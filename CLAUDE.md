@@ -291,6 +291,16 @@ INSIDE the executable, and `get-model.cmd` is gone.**
   name (`pick_artifacts`), and a release carries one design set per width.
   The build emits `npuembeddings.exe` beside `npuembed.exe` so every existing
   script and task log keeps working.
+- **A bare invocation prints help + the model table.** It used to take
+  `root = ".."` and start the validation encode -- a developer default that
+  answers nothing a double-clicked executable is asking. `npuembed.exe ..`
+  alone still runs the validation encode (`argc == 2`), so no script moved.
+- **Shipped as `dist/npuembeddings-0.2.0-win-x64.zip`, 0.40 MB**, verified by
+  unzipping outside the repository and running it cold: fetch, pin check, pack,
+  encode -- and the container it built is byte-identical to the validated one.
+  The public repo (`repo/`) was regenerated and pushed; its sync **refused the
+  first attempt** over a link into excluded material, which is the guard
+  working.
 - **`default_root` bug, reported by the user and worth remembering**: it
   searched *upwards* before checking the executable's own directory, so a
   release staged inside the repo (`dist\npuembeddings-0.2.0\`) climbed to the

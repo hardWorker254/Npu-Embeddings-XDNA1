@@ -199,6 +199,16 @@ outside the release directory. It now recognises the source tree by `models/`
 directory down. Caught by unzipping the release and running it as a new user
 would, which is the only way it was ever going to show up.
 
+### A bare invocation now answers the question it is asking
+
+`npuembeddings.exe` with no arguments used to take `root = ".."` and start the
+golden-vector validation encode -- a developer default from when the only
+caller was a task log. Double-clicking the executable, which is exactly what a
+release invites, would then either dispatch to the NPU or fail with a path
+error about a directory the user never named. It now prints the usage summary
+and the model table. The flag form is untouched: `npuembed.exe ..` alone still
+runs the validation encode, because that is `argc == 2`.
+
 ### Release layout (0.2.0)
 
 `get-model.cmd` is gone. The bundle carries `npuembeddings.exe`, one design
@@ -209,6 +219,27 @@ embedding dim, and it **reads each design's hidden size out of its
 `design.json`** instead of trusting the directory name.
 
 ---
+
+## Shipped
+
+`tools\make_release.ps1 -Version 0.2.0` -> `dist
+puembeddings-0.2.0-win-x64.zip`,
+**0.40 MB**. Verified by unzipping outside the repository and running it as a
+new user would:
+
+- bare invocation prints help + the catalogue
+- `embed bge-base-en-v1.5` fetched 438 MB, verified the pin, packed, and ran
+- the container it produced is **byte-identical** to the one this task
+  validated at `1-cos` 1.353e-05
+
+The public repository (`repo/`) was regenerated with
+`tools\sync_public_repo.py`, which **refused the first attempt**: a
+`[Rösti](../../research/papers/)` link in
+[`0040`](../0040-m9-honest-cpu-baseline/TASK.md) pointed at the excluded
+directory and would have shipped a 404. Fixed to point at the summary, which
+the sync then rewrites into the arXiv citation it should always have been. A
+second dead link surfaced with it -- note 0006 referenced
+`tasks/0031-m7-eltwise-il4`, and the directory is `-ilp`.
 
 ## Files
 
