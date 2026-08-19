@@ -233,12 +233,19 @@ new user would:
   validated at `1-cos` 1.353e-05
 
 The public repository (`repo/`) was regenerated with
-`tools\sync_public_repo.py`, which **refused the first attempt**: a
-`[Rösti](../../research/papers/)` link in
-[`0040`](../0040-m9-honest-cpu-baseline/TASK.md) pointed at the excluded
-directory and would have shipped a 404. Fixed to point at the summary, which
-the sync then rewrites into the arXiv citation it should always have been. A
-second dead link surfaced with it -- note 0006 referenced
+`tools\sync_public_repo.py`, which **refused the first attempt**: a link in
+[`0040`](../0040-m9-honest-cpu-baseline/TASK.md) whose target was the excluded
+`research/papers/` **directory** (rather than a summary inside it) pointed at
+nothing a public reader could follow, and would have shipped a 404. Fixed to
+name the summary file, which the sync then rewrites into the arXiv citation it
+should always have been.
+
+> Writing this paragraph broke the sync a second time: quoting the bad link
+> verbatim recreated it, in the very log describing the fix. **A link-checker
+> cannot tell a demonstration from a defect** — so the shape is described here
+> instead of reproduced.
+
+A second dead link surfaced alongside the first: note 0006 referenced
 `tasks/0031-m7-eltwise-il4`, and the directory is `-ilp`.
 
 ## Files
