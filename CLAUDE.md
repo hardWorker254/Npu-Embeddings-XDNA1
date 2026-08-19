@@ -34,7 +34,17 @@ tried and failed, and how to build and run the whole thing — see
    sha256 changed) should be opened, and then it gets summarised and added.
    → `research/README.md`
 
-3. **Every unit of work gets a `tasks/NNNN-slug/TASK.md`** recording goal, what was
+3. **Every open question goes in [`research/OPEN-THREADS.md`](research/OPEN-THREADS.md),
+   and that file is the authority on what is still open.** A `TASK.md` is a
+   diary entry — written once, never revisited — which is the wrong property for
+   a question. Twice now a correctly-stated open question has sat unread for
+   more than 20 tasks after the thing blocking it went away
+   ([`0044`](tasks/0044-m9-optimisation-sweep/TASK.md) Part 3, §6b in
+   [note 0005](research/notes/0005-expert-review-tests.md)). A stale "untested"
+   in an old task is **not** evidence a thread is live; the register is. Threads
+   leave it only as ANSWERED, RETIRED or SUPERSEDED, with a pointer.
+
+3b. **Every unit of work gets a `tasks/NNNN-slug/TASK.md`** recording goal, what was
    done, **the exact commands run**, results, and problems hit. **Failures are the
    valuable part — never delete or rewrite them.** The stated bar is that the task log
    alone should permit rebuilding the solution from scratch.
@@ -110,9 +120,43 @@ silent.
    become `(4,8,4)` instead of `(4,8,8)`, and `emulate_bf16_mmul_with_bfp16` — worth
    **5.5×** — becomes a **no-op**. No error. `iron.get_current_device()` still says
    NPU2. Also note `from_name("npu2")` defaults to **1 column**; pass `n_cols=None`.
+   **Third consequence, found in [`0044`](tasks/0044-m9-optimisation-sweep/TASK.md):**
+   it also **halves the maximum shim DMA burst** — `BaseNPU2TargetModel`
+   offers {64, 128, 256, **512**} bytes and `AIE2TargetModel` only {64, 128, 256},
+   and `burst_length = 0` means "take the largest available". On a design that
+   is data-movement bound, the fallback silently costs bandwidth as well as MACs.
    → [note 0002](research/notes/0002-iron-silent-arch-fallback.md)
 2. **Always accumulate in fp32** (`output_dtype=np.float32`). bf16 output re-rounds at
    every K step: 7.4e-3 error vs **1.21e-07** with f32.
+2b. **The default AIE rounding mode is `floor`, and it was the entire
+   implementation error of all three eltwise kernels.** `aie_api/aie.hpp` says
+   so twice; `aie_types.hpp` defines `floor` as *"always round towards negative
+   infinity"*. We had never called `aie::set_rounding`, so every bf16 SRS this
+   project ever executed carried a **systematic downward bias, not symmetric
+   noise**. Measured on hardware ([`0044`](tasks/0044-m9-optimisation-sweep/TASK.md)
+   Part 3), one line per kernel, each harness's *CPU-model-vs-golden* control
+   bit-identical across the pair:
+
+   | kernel | vs golden | implementation error alone |
+   |---|---|---|
+   | GELU | 4.312e-03 → **2.494e-03** (1.73×) | 3.886e-03 → 1.556e-03 |
+   | softmax | 4.278e-03 → **3.325e-03** (1.29×) | 3.424e-03 → 1.481e-03 |
+   | LayerNorm | 3.326e-03 → **2.059e-03** (1.62×) | 3.659e-03 → **3.967e-05 (92×)** |
+
+   All three now sit at their bf16 design limit. GELU lands on **2.494e-03 —
+   the exact figure `gelu_poly.cc`'s own header has predicted since it was
+   written.** Mechanism confirmed independently of any error metric: under
+   `floor` softmax row sums are min 0.994581 / **max exactly 1.000000** (no row
+   can exceed 1 when every element rounds down); under `conv_even` they straddle
+   it. This closes a mystery [`0015`](tasks/0015-m5-gelu-polynomial/TASK.md)
+   opened by misattributing the gap to `aie::vector<float>` not being IEEE fp32,
+   which [`0016`](tasks/0016-m5-fp32-probe/TASK.md) refuted while naming the
+   right hypothesis and leaving it unchased for 28 tasks.
+   **Shipped kernels still default to `floor` on purpose** — eltwise runs on the
+   host, so none of them executes today, and `set_rounding` is *core-wide* state
+   that leaks between kernels sharing a core. The `*_rne.cc` variants hold the
+   evidence; `conv_even` becomes the default when eltwise returns to the array.
+   → [note 0007](research/notes/0007-unused-iron-surface.md) §3.1
 3. **Budget L1 before compiling.** `2*(m*k*in + k*n*in + m*n*out) < 64512`. Exceeding it
    gives the opaque `'aie.tile' op Basic sequential allocation also failed`.
    **The limit is 63 KB, not 64** — 1 KB of the 64 KB DMEM is reserved for the program
@@ -138,16 +182,25 @@ silent.
    whether a shape hits the limit depends on the *access pattern*, not on K.
 5. **Never use scalar float math in a kernel** — it lowers to `__mulsf3` calls, measured
    at 1,617× slower. → [note 0001](research/notes/0001-aie-kernel-pitfalls.md)
-5b. **`chess_*` pragmas are silently ignored by Peano.** `chess_prepare_for_pipelining`
-   and `chess_loop_range(...)` are xchesscc directives. Peano does not error on them — it
-   drops them in the optimisation passes, so copied example code *looks* tuned and is not.
-   AMD measured a relu kernel dropping **47% → 26% vectorisation** from exactly this.
-   We are Peano-only. → [NPUEval](https://arxiv.org/abs/2507.14403)
-5c. **Record the power mode with every measurement.** A master's thesis measured turbo
-   performing **>22 percentage points worse than balanced** for one GEMM data layout, and
-   powersaver ≈ balanced ≈ turbo for two others. Power mode is a first-class experimental
-   variable on this hardware, not a monotonic knob.
-   → Steinert
+5b. **Loop hints: `chess_*` are ignored by Peano, and so is
+   `AIE_PREPARE_FOR_PIPELINING`.** `chess_prepare_for_pipelining` and
+   `chess_loop_range(...)` are xchesscc directives; Peano does not error on
+   them, it drops them, so copied example code *looks* tuned and is not. AMD
+   measured a relu kernel dropping **47% → 26% vectorisation** from exactly
+   this. We are Peano-only. → [NPUEval](https://arxiv.org/abs/2507.14403)
+
+   **The portable `AIE_*` wrappers are not a blanket fix.** Peano compiles
+   under the header's `__AIECC__` branch (the aie2p driver defines it itself —
+   verified with a `#error` probe), and there
+   **`AIE_PREPARE_FOR_PIPELINING` is defined as nothing**. It is the only
+   pipelining hint our kernels carry, in 8 places. What *does* survive Peano:
+   `AIE_LOOP_MIN_ITERATION_COUNT` / `AIE_LOOP_MAX_ITERATION_COUNT` /
+   `AIE_LOOP_RANGE` / `AIE_LOOP_UNROLL` / `AIE_LOOP_UNROLL_FULL`, all real
+   `clang loop` pragmas. We use the min bound and none of the others.
+   And they only bind when the trip count is a **compile-time constant** —
+   which is the mechanism behind `rtp=True`'s measured +1.6%
+   ([`0030`](tasks/0030-m7-expert-review-tests/TASK.md)).
+   → [note 0006](research/notes/0006-peano-loop-hints.md)
 6. **Assert `trace.txt` is non-empty** before believing any measurement.
 6b. **Never write device tensors through `.numpy()`.** `Tensor.numpy()` syncs
    *from* the device and returns the host buffer; writing into that array never
@@ -197,6 +250,387 @@ silent.
    → [`docs/05-measurement/`](docs/05-measurement/README.md)
 
 ## Current state
+
+**Update 2026-08-19 (tasks/0051): FOUR models — and bge-base-en-v1.5 is the
+one whose geometry actually fits XDNA2. Also: model fetching now happens
+INSIDE the executable, and `get-model.cmd` is gone.**
+
+- **Why bge-base fits**: every N a multiple of 384 (qkv 2304, attn_out 768,
+  ffn_up 3072, ffn_down 768) so **tile_n stays 48** where bge-large is forced
+  to 32; **head_dim 64** where MiniLM and bge-small have the untileable 32;
+  wide rather than deep (0027/0042); WordPiece + post-LN + absolute positions,
+  so zero runtime work. It packs to the **same layout_hash as MiniLM and
+  bge-small** — the architectural claim as a constant.
+- **It validated first attempt**: round-trip bit-exact, `1-cos` **1.353e-05**
+  on hardware, **2.613e-05** end to end, top-10 neighbour overlap 1.0000.
+  ONE xclbin, 16 streams, 8 columns, identity 64–69 bytes.
+- **181.2 seq/s (pipelined, 5.50 cores) against my own ~230 prediction — a
+  27% miss, recorded as one.** 0048's iteration fit was made at h=384 and
+  extrapolated across a width doubling it was never tested at. What it did
+  reveal: **the NPU is 74.1% of wall clock here against MiniLM's ~40%** — the
+  most array-bound model we run, so **host levers (T3) buy less on it and
+  datapath levers (T23/T20) buy more.** No CPU ratio is claimed; 0040's
+  interleaving rule stands and the CPU side was not re-measured.
+- **`get-model.cmd` is deleted.** It ran `curl` and then compared a
+  `certutil -hashfile` digest against a hardcoded constant — the literal
+  behavioural signature of a dropper, so SmartScreen and AV heuristics
+  flagged it and a security warning was the first thing a new user saw.
+- **New CLI**: `npuembeddings list` / `serve <model>` / `embed <model> <file>`
+  / `help`. Fetching is **WinHTTP inside the exe** (`runtime/src/hub.cpp`),
+  verified against a catalogue of pinned sha256s using the packer's own
+  `sha256_file` — exposed, not reimplemented, because the Python side already
+  has four copies of that function. Subcommands are **translated into the
+  existing flag form**, so the ~2,700 lines below are untouched and there is
+  no second dispatch path to drift.
+- **Fail-closed and tested**: wrong weights refuse (exit 2, both digests
+  printed); right weights with a wrong `config.json` refuse (the catalogue's
+  geometry is cross-checked against the download before packing); an
+  interrupted download never promotes its `.part`. Containers built in the
+  release come out **byte-identical** to the repo's.
+- **Designs are now chosen by reading which K they serve**, not by directory
+  name (`pick_artifacts`), and a release carries one design set per width.
+  The build emits `npuembeddings.exe` beside `npuembed.exe` so every existing
+  script and task log keeps working.
+- **`default_root` bug, reported by the user and worth remembering**: it
+  searched *upwards* before checking the executable's own directory, so a
+  release staged inside the repo (`dist\npuembeddings-0.2.0\`) climbed to the
+  repository root and served **the repo's models while claiming to be
+  self-contained**. The earlier test passed only because it unzipped outside
+  the tree — it proved the layout worked, not that the search was right. The
+  exe's own directory now wins whenever it holds a design or `models/`.
+  **Then I reintroduced the very bug the function's comment warns about**, by
+  folding the design check into the same upward loop: from `runtime\build\`
+  the parent `runtime\` has designs but no models, so it beat the repo root.
+  The two searches must each run to completion before the other starts. Now
+  verified on all four layouts, not the one that was reported.
+
+**Update 2026-08-19 (tasks/0050): T23's ceiling has an external measurement on
+our exact SKU.** The ATB paper ([2511.16041](https://arxiv.org/abs/2511.16041),
+UCLA+AMD, IRON/MLIR-AIE, web-indexed) demonstrates **24.3 TFLOPS BFP16 GEMM**
+by buffering A's M dimension smaller than C's (ρ ≥ 1) — ~8× our production
+array rate, with 2.88× of it from microkernel hand-optimisation alone
+(0.32 → 0.92 TFLOPS/core ≈ 100% of MMAC peak). All on the MMAC datapath:
+nothing for today's plain-bf16 path, but it re-prices the T23/T20 datapath
+decision (0049's 2.9× is the floor) and gives T19 an overlap-safe mechanism.
+
+**Update 2026-08-19 (tasks/0049): T16 ANSWERED — THE "MISSING 4,500 CYCLES"
+NEVER EXISTED. The 145-MACs/cycle baseline was traced with `--emulate-bfp16`
+ON; the production datapath (plain bf16) has always traced at 25–30. The GEMM
+is compute-bound at ~100% of the fp32 vector datapath's 32 MACs/cycle/core
+limit.** → [`research/OPEN-THREADS.md`](research/OPEN-THREADS.md) T16, T23
+
+- **The record proves the mislabelling**: every row of 0007's "148.9–149.9
+  traced" artifact carries `emulate_bfp16: true` and rel_fro 1.04e-02, and
+  M2's own plain-bf16 line says 25.0. Reproduced today as a pair, same script:
+  emulation ON 1,340 cyc / 146.7 MACs/cyc / 1.04e-02; OFF 6,806 cyc /
+  28.9 MACs/cyc / 1.89e-07.
+- **Anatomy of a production k-block** (traced at 4 cols, ffn_up): 7,813-cycle
+  window, of which **6,144 = exactly 768 MMAC steps × 8 `vmac.f`** — each
+  `aie::mmul<4,8,8,bf16,f32>` lowers to 8 fp32-datapath MACs at 32 MACs/instr,
+  confirming 0003's static analysis in situ. 1,669 non-vector in-window, 84-cyc
+  gaps, LOCK/STREAM_STALL ≈ 0. Disassembly: the inner loop is near-perfectly
+  packed. **No code-quality gap exists; only the 22% non-vector share is
+  amortisable by any tile-geometry lever.**
+- **The account closes at the documented 1.808 GHz**: 7,897 cyc = 4.37 µs, 93%
+  of 0048's fitted 4.72 µs. (0048's "≈5,900 cycles" converted at an implicit
+  wrong clock; its µs facts stand.)
+- **Under emulation the same design is DMA-bound** (39% vector busy, lock-stall
+  gaps). M2's "the array is starved, not slow" was an emulated-datapath
+  finding — under plain bf16 the DMA idles in the compute's shadow, which is
+  *why* 0048 measured bytes as free.
+- **Re-priced by this**: T19 Stationary-B k=96 collapses 1.28× → **≈1.08×**;
+  T17 bigger-tiles caps at ≤1.29× (realistic ~1.06×) — no longer "the lever".
+  T14 answered (datapath, not operand prep). **The only multi-× array levers
+  left are datapath changes**: bfp16 emulation is 2.9× of array GEMM time
+  (≈1.35× e2e MiniLM, ≈1.66× bge-large) but failed the 1-cos gate at 3.47e-03
+  — reopening it is an MTEB accuracy decision for the user (T23), as is int8
+  (T20, native (8,8,8)).
+- **Measurement note**: `run_one`'s printed avg mixes 583-cycle zero-kernel
+  windows into the matmul mean (~6% deflation); use window-level histograms.
+  The M=512 plain-bf16 trace dropped packets and its pairing is corrupt —
+  the M=256 trace is canonical (`tasks/0049`, `analyze_trace.py`).
+
+**Update 2026-08-19 (tasks/0048): THE GEMM IS NOT BANDWIDTH-BOUND. It is bound
+by the NUMBER of tile iterations.** This overturns the cost model every
+data-movement decision since M5 has rested on, and retires two levers.
+→ [`research/OPEN-THREADS.md`](research/OPEN-THREADS.md) T1
+
+- **The discriminating pair was in the production shapes all along.** `ffn_up`
+  and `ffn_down` have **identical MACs** (4.83 GMAC) and differ **1.50× in
+  bytes**. They measure **4,196 vs 4,273 µs** — 1.8% apart, and the one moving
+  *more* data is the faster one. `GMAC/ms` is flat at 1.08–1.15 across the three
+  large shapes; `GB/s` spreads 17.7–27.0. Reproduced independently on the
+  `--c-bf16` set, where 27% more bytes on `ffn_up` costs **0.3% less** time.
+- **`t = 573 µs + 4.72 µs × k-block iterations per core`**, ≤2.3% residual on
+  four points — against [`0010`](tasks/0010-m5-b-reuse-and-cost-model/TASK.md)'s
+  `150.4 µs + traffic/33 GB/s`, which is 18% out on the mean and **50% out on
+  the discriminating pair**. Treat the traffic model as **superseded for
+  production shapes**; it was fitted at M=512 and never tested where it is used.
+- **RETIRED: B-reuse** and the cascade milestone
+  [`0047`](tasks/0047-m9-cascade-channel-probe/TASK.md) scoped for it. B-reuse
+  removes bytes; bytes are free. 0010's 1.26–1.68× was priced with the refuted
+  model. (The channel census from 0046/0047 keeps its value — it is about what
+  the array can express.)
+- **It also explains [`0045`](tasks/0045-m9-bf16-gemm-epilogue/TASK.md)**:
+  narrowing C bought +4.9% end to end and ~0% of array time, because it removed
+  bytes.
+- **The successor question is now the top thread.** A k-block is 196,608 MACs =
+  **1,356 cycles** at the 145 MACs/cycle/core M2 and M5 *traced in isolation*.
+  Production spends **~5,900**. The array runs at **28–33 MACs/cycle/core
+  against 145 traced**, and ~4,500 cycles per iteration are unaccounted for.
+  Traceable at 4 columns (trap 7 forbids 8).
+- **Tile SIZE is the lever now**, since iterations go as `1/(m·k·n)` — and it is
+  hard-blocked: `(64,64,48)` costs **53,248 B of the 63 KB L1 budget** and every
+  legal larger geometry overflows. That reframes **cross-tile `Buffer`**
+  ([note 0007](research/notes/0007-unused-iron-surface.md) §1.2) from a
+  curiosity into the one identified way to give a worker more L1.
+
+**Update 2026-08-19 (tasks/0046–0047): B-reuse is out of DMA channels, not out
+of space — and cascade moves the pressure rather than removing it.** Two probes,
+nothing built, one lever closed and one milestone priced.
+→ [`tools/count_dma_channels.py`](tools/count_dma_channels.py) (new)
+
+- **The shipping GEMM has ZERO spare input channels.** Census of the
+  post-placement MLIR at 8 columns: **all 32 core tiles at 2/2 in**, five of
+  eight mem tiles at **6/6 in**. The mem-tile arithmetic is exact —
+  `A(1) + B(1) + C(4 core rows) = 6` — so **the C join spends the budget**.
+  B-reuse ([`0010`](tasks/0010-m5-b-reuse-and-cost-model/TASK.md), priced
+  1.26–1.68×) is blocked by this, not by capacity: the column B slice is
+  108–144 KB of a 512 KB mem tile.
+- **`consumer_obj_type` cannot rescue it.** `repeat_count` is *"unavailable for
+  shim tiles"* so an L3-fed fifo cannot replay, and `forward()`/`split()` do not
+  expose `consumer_obj_type` at all.
+- **Two things the repo believed are wrong.** `0010` and `gemm_pretiled.py` say
+  the mega workaround fails on a **core** tile and needs "a core-side redesign";
+  the failing op is `row = 1`, a **mem tile**.
+- **Cascade trades 3 inputs for 3 outputs.** Built upstream's cascade matmul —
+  it runs here with bf16→f32 and PASSes. At the same 4 columns: ours 6/6 in and
+  3/6 out; cascade **3/6 in and 6/6 out**, with three of four cores per column
+  having **no DMA output at all**. Since *inputs* were the exhausted side, this
+  is still the route — but it is a milestone: upstream's kernel is scalar-only
+  (**3.19 GFLOPS**), and `K % (4k) == 0` forces **k = 32** at h=384 (bge-large
+  is fine at k = 64, so the wide model is again the easier target).
+- **A CORE CANNOT TAKE A THIRD INPUT STREAM.** Every core tile is 2/2 in under
+  *both* dataflows — A and B, and there is no room for a bias vector, LayerNorm
+  params or fused-activation coefficients. This is why
+  [`0020`](tasks/0020-m5-layernorm-kernel/TASK.md) had to pack γ+β into one
+  buffer, and it is the same wall whisper-xdna hits packing K+V for fused
+  attention. Treat it as a design constant.
+
+**Update 2026-08-19 (tasks/0045): the GEMM can emit bf16 C — `--c-bf16`,
++4.9% and the epilogue is free.** The first lever from 0044 built and measured.
+The matmul still accumulates in **fp32 for the whole K reduction** (trap 2
+intact); a core-local fp32 `Buffer` holds the accumulator and a new
+`narrow_f32_bf16` kernel converts **once** into the bf16 fifo object the DMA
+drains. L1 is unchanged — the single-buffered accumulator costs exactly what the
+halved C fifo saves, 53,248 B at (64,64,48) either way.
+
+| model | fp32 C | **bf16 C** | gain | `1-cos` fp32 → bf16 |
+|---|---:|---:|---:|---|
+| MiniLM-L6 | 693.5 | **727.2** | +4.9% | 1.086e-05 → 1.498e-05 |
+| bge-small | 347.9 | **365.3** | +5.0% | 8.348e-06 → 1.232e-05 |
+| bge-large | 42.6 | **43.9** | +3.1% | 8.432e-06 → 1.281e-05 |
+
+- **The epilogue costs nothing measurable**: per-dispatch `wait` moves by ≤29 µs
+  of 3,028 (and 19 µs of 19,003 on bge-large). Static analysis said 2.3%; the
+  DMA shadow absorbs it.
+- **`read out + bias` falls ~20% at every geometry**, not the 50% halving the
+  bytes suggests — because only the **read** halved. C is still *written* as
+  679 MB of fp32 into host memory, since attention/LN/GELU/residuals all consume
+  fp32. That is why this is +4.9% and not the ~10% projected.
+- **It pays least where the array is busiest**: bge-large is 60.8% `wait`
+  against MiniLM's 39.4%, so the host share this attacks is smaller. A host
+  lever, the opposite of the fusion levers.
+- **Accuracy costs exactly one rounding** — 1.38–1.52× on `1-cos`, still
+  **133–162× inside** the 2e-03 gate, and **top-10 neighbour overlap is
+  unchanged at 1.0000**.
+- **DECIDED 2026-08-19: the datapath stays bf16 in, fp32 out.** `--c-bf16`
+  remains available and measured, but it is **not** the default and MTEB is not
+  being run on it for now. Treat "16 in, 32 out" as the standing contract when
+  designing anything downstream; revisit only if a mode selection is explicitly
+  asked for. (Making it the default would be an accuracy decision, and
+  [`0035`](tasks/0035-m8-mteb-gate/TASK.md) established MTEB as the gate for
+  those, not `1-cos`.)
+- **`--c-bf16` collapsed the cache-marker namespace and nearly shipped the wrong
+  stream.** `markers_for()` matched three positionless memref strings; with A,
+  B and C all bf16, `ffn_up` [8192,384,1536] and `ffn_down` [8192,1536,384] have
+  the *same three sizes* and became indistinguishable, so `purge()` for one
+  deleted the other's build. It crashed only by luck of ordering. Now matched on
+  the **ordered `aie.runtime_sequence(%arg0…%arg1…%arg2…)` signature**, which is
+  strictly better for the fp32 path too. Sixth cache fail-open.
+- **Third instance of one bug class:** `verify_embed_e2e.py` wrote a constant
+  artifact path, so an A/B erased its own control — same as the two eltwise
+  harnesses 0044 fixed. **Any script writing a result to a constant path is an
+  A/B waiting to overwrite its baseline.**
+
+**Update 2026-08-19 (tasks/0044): an optimisation sweep — twelve IRON features
+we have never typed, and one architecture decision priced on the wrong ledger.**
+Nothing was built; everything is priced.
+→ [note 0007](research/notes/0007-unused-iron-surface.md)
+
+- **Host eltwise costs 7.5% of an encode; the transport it forces costs 33%.**
+  [`0032`](tasks/0032-m7-one-xclbin-production/TASK.md) moved LayerNorm, softmax
+  and GELU to the host because each measured faster *and* more accurate than its
+  NPU dispatch. True — but that priced **the operator**, not the `read out +
+  bias` (18.8%) + bf16 convert (9.0%) + syncs (5.2%) that exist only because the
+  next operator is on the host. `read out + bias` is **679 MB of fp32 C per
+  MiniLM encode at batch 128**, read out of write-combined XRT memory at
+  19.6 GB/s. In production (`--pipeline 2`) host work is **half the wall clock
+  per lane** and that readback is **70.7 ms of it — 3.6× all three eltwise
+  operators combined (19.7 ms)**. This was already raised as the expert review's
+  **§6b**, priced at "t_conv + syncs ≈ 70 ms", **deferred with cause**, and then
+  explicitly unblocked by 0032 — and nobody picked it up. Its estimate was ~2×
+  low because it never counted the readback, which *grew* as a result of the
+  0032 move. Reopen it — with the 16 KB program-memory wall respected as **one
+  operator per core**, not the three-op universal worker 0032 killed. The cheap
+  independent half: a **bias + fp32→bf16 GEMM epilogue** halves that 679 MB
+  using the mechanism 0030 already built.
+  **And note which way contention biased this**: the first reading of that table
+  was taken with a foreign hw_context resident and said 22% / 3.6%. On an idle
+  array the NPU shrinks from 65.0% to 40.3% of the encode while the readback
+  *rises* from 14.3% to 18.8%. **The faster the array gets, the bigger this term
+  is.**
+- **Unused and available** (all verified in the installed 1.3.4 wheel, not just
+  the source checkout): `pad_dimensions` (mem-tile only — it reopens
+  [`0043`](tasks/0043-m9-attention-geometry/TASK.md)'s `cols ≤ 4` wall at ~5% of
+  encoder FLOPs), **cross-tile `Buffer`** (a core reads its neighbours' L1, so
+  trap 3's 63 KB is per *worker*, not per design — and it is the API for what
+  ARIES did), **`CascadeFlow`** (core-to-core accumulator path costing **zero**
+  `aie.lock`/`aie.dma_bd`, i.e. zero switch cost by our own 0024 model),
+  `consumer_obj_type` (the fifo shape [`0010`](tasks/0010-m5-b-reuse-and-cost-model/TASK.md)
+  wanted for B reuse and could not express), `disable_synchronization` +
+  `delegate_tile`, `aie_stream`, `init_values`, and hand-wired
+  `TileDma`/`Bd`/`Lock` (§2g).
+- **`xrt::runlist` is in our XRT and unused by our runtime.** Worth only ~0.4%
+  today (submit is 94–103 µs against a 578 ms encode) because our dispatches are
+  huge; worth having the moment attention or eltwise returns to the array.
+- **The rounding mode was the whole implementation error** (trap 2b above):
+  `set_rounding(conv_even)` is one line and it moved GELU 1.73×, softmax 1.29×
+  and LayerNorm 1.62× against the goldens, taking LayerNorm's error against a
+  numpy model of the same formula from 3.659e-03 to **3.967e-05**. All three
+  kernels now hit their bf16 design limit. Found by *running* the hypothesis
+  [`0016`](tasks/0016-m5-fp32-probe/TASK.md) wrote down and left for 28 tasks.
+- **Closed, do not revisit:** `burst_length` (already maximal by default),
+  `AIE_LOOP_UNROLL_FULL` (whisper-xdna measured **14% slower** on a straight
+  vector loop, independently confirming note 0006's inference), and the
+  **centred polynomial basis** — a borrowed 2.5× claim, tested against
+  `gelu_poly.cc` and **refuted at fp32**: identical error to four significant
+  figures until degree 10, because their fix targets *bf16 coefficients* and
+  ours are fp32. That test did show degree 8 → 7 is free (3.6e-04 against a
+  2.465e-03 bf16 floor).
+- **NINTH FAIL-OPEN, FOUND AND CLOSED: a stale `npuembed.exe` was holding an
+  Active hw_context with 1,032 MB, and `--bench` had no way to say so.** It read
+  **221.4 seq/s against a true 691.0** (3.1×), with per-dispatch hardware wait
+  15,541 µs against 3,029. Rule 1's usual mitigation does not cover this:
+  interleaving against the CPU ([`0040`](tasks/0040-m9-honest-cpu-baseline/TASK.md))
+  corrects drift that hits *both* sides, while a resident NPU context hits only
+  ours — so it makes the **ratio** wrong, confidently. And the contending
+  process was **ours**, which a long measurement session produces by itself.
+  **`--bench` now refuses to run** (`runtime/src/npu_contention.cpp`, exit 2)
+  unless `xrt-smi examine -r all` shows no foreign `Active` context. It fails
+  closed on three things — a foreign context, `xrt-smi` missing, and a table it
+  cannot parse — because *an absent data source is not a negative reading*
+  (0040). `--allow-contention` overrides it and says in the output that the
+  number is not an NPU performance claim.
+  **The third failure mode caught a bug in the guard on its first run** (the
+  table is indented, so the first parser matched zero rows); a fail-open would
+  have reported "idle" forever on every machine.
+- **Throughput on an idle array, three runs, 0.9% spread: MiniLM 691.0 seq/s
+  single-lane and 907.5 with `--pipeline 2`** — against the 618 / 833 recorded
+  in [`0033`](tasks/0033-m7-pipelined-lanes/TASK.md). The CPU side was **not**
+  re-measured, so no new ratio is claimed here; `0040`'s rule stands that the
+  defensible quantity is the interleaved ratio, not either side alone.
+
+**Update 2026-08-18 (tasks/0038–0039): TWO models, and the runtime reads them
+rather than assuming them.** `--model` picks between `models/*.npue`; the table
+is built from the containers, and selection becomes **required the moment there
+is more than one**, so a script breaks loudly instead of silently changing which
+model it measured.
+
+- **bge-small-en-v1.5 runs on the NPU**, on unchanged xclbins — identical GEMM
+  shapes, so only the dispatch count changes. `1-cos` **8.348e-06**, MTEB gate
+  **−0.03**, **+2.99 MTEB points over MiniLM** on the same five tasks, at
+  **450.0 seq/s against 888.7** (0.506×, exactly what twice the layers costs).
+- **MiniLM is now 892.2 seq/s** (was 844.8), and `--embed` output is
+  **bit-identical** through the whole refactor.
+- **A 2× regression shipped inside a commit verified bit-identical.** Making
+  attention generic in `head_dim` turned a compile-time vector count into a
+  runtime one; attention went 29 → 58 ms and wall clock moved 829 → 828, so
+  only the `--bench` breakdown showed it. Fixed with `qk_impl<NV>`/`av_impl<NV>`.
+  **Bit-identical verifies correctness only** — genericity that replaces a
+  constant with a variable is a performance change by construction.
+- **Seven fail-opens are now eight.** Pooling, `source_repo` and the golden
+  filenames were literals; the fixture `source_sha256` was carried and never
+  read (it fired in production on its first real encounter); `verify_npue`'s
+  1-cos gate existed only relative to MiniLM and skipped entirely for a new
+  model; the endpoint gated on absolute cosine, which is a property of the
+  training objective rather than of quality, and now gates on **separation**.
+
+**Update 2026-08-18 (tasks/0042): THREE models, and the width prediction is
+confirmed on real ones.** bge-large runs at **hidden 1024, 24 layers,
+head_dim 64** -- `1-cos` **8.432e-06**, 604 MB of weights staged, ONE xclbin
+with 4 streams, first attempt.
+
+| model | h | layers | NPU | torch | ORT | **NPU / strongest CPU** |
+|---|---:|---:|---:|---:|---:|---:|
+| MiniLM-L6 | 384 | 6 | 877.0 | 489.4 | 234.3 | **1.792×** |
+| bge-small | 384 | 12 | 444.6 | 290.0 | 134.0 | **1.533×** |
+| bge-large | 1024 | 24 | 52.8 | 25.1 | 11.4 | **2.106×** |
+
+**Width helps, depth hurts, and bge-small separates them.** Same width, twice
+the layers: 1.792 → 1.533, because our cost is per dispatch and the CPU has no
+such term. Width 384 → 1024 takes it to 2.106× — the direction
+[`0027`](tasks/0027-m7-width-hypothesis/TASK.md) predicted from a synthetic
+sweep, now on a real model. Per core: **4.2× better**, up from 3.2×.
+
+**`tile_n` is a parameter, not a constant.** bge-large's N in
+{1024, 3072, 4096} makes 48 illegal; 32 is the largest legal value that fits
+L1 (40,960 B of 63 KB). The C++ packer's *frozen* layout hash is gone,
+replaced by `npue::gemm_b_layout()` — verified by reproducing the frozen
+constant byte for byte. `verify_pack_parity --tile-n` covers both sizes.
+
+**Memory was never the blocker**: `--probe-bo` allocates 8 GB in 1.76 s and a
+single 3 GB buffer, against bge-large's 1023 MB need.
+
+**And a banner lied.** After wiring `--tile-n` the packer printed
+`tile (64, 32)` and tiled at 48 — the flag reached the layout descriptor and
+not the `prepare_model` call. Caught only because 48 is illegal at these
+shapes. A status line that reports the intention rather than the value is the
+same fail-open as all the others.
+
+**The CPU comparison is now interleaved, and ONNX Runtime is not the stronger
+opponent** (tasks/0040). `prior-art.md` prescribes ORT as *the* baseline; it
+measures **234.3 seq/s against torch's 489.4**, and attention never fuses under
+either attention implementation. Measured round-robin in one session, same
+statistic on every side, steady state:
+
+| | NPU | torch | ORT | ratio |
+|---|---:|---:|---:|---:|
+| MiniLM | **877.0** | 489.4 | 234.3 | **1.792×** |
+| bge-small | **444.6** | 290.0 | 134.0 | **1.533×** |
+
+**Interleave, always.** sentence-transformers measured 710, 662.9, 580.3, 518.5
+and 489.4 seq/s at the same batch on the same machine in one session, and torch
+ramps 469 → 686 *within* a run while the NPU holds to ±1%. The published
+"1.17× of 710" compared best-of-5 against a mean, minutes apart, and is
+superseded. Best-of-5 is worth only 3.4%, so the statistic does not explain the
+change — the machine does, and the defensible quantity is the ratio.
+**And record machine state by tool**: a hand-rolled check reported "ON BATTERY"
+for a machine with no battery, because `Win32_Battery` returns nothing there and
+the `else` branch fired. An absent data source is not a negative reading.
+
+**bge-small shows F1 again**: twice the layers costs us **0.507×** and the CPU
+only **0.593×**, because our cost is per dispatch and 12 layers is 96 of them.
+That gap is the size of the fusion prize.
+
+**NPU memory never moves, and that is correct.** XDNA2 has no device-local
+DRAM — 2 MB of L1 and 4 MB of mem tiles is all the memory on the array, and
+every buffer is pinned host RAM. Windows exposes no NPU counter set and
+`xrt-smi` has no memory report. Busy percentage *is* observable through the
+MCDM compute engine and agrees with our own accounting (50.5% vs 52.3%);
+`tools/npu_utilisation.ps1` measures it and **refuses to report a percentage
+from too few samples**, because an unsampled counter reads as 0%.
+→ [`docs/05-measurement/`](docs/05-measurement/README.md)
 
 **Update 2026-08-18 (tasks/0031–0033): 833 seq/s pipelined / 618 single-lane,
 1-cos 1.086e-05 — CPU WALL PARITY PASSED (1.17× of the CPU's 710).**
@@ -550,8 +984,11 @@ encode (bankable)** → M7 C++ runtime → M8 benchmark.
 
 ## Target model
 
-**all-MiniLM-L6-v2**, designed so **bge-small-en-v1.5** is a drop-in weight swap
-(byte-identical tensor names/shapes; +5.9 MTEB for free).
+**all-MiniLM-L6-v2** and **bge-small-en-v1.5**, both running. Same tensor names,
+same GEMM shapes, so the compiled designs and the `.npue` tiling are shared --
+but bge-small has **12 layers, not 6** and pools **CLS, not mean**, so it is not
+the byte-identical drop-in earlier docs claimed. Those two facts are data the
+runtime reads (container config, `1_Pooling/config.json`), not constants.
 
 6 layers, hidden 384, FFN 1536, 12 heads × head_dim 32, vocab 30522, absolute learned
 positions, exact-erf GELU, post-LayerNorm (eps 1e-12), mean pooling, L2 normalized.

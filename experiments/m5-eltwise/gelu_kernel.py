@@ -71,6 +71,11 @@ TILE = 1024          # kernels.gelu accepts nothing else; ours matches it
 # so the fix is fewer, larger transactions. L1 stays inside trap 3's budget:
 # 2 fifos x depth 2 x 4096 x 2 B = 32 KB of 64 KB.  -> tasks/0026
 POLY_TILES = {1024: "gelu_poly_bf16", 4096: "gelu_poly_bf16_4k"}
+# Same kernel, one line different: aie::set_rounding(conv_even). The AIE
+# default is `floor` -- a systematic downward bias on every bf16 store, never
+# set by us until tasks/0044 went looking. Separate FILE, not a flag, because
+# an edit-in-place A/B is the exact shape that has served stale builds here.
+POLY_RNE_TILES = {1024: "gelu_poly_rne_bf16", 4096: "gelu_poly_rne_bf16_4k"}
 
 # Speed probe, numerically WRONG on purpose: identical structure with the Horner
 # chain cut from 8 steps to 2. Never shipped; use_ours="probe2" selects it.
@@ -83,6 +88,12 @@ def ext_kernel(symbol, filename, tile=TILE):
     from aie.utils import config
 
     include = _include_dirs()
+    # OUR kernels dir FIRST: aie_kernels ships its own softmax.cc, and a
+    # sibling #include (kernels/*_rne.cc pull in the impl they wrap) would
+    # otherwise silently resolve to the upstream file -- which compiles and
+    # then fails with "undeclared identifier". This is the include-order trap
+    # CLAUDE.md records from the m7-unified design, hit again in tasks/0044.
+    include.insert(0, str(HERE / "kernels"))
     include.append(str(Path(config.cxx_header_path()) / "aie_kernels"))
     include.append(str(Path(config.cxx_header_path()) / "aie_kernels" / _detect_arch()))
     tile_ty = np.ndarray[(tile,), np.dtype[bfloat16]]
@@ -122,6 +133,11 @@ def _build_design(dev, n_elem, n_cols, use_ours, tile=TILE):
             raise ValueError(f"no gelu_poly entry point for tile {tile}; "
                              f"have {sorted(POLY_TILES)}")
         gelu_k = ext_kernel(POLY_TILES[tile], "gelu_poly.cc", tile)
+    elif use_ours == "polyrne":
+        if tile not in POLY_RNE_TILES:
+            raise ValueError(f"no gelu_poly_rne entry point for tile {tile}; "
+                             f"have {sorted(POLY_RNE_TILES)}")
+        gelu_k = ext_kernel(POLY_RNE_TILES[tile], "gelu_poly_rne.cc", tile)
     elif use_ours == "probe2":
         gelu_k = ext_kernel(PROBE_SYMBOL, "gelu_poly.cc", tile)
     elif use_ours == "control":
@@ -218,7 +234,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--goldens", default=str(REPO / "reference" / "goldens"))
     ap.add_argument("--cols", type=int, default=1)
-    ap.add_argument("--kernel", choices=["iron", "ours", "control", "poly"], default="poly")
+    ap.add_argument("--kernel",
+                    choices=["iron", "ours", "control", "poly", "polyrne"],
+                    default="poly")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -262,7 +280,7 @@ def main() -> int:
     # When we run our own polynomial, compare the hardware against the CPU
     # model of the SAME polynomial. That separates "the design is imperfect"
     # from "the hardware arithmetic differs from numpy fp32".
-    if args.kernel == "poly":
+    if args.kernel in ("poly", "polyrne"):
         import json as _json
         d = _json.loads((ARTIFACTS / "gelu_poly.json").read_text(encoding="utf-8"))
         coef, R = d["coefficients_highest_first"], np.float32(d["clamp_R"])

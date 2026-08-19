@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import statistics
 import time
 from pathlib import Path
 
@@ -46,15 +47,28 @@ def main() -> int:
     for batch in (4, 32, 128):
         sents = (SENTENCES * ((batch // len(SENTENCES)) + 1))[:batch]
         st.encode(sents, batch_size=batch, convert_to_numpy=True)   # warm
-        best = float("inf")
-        for _ in range(5):
+        # best-of-N against the NPU's MEAN flatters the CPU by whatever its
+        # run-to-run spread happens to be -- and that spread is 5-30% on this
+        # machine. All three are reported so the size of the effect is visible
+        # rather than arguable; `seconds`/`seq_per_s` keep their old meaning so
+        # previously published numbers stay traceable.
+        ts = []
+        for _ in range(9):
             t0 = time.perf_counter()
             st.encode(sents, batch_size=batch, convert_to_numpy=True,
                       normalize_embeddings=True)
-            best = min(best, time.perf_counter() - t0)
-        rows.append({"batch": batch, "seconds": best, "seq_per_s": batch / best})
-        print(f"  batch {batch:>4}: {best * 1e3:8.1f} ms  ->  "
-              f"{batch / best:8.1f} seq/s")
+            ts.append(time.perf_counter() - t0)
+        best = min(ts)
+        mean = statistics.fmean(ts)
+        med = statistics.median(ts)
+        rows.append({"batch": batch, "repeats": len(ts),
+                     "seconds": best, "seq_per_s": batch / best,
+                     "mean_s": mean, "median_s": med,
+                     "seq_per_s_mean": batch / mean,
+                     "seq_per_s_median": batch / med})
+        print(f"  batch {batch:>4}: best {batch / best:8.1f}   "
+              f"mean {batch / mean:8.1f}   median {batch / med:8.1f} seq/s"
+              f"   (spread {100 * (max(ts) - min(ts)) / min(ts):.1f}%)")
 
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     (ARTIFACTS / "bench_cpu_baseline.json").write_text(json.dumps({

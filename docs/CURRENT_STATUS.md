@@ -1,6 +1,15 @@
 # CURRENT STATUS
 
-*Last updated: 2026-08-18, after [`tasks/0036`](../tasks/0036-m8-tokenizer/TASK.md).*
+*Last updated: 2026-08-19, after [`tasks/0051`](../tasks/0051-m9-bge-base-and-in-exe-fetch/TASK.md).*
+
+> **The shipped CLI is now subcommands**: `npuembeddings list`,
+> `npuembeddings serve <model>`, `npuembeddings embed <model> <file>`, and a
+> bare invocation prints help plus the model table. Models are fetched and
+> checksum-verified **inside the executable** (`runtime/src/hub.cpp`); the
+> `get-model.cmd` batch script is gone, because `curl` plus a hardcoded
+> `certutil` digest is the behavioural signature of a dropper and antivirus
+> treated it as one. The flag form below is unchanged and still carries every
+> probe and benchmark.
 
 A single place to answer: **what works, what does not, what was tried and
 failed, where everything lives, and how to build and run it.**
@@ -14,9 +23,28 @@ this file, they are right and this file is old.
 
 ## 1. Where the project is
 
-**The model runs end to end on the NPU, in C++, with no Python in the process,
-and it is validated against HuggingFace.** M0–M7 are done. What remains is M8
-(MTEB accuracy) and a tokenizer.
+**Three models run end to end on the NPU, in C++, with no Python in the
+process, all validated against HuggingFace.** M0-M8 are done: the tokenizer
+ships, the MTEB gate passes, and energy is measured. M9 made the runtime
+model-driven and added bge-small and bge-large.
+
+| `--model` | hidden | layers | pooling | `1-cos` vs HF | seq/s |
+|---|---:|---:|---|---:|---:|
+| `all-MiniLM-L6-v2` | 384 | 6 | mean | 1.086e-05 | **877** |
+| `bge-small-en-v1.5` | 384 | 12 | CLS | 8.348e-06 | **445** |
+| `bge-base-en-v1.5` | 768 | 12 | CLS | 1.353e-05 | **181** |
+| `bge-large-en-v1.5` | 1024 | 24 | CLS | 8.432e-06 | **52.8** |
+
+`bge-base-en-v1.5` was added in [`0051`](../tasks/0051-m9-bge-base-and-in-exe-fetch/TASK.md)
+and is **the model whose geometry fits this NPU best**: head_dim 64, and every
+layer width a multiple of 384, so `tile_n` stays 48 where bge-large is forced
+down to 32. It is also the most array-bound model we run -- 74.1% of wall
+clock is NPU against MiniLM's ~40%.
+
+`--model` is **required as soon as more than one container is installed** --
+picking one silently is how this project's fail-open bugs have always looked.
+Geometry, depth, pooling and tile size all come from the `.npue`; none of them
+is a constant in the binary.
 
 ```
 worst 1 - cos vs HuggingFace          1.086e-05        (tolerance 2e-03)
@@ -28,9 +56,25 @@ return embeddings, with no Python in the process
 ([`0036`](../tasks/0036-m8-tokenizer/TASK.md)):
 faithful to fp32 (`1-cos` 1.086e-05), **downstream quality preserved**
 (MTEB +0.04 points, [`0035`](../tasks/0035-m8-mteb-gate/TASK.md)), **faster
-than the CPU** (833 vs 663–710 seq/s, [`0033`](../tasks/0033-m7-pipelined-lanes/TASK.md))
+than the CPU** (interleaved: 877 vs torch's 489 and ONNX Runtime's 234,
+[`0040`](../tasks/0040-m9-honest-cpu-baseline/TASK.md))
 and **1.94× lower energy per sequence** ([`0034`](../tasks/0034-m8-energy/TASK.md)),
-on ~5.3 cores against twelve. What remains is the WordPiece tokenizer.
+on ~5.3 cores against twelve. The tokenizer shipped in
+[`0036`](../tasks/0036-m8-tokenizer/TASK.md).
+
+**And the advantage grows with width, shrinks with depth**
+([`0042`](../tasks/0042-m9-bge-large/TASK.md)). Same width, twice the layers:
+1.792 -> 1.533, because our cost is per dispatch and the CPU has no such term.
+Width 384 -> 1024: **2.106x**, and **4.2x per core**. That is
+[`0027`](../tasks/0027-m7-width-hypothesis/TASK.md)'s prediction, made from a
+synthetic sweep, confirmed on real models.
+
+**Attention still cannot share a design with the projections, and now we know
+why structurally** ([`0043`](../tasks/0043-m9-attention-geometry/TASK.md)).
+Attention is `[64,64] x [64,64]`, so `N % (n * cols) == 0` forces `n * cols` to
+divide 64, while the AIE microkernel asserts `n % 16 == 0`. **Therefore
+cols <= 4**: any design that can express attention uses at most half the array,
+with an eighth of the output tile.
 
 Since 0030 the architecture changed shape (tasks/0031–0032): the NPU is now a
 **pure GEMM engine** — four shapes as instruction streams over **one xclbin in
@@ -48,6 +92,15 @@ Against `sentence-transformers` on the same machine's CPU (12 threads,
 |---|---|---|---|---|---|---|
 | single lane, batch 128 | 604–618 | ~3.5 | 710.0 | 0.86× | ~3.0× better | 53.5 (1.59×) |
 | **pipelined 2 lanes** | **833** | ~5.3 | 710.0 | **1.17×** | 2.7× better | **44.0 (1.94×)** |
+
+> **Superseded by [`0040`](../tasks/0040-m9-honest-cpu-baseline/TASK.md).** That
+> table compares the CPU's **best-of-5** against the NPU's **mean**, and the two
+> sides were measured minutes apart. Re-measured **interleaved**, same statistic
+> on every side, steady state: **NPU 877.0, torch 489.4, ONNX Runtime 234.3
+> seq/s — 1.792×.** The 710 is not reproducible today and the gap is not fully
+> explained by the statistic (worth ~3.4%) or by background load (~6%); what is
+> defensible is the interleaved ratio. The NPU is also far the more
+> reproducible side: ±1.09× against the CPU's ±1.28× within a single run.
 
 **Both halves of the project's own goal are now measured**: faster than the CPU
 in wall clock, and **1.94× less energy per sequence** ([`0034`](../tasks/0034-m8-energy/TASK.md)).

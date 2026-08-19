@@ -302,3 +302,57 @@ class Reader:
             raise ValueError(
                 f"{name}: layout_hash mismatch -- file has {got}, caller wants "
                 f"{want}. Repack with tools/pack_npue.py.")
+
+
+# --- one naming rule, three callers ----------------------------------------
+# reference/make_goldens.py writes them, tools/export_validation.py and
+# tools/verify_npue.py read them. Three copies of a naming convention is how
+# the three pooling implementations started, so it lives here.
+
+# all-MiniLM-L6-v2's goldens predate the derived scheme and are cited by name
+# in tasks/0005 and by six scripts under experiments/. Renaming them would
+# falsify a task log, so its historical slug is kept.
+LEGACY_GOLDEN_SLUGS = {"all-MiniLM-L6-v2": "minilm_l6"}
+
+
+def golden_slug(model_name, n_layers):
+    """Stem of this model's golden files, without the _s<seq>_* suffix."""
+    import os
+    name = os.path.basename(str(model_name).rstrip("/\\"))
+    if name.endswith(".npue"):
+        name = name[:-5]
+    return LEGACY_GOLDEN_SLUGS.get(name, f"{name.lower()}_l{n_layers}")
+
+
+def find_goldens(goldens_dir, source_sha256, seq, load):
+    """The goldens for a checkpoint, found by CONTENT rather than by name.
+
+    Goldens belong to a checkpoint; a `.npue` is one packing of it. Two
+    containers of the same weights at different tile sizes share goldens, and
+    deriving the filename from the container's name made that unexpressible --
+    `bge-large-n16.npue` went looking for `bge-large-n16_l24_s64_*`.
+
+    `load` is passed in because reference/safetensors_io is not importable from
+    here without dragging reference/ onto the path of every caller.
+
+    Returns (boundary_path, taps_path). Raises if the match is not exactly one:
+    zero means the goldens were never generated, and more than one means two
+    checkpoints share a sha256, which is not a thing to guess about.
+    """
+    from pathlib import Path as _P
+    gdir = _P(goldens_dir)
+    hits = []
+    for cand in sorted(gdir.glob(f"*_s{seq}_boundary.safetensors")):
+        try:
+            _, meta = load(cand)
+        except Exception:
+            continue
+        if meta.get("source_sha256") == source_sha256:
+            hits.append(cand)
+    if len(hits) != 1:
+        names = ", ".join(h.name for h in hits) if hits else "none"
+        raise FileNotFoundError(
+            f"{len(hits)} goldens in {gdir} match checkpoint "
+            f"{source_sha256[:16]}... at seq {seq} ({names}). Generate them "
+            f"with reference/make_goldens.py --model-dir <dir> --taps")
+    return hits[0], hits[0].with_name(hits[0].name.replace("_boundary.", "_taps."))

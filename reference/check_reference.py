@@ -28,7 +28,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from encoder import MiniLMReference          # noqa: E402
+from encoder import MiniLMReference, read_pooling          # noqa: E402
 from safetensors_io import load              # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
@@ -93,7 +93,8 @@ def main():
     w, _ = load(model_dir / "model.safetensors")
     ref = MiniLMReference(w, num_layers=n_layers,
                           num_heads=cfg["num_attention_heads"],
-                          eps=cfg["layer_norm_eps"])
+                          eps=cfg["layer_norm_eps"],
+                          pooling=read_pooling(model_dir))
 
     taps = {}
     out = ref.encode(g["input_ids"], g["attention_mask"], g["token_type_ids"], taps=taps)

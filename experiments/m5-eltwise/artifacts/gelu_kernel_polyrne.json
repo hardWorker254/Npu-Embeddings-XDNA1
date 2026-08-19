@@ -1,0 +1,13 @@
+{
+  "kind": "hardware measurement",
+  "op": "gelu",
+  "kernel": "polyrne",
+  "n_elem": 393216,
+  "tile": 1024,
+  "cols": 1,
+  "rel_fro_vs_exact_erf_golden": 0.0024943417105037892,
+  "rel_fro_vs_fp32_tanh": 0.0016881535047485632,
+  "max_pointwise_rel": 113374524188.32063,
+  "tolerance": 0.005,
+  "pass": true
+}

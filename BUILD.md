@@ -169,18 +169,27 @@ every tokenized sequence.
 ### 2.6 Package a release
 
 ```powershell
-.\tools\make_release.ps1 -Version v0.1.0
+.\tools\make_release.ps1 -Version v0.2.0
+.\tools\make_release.ps1 -Version v0.2.0 -Artifacts artifacts_b128il,artifacts_base
 ```
 
-Stages the executable and the design into `dist\`, writes a manifest with the
-sha256 of every file, and zips it (~300 KB).
+Stages `npuembeddings.exe` and one design set **per width** into `dist\`,
+writes a manifest with the sha256 of every file, and zips it (~400 KB). Each
+design's hidden size is read out of its own `design.json`, not taken from the
+directory name.
 
-**The model is deliberately not in the release.** The zip carries a
-`get-model.cmd` that downloads the checkpoint from HuggingFace, verifies its
-sha256 against `models/all-MiniLM-L6-v2/CHECKPOINT.json`, and builds the
-container with `npuembed --prepare-model` — the same layout as
-`tools/pack_npue.py`, byte for byte, and with no Python on the user's
-machine.
+**The model is deliberately not in the release.** The user runs
+`npuembeddings serve <model>`, and the executable downloads the checkpoint
+from HuggingFace, verifies its sha256 against the catalogue compiled into the
+binary (`runtime/src/hub.cpp`), cross-checks the checkpoint's own `config.json`
+against that catalogue, and builds the container — the same layout as
+`tools/pack_npue.py`, byte for byte, with no Python on the user's machine.
+
+> **Why not a script.** Until 0.1.x this was `get-model.cmd`: `curl` to fetch
+> a binary, then `certutil -hashfile` compared against a hardcoded digest.
+> That is the behavioural signature of a dropper, so SmartScreen and AV
+> heuristics flagged it. The checks are unchanged; they just live in the
+> executable now ([`0051`](tasks/0051-m9-bge-base-and-in-exe-fetch/TASK.md)).
 
 ---
 

@@ -65,18 +65,21 @@ SITES = {
 }
 
 
-def ln_kernel(symbol="layernorm_bf16"):
+def ln_kernel(symbol="layernorm_bf16", src="layernorm.cc"):
     from aie.iron.kernels._common import _detect_arch, _include_dirs
     from aie.utils import config
 
     include = _include_dirs()
+    # OUR kernels dir FIRST -- kernels/layernorm_rne.cc #includes the impl it
+    # wraps, and aie_kernels ships same-named sources. See tasks/0044.
+    include.insert(0, str(HERE / "kernels"))
     include.append(str(Path(config.cxx_header_path()) / "aie_kernels"))
     include.append(str(Path(config.cxx_header_path()) / "aie_kernels" / _detect_arch()))
     in_ty = np.ndarray[(ROWS_PER_CALL * COLS,), np.dtype[bfloat16]]
     vec_ty = np.ndarray[(2 * COLS,), np.dtype[np.float32]]   # gamma then beta
     return ExternalFunction(
         symbol,
-        source_file=str(HERE / "kernels" / "layernorm.cc"),
+        source_file=str(HERE / "kernels" / src),
         arg_types=[in_ty, vec_ty, in_ty],
         include_dirs=include,
     )
@@ -92,8 +95,12 @@ def _build(dev, rows, n_cols, variant="base", stack=0xD00):
     tile_ty = np.ndarray[(blk,), np.dtype[bfloat16]]
     vec_ty = np.ndarray[(2 * COLS,), np.dtype[np.float32]]
     buf_ty = np.ndarray[(rows * COLS,), np.dtype[bfloat16]]
-    k = ln_kernel("layernorm_il4_bf16" if variant == "il4"
-                  else "layernorm_bf16")
+    # *_rne variants differ by exactly one line: set_rounding(conv_even).
+    _SYM = {"base": ("layernorm_bf16", "layernorm.cc"),
+            "il4": ("layernorm_il4_bf16", "layernorm.cc"),
+            "rne": ("layernorm_rne_bf16", "layernorm_rne.cc"),
+            "il4_rne": ("layernorm_il4_rne_bf16", "layernorm_rne.cc")}
+    k = ln_kernel(*_SYM[variant])
 
     # ONE shim stream per column for data in, one for params, one for data out
     # -- split/join/broadcast through the mem tile, the pattern that took GELU
@@ -173,7 +180,8 @@ def main() -> int:
     ap.add_argument("--npue", default=str(REPO / "models" / "all-MiniLM-L6-v2.npue"))
     ap.add_argument("--goldens", default=str(REPO / "reference" / "goldens"))
     ap.add_argument("--cols", type=int, default=1)
-    ap.add_argument("--variant", default="base", choices=["base", "il4"])
+    ap.add_argument("--variant", default="base",
+                    choices=["base", "il4", "rne", "il4_rne"])
     ap.add_argument("--stack", type=lambda v: int(v, 0), default=0xD00)
     args = ap.parse_args()
 
@@ -253,7 +261,8 @@ def main() -> int:
     TOL = 5e-3
     ok = r_golden <= TOL
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    (ARTIFACTS / f"layernorm_{args.tap.replace('.', '_')}.json").write_text(
+    # Keyed by VARIANT too -- see the note in softmax_kernel.py (tasks/0044).
+    (ARTIFACTS / f"layernorm_{args.tap.replace('.', '_')}_{args.variant}.json").write_text(
         json.dumps({
             "kind": "hardware measurement", "op": "layernorm", "site": args.tap,
             "rows": int(rows), "cols": COLS, "eps": eps,

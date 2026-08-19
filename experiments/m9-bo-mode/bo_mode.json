@@ -1,0 +1,99 @@
+{
+  "kind": "hardware measurement",
+  "what": "XRT buffer-object allocation flavour vs throughput",
+  "model": "all-MiniLM-L6-v2",
+  "artifacts": "artifacts_b128il",
+  "rounds": 6,
+  "inner_bench": 5,
+  "steady_rounds": 3,
+  "modes": {
+    "host_only": {
+      "steady_seq_per_s": 897.3333333333334,
+      "steady_npu_ms": 154.54666666666665,
+      "all": [
+        865.7,
+        875.5,
+        888.9,
+        888.2,
+        897.5,
+        906.3
+      ],
+      "npu_ms_all": [
+        155.71,
+        154.98,
+        154.99,
+        153.86,
+        154.9,
+        154.88
+      ],
+      "alignment_bytes": 262144,
+      "vs_host_only": 1.0
+    },
+    "host_only_1m": {
+      "steady_seq_per_s": 893.1,
+      "steady_npu_ms": 154.78,
+      "all": [
+        872.5,
+        844.1,
+        890.7,
+        895.8,
+        901.0,
+        882.5
+      ],
+      "npu_ms_all": [
+        155.62,
+        156.37,
+        154.14,
+        155.23,
+        154.95,
+        154.16
+      ],
+      "alignment_bytes": 131072,
+      "vs_host_only": 0.9952823179791976
+    },
+    "ext": {
+      "steady_seq_per_s": 887.1999999999999,
+      "steady_npu_ms": 154.49333333333334,
+      "all": [
+        892.1,
+        870.3,
+        883.0,
+        884.8,
+        902.3,
+        874.5
+      ],
+      "npu_ms_all": [
+        154.61,
+        155.45,
+        154.94,
+        154.7,
+        154.0,
+        154.78
+      ],
+      "alignment_bytes": 131072,
+      "vs_host_only": 0.988707280832095
+    },
+    "ext_1m": {
+      "steady_seq_per_s": 884.2666666666668,
+      "steady_npu_ms": 154.66666666666666,
+      "all": [
+        873.8,
+        888.2,
+        880.1,
+        885.2,
+        887.1,
+        880.5
+      ],
+      "npu_ms_all": [
+        155.04,
+        155.64,
+        154.6,
+        154.27,
+        154.63,
+        155.1
+      ],
+      "alignment_bytes": 65536,
+      "vs_host_only": 0.9854383358098069
+    }
+  }
+}

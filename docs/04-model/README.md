@@ -3,7 +3,10 @@
 ## Choice and rationale
 
 **First target: `sentence-transformers/all-MiniLM-L6-v2`.**
-**Design constraint: `BAAI/bge-small-en-v1.5` must be a drop-in weight swap.**
+**Design constraint: `BAAI/bge-small-en-v1.5` must run on the same compiled
+designs.** It does, and it now has. What it is *not* is a byte-identical
+drop-in: it has **12 layers** and pools **CLS**. Both are read from the
+container and `1_Pooling/config.json` rather than compiled in.
 
 The two checkpoints have **byte-for-byte identical tensor names and shapes**. The only
 differences are layer count (6 vs 12) and pooling (mean vs CLS). So the same pre-tiling

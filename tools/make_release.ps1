@@ -2,37 +2,49 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # A release is everything a user needs and nothing they do not: the executable
-# and the compiled NPU design. About 1.2 MB.
+# and the compiled NPU designs. About 1-3 MB depending on how many widths are
+# carried.
 #
-#   npuembed.exe            ~0.6 MB
-#   gemm_rtp/               ~0.6 MB  one xclbin + 16 instruction streams
+#   npuembeddings.exe       ~0.7 MB
+#   <set>/gemm_rtp/         ~0.6 MB each  one xclbin + 16 instruction streams
 #
 # THE MODEL IS NOT IN HERE, ON PURPOSE
 # ------------------------------------
-# The weights are sentence-transformers/all-MiniLM-L6-v2. Redistributing them
-# would be permitted -- that model is Apache-2.0 -- but it would be the worse
-# deal for everyone: a 66 MB binary blob in a stranger's zip that nobody can
-# practically check against the original, going stale the moment upstream
-# changes, and hiding the model card the user ought to read.
+# Redistributing the weights would be permitted -- these models are
+# Apache-2.0 / MIT -- but it would be the worse deal for everyone: a large
+# binary blob in a stranger's zip that nobody can practically check against
+# the original, going stale the moment upstream changes, and hiding the model
+# card the user ought to read.
 #
-# So get-model.cmd fetches the two files from HuggingFace, verifies the
-# checkpoint's sha256 against the value this project pinned its goldens to,
-# and calls `npuembed --prepare-model`. No Python: the container builder is in
-# the executable (runtime/src/npue_pack.cpp), and it is verified byte-identical
-# to the reference packer by tools/verify_pack_parity.py.
+# NO get-model.cmd (0.2.0)
+# ------------------------
+# Until 0.1.x this bundle carried a batch file that ran `curl` and then
+# compared a `certutil -hashfile` digest against a pinned one. That is the
+# literal shape of a dropper, so SmartScreen and AV heuristics flagged it, and
+# a security warning was the first thing a new user saw. The behaviour was
+# always right; the packaging was not. Fetching and verification now happen
+# inside the executable (runtime/src/hub.cpp), which removes the script, the
+# `curl` dependency and the `certutil` call together:
+#
+#   npuembeddings list
+#   npuembeddings serve bge-base-en-v1.5
+#
+# The pins live in the catalogue compiled into the binary, and the container
+# builder is verified byte-identical to the reference packer by
+# tools/verify_pack_parity.py.
 #
 # The manifest records the sha256 of every file and the numbers this build was
 # verified at, so a downloaded release can be checked against the run that
 # produced it rather than trusted.
 #
 # Usage:
-#   .\tools\make_release.ps1 -Version v0.1.0
-#   .\tools\make_release.ps1 -Version v0.1.0 -Artifacts artifacts_b128il
+#   .\tools\make_release.ps1 -Version v0.2.0
+#   .\tools\make_release.ps1 -Version v0.2.0 -Artifacts artifacts_b128il,artifacts_base
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Version,
-    [string]$Artifacts = "artifacts_b128il",
+    [string[]]$Artifacts = @("artifacts_b128il", "artifacts_base"),
     [string]$OutDir = "dist"
 )
 
@@ -40,14 +52,24 @@ $ErrorActionPreference = "Stop"
 $REPO = Split-Path -Parent $PSScriptRoot
 $stage = Join-Path $REPO "$OutDir\npuembeddings-$Version"
 
-$exe = Join-Path $REPO "runtime\build\npuembed.exe"
-$design = Join-Path $REPO "runtime\$Artifacts\gemm_rtp"
-$pin = Join-Path $REPO "models\all-MiniLM-L6-v2\CHECKPOINT.json"
+# The product name is npuembeddings; the build emits it beside npuembed.exe.
+$exe = Join-Path $REPO "runtime\build\npuembeddings.exe"
+if (-not (Test-Path $exe)) {
+    throw "missing $exe -- see BUILD.md (the release cannot be assembled from a partial build)"
+}
 
-foreach ($p in @($exe, $design, $pin)) {
-    if (-not (Test-Path $p)) {
-        throw "missing $p -- see BUILD.md (the release cannot be assembled from a partial build)"
+$sets = foreach ($a in $Artifacts) {
+    $d = Join-Path $REPO "runtime\$a\gemm_rtp"
+    if (-not (Test-Path "$d\design.json")) {
+        throw "missing $d\design.json -- export it with tools\export_gemm_rtp.py"
     }
+    # The width a design serves is READ from it, never inferred from the
+    # directory name. A release that mislabels which model a design runs is
+    # the same fail-open this project has closed nine times.
+    $json = Get-Content "$d\design.json" -Raw | ConvertFrom-Json
+    $ks = $json.streams | ForEach-Object { $_.K } | Sort-Object -Unique
+    $hidden = ($ks | Sort-Object)[0]
+    [pscustomobject]@{ name = $a; dir = $d; hidden = $hidden }
 }
 
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
@@ -55,80 +77,47 @@ New-Item -ItemType Directory -Force -Path $stage | Out-Null
 New-Item -ItemType Directory -Force -Path "$stage\models" | Out-Null
 
 Copy-Item $exe $stage
-Copy-Item -Recurse $design "$stage\gemm_rtp"
+foreach ($s in $sets) {
+    New-Item -ItemType Directory -Force -Path "$stage\$($s.name)" | Out-Null
+    Copy-Item -Recurse $s.dir "$stage\$($s.name)\gemm_rtp"
+}
 Copy-Item (Join-Path $REPO "LICENSE") $stage
 if (Test-Path (Join-Path $REPO "README.md")) {
     Copy-Item (Join-Path $REPO "README.md") $stage
 }
 
-# get-model.cmd: fetch the checkpoint from its source and build the container.
-# curl ships with Windows 10 and later, so this needs nothing installed.
-$pinned = (Get-Content $pin -Raw | ConvertFrom-Json).sha256
-$repoId = (Get-Content $pin -Raw | ConvertFrom-Json).repo_id
-@"
-@echo off
-rem NpuEmbeddings -- fetch all-MiniLM-L6-v2 and build the model container.
-rem
-rem The weights are not redistributed with this release. They come from
-rem   https://huggingface.co/$repoId
-rem which is Apache-2.0 licensed; please read its model card. This script
-rem downloads them, checks the checksum, and builds models\all-MiniLM-L6-v2.npue.
-setlocal
-set BASE=https://huggingface.co/$repoId/resolve/main
-set DIR=%~dp0models\src
-if not exist "%DIR%" mkdir "%DIR%"
-
-echo Downloading from %BASE% ...
-curl -L -f --progress-bar -o "%DIR%\model.safetensors" "%BASE%/model.safetensors" || goto :fail
-curl -L -f --progress-bar -o "%DIR%\vocab.txt"         "%BASE%/vocab.txt"         || goto :fail
-curl -L -f --progress-bar -o "%DIR%\config.json"       "%BASE%/config.json"       || goto :fail
-
-echo.
-echo Verifying checkpoint ...
-for /f "skip=1 tokens=1" %%H in ('certutil -hashfile "%DIR%\model.safetensors" SHA256') do (
-  if not defined GOT set GOT=%%H
-)
-if /I not "%GOT%"=="$pinned" (
-  echo   MISMATCH
-  echo     expected $pinned
-  echo     got      %GOT%
-  echo   These are not the weights this build was verified against. Stopping.
-  goto :fail
-)
-echo   ok  %GOT%
-
-echo.
-"%~dp0npuembed.exe" --prepare-model "%DIR%" "%~dp0models\all-MiniLM-L6-v2.npue" || goto :fail
-echo.
-echo Done. Run run-server.cmd
-exit /b 0
-
-:fail
-echo.
-echo FAILED -- see the messages above.
-exit /b 1
-"@ | Set-Content -Path "$stage\get-model.cmd" -Encoding ascii
-
-# The layout the runtime expects when pointed at a release directory: it takes
-# a root and looks for models/*.npue and <root>/runtime/<artifacts>/gemm_rtp,
-# so a release ships a tiny launcher rather than asking the user to recreate
-# that tree by hand.
+# Launchers. They exist only so a double-click works; everything they do is
+# one subcommand, and the subcommand is what the documentation teaches.
 @'
 @echo off
-rem NpuEmbeddings -- start the embeddings server on http://127.0.0.1:8420
-rem Usage: run-server.cmd [port]
+rem NpuEmbeddings -- list the models this build can run.
+"%~dp0npuembeddings.exe" list --root "%~dp0."
+pause
+'@ | Set-Content -Path "$stage\list-models.cmd" -Encoding ascii
+
+@'
+@echo off
+rem NpuEmbeddings -- start the embeddings server.
+rem Usage: serve.cmd <model> [port]        e.g.  serve.cmd bge-base-en-v1.5 8080
+rem Downloads and verifies the model on first use.
 setlocal
-set PORT=%1
-if "%PORT%"=="" set PORT=8420
-"%~dp0npuembed.exe" "%~dp0." --artifacts . --threads 24 --pipeline 2 --serve %PORT%
-'@ | Set-Content -Path "$stage\run-server.cmd" -Encoding ascii
+if "%~1"=="" (
+  echo Usage: serve.cmd ^<model^> [port]
+  echo.
+  "%~dp0npuembeddings.exe" list --root "%~dp0."
+  exit /b 1
+)
+set PORT=%2
+if "%PORT%"=="" set PORT=8080
+"%~dp0npuembeddings.exe" serve %1 --port %PORT% --root "%~dp0."
+'@ | Set-Content -Path "$stage\serve.cmd" -Encoding ascii
 
 @'
 @echo off
 rem NpuEmbeddings -- embed one text file (one text per line) to out.f32
-rem Usage: embed.cmd texts.txt out.f32
+rem Usage: embed.cmd <model> texts.txt out.f32
 setlocal
-"%~dp0npuembed.exe" "%~dp0." --artifacts . --threads 24 --pipeline 2 --embed %1 %2
+"%~dp0npuembeddings.exe" embed %1 %2 %3 --root "%~dp0."
 '@ | Set-Content -Path "$stage\embed.cmd" -Encoding ascii
 
 # Checksums over everything shipped.
@@ -143,25 +132,30 @@ $hashes = foreach ($f in $files) {
 $manifest = [ordered]@{
     name    = "NpuEmbeddings"
     version = $Version
-    model   = "all-MiniLM-L6-v2"
-    model_source = @{ repo = $repoId; sha256 = $pinned
-                      note = "fetched by get-model.cmd; not redistributed" }
+    models  = "fetched and verified by `npuembeddings serve <model>`; not redistributed. Run `npuembeddings list` for the catalogue and its pinned checksums."
     hardware = "AMD Ryzen AI (XDNA2 / Strix Point) NPU"
     sequence_length = 64
-    embedding_dim = 384
-    artifacts_set = $Artifacts
+    designs = @($sets | ForEach-Object {
+        [ordered]@{ set = $_.name; hidden = $_.hidden }
+    })
     built_utc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
     verified = [ordered]@{
-        note = "figures from tasks/0033-0037; reproduce with tools/verify_*.py"
-        worst_1_minus_cos_vs_huggingface = 1.086e-05
+        note = "figures from tasks/0033-0037 (MiniLM) and 0051 (bge-base); reproduce with tools/verify_*.py"
+        worst_1_minus_cos_vs_huggingface = [ordered]@{
+            "all-MiniLM-L6-v2" = 1.086e-05
+            "bge-base-en-v1.5" = 1.353e-05
+        }
         tokenizer_exact_match = "6826/6826"
         mteb_delta_points = 0.04
-        throughput_seq_per_s = 918
+        throughput_seq_per_s = [ordered]@{
+            "all-MiniLM-L6-v2" = 907.5
+            "bge-base-en-v1.5" = 181.2
+        }
         energy_j_per_1000_seq = 44.0
     }
     files = $hashes
 }
-$manifest | ConvertTo-Json -Depth 5 | Set-Content "$stage\manifest.json" -Encoding utf8
+$manifest | ConvertTo-Json -Depth 6 | Set-Content "$stage\manifest.json" -Encoding utf8
 
 $zip = Join-Path $REPO "$OutDir\npuembeddings-$Version-win-x64.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }
@@ -170,9 +164,9 @@ Compress-Archive -Path "$stage\*" -DestinationPath $zip -CompressionLevel Optima
 $mb = (Get-Item $zip).Length / 1MB
 Write-Host ""
 Write-Host "  staged  $stage"
-Write-Host ("  zip     {0}  ({1:N1} MB)" -f $zip, $mb)
-Write-Host ("  files   {0}" -f $files.Count)
+Write-Host ("  designs " + (($sets | ForEach-Object { "$($_.name) (hidden $($_.hidden))" }) -join ", "))
+Write-Host ("  zip     $zip  ({0:N2} MB)" -f $mb)
 Write-Host ""
-Write-Host "  Upload the zip as a GitHub release asset for tag $Version."
-Write-Host "  Users need: AMD Ryzen AI driver + XRT, and the MSVC 2015-2022 redistributable."
-Write-Host "  First run: get-model.cmd -- it downloads the weights and builds the container."
+Write-Host "  Unzip, then:  npuembeddings list"
+Write-Host "                npuembeddings serve bge-base-en-v1.5"
+Write-Host ""

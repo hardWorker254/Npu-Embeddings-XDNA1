@@ -46,13 +46,26 @@ add_executable(npuembed
     src/tokenizer.cpp
   src/npue_pack.cpp
   src/npu_device.cpp
+  src/npu_contention.cpp
+  src/hub.cpp
 )
 target_include_directories(npuembed PRIVATE include "${XRT_INCLUDE_DIR}")
 if(DEFINED BOOST_ROOT AND EXISTS "${BOOST_ROOT}")
   target_include_directories(npuembed PRIVATE "${BOOST_ROOT}")
 endif()
-# ws2_32: the /v1/embeddings endpoint (include/http.hpp) talks Winsock
-target_link_libraries(npuembed PRIVATE "${XRT_COREUTIL_LIB}" ws2_32)
+# ws2_32: the /v1/embeddings endpoint (include/http.hpp) talks Winsock.
+# winhttp: fetching a model (src/hub.cpp). Both ship with Windows, so the
+# release stays one executable with no DLL to carry -- which is the point of
+# having replaced the curl+certutil batch script with this.
+target_link_libraries(npuembed PRIVATE "${XRT_COREUTIL_LIB}" ws2_32 winhttp)
+
+# The product is `npuembeddings`; `npuembed.exe` is kept as the name every
+# task log, script and doc in this repo already invokes. One binary, two
+# names, so neither the new CLI nor the existing measurement scripts break.
+add_custom_command(TARGET npuembed POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "$<TARGET_FILE:npuembed>"
+          "$<TARGET_FILE_DIR:npuembed>/npuembeddings.exe")
 
 if(MSVC)
   # /Zc:__cplusplus is REQUIRED, not cosmetic.

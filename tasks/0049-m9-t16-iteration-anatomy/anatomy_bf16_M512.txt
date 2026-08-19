@@ -1,0 +1,29 @@
+INSTR_EVENT_0    n=   108 total=       108 cyc
+INSTR_EVENT_1    n=   107 total=       107 cyc
+INSTR_VECTOR     n= 35954 total=    564480 cyc
+LOCK_STALL       n=   399 total=     13871 cyc
+MEMORY_STALL     n= 18651 total=     19008 cyc
+PORT_RUNNING_0   n=   362 total=     93156 cyc
+PORT_RUNNING_1   n=    16 total=     24576 cyc
+
+kernel windows: 107
+in-window dur     mean= 12232.3 min=   584 max= 25336 median= 15720.0
+in-window vec     mean=  9435.6 min=     0 max= 19796 median= 12288.0
+in-window mem     mean=   317.7 min=     2 max=   670 median=   402.0
+in-window lock    mean=     2.9 min=     0 max=     4 median=     4.0
+in-window stream  mean=     0.0 min=     0 max=     0 median=     0.0
+
+gaps: n=106 mean= -5346.3 min=-17418 max=5490 median= -7812.0
+gap lock-stall total=5488 of -566713
+
+window duration histogram (500-cyc buckets):
+     500-   999:    3 ###
+    4500-  4999:    1 #
+    7500-  7999:   17 #################
+    8000-  8499:   17 #################
+    8500-  8999:    9 #########
+   11500- 11999:    2 ##
+   13500- 13999:    2 ##
+   14000- 14499:    1 #
+   15500- 15999:   53 #####################################################
+   25000- 25499:    2 ##

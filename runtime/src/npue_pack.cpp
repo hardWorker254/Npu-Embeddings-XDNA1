@@ -232,7 +232,11 @@ inline uint16_t bf16_rne(float x) {
 std::vector<uint16_t> tile_b(const float *mat, int64_t K, int64_t N,
                              int64_t tk, int64_t tn) {
   if (K % tk || N % tn)
-    throw std::runtime_error("operand does not tile evenly");
+    throw std::runtime_error(
+        "operand [" + std::to_string(K) + "," + std::to_string(N) +
+        "] does not tile evenly by (" + std::to_string(tk) + "," +
+        std::to_string(tn) + "): K%tk=" + std::to_string(K % tk) +
+        ", N%tn=" + std::to_string(N % tn));
   const int64_t kb_n = K / tk, nb_n = N / tn;
   std::vector<uint16_t> out(static_cast<size_t>(K) * N);
   size_t w = 0;
@@ -350,6 +354,25 @@ std::vector<uint8_t> slurp(const std::string &path) {
 
 }  // namespace
 
+// The one C++ SHA-256, exposed. The downloader must verify a checkpoint with
+// EXACTLY the implementation that later records `source_sha256` into the
+// container -- a second copy is how the Python side ended up with four.
+// Streamed rather than slurped: `model.safetensors` is 438 MB for bge-base
+// and there is no reason to hold it twice.
+std::string sha256_file(const std::string &path) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) throw std::runtime_error("cannot open " + path);
+  Sha256 s;
+  std::vector<char> buf(1 << 20);
+  while (f) {
+    f.read(buf.data(), (std::streamsize)buf.size());
+    const std::streamsize got = f.gcount();
+    if (got > 0)
+      s.update(reinterpret_cast<const uint8_t *>(buf.data()), (size_t)got);
+  }
+  return s.hex();
+}
+
 // The [K,N] operand for a GEMM: transpose the checkpoint's [N,K] weight,
 // optionally fold a scale, convert and pre-tile.
 static void add_gemm_b(Writer &w, const std::string &name, const Tensor &t,
@@ -370,8 +393,32 @@ static void add_gemm_b(Writer &w, const std::string &name, const Tensor &t,
         layout_json, layout_hash);
 }
 
+Layout gemm_b_layout(int64_t tile_k, int64_t tile_n, int64_t mac_s,
+                     int64_t mac_t) {
+  const std::string k = std::to_string(tile_k), n = std::to_string(tile_n);
+  const std::string s = std::to_string(mac_s), tt = std::to_string(mac_t);
+  Layout L;
+  // Insertion order, matching tools/npue.py's dict literal.
+  L.json = "{\"kind\":\"block_panel\",\"tile_k\":" + k + ",\"tile_n\":" + n +
+           ",\"order\":\"k,n,kt,nt\",\"inner\":\"s,t\"" +
+           ",\"mac_s\":" + s + ",\"mac_t\":" + tt + ",\"dtype\":\"BF16\"}";
+  // json.dumps(..., sort_keys=True, separators=(",", ":")) -- keys sorted
+  // alphabetically: dtype, inner, kind, mac_s, mac_t, order, tile_k, tile_n.
+  const std::string canonical =
+      "{\"dtype\":\"BF16\",\"inner\":\"s,t\",\"kind\":\"block_panel\",\"mac_s\":" + s +
+      ",\"mac_t\":" + tt + ",\"order\":\"k,n,kt,nt\",\"tile_k\":" + k +
+      ",\"tile_n\":" + n + "}";
+  Sha256 h;
+  h.update(reinterpret_cast<const uint8_t *>(canonical.data()),
+           canonical.size());
+  L.hash = h.hex();
+  return L;
+}
+
 void prepare_model(const std::string &safetensors, const std::string &vocab,
                    const std::string &config_json_path,
+                   const std::string &pooling,
+                   const std::string &source_repo,
                    const std::string &out, const std::string &source_sha,
                    const std::string &layout_json,
                    const std::string &layout_hash,
@@ -424,7 +471,7 @@ void prepare_model(const std::string &safetensors, const std::string &vocab,
   std::ostringstream cj;
   cj.precision(17);
   cj << "{\"arch\":\"bert_abs_gelu_postln\""
-     << ",\"source_repo\":\"sentence-transformers/all-MiniLM-L6-v2\""
+     << ",\"source_repo\":\"" << source_repo << "\""
      << ",\"source_sha256\":\"" << sha << "\""
      << ",\"num_layers\":" << L << ",\"num_heads\":" << H
      << ",\"hidden\":" << hidden << ",\"head_dim\":" << head_dim
@@ -432,7 +479,7 @@ void prepare_model(const std::string &safetensors, const std::string &vocab,
      << ",\"layer_norm_eps\":1e-12"
      << ",\"vocab_size\":" << vocab_size
      << ",\"max_seq_len\":" << max_seq
-     << ",\"pooling\":\"mean\",\"l2_normalize\":true"
+     << ",\"pooling\":\"" << pooling << "\",\"l2_normalize\":true"
      << ",\"activation\":\"gelu_erf_exact\""
      << ",\"tile_k\":" << tile_k << ",\"tile_n\":" << tile_n
      << ",\"mac_s\":" << kMacS << ",\"mac_t\":" << kMacT

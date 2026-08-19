@@ -39,14 +39,16 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parent.parent.parent
 SEQ = 64
-HIDDEN = 384
+# Width comes from the checkpoint in __init__; 384 was a
+# literal that bge-large's 1024 falsified.
 
 
 class NpuEncoder:
     """Runs the C++ NPU runtime as a subprocess, one call per encode()."""
 
     def __init__(self, artifacts="artifacts_b128il", threads=24, pipeline=2,
-                 exe=None, model_dir=None, verbose=False):
+                 exe=None, model_dir=None, verbose=False,
+                 model="all-MiniLM-L6-v2"):
         from transformers import AutoTokenizer
         from safetensors.numpy import load_file
 
@@ -54,11 +56,14 @@ class NpuEncoder:
         if not self.exe.exists():
             raise FileNotFoundError(f"{self.exe} -- build the runtime first")
         self.artifacts = artifacts
+        # Which container the runtime should load. Pooling and depth live in
+        # it, so the caller does not have to know them.
+        self.model = model
         self.threads = threads
         self.pipeline = pipeline
         self.verbose = verbose
 
-        md = Path(model_dir or REPO / "models" / "all-MiniLM-L6-v2")
+        md = Path(model_dir or REPO / "models" / model)
         self.tok = AutoTokenizer.from_pretrained(str(md))
 
         # The three embedding tables, straight from the checkpoint. The .npue
@@ -78,13 +83,14 @@ class NpuEncoder:
             raise KeyError(names)
         self._meta = None
         self.word = pick("embeddings.word_embeddings.weight")
+        self.hidden = int(self.word.shape[1])
         self.pos = pick("embeddings.position_embeddings.weight")
         self.typ = pick("embeddings.token_type_embeddings.weight")
 
     def _encode_texts(self, sentences):
         sentences = [s if isinstance(s, str) else str(s) for s in sentences]
         if not sentences:
-            return np.zeros((0, HIDDEN), dtype=np.float32)
+            return np.zeros((0, self.hidden), dtype=np.float32)
         n = len(sentences)
         enc = self.tok(sentences, padding="max_length", truncation=True,
                        max_length=SEQ, return_tensors="np")
@@ -106,7 +112,8 @@ class NpuEncoder:
             (d / "attention_mask.f32").write_bytes(
                 np.ascontiguousarray(am, np.float32).tobytes())
 
-            cmd = [str(self.exe), "..", "--artifacts", self.artifacts,
+            cmd = [str(self.exe), "..", "--model", self.model,
+                   "--artifacts", self.artifacts,
                    "--threads", str(self.threads), "--encode-file", str(d)]
             if self.pipeline > 1:
                 cmd += ["--pipeline", str(self.pipeline)]
@@ -119,9 +126,9 @@ class NpuEncoder:
                 print(r.stdout.strip().splitlines()[-1])
             out = np.frombuffer((d / "out.f32").read_bytes(),
                                 dtype=np.float32)
-        if out.size != n * HIDDEN:
-            raise RuntimeError(f"expected {n * HIDDEN} floats, got {out.size}")
-        return out.reshape(n, HIDDEN).copy()
+        if out.size != n * self.hidden:
+            raise RuntimeError(f"expected {n * self.hidden} floats, got {out.size}")
+        return out.reshape(n, self.hidden).copy()
 
     @property
     def mteb_model_meta(self):
@@ -129,10 +136,10 @@ class NpuEncoder:
             from mteb.models.model_meta import ModelMeta
             self._meta = ModelMeta(
                 name="NpuEmbeddings/all-MiniLM-L6-v2-npu",
-                revision="npu-" + self.artifacts,
+                revision="npu-" + self.model + "-" + self.artifacts,
                 release_date=None, languages=["eng-Latn"],
                 n_parameters=None, memory_usage_mb=None,
-                max_tokens=float(SEQ), embed_dim=HIDDEN,
+                max_tokens=float(SEQ), embed_dim=self.hidden,
                 license=None, open_weights=True, public_training_code=None,
                 public_training_data=None, similarity_fn_name="cosine",
                 use_instructions=False, training_datasets=None,

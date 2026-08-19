@@ -76,10 +76,36 @@ def core_columns(d):
     return len(cols) if cols else None
 
 
-def markers_for(shape, m, k, n):
+def markers_for(shape, m, k, n, c_dtype="f32"):
+    """Strings that identify THIS design in the JIT cache.
+
+    The C element type is part of the identity and must be, because
+    `--c-bf16` and the fp32 default differ in the cache only by it.
+
+    MATCH THE ORDERED SIGNATURE, NOT THREE LOOSE MEMREF STRINGS. The old form
+    listed `memref<M*K xbf16>`, `memref<K*N xbf16>` and `memref<M*N xf32>` and
+    asked only whether each appeared SOMEWHERE in the module. With fp32 C the
+    `xf32` suffix happened to keep them apart. With bf16 C it does not, and the
+    collision is exact rather than theoretical (tasks/0045):
+
+        ffn_up   [8192,  384, 1536]  -> M*K=3145728  K*N=589824  M*N=12582912
+        ffn_down [8192, 1536,  384]  -> M*K=12582912 K*N=589824  M*N=3145728
+
+    Same three numbers, all now `bf16`, so the two shapes became
+    indistinguishable and `purge()` for ffn_down DELETED ffn_up's build
+    mid-export. It surfaced as a FileNotFoundError on a missing final.xclbin,
+    which is luck: had ffn_up been built second it would have shipped the wrong
+    instruction stream.
+
+    `aie.runtime_sequence(%arg0: ..., %arg1: ..., %arg2: ...)` binds each size
+    to an ARGUMENT POSITION, so A, B and C cannot trade places whatever their
+    element types are.
+    """
     M, K, N = shape["M"], shape["K"], shape["N"]
-    return [f"memref<{M * K}xbf16>", f"memref<{K * N}xbf16>",
-            f"memref<{M * N}xf32>", f"<size = {k}, stride = {n}>",
+    return [f"aie.runtime_sequence(%arg0: memref<{M * K}xbf16>, "
+            f"%arg1: memref<{K * N}xbf16>, "
+            f"%arg2: memref<{M * N}x{c_dtype}>)",
+            f"<size = {k}, stride = {n}>",
             'sym_name = "rtp_0_0"']
 
 
@@ -137,6 +163,13 @@ def main() -> int:
     ap.add_argument("-m", type=int, default=64)
     ap.add_argument("-k", type=int, default=64)
     ap.add_argument("-n", type=int, default=48)
+    # NPUE-M9 (tasks/0045): narrow C to bf16 on the core, after the fp32 K
+    # reduction, so the C DMA and the host readback move half the bytes.
+    # tasks/0044 measured that readback at 18.8% of a MiniLM encode.
+    ap.add_argument("--c-bf16", action="store_true",
+                    help="GEMM emits bf16 C (fp32 accumulate, one round at "
+                         "the end). Halves C transport; the runtime reads the "
+                         "dtype from design.json.")
     args = ap.parse_args()
     tiers = ([int(x) for x in args.batches.split(",")] if args.batches
              else [args.batch])
@@ -158,17 +191,21 @@ def main() -> int:
         shapes_b = shapes_for(b, args.hidden)
         for name in STREAM_ORDER:
             sh = shapes_b[name]
-            mk = markers_for(sh, args.m, args.k, args.n)
+            mk = markers_for(sh, args.m, args.k, args.n,
+                             "bf16" if args.c_bf16 else "f32")
             purge(mk, args.cols, f"{name}@b{b}")
             M, K, N = sh["M"], sh["K"], sh["N"]
             A = iron.zeros((M, K), dtype=bfloat16, device="npu")
             B = iron.zeros((K, N), dtype=bfloat16, device="npu")
-            C = iron.zeros(M * N, dtype=np.float32, device="npu")
+            C = iron.zeros(M * N,
+                           dtype=bfloat16 if args.c_bf16 else np.float32,
+                           device="npu")
             pretiled_array(A, B, C, M=M, K=K, N=N, m=args.m, k=args.k,
                            n=args.n, n_aie_cols=args.cols,
                            dtype_in_str="bf16", dtype_out_str="f32",
                            emulate_bf16_mmul_with_bfp16=False,
-                           pretiled=True, trace_config=None, rtp=True)
+                           pretiled=True, trace_config=None, rtp=True,
+                           c_bf16=args.c_bf16)
             dirs[(name, b)] = find_cache(mk, args.cols, f"{name}@b{b}")
             print(f"  b{b:<4} {name:<9} {str([M, K, N]):>20} -> "
                   f"{dirs[(name, b)].name}")
@@ -210,16 +247,27 @@ def main() -> int:
                                 "src": dirs[(name, b)].name})
 
     biggest = shapes_for(max(tiers), args.hidden)
+    c_bytes = 2 if args.c_bf16 else 4
     b_layout = gemm_b_layout(args.k, args.n)
     meta = {
         "name": "gemm_rtp", "kind": "gemm_rtp", "kernel": "MLIR_AIE",
         "M": biggest["qkv"]["M"],        # batch inference in the runtime
         "buffers": [max(sh["M"] * sh["K"] * 2 for sh in biggest.values()),
                     max(sh["K"] * sh["N"] * 2 for sh in biggest.values()),
-                    max(sh["M"] * sh["N"] * 4 for sh in biggest.values())],
+                    max(sh["M"] * sh["N"] * c_bytes for sh in biggest.values())],
+        # The runtime must READ this, never assume it. An artifact that is
+        # bf16 and says nothing looks exactly like an fp32 one to a parser
+        # that defaults -- the eighth fail-open in CLAUDE.md is a literal that
+        # should have been data.
+        "c_dtype": "bf16" if args.c_bf16 else "f32",
         "b_layout_hash": layout_hash(b_layout),
         "b_layout": b_layout,
         "cols": args.cols, "batch": max(tiers), "tiers": tiers,
+        # The sequence length these designs were compiled for. It is a
+        # property of the DESIGN, not of the model: the container's
+        # max_seq_len is how many position embeddings were packed (256),
+        # which is a different and larger number.
+        "seq": SEQ,
         "tile": {"m": args.m, "k": args.k, "n": args.n},
         "streams": stream_meta,
     }

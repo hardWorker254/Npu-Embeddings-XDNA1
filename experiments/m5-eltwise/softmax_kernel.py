@@ -47,17 +47,23 @@ COLS = 64                   # sequence length; must match SM_COLS in softmax.cc
 ROWS_PER_CALL = 64          # must match the extern "C" wrapper
 
 
-def sm_kernel(symbol="softmax_bf16"):
+def sm_kernel(symbol="softmax_bf16", src="softmax.cc"):
     from aie.iron.kernels._common import _detect_arch, _include_dirs
     from aie.utils import config
 
     include = _include_dirs()
+    # OUR kernels dir FIRST: aie_kernels ships its own softmax.cc, and a
+    # sibling #include (kernels/*_rne.cc pull in the impl they wrap) would
+    # otherwise silently resolve to the upstream file -- which compiles and
+    # then fails with "undeclared identifier". This is the include-order trap
+    # CLAUDE.md records from the m7-unified design, hit again in tasks/0044.
+    include.insert(0, str(HERE / "kernels"))
     include.append(str(Path(config.cxx_header_path()) / "aie_kernels"))
     include.append(str(Path(config.cxx_header_path()) / "aie_kernels" / _detect_arch()))
     ty = np.ndarray[(ROWS_PER_CALL * COLS,), np.dtype[bfloat16]]
     return ExternalFunction(
         symbol,
-        source_file=str(HERE / "kernels" / "softmax.cc"),
+        source_file=str(HERE / "kernels" / src),
         arg_types=[ty, ty],
         include_dirs=include,
     )
@@ -70,8 +76,16 @@ def _build(dev, rows, n_cols, variant="lib", stack=0xD00):
     blk = ROWS_PER_CALL * COLS
     tile_ty = np.ndarray[(blk,), np.dtype[bfloat16]]
     buf_ty = np.ndarray[(rows * COLS,), np.dtype[bfloat16]]
+    # The *_rne variants live in their own .cc and differ by exactly one line,
+    # aie::set_rounding(conv_even) -- see kernels/softmax_rne.cc (tasks/0044).
+    _SRC = {"lib": "softmax.cc", "poly": "softmax.cc",
+            "poly_il4": "softmax.cc", "poly_rne": "softmax_rne.cc",
+            "poly_il4_rne": "softmax_rne.cc"}
     k = sm_kernel({"lib": "softmax_bf16", "poly": "softmax_poly_bf16",
-                   "poly_il4": "softmax_poly_il4_bf16"}[variant])
+                   "poly_il4": "softmax_poly_il4_bf16",
+                   "poly_rne": "softmax_poly_rne_bf16",
+                   "poly_il4_rne": "softmax_poly_il4_rne_bf16"}[variant],
+                  src=_SRC[variant])
     # Same split/join dataflow as GELU and (now) LayerNorm: one shim stream
     # per column each way, fanned across the four cores by the mem tile.
     def core_fn(a, c, sm):
@@ -131,7 +145,8 @@ def main() -> int:
     ap.add_argument("--goldens", default=str(REPO / "reference" / "goldens"))
     ap.add_argument("--cols", type=int, default=1)
     ap.add_argument("--variant", default="lib",
-                    choices=["lib", "poly", "poly_il4"])
+                    choices=["lib", "poly", "poly_il4",
+                             "poly_rne", "poly_il4_rne"])
     ap.add_argument("--stack", type=lambda v: int(v, 0), default=0xD00)
     args = ap.parse_args()
 
@@ -231,7 +246,9 @@ def main() -> int:
     TOL = 2.5e-2
     ok = r_golden <= TOL and np.abs(1 - sums).max() < 2e-2
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    (ARTIFACTS / "softmax_kernel.json").write_text(json.dumps({
+    # Keyed by VARIANT, like gelu_kernel.py: running poly_rne used to overwrite
+    # poly's artifact, so the A/B destroyed its own control (tasks/0044).
+    (ARTIFACTS / f"softmax_kernel_{args.variant}.json").write_text(json.dumps({
         "kind": "hardware measurement", "op": "softmax",
         "rows": int(rows), "cols": COLS, "masked_entries": n_masked,
         "rel_fro_vs_golden": r_golden, "rel_fro_vs_cpu_model": r_cpu,

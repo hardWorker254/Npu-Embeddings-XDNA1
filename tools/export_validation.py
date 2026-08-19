@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import sys
@@ -28,20 +29,49 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "reference"))
 sys.path.insert(0, str(REPO / "tools"))
 
-from npue import Reader                       # noqa: E402
+from npue import Reader, find_goldens                       # noqa: E402
 from safetensors_io import load               # noqa: E402
 
 
+
 def main() -> int:
-    out = REPO / "runtime" / "artifacts" / "validation"
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default="all-MiniLM-L6-v2",
+                    help="name of the container under models/, without .npue")
+    ap.add_argument("--seq", type=int, default=64)
+    args = ap.parse_args()
+
+    # Per model, so two installed models cannot overwrite each other's
+    # fixtures. The runtime's source_sha256 guard would CATCH that, but a
+    # collision that cannot happen beats one that is merely detected.
+    out = REPO / "runtime" / "artifacts" / "validation" / args.model
     out.mkdir(parents=True, exist_ok=True)
 
-    _, meta = load(REPO / "reference" / "goldens"
-                   / "minilm_l6_s64_boundary.safetensors")
-    taps, _ = load(REPO / "reference" / "goldens"
-                   / "minilm_l6_s64_taps.safetensors")
+    npue_path = REPO / "models" / f"{args.model}.npue"
+    if not npue_path.exists():
+        print(f"FAIL -- {npue_path} not found; build it with "
+              f"`npuembed --prepare-model models/{args.model}`")
+        return 1
+    with Reader(npue_path) as r0:
+        want_sha = r0.config["source_sha256"]
+        n_layers = r0.config["num_layers"]
 
-    with Reader(REPO / "models" / "all-MiniLM-L6-v2.npue") as r:
+    # By checkpoint, not by name -- see tools/npue.py's find_goldens().
+    try:
+        bpath, tpath = find_goldens(REPO / "reference" / "goldens",
+                                    want_sha, args.seq, load)
+    except FileNotFoundError as e:
+        print(f"FAIL -- {e}")
+        return 1
+    if not tpath.exists():
+        print(f"FAIL -- {tpath.name} not found; the boundary goldens are "
+              f"there, so re-run make_goldens.py with --taps")
+        return 1
+
+    _, meta = load(bpath)
+    taps, _ = load(tpath)
+
+    with Reader(npue_path) as r:
         cfg = r.config
         hidden, head_dim = cfg["hidden"], cfg["head_dim"]
         folded = cfg["fusions"]["qk_scale_folded_into_q"]
@@ -67,8 +97,7 @@ def main() -> int:
     # check. The mask is the additive form softmax consumes, clamped to a
     # bf16-representable value -- tasks/0021: finfo(float32).min becomes -inf in
     # bf16, which is docs/04-model's NaN landmine arriving through the dtype.
-    g, _ = load(REPO / "reference" / "goldens"
-                / "minilm_l6_s64_boundary.safetensors")
+    g, _ = load(bpath)
     emb_sum = np.ascontiguousarray(taps["emb.sum"].reshape(-1, hidden),
                                    dtype=np.float32)
     am = np.ascontiguousarray(g["attention_mask"], dtype=np.float32)
@@ -95,7 +124,7 @@ def main() -> int:
                 "1/sqrt(head_dim), matching the .npue fold",
     }, indent=2), encoding="utf-8")
 
-    print(f"wrote {out.relative_to(REPO)}")
+    print(f"wrote {out.relative_to(REPO)}   (goldens {bpath.name})")
     print(f"  input    {a.shape} fp32  {a.nbytes / 1024:.1f} KB")
     print(f"  expected {want.shape} fp32  {want.nbytes / 1024:.1f} KB")
     print(f"  emb_sum  {emb_sum.shape} fp32   add_mask {add_mask.shape}")

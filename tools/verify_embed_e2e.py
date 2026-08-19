@@ -26,9 +26,27 @@ from pathlib import Path
 
 import numpy as np
 
+# The corpus is deliberately non-ASCII. Windows redirects stdout as cp1252, so
+# reporting on it raised UnicodeEncodeError and killed the run -- the data was
+# never at risk, only the report about it.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 REPO = Path(__file__).resolve().parent.parent
 SEQ = 64
-HIDDEN = 384
+def hidden_of(model: str) -> int:
+    """Embedding width, from the container rather than a constant.
+
+    It was a literal 384 -- right for MiniLM and bge-small, wrong for
+    bge-large's 1024. Read it, then use it to CHECK the byte count rather than
+    inferring the width from the data: an inferred width reshapes a truncated
+    file into a plausible array.
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(REPO / "tools"))
+    from npue import Reader
+    with Reader(REPO / "models" / f"{model}.npue") as r:
+        return int(r.config["hidden"])
 
 # Deliberately mixed: short and long, ASCII and not, near-duplicates (so a
 # similarity mistake shows up as a ranking change), and the golden corpus.
@@ -53,23 +71,33 @@ DEFAULT = [
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--corpus", default=None, help="one text per line")
+    ap.add_argument("--model", default="all-MiniLM-L6-v2")
     ap.add_argument("--artifacts", default="artifacts_b128il")
     ap.add_argument("--threads", type=int, default=24)
     ap.add_argument("--tol", type=float, default=2e-3)
-    ap.add_argument("--out", default=str(REPO / "tasks" / "0036-m8-tokenizer"
-                                         / "verify_embed_e2e.json"))
+    # Default output is keyed by MODEL and ARTIFACT SET. It used to be one
+    # fixed filename, so running two arms of an A/B in sequence left only the
+    # second one's numbers on disk -- the artifact existed and quietly held the
+    # other arm's result. Found twice: tasks/0044 in the eltwise harnesses,
+    # tasks/0045 here.
+    ap.add_argument("--out", default=None)
     args = ap.parse_args()
+    if args.out is None:
+        args.out = str(REPO / "tasks" / "0036-m8-tokenizer" /
+                       f"verify_embed_e2e_{args.model}_{args.artifacts}.json")
 
     texts = (Path(args.corpus).read_text(encoding="utf-8").splitlines()
              if args.corpus else list(DEFAULT))
     texts = [t.replace("\r", "") for t in texts]
 
+    hidden = hidden_of(args.model)
     exe = REPO / "runtime" / "build" / "npuembed.exe"
     with tempfile.TemporaryDirectory(prefix="e2e_") as td:
         d = Path(td)
         (d / "in.txt").write_text("\n".join(texts) + "\n", encoding="utf-8")
         r = subprocess.run(
-            [str(exe), "..", "--artifacts", args.artifacts,
+            [str(exe), "..", "--model", args.model,
+             "--artifacts", args.artifacts,
              "--threads", str(args.threads),
              "--embed", str(d / "in.txt"), str(d / "out.f32")],
             cwd=str(REPO / "runtime"), capture_output=True, text=True,
@@ -78,10 +106,10 @@ def main() -> int:
             print(f"npuembed --embed failed ({r.returncode}):\n{r.stdout}\n{r.stderr}")
             return 2
         got = np.frombuffer((d / "out.f32").read_bytes(),
-                            dtype=np.float32).reshape(len(texts), HIDDEN)
+                            dtype=np.float32).reshape(len(texts), hidden)
 
     from sentence_transformers import SentenceTransformer
-    st = SentenceTransformer(str(REPO / "models" / "all-MiniLM-L6-v2"),
+    st = SentenceTransformer(str(REPO / "models" / args.model),
                              device="cpu")
     st.max_seq_length = SEQ
     ref = st.encode(texts, convert_to_numpy=True, normalize_embeddings=True)

@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <set>
 #include <sstream>
@@ -41,6 +42,8 @@
 #include <thread>
 #include <vector>
 
+#include "hub.hpp"
+#include "npu_contention.hpp"
 #include "npu_device.hpp"
 #include "npue.hpp"
 #include "npue_pack.hpp"
@@ -62,9 +65,29 @@
 
 namespace {
 
-constexpr int64_t kSeq = 64;
-constexpr int64_t kHidden = 384, kHeads = 12, kHeadDim = 32, kFfn = 1536;
-constexpr int64_t kLayers = 6;
+// Model geometry, READ FROM THE CONTAINER at startup rather than compiled in.
+//
+// This runtime serves several models -- MiniLM-L6 (6 layers, mean pooling),
+// bge-small (12 layers, CLS pooling), bge-large (24 layers, hidden 1024,
+// head_dim 64) -- and their depth, width and pooling all differ. As
+// constexpr, `g_layers = 6` would have run a 12-layer model for six layers and
+// returned a plausible wrong vector with exit code 0.
+//
+// They are file scope and mutable because they are read at ~150 sites;
+// threading a struct through all of them would be a large diff for no
+// behavioural gain. set_model_shape() is the ONLY writer, it runs once before
+// any Encoder exists, and every value starts at 0 so that a missed
+// initialisation divides by zero or allocates nothing rather than quietly
+// using a stale MiniLM number.
+// head_dim / 8, bounded so the attention kernels can hold the vectors on the
+// stack. 16 covers head_dim up to 128; every BERT-family encoder we target is
+// 32 or 64.
+constexpr int kMaxHeadVecs = 16;
+
+int64_t g_seq = 0, g_hidden = 0, g_heads = 0, g_head_dim = 0;
+int64_t g_ffn = 0, g_layers = 0, g_max_positions = 0;
+bool g_cls_pool = false, g_l2_normalize = true;
+std::string g_model_name, g_source_repo;
 
 // Batch is NOT a constant: it is read back from the loaded design's M, so the
 // runtime cannot disagree with the xclbin it was handed. Every GEMM in the
@@ -73,16 +96,131 @@ constexpr int64_t kLayers = 6;
 // design switches per encode cost the same no matter how many sequences that
 // encode carries.
 
+// ---------------------------------------------------------------------------
+// Which model to run.
+//
+// Four sites used to name all-MiniLM-L6-v2 as a literal. The set of installed
+// models is now whatever is in models/*.npue, and everything shown about them
+// is read from the containers -- there is no list of models in this binary.
+
+struct ModelEntry {
+  std::string path, name, repo, pooling, error;
+  int64_t layers = 0, hidden = 0, heads = 0, head_dim = 0, ffn = 0, seq = 0;
+  double mb = 0;
+};
+
+std::vector<ModelEntry> discover_models(const std::string &root) {
+  namespace fs = std::filesystem;
+  std::vector<ModelEntry> v;
+  std::error_code ec;
+  const fs::path dir = fs::path(root) / "models";
+  for (fs::directory_iterator it(dir, ec), end; !ec && it != end;
+       it.increment(ec)) {
+    if (it->path().extension() != ".npue") continue;
+    ModelEntry m;
+    m.path = it->path().string();
+    m.name = it->path().stem().string();
+    // A container that will not open is LISTED with its error rather than
+    // skipped: a model silently missing from the table is a worse failure
+    // than one that is visibly broken.
+    try {
+      npue::File f(m.path);
+      m.repo = f.config_string("source_repo");
+      m.pooling = f.config_string("pooling");
+      m.layers = f.config_int("num_layers");
+      m.hidden = f.config_int("hidden");
+      m.heads = f.config_int("num_heads");
+      m.head_dim = f.config_int("head_dim");
+      m.ffn = f.config_int("intermediate");
+      m.seq = f.config_int("max_seq_len");
+      m.mb = f.data_length() / 1e6;
+    } catch (const std::exception &e) {
+      m.error = e.what();
+    }
+    v.push_back(std::move(m));
+  }
+  std::sort(v.begin(), v.end(),
+            [](const ModelEntry &a, const ModelEntry &b) {
+              return a.name < b.name;
+            });
+  return v;
+}
+
+void print_model_table(const std::vector<ModelEntry> &v) {
+  std::printf("\nInstalled models (from %s):\n\n",
+              "models/*.npue");
+  std::printf("  %-24s %6s %7s %7s %6s %8s  %s\n", "--model", "layers",
+              "hidden", "pooling", "MB", "max seq", "source");
+  for (const auto &m : v) {
+    if (!m.error.empty()) {
+      std::printf("  %-24s  UNREADABLE: %s\n", m.name.c_str(),
+                  m.error.c_str());
+      continue;
+    }
+    std::printf("  %-24s %6lld %7lld %7s %6.0f %8lld  %s\n", m.name.c_str(),
+                (long long)m.layers, (long long)m.hidden, m.pooling.c_str(),
+                m.mb, (long long)m.seq, m.repo.c_str());
+  }
+  std::printf("\n  Wider and deeper models score better and run slower; the\n"
+              "  measured throughput and MTEB for each are in docs/.\n\n");
+}
+
+// Resolve --model to a container. Accepts a name as printed in the table or a
+// path to a .npue directly.
+std::string resolve_model_path(const std::string &root, int argc,
+                               char **argv) {
+  std::string want;
+  for (int i = 1; i < argc - 1; ++i)
+    if (std::string(argv[i]) == "--model") want = argv[i + 1];
+
+  if (!want.empty() && want.size() > 5 &&
+      want.compare(want.size() - 5, 5, ".npue") == 0 &&
+      std::ifstream(want).good())
+    return want;
+
+  const auto models = discover_models(root);
+  if (models.empty())
+    throw std::runtime_error(
+        "no models/*.npue under " + root + " -- build one with "
+        "`npuembed --prepare-model <checkpoint-dir>`; see BUILD.md");
+
+  if (want.empty()) {
+    // AMBIGUITY is what makes --model required. One installed model is not
+    // ambiguous, and demanding the flag would only make the user type the
+    // single possible answer. Two are, and choosing for them is how this
+    // project's fail-open bugs have always looked.
+    if (models.size() == 1) return models[0].path;
+    print_model_table(models);
+    throw std::runtime_error(
+        "several models are installed; say which with --model <name>");
+  }
+
+  for (const auto &m : models)
+    if (m.name == want) {
+      if (!m.error.empty())
+        throw std::runtime_error("model " + want + " will not open: " +
+                                 m.error);
+      return m.path;
+    }
+  print_model_table(models);
+  throw std::runtime_error("no model named '" + want + "' is installed");
+}
+
 // The vocabulary lives inside the .npue as of 0036, so a deployed model is
 // ONE file. A model packed before that still works: fall back to the loose
 // vocab.txt and say so, rather than failing on a file that is merely older.
-npue::Tokenizer load_tokenizer(npue::File &model, const std::string &root) {
+npue::Tokenizer load_tokenizer(npue::File &model,
+                               const std::string &model_path) {
   try {
     auto v = model.raw("tokenizer.vocab");
     return npue::Tokenizer::from_vocab_bytes(
         reinterpret_cast<const char *>(v.data), v.bytes);
   } catch (const std::exception &) {
-    const std::string p = root + "/models/all-MiniLM-L6-v2/vocab.txt";
+    // Pre-0036 container: the loose checkpoint directory beside it, derived
+    // from the container's own name rather than assumed to be MiniLM's.
+    const std::string p =
+        std::filesystem::path(model_path).replace_extension().string() +
+        "/vocab.txt";
     std::printf("  tokenizer  .npue has no vocabulary; using %s\n", p.c_str());
     return npue::Tokenizer::from_vocab_file(p);
   }
@@ -133,6 +271,108 @@ std::vector<StreamEntry> parse_streams(const std::string &json) {
     p = cb + 1;
   }
   return out;
+}
+
+// Pool [take, seq, hidden] hidden states into [take, hidden], then optionally
+// L2 normalise. ONE implementation: there were three, and they disagreed --
+// the golden path accumulated in float while the other two used double, so a
+// comment claiming they matched was wrong by a rounding.
+//
+// `am` is the 1/0 attention mask, [rows, seq].
+void pool_rows(const float *h, const float *am, int64_t take, float *out) {
+  std::vector<double> acc(static_cast<size_t>(g_hidden));
+  for (int64_t b = 0; b < take; ++b) {
+    const float *amb = am + b * g_seq;
+    const float *hb = h + b * g_seq * g_hidden;
+
+    if (g_cls_pool) {
+      // The [CLS] token is position 0 by construction (tokenizer.cpp emits it
+      // first). If it is masked the sequence is empty, and returning zeros
+      // would be a silently plausible answer.
+      if (amb[0] == 0.f)
+        throw std::runtime_error("CLS pooling on a sequence whose first "
+                                 "token is masked");
+      for (int64_t c = 0; c < g_hidden; ++c) acc[c] = hb[c];
+    } else {
+      float denom = 0.f;
+      for (int64_t s = 0; s < g_seq; ++s) denom += amb[s];
+      denom = std::max(denom, 1e-9f);
+      std::fill(acc.begin(), acc.end(), 0.0);
+      for (int64_t s = 0; s < g_seq; ++s) {
+        const float m = amb[s];
+        if (m == 0.f) continue;
+        const float *hr = hb + s * g_hidden;
+        for (int64_t c = 0; c < g_hidden; ++c) acc[c] += hr[c] * m;
+      }
+      for (int64_t c = 0; c < g_hidden; ++c) acc[c] /= denom;
+    }
+
+    float *o = out + b * g_hidden;
+    if (g_l2_normalize) {
+      double nrm = 0.0;
+      for (int64_t c = 0; c < g_hidden; ++c) nrm += acc[c] * acc[c];
+      nrm = std::sqrt(std::max(nrm, 1e-24));
+      for (int64_t c = 0; c < g_hidden; ++c)
+        o[c] = static_cast<float>(acc[c] / nrm);
+    } else {
+      for (int64_t c = 0; c < g_hidden; ++c) o[c] = static_cast<float>(acc[c]);
+    }
+  }
+}
+
+// Populate the geometry from the container. Every value is REQUIRED: a
+// missing key throws from npue::File rather than defaulting, because a
+// default here is indistinguishable from a correct value and this project has
+// shipped six bugs of exactly that shape.
+void set_model_shape(npue::File &m) {
+  g_layers = m.config_int("num_layers");
+  g_hidden = m.config_int("hidden");
+  g_heads = m.config_int("num_heads");
+  g_head_dim = m.config_int("head_dim");
+  g_ffn = m.config_int("intermediate");
+  g_source_repo = m.config_string("source_repo");
+  // NOT g_seq: `max_seq_len` is how many position embeddings were packed,
+  // which is 256 while the designs are compiled for 64. The sequence length
+  // belongs to the design and is set by set_design_seq().
+  g_max_positions = m.config_int("max_seq_len");
+
+  // Pooling is data. sentence-transformers ships the answer in
+  // 1_Pooling/config.json and the packer copies it here; a container that
+  // predates that carries "mean", which is what MiniLM wants anyway.
+  const std::string pool = m.config_string("pooling");
+  if (pool == "cls") g_cls_pool = true;
+  else if (pool == "mean") g_cls_pool = false;
+  else throw std::runtime_error("unknown pooling mode '" + pool +
+                                "' in the .npue -- expected mean or cls");
+
+  if (g_layers <= 0 || g_hidden <= 0 || g_heads <= 0 || g_max_positions <= 0)
+    throw std::runtime_error("the .npue reports a non-positive shape");
+  if (g_head_dim * g_heads != g_hidden)
+    throw std::runtime_error("head_dim * heads != hidden in the .npue");
+  if (g_head_dim % 8 || g_head_dim / 8 > kMaxHeadVecs)
+    throw std::runtime_error(
+        "head_dim " + std::to_string(g_head_dim) + " must be a multiple of 8 "
+        "and at most " + std::to_string(kMaxHeadVecs * 8) +
+        " for the host attention kernels");
+  // The host AVX2 paths step 8 floats with no scalar tail.
+  if (g_hidden % 8)
+    throw std::runtime_error("this runtime requires hidden to be a multiple "
+                             "of 8");
+}
+
+// The sequence length comes from the design, and the container has to be able
+// to feed it. Two independent sources that must agree in one direction: a
+// design asking for more positions than were packed would index past the
+// position table.
+void set_design_seq(int64_t seq) {
+  if (seq <= 0 || seq % 8)
+    throw std::runtime_error("design seq " + std::to_string(seq) +
+                             " must be positive and a multiple of 8");
+  if (seq > g_max_positions)
+    throw std::runtime_error(
+        "design seq " + std::to_string(seq) + " exceeds the " +
+        std::to_string(g_max_positions) + " position embeddings in the .npue");
+  g_seq = seq;
 }
 
 std::vector<float> read_f32(const std::string &path, size_t count) {
@@ -325,7 +565,7 @@ struct Encoder {
 
 
   // Staged once: the mask, in the form softmax consumes.
-  std::vector<float> add_mask;   // [batch, kSeq]
+  std::vector<float> add_mask;   // [batch, g_seq]
 
   // Unified gemm_rtp mode (tasks/0032): all four GEMM refs above point at ONE
   // design; each op is an instruction-stream slot bound before dispatch. The
@@ -347,7 +587,7 @@ struct Encoder {
     for (size_t i = 0; i < tiers.size(); ++i)
       if (tiers[i] >= want) { pick = i; break; }
     batch = tiers[pick];
-    rows = batch * kSeq;
+    rows = batch * g_seq;
     is_qkv = tier_slots[pick][0];
     is_ao = tier_slots[pick][1];
     is_fu = tier_slots[pick][2];
@@ -364,7 +604,7 @@ struct Encoder {
   std::mutex *npu_mu = nullptr;
   size_t slot_a = 0, slot_c = 0;
 
-  int64_t batch = 0, rows = 0;   // rows = batch * kSeq, from the design's M
+  int64_t batch = 0, rows = 0;   // rows = batch * g_seq, from the design's M
   Pool *pool = nullptr;
 
   // Chunk a flat range over the pool. Chunks are 64-element aligned so the AVX2
@@ -382,6 +622,10 @@ struct Encoder {
   // Scratch reused across layers. `residual = x` used to allocate and copy
   // 12.6 MB per layer at batch 128 -- 75 MB per encode of pure copying.
   std::vector<float> residual;
+  // Scratch, sized once. These used to be six fresh vectors per run() -- ~90
+  // MB of allocate-and-touch per encode at batch 128, and ~280 MB at
+  // bge-large's width. resize() after the first call is a no-op.
+  std::vector<float> qkvbuf, ctx, proj, up, down, scores;
 
   // Device-resident weights, one slot per layer per design, plus the bias
   // pointers straight into the mapped file. Filled by stage_all().
@@ -457,7 +701,7 @@ struct Encoder {
       bias.push_back(model.raw(name + ".bias").as<float>());
       bytes += w.bytes;
     };
-    for (int64_t L = 0; L < kLayers; ++L) {
+    for (int64_t L = 0; L < g_layers; ++L) {
       const std::string p = "layer." + std::to_string(L) + ".";
       one(qkv, p + "qkv", s_qkv, b_qkv);
       one(attn_out, p + "attn_out", s_ao, b_ao);
@@ -467,11 +711,11 @@ struct Encoder {
 
     // gamma and beta share one buffer: a core tile has two input DMA channels
     // and the activations need one of them (tasks/0020).
-    std::vector<float> gb(2 * kHidden);
+    std::vector<float> gb(2 * g_hidden);
     auto ln_one = [&](const std::string &g, const std::string &b) {
-      std::memcpy(gb.data(), model.raw(g).data, kHidden * sizeof(float));
-      std::memcpy(gb.data() + kHidden, model.raw(b).data,
-                  kHidden * sizeof(float));
+      std::memcpy(gb.data(), model.raw(g).data, g_hidden * sizeof(float));
+      std::memcpy(gb.data() + g_hidden, model.raw(b).data,
+                  g_hidden * sizeof(float));
       s_ln.push_back(layernorm.stage(1, gb.data(), gb.size() * sizeof(float)));
       bytes += gb.size() * sizeof(float);
       h_gamma.push_back(model.raw(g).as<float>());
@@ -485,7 +729,7 @@ struct Encoder {
         h_beta.push_back(model.raw(b).as<float>());
       };
       ln_host("embeddings.ln.weight", "embeddings.ln.bias");
-      for (int64_t L = 0; L < kLayers; ++L) {
+      for (int64_t L = 0; L < g_layers; ++L) {
         const std::string p = "layer." + std::to_string(L) + ".";
         ln_host(p + "ln1.weight", p + "ln1.bias");
         ln_host(p + "ln2.weight", p + "ln2.bias");
@@ -493,7 +737,7 @@ struct Encoder {
       return bytes;
     }
     ln_one("embeddings.ln.weight", "embeddings.ln.bias");
-    for (int64_t L = 0; L < kLayers; ++L) {
+    for (int64_t L = 0; L < g_layers; ++L) {
       const std::string p = "layer." + std::to_string(L) + ".";
       ln_one(p + "ln1.weight", p + "ln1.bias");
       ln_one(p + "ln2.weight", p + "ln2.bias");
@@ -537,27 +781,27 @@ struct Encoder {
   void layer_norm_cpu(std::vector<float> &x, size_t site) {
     double t0 = now_s();
     const float *g = h_gamma[site], *b = h_beta[site];
-    const int64_t n_rows = static_cast<int64_t>(x.size()) / kHidden;
+    const int64_t n_rows = static_cast<int64_t>(x.size()) / g_hidden;
     pool->run([&](int w, int nw) {
       const int64_t chunk = (n_rows + nw - 1) / nw;
       const int64_t lo = std::min<int64_t>(n_rows, chunk * w);
       const int64_t hi = std::min<int64_t>(n_rows, lo + chunk);
       for (int64_t r = lo; r < hi; ++r) {
-        float *row = x.data() + r * kHidden;
+        float *row = x.data() + r * g_hidden;
 #if defined(__AVX2__)
         __m256 s = _mm256_setzero_ps();
-        for (int64_t j = 0; j < kHidden; j += 8)
+        for (int64_t j = 0; j < g_hidden; j += 8)
           s = _mm256_add_ps(s, _mm256_loadu_ps(row + j));
-        const float mean = hsum256(s) / kHidden;
+        const float mean = hsum256(s) / g_hidden;
         const __m256 mv = _mm256_set1_ps(mean);
         __m256 v = _mm256_setzero_ps();
-        for (int64_t j = 0; j < kHidden; j += 8) {
+        for (int64_t j = 0; j < g_hidden; j += 8) {
           __m256 d = _mm256_sub_ps(_mm256_loadu_ps(row + j), mv);
           v = _mm256_fmadd_ps(d, d, v);
         }
-        const float var = hsum256(v) / kHidden;
+        const float var = hsum256(v) / g_hidden;
         const __m256 is = _mm256_set1_ps(1.0f / std::sqrt(var + 1e-12f));
-        for (int64_t j = 0; j < kHidden; j += 8) {
+        for (int64_t j = 0; j < g_hidden; j += 8) {
           __m256 d = _mm256_sub_ps(_mm256_loadu_ps(row + j), mv);
           __m256 y = _mm256_fmadd_ps(_mm256_mul_ps(d, is),
                                      _mm256_loadu_ps(g + j),
@@ -566,16 +810,16 @@ struct Encoder {
         }
 #else
         double sm = 0.0;
-        for (int64_t j = 0; j < kHidden; ++j) sm += row[j];
-        const float mean = static_cast<float>(sm / kHidden);
+        for (int64_t j = 0; j < g_hidden; ++j) sm += row[j];
+        const float mean = static_cast<float>(sm / g_hidden);
         double sv = 0.0;
-        for (int64_t j = 0; j < kHidden; ++j) {
+        for (int64_t j = 0; j < g_hidden; ++j) {
           const float d = row[j] - mean;
           sv += static_cast<double>(d) * d;
         }
-        const float var = static_cast<float>(sv / kHidden);
+        const float var = static_cast<float>(sv / g_hidden);
         const float is = 1.0f / std::sqrt(var + 1e-12f);
-        for (int64_t j = 0; j < kHidden; ++j)
+        for (int64_t j = 0; j < g_hidden; ++j)
           row[j] = (row[j] - mean) * is * g[j] + b[j];
 #endif
       }
@@ -608,22 +852,45 @@ struct Encoder {
   }
 #endif
 
-  // fp32 softmax over rows of kSeq on the host. Same structure as the NPU
+  // fp32 softmax over rows of g_seq on the host. Same structure as the NPU
   // kernel (max-subtract, exp2 with the -120 argument floor, one reciprocal),
   // but fp32 end to end -- like host LayerNorm, it removes dispatches AND
   // beats the bf16 path on accuracy.
+  // The padding mask, as an explicit pass. Only the NPU-softmax branch needs
+  // this: softmax_cpu folds the same addition into its per-row prologue, where
+  // the row is already in L1 and it costs nothing, while an aie softmax kernel
+  // has no second operand to take it from.
+  void add_additive_mask(std::vector<float> &scores) {
+    const int64_t rows_per_seq = g_heads * g_seq;
+    const int64_t n_rows = static_cast<int64_t>(scores.size()) / g_seq;
+    pool->run([&](int w, int nw) {
+      for (int64_t r = w; r < n_rows; r += nw) {
+        float *row = scores.data() + r * g_seq;
+        const float *mk = add_mask.data() + (r / rows_per_seq) * g_seq;
+        for (int64_t j = 0; j < g_seq; ++j) row[j] += mk[j];
+      }
+    });
+  }
+
   void softmax_cpu(std::vector<float> &scores) {
     double t0 = now_s();
-    const int64_t n_rows = static_cast<int64_t>(scores.size()) / kSeq;
+    const int64_t n_rows = static_cast<int64_t>(scores.size()) / g_seq;
     pool->run([&](int w, int nw) {
       const int64_t chunk = (n_rows + nw - 1) / nw;
       const int64_t lo = std::min<int64_t>(n_rows, chunk * w);
       const int64_t hi = std::min<int64_t>(n_rows, lo + chunk);
+      const int64_t rows_per_seq = g_heads * g_seq;
       for (int64_t r = lo; r < hi; ++r) {
-        float *row = scores.data() + r * kSeq;
+        float *row = scores.data() + r * g_seq;
+        // The additive padding mask, folded in here rather than in qk(): the
+        // row is already resident, so this is free, and it leaves qk() as the
+        // pure matmul an array kernel could run. Same single float addition
+        // qk() used to do, so the result is unchanged to the bit.
+        const float *mk = add_mask.data() + (r / rows_per_seq) * g_seq;
+        for (int64_t j = 0; j < g_seq; ++j) row[j] += mk[j];
 #if defined(__AVX2__)
         __m256 mx = _mm256_loadu_ps(row);
-        for (int64_t j = 8; j < kSeq; j += 8)
+        for (int64_t j = 8; j < g_seq; j += 8)
           mx = _mm256_max_ps(mx, _mm256_loadu_ps(row + j));
         __m128 m4 = _mm_max_ps(_mm256_castps256_ps128(mx),
                                _mm256_extractf128_ps(mx, 1));
@@ -633,7 +900,7 @@ struct Encoder {
         const __m256 log2e = _mm256_set1_ps(1.4426950408889634f);
         const __m256 argfloor = _mm256_set1_ps(-120.0f);
         __m256 sum = _mm256_setzero_ps();
-        for (int64_t j = 0; j < kSeq; j += 8) {
+        for (int64_t j = 0; j < g_seq; j += 8) {
           __m256 a = _mm256_mul_ps(_mm256_sub_ps(_mm256_loadu_ps(row + j), mv),
                                    log2e);
           __m256 e = exp2_avx2(_mm256_max_ps(a, argfloor));
@@ -641,19 +908,19 @@ struct Encoder {
           sum = _mm256_add_ps(sum, e);
         }
         const __m256 inv = _mm256_set1_ps(1.0f / hsum256(sum));
-        for (int64_t j = 0; j < kSeq; j += 8)
+        for (int64_t j = 0; j < g_seq; j += 8)
           _mm256_storeu_ps(row + j,
                            _mm256_mul_ps(_mm256_loadu_ps(row + j), inv));
 #else
         float m = row[0];
-        for (int64_t j = 1; j < kSeq; ++j) m = std::max(m, row[j]);
+        for (int64_t j = 1; j < g_seq; ++j) m = std::max(m, row[j]);
         float sum = 0.f;
-        for (int64_t j = 0; j < kSeq; ++j) {
+        for (int64_t j = 0; j < g_seq; ++j) {
           row[j] = std::exp(row[j] - m);
           sum += row[j];
         }
         const float inv = 1.0f / sum;
-        for (int64_t j = 0; j < kSeq; ++j) row[j] *= inv;
+        for (int64_t j = 0; j < g_seq; ++j) row[j] *= inv;
 #endif
       }
     });
@@ -755,7 +1022,11 @@ struct Encoder {
       t0 = lap(t0, t_in);
       d.dispatch_only();
       t0 = lap(t0, t_disp);
-      d.sync_from_device(2, static_cast<size_t>(rows) * N * sizeof(float));
+      // NPUE-M9 (tasks/0045): with --c-bf16 the design narrows C on the core
+      // after the fp32 K reduction, so this moves half the bytes. The size
+      // comes from the design, never from an assumption about the datatype.
+      const size_t cb = d.info().c_elem_bytes;
+      d.sync_from_device(2, static_cast<size_t>(rows) * N * cb);
       t0 = lap(t0, t_out);
       // The pointer survives the unlock -- it is THIS pipeline's own bo; the
       // other pipeline binds its own slots and never touches this memory.
@@ -763,27 +1034,58 @@ struct Encoder {
     }
     // The bias add reads the result buffer directly. It used to be a memcpy
     // out followed by a second pass over the same 21 MB; this is one pass.
-    par(size_t(rows), [&](size_t r0, size_t r1) {
-      for (size_t r = r0; r < r1; ++r) {
-        const float *cr = c + r * N;
-        float *o = out.data() + r * N;
-        int64_t j = 0;
+    //
+    // STREAMING loads in both arms: the C buffer is an XRT host bo, and
+    // ordinary loads from it measured ~80 ms per encode (~2 GB/s) -- the
+    // signature of uncached/write-combined memory, where each load stalls the
+    // core. movntdqa reads a whole WC line per transaction. Alignment holds:
+    // the bo map is page-aligned and N is a multiple of 16.
+    if (d.info().c_elem_bytes == 2) {
+      const uint16_t *cb16 = reinterpret_cast<const uint16_t *>(c);
+      par(size_t(rows), [&](size_t r0, size_t r1) {
+        for (size_t r = r0; r < r1; ++r) {
+          const uint16_t *cr = cb16 + r * N;
+          float *o = out.data() + r * N;
+          int64_t j = 0;
 #if defined(__AVX2__)
-        // STREAMING loads: the C buffer is an XRT host bo, and ordinary loads
-        // from it measured ~80 ms per encode (~2 GB/s) -- the signature of
-        // uncached/write-combined memory, where each load stalls the core.
-        // movntdqa reads a whole WC line per transaction. Alignment holds:
-        // the bo map is page-aligned and N is a multiple of 8 floats.
-        for (; j + 8 <= N; j += 8) {
-          __m256i raw = _mm256_stream_load_si256(
-              reinterpret_cast<const __m256i *>(cr + j));
-          _mm256_storeu_ps(o + j, _mm256_add_ps(_mm256_castsi256_ps(raw),
-                                                _mm256_loadu_ps(bias + j)));
-        }
+          // One 32-byte streaming load carries 16 bf16, against 8 fp32 --
+          // which is the whole point: same instruction count, half the traffic.
+          for (; j + 16 <= N; j += 16) {
+            __m256i raw = _mm256_stream_load_si256(
+                reinterpret_cast<const __m256i *>(cr + j));
+            __m256i lo = _mm256_slli_epi32(
+                _mm256_cvtepu16_epi32(_mm256_castsi256_si128(raw)), 16);
+            __m256i hi = _mm256_slli_epi32(
+                _mm256_cvtepu16_epi32(_mm256_extracti128_si256(raw, 1)), 16);
+            _mm256_storeu_ps(o + j,
+                             _mm256_add_ps(_mm256_castsi256_ps(lo),
+                                           _mm256_loadu_ps(bias + j)));
+            _mm256_storeu_ps(o + j + 8,
+                             _mm256_add_ps(_mm256_castsi256_ps(hi),
+                                           _mm256_loadu_ps(bias + j + 8)));
+          }
 #endif
-        for (; j < N; ++j) o[j] = cr[j] + bias[j];
-      }
-    });
+          for (; j < N; ++j) o[j] = from_bf16(cr[j]) + bias[j];
+        }
+      });
+    } else {
+      par(size_t(rows), [&](size_t r0, size_t r1) {
+        for (size_t r = r0; r < r1; ++r) {
+          const float *cr = c + r * N;
+          float *o = out.data() + r * N;
+          int64_t j = 0;
+#if defined(__AVX2__)
+          for (; j + 8 <= N; j += 8) {
+            __m256i raw = _mm256_stream_load_si256(
+                reinterpret_cast<const __m256i *>(cr + j));
+            _mm256_storeu_ps(o + j, _mm256_add_ps(_mm256_castsi256_ps(raw),
+                                                  _mm256_loadu_ps(bias + j)));
+          }
+#endif
+          for (; j < N; ++j) o[j] = cr[j] + bias[j];
+        }
+      });
+    }
     lap(t0, t_bias);
     ++n_dispatch;
   }
@@ -803,32 +1105,49 @@ struct Encoder {
   }
 
   // scores[b,h,i,j] = dot(Q[b,i,h], K[b,j,h]) + mask[b,j]
-  void qk(const std::vector<float> &qkvbuf, std::vector<float> &scores) {
-    const int64_t pairs = batch * kHeads;
+  // scores[b,h,i,j] = Q[b,i,h] . K[b,j,h]. NO mask: this is the operation an
+  // array kernel would perform, and the mask is a property of the batch rather
+  // than of the matmul. add_additive_mask() below applies it.
+  // NV is head_dim/8 as a COMPILE-TIME constant where we have one, so the
+  // inner loop unrolls and qv[]/acc[] stay in registers. NV == 0 keeps the
+  // fully generic path for a width we have not met yet.
+  template <int NV>
+  void qk_impl(const std::vector<float> &qkvbuf, std::vector<float> &scores) {
+    const int64_t pairs = batch * g_heads;
+    // __restrict, because these are members now: the compiler could prove two
+    // fresh local allocations did not overlap and cannot prove it for two
+    // fields of the same object, and without the proof every store to dst[j]
+    // re-issues the loads. Measured at 2x on this loop.
+    const float *__restrict qkv_p = qkvbuf.data();
+    float *__restrict sc_p = scores.data();
     pool->run([&](int w, int nw) {
       for (int64_t p = w; p < pairs; p += nw) {
-        const int64_t b = p / kHeads, h = p % kHeads;
-        const float *mask = &add_mask[b * kSeq];
-        for (int64_t i = 0; i < kSeq; ++i) {
-          const float *q = &qkvbuf[(b * kSeq + i) * 3 * kHidden + h * kHeadDim];
-          float *dst = &scores[(p * kSeq + i) * kSeq];
+        const int64_t b = p / g_heads, h = p % g_heads;
+        for (int64_t i = 0; i < g_seq; ++i) {
+          const float *q = &qkv_p[(b * g_seq + i) * 3 * g_hidden + h * g_head_dim];
+          float *dst = &sc_p[(p * g_seq + i) * g_seq];
 #if defined(__AVX2__)
-          const __m256 q0 = _mm256_loadu_ps(q), q1 = _mm256_loadu_ps(q + 8),
-                       q2 = _mm256_loadu_ps(q + 16), q3 = _mm256_loadu_ps(q + 24);
+          // head_dim / 8 vectors, held across the j loop. head_dim is 32 for
+          // MiniLM and bge-small and 64 for bge-large; kMaxHeadVecs bounds the
+          // stack array and set_model_shape() refuses anything larger.
+          __m256 qv[NV ? NV : kMaxHeadVecs];
+          const int64_t nv = NV ? NV : g_head_dim / 8;
+          for (int64_t v = 0; v < nv; ++v) qv[v] = _mm256_loadu_ps(q + v * 8);
 #endif
-          for (int64_t j = 0; j < kSeq; ++j) {
-            const float *k = &qkvbuf[(b * kSeq + j) * 3 * kHidden + kHidden +
-                                     h * kHeadDim];
+          for (int64_t j = 0; j < g_seq; ++j) {
+            const float *k = &qkv_p[(b * g_seq + j) * 3 * g_hidden + g_hidden +
+                                    h * g_head_dim];
 #if defined(__AVX2__)
-            __m256 s = _mm256_mul_ps(q0, _mm256_loadu_ps(k));
-            s = _mm256_fmadd_ps(q1, _mm256_loadu_ps(k + 8), s);
-            s = _mm256_fmadd_ps(q2, _mm256_loadu_ps(k + 16), s);
-            s = _mm256_fmadd_ps(q3, _mm256_loadu_ps(k + 24), s);
-            dst[j] = hsum256(s) + mask[j];
+            // Accumulate in the same order the unrolled version did, so the
+            // floating-point result is unchanged for head_dim 32.
+            __m256 s = _mm256_mul_ps(qv[0], _mm256_loadu_ps(k));
+            for (int64_t v = 1; v < nv; ++v)
+              s = _mm256_fmadd_ps(qv[v], _mm256_loadu_ps(k + v * 8), s);
+            dst[j] = hsum256(s);
 #else
             float s = 0.f;
-            for (int64_t d = 0; d < kHeadDim; ++d) s += q[d] * k[d];
-            dst[j] = s + mask[j];
+            for (int64_t d = 0; d < g_head_dim; ++d) s += q[d] * k[d];
+            dst[j] = s;
 #endif
           }
         }
@@ -836,59 +1155,81 @@ struct Encoder {
     });
   }
 
+  // Dispatch on the width the container reported. head_dim 32 is MiniLM and
+  // bge-small, 64 is bge-large; anything else still works, just generically.
+  void qk(const std::vector<float> &qkvbuf, std::vector<float> &scores) {
+    switch (g_head_dim) {
+      case 32: qk_impl<4>(qkvbuf, scores); break;
+      case 64: qk_impl<8>(qkvbuf, scores); break;
+      default: qk_impl<0>(qkvbuf, scores); break;
+    }
+  }
+
   // ctx[b,i,h] = sum_j scores[b,h,i,j] * V[b,j,h]
-  void av(const std::vector<float> &scores, const std::vector<float> &qkvbuf,
-          std::vector<float> &ctx) {
-    const int64_t pairs = batch * kHeads;
+  template <int NV>
+  void av_impl(const std::vector<float> &scores,
+               const std::vector<float> &qkvbuf, std::vector<float> &ctx) {
+    const int64_t pairs = batch * g_heads;
+    const float *__restrict sc_p = scores.data();
+    const float *__restrict qkv_p = qkvbuf.data();
+    float *__restrict ctx_p = ctx.data();
     pool->run([&](int w, int nw) {
       for (int64_t p = w; p < pairs; p += nw) {
-        const int64_t b = p / kHeads, h = p % kHeads;
-        for (int64_t i = 0; i < kSeq; ++i) {
-          const float *a = &scores[(p * kSeq + i) * kSeq];
-          float *o = &ctx[(b * kSeq + i) * kHidden + h * kHeadDim];
+        const int64_t b = p / g_heads, h = p % g_heads;
+        for (int64_t i = 0; i < g_seq; ++i) {
+          const float *a = &sc_p[(p * g_seq + i) * g_seq];
+          float *o = &ctx_p[(b * g_seq + i) * g_hidden + h * g_head_dim];
 #if defined(__AVX2__)
-          __m256 o0 = _mm256_setzero_ps(), o1 = _mm256_setzero_ps(),
-                 o2 = _mm256_setzero_ps(), o3 = _mm256_setzero_ps();
-          for (int64_t j = 0; j < kSeq; ++j) {
-            const float *v = &qkvbuf[(b * kSeq + j) * 3 * kHidden +
-                                     2 * kHidden + h * kHeadDim];
+          __m256 acc[NV ? NV : kMaxHeadVecs];
+          const int64_t nv = NV ? NV : g_head_dim / 8;
+          for (int64_t v = 0; v < nv; ++v) acc[v] = _mm256_setzero_ps();
+          for (int64_t j = 0; j < g_seq; ++j) {
+            const float *v = &qkv_p[(b * g_seq + j) * 3 * g_hidden +
+                                    2 * g_hidden + h * g_head_dim];
             const __m256 aj = _mm256_set1_ps(a[j]);
-            o0 = _mm256_fmadd_ps(aj, _mm256_loadu_ps(v), o0);
-            o1 = _mm256_fmadd_ps(aj, _mm256_loadu_ps(v + 8), o1);
-            o2 = _mm256_fmadd_ps(aj, _mm256_loadu_ps(v + 16), o2);
-            o3 = _mm256_fmadd_ps(aj, _mm256_loadu_ps(v + 24), o3);
+            for (int64_t k = 0; k < nv; ++k)
+              acc[k] = _mm256_fmadd_ps(aj, _mm256_loadu_ps(v + k * 8), acc[k]);
           }
-          _mm256_storeu_ps(o, o0);
-          _mm256_storeu_ps(o + 8, o1);
-          _mm256_storeu_ps(o + 16, o2);
-          _mm256_storeu_ps(o + 24, o3);
+          for (int64_t v = 0; v < nv; ++v)
+            _mm256_storeu_ps(o + v * 8, acc[v]);
 #else
-          for (int64_t d = 0; d < kHeadDim; ++d) o[d] = 0.f;
-          for (int64_t j = 0; j < kSeq; ++j) {
-            const float *v = &qkvbuf[(b * kSeq + j) * 3 * kHidden +
-                                     2 * kHidden + h * kHeadDim];
-            for (int64_t d = 0; d < kHeadDim; ++d) o[d] += a[j] * v[d];
+          for (int64_t d = 0; d < g_head_dim; ++d) o[d] = 0.f;
+          for (int64_t j = 0; j < g_seq; ++j) {
+            const float *v = &qkv_p[(b * g_seq + j) * 3 * g_hidden +
+                                    2 * g_hidden + h * g_head_dim];
+            for (int64_t d = 0; d < g_head_dim; ++d) o[d] += a[j] * v[d];
           }
 #endif
         }
       }
     });
+  }
+
+  void av(const std::vector<float> &scores, const std::vector<float> &qkvbuf,
+          std::vector<float> &ctx) {
+    switch (g_head_dim) {
+      case 32: av_impl<4>(scores, qkvbuf, ctx); break;
+      case 64: av_impl<8>(scores, qkvbuf, ctx); break;
+      default: av_impl<0>(scores, qkvbuf, ctx); break;
+    }
   }
 
   std::vector<float> run(const std::vector<float> &emb_in) {
     std::vector<float> x = emb_in;
     layer_norm(x, s_ln[0]);
 
-    std::vector<float> qkvbuf(rows * 3 * kHidden), ctx(rows * kHidden);
-    std::vector<float> proj(rows * kHidden), up(rows * kFfn);
-    std::vector<float> down(rows * kHidden);
-    std::vector<float> scores(batch * kHeads * kSeq * kSeq);
+    qkvbuf.resize(rows * 3 * g_hidden);
+    ctx.resize(rows * g_hidden);
+    proj.resize(rows * g_hidden);
+    up.resize(rows * g_ffn);
+    down.resize(rows * g_hidden);
+    scores.resize(batch * g_heads * g_seq * g_seq);
 
     residual.resize(x.size());
-    for (int64_t L = 0; L < kLayers; ++L) {
+    for (int64_t L = 0; L < g_layers; ++L) {
       std::memcpy(residual.data(), x.data(), x.size() * sizeof(float));
 
-      gemm(qkv, is_qkv, x, s_qkv[L], b_qkv[L], qkvbuf, 3 * kHidden);
+      gemm(qkv, is_qkv, x, s_qkv[L], b_qkv[L], qkvbuf, 3 * g_hidden);
 
       double ta = now_s();
       // QK^T per head, on the host: [64,32]x[32,64] does not tile (head_dim 32
@@ -901,10 +1242,12 @@ struct Encoder {
       qk(qkvbuf, scores);
       t_attn += now_s() - ta;
 
-      if (host_sm)
-        softmax_cpu(scores);
-      else
+      if (host_sm) {
+        softmax_cpu(scores);  // applies add_mask itself
+      } else {
+        add_additive_mask(scores);
         eltwise(softmax, scores.data(), scores.size());
+      }
 
       ta = now_s();
       // A.V. Each (b, h, i) owns its own 32 output floats, so this accumulates
@@ -913,19 +1256,19 @@ struct Encoder {
       av(scores, qkvbuf, ctx);
       t_attn += now_s() - ta;
 
-      gemm(attn_out, is_ao, ctx, s_ao[L], b_ao[L], proj, kHidden);
+      gemm(attn_out, is_ao, ctx, s_ao[L], b_ao[L], proj, g_hidden);
       add_into(x, proj);
       layer_norm(x, s_ln[1 + 2 * L]);
 
       std::memcpy(residual.data(), x.data(), x.size() * sizeof(float));
-      gemm(ffn_up, is_fu, x, s_fu[L], b_fu[L], up, kFfn);
+      gemm(ffn_up, is_fu, x, s_fu[L], b_fu[L], up, g_ffn);
 
       if (host_gelu)
         gelu_cpu(up);
       else
         eltwise(gelu, up.data(), up.size());
 
-      gemm(ffn_down, is_fd, up, s_fd[L], b_fd[L], down, kHidden);
+      gemm(ffn_down, is_fd, up, s_fd[L], b_fd[L], down, g_hidden);
       add_into(x, down);
       layer_norm(x, s_ln[2 + 2 * L]);
     }
@@ -935,7 +1278,336 @@ struct Encoder {
 
 }  // namespace
 
+namespace {
+
+// --- subcommands (0.2.0) --------------------------------------------------
+//
+// `npuembeddings list` and `npuembeddings serve <model>` exist because the
+// flag form below (`npuembed <root> --model X --artifacts Y --serve`) asks a
+// first-time user for three things they have no way to know: where the root
+// is, which artifact set matches their model, and that `--model` is spelled
+// like the container stem. All three are derivable, so they are derived.
+//
+// The subcommands are TRANSLATED into the flag form and then fall through to
+// the same code path. That is deliberate: a second dispatch path would be a
+// second place for the batch tiers, the contention gate and the fixture check
+// to drift out of agreement, and this project has had five bugs of exactly
+// that shape.
+
+// Where the model and design directories live, when nobody says.
+//
+// Two layouts must both work: an extracted release (exe beside models/ and
+// gemm_rtp/) and the source tree (exe in runtime/build/). Probing for the
+// directories rather than assuming a depth means neither is privileged, and a
+// wrong guess reports what it looked for instead of failing later on a
+// confusing missing-file error.
+std::string default_root(const char *argv0) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const fs::path start = fs::absolute(fs::path(argv0), ec).parent_path();
+
+  // THE EXECUTABLE'S OWN DIRECTORY WINS, whenever it holds anything of ours.
+  //
+  // Walking up before checking it was a bug, and a quiet one: a release
+  // staged or unzipped INSIDE the source tree (dist\npuembeddings-0.2.0\)
+  // climbed past its own directory, found the repository's models/ and
+  // runtime/, and served the repo's four containers while claiming to be the
+  // release. Everything worked and everything was wrong -- which is the
+  // failure shape this project keeps meeting. A self-contained directory is
+  // self-contained; the search only starts when there is nothing here.
+  auto has_design = [&](const fs::path &d) {
+    if (fs::exists(d / "gemm_rtp", ec)) return true;
+    // Several widths: one design set per subdirectory.
+    for (fs::directory_iterator it(d, ec), end; !ec && it != end;
+         it.increment(ec))
+      if (it->is_directory(ec) && fs::exists(it->path() / "gemm_rtp", ec))
+        return true;
+    return false;
+  };
+  if (has_design(start) || fs::exists(start / "models", ec))
+    return start.string();
+
+  // Nothing here, so this is a build directory (runtime\build\). Now search
+  // upwards -- and the two searches must each run to completion before the
+  // other starts, never interleaved a level at a time. The source tree is
+  // recognised by BOTH models/ and runtime/, because a design alone would
+  // stop at runtime/, which carries the design sets but not the models. I
+  // wrote exactly that bug while fixing this function: checking both
+  // conditions at each level made runtime/ win over the repository root.
+  auto walk = [&](auto &&match) -> std::string {
+    fs::path dir = start.parent_path();
+    for (int up = 0; up < 5 && !dir.empty(); ++up) {
+      if (match(dir)) return dir.string();
+      const fs::path next = dir.parent_path();
+      if (next == dir) break;               // hit the drive root
+      dir = next;
+    }
+    return "";
+  };
+
+  const std::string src = walk([&](const fs::path &d) {
+    return fs::exists(d / "models", ec) && fs::exists(d / "runtime", ec);
+  });
+  if (!src.empty()) return src;
+
+  const std::string rel = walk(has_design);
+  if (!rel.empty()) return rel;
+  return "..";
+}
+
+// Does this design set serve a model of this width? qkv, attn_out and ffn_up
+// all have K = hidden, so `hidden` must appear as a K in design.json. Checked
+// rather than assumed because a design built for another width has the same
+// filenames and loads fine -- it would simply compute the wrong thing.
+bool design_fits(const std::string &design_dir, int64_t hidden) {
+  std::ifstream f(design_dir + "/gemm_rtp/design.json");
+  if (!f) return false;
+  std::stringstream b;
+  b << f.rdbuf();
+  const std::string s = b.str();
+  const std::string want = "\"K\": " + std::to_string(hidden);
+  const std::string want2 = "\"K\":" + std::to_string(hidden);
+  auto exact = [&](const std::string &pat) {
+    for (size_t p = s.find(pat); p != std::string::npos;
+         p = s.find(pat, p + 1)) {
+      const size_t e = p + pat.size();
+      if (e >= s.size() || !isdigit((unsigned char)s[e])) return true;
+    }
+    return false;
+  };
+  return exact(want) || exact(want2);
+}
+
+// The design set for a model, when --artifacts is not given.
+//
+// Three layouts have to work and none is privileged: a single-width release
+// (<root>/gemm_rtp), a multi-width release (<root>/<set>/gemm_rtp) and the
+// source tree (<root>/runtime/artifacts*/gemm_rtp). Each candidate is tested
+// by whether its design actually serves this width, so the answer is a fact
+// about the design rather than a naming convention.
+std::string pick_artifacts(const std::string &root, int64_t hidden) {
+  namespace fs = std::filesystem;
+  if (hidden <= 0) return "";
+  std::error_code ec;
+  if (design_fits(root, hidden)) return root;
+
+  // Sorted, so the choice is reproducible rather than filesystem-order
+  // dependent -- and never by mtime, which a JIT cache hit does not restamp
+  // (CLAUDE.md trap 7c).
+  std::vector<std::string> cands;
+  for (const fs::path base : {fs::path(root), fs::path(root) / "runtime"})
+    for (fs::directory_iterator it(base, ec), end; !ec && it != end;
+         it.increment(ec))
+      if (it->is_directory(ec)) cands.push_back(it->path().string());
+  std::sort(cands.begin(), cands.end());
+  for (const auto &c : cands)
+    if (design_fits(c, hidden)) return c;
+  return "";
+}
+
+void print_usage() {
+  std::printf(
+      "NpuEmbeddings -- BERT embeddings on the AMD Ryzen AI NPU (XDNA2)\n"
+      "\n"
+      "  npuembeddings list\n"
+      "        every model this build can run, and which are installed\n"
+      "\n"
+      "  npuembeddings serve <model> [--port N] [--bind ADDR]\n"
+      "        OpenAI-shaped /v1/embeddings endpoint. Downloads and verifies\n"
+      "        the model first if it is not installed yet.\n"
+      "\n"
+      "  npuembeddings embed <model> <in.txt> [out.f32]\n"
+      "        embed a text file, one text per line\n"
+      "\n"
+      "  Options for serve/embed:\n"
+      "    --port N          listen port (default 8080)\n"
+      "    --bind ADDR       interface (default 127.0.0.1, localhost only)\n"
+      "    --threads N       host thread budget (default 24 for these)\n"
+      "    --pipeline N      concurrent encode lanes (default 2)\n"
+      "    --artifacts DIR   override the design set\n"
+      "    --root DIR        override where models/ and the design live\n"
+      "\n"
+      "  The flag form is unchanged and still works:\n"
+      "    npuembeddings <root> --model NAME --artifacts DIR --serve [port]\n"
+      "  and carries the probes and benchmarks; see docs/CURRENT_STATUS.md.\n"
+      "\n");
+}
+
+void print_catalog(const std::string &root) {
+  const auto installed = discover_models(root);
+  auto is_installed = [&](const std::string &n) -> const ModelEntry * {
+    for (const auto &m : installed)
+      if (m.name == n) return &m;
+    return nullptr;
+  };
+
+  std::printf("\nModels (root %s)\n\n", root.c_str());
+  std::printf("  %-20s %-9s %6s %6s %8s %9s  %s\n", "model", "state",
+              "layers", "hidden", "pooling", "size", "notes");
+
+  for (const auto &e : npue::hub::catalog()) {
+    const ModelEntry *m = is_installed(e.name);
+    // "installed" is not the same as "runnable": the design set for this
+    // width has to be present too, and a release ships one width. Saying so
+    // here beats a confusing failure at dispatch.
+    const bool have_design = !pick_artifacts(root, e.hidden).empty();
+    const char *state = !m ? "available"
+                           : (have_design ? "ready" : "no design");
+    char size[32];
+    if (m)
+      std::snprintf(size, sizeof size, "%.0f MB", m->mb);
+    else
+      std::snprintf(size, sizeof size, "%.0f MB dl", e.download_mb);
+    std::printf("  %-20s %-9s %6lld %6lld %8s %9s  %s\n", e.name.c_str(),
+                state, (long long)e.layers, (long long)e.hidden,
+                e.pooling.c_str(), size, e.note.c_str());
+  }
+
+  // Anything packed locally that the catalogue does not know about. It is
+  // perfectly valid -- `--prepare-model` builds one from any BERT checkpoint
+  // -- and hiding it would make the table a lie about what `serve` accepts.
+  bool header = false;
+  for (const auto &m : installed) {
+    if (npue::hub::find(m.name)) continue;
+    if (!header) {
+      std::printf("\n  Locally packed (not in the catalogue):\n");
+      header = true;
+    }
+    if (!m.error.empty()) {
+      std::printf("  %-20s UNREADABLE: %s\n", m.name.c_str(),
+                  m.error.c_str());
+      continue;
+    }
+    std::printf("  %-20s %-9s %6lld %6lld %8s %6.0f MB  %s\n", m.name.c_str(),
+                pick_artifacts(root, m.hidden).empty() ? "no design" : "ready",
+                (long long)m.layers, (long long)m.hidden, m.pooling.c_str(),
+                m.mb, m.repo.c_str());
+  }
+
+  std::printf(
+      "\n  ready      installed, with a matching NPU design -- `serve` runs it\n"
+      "  available  not downloaded yet -- `serve` fetches and verifies it\n"
+      "  no design  installed, but no design set for this width is present\n"
+      "\n  npuembeddings serve <model>\n\n");
+}
+
+}  // namespace
+
 int main(int argc, char **argv) try {
+  // No arguments at all: say what this is and what it can run.
+  //
+  // The old behaviour was to take root = ".." and start the golden-vector
+  // validation encode -- a developer default that made sense when the only
+  // caller was a task log. Double-clicking the executable, which is what a
+  // release invites, would then either dispatch to the NPU or fail with a
+  // path error about a directory the user never named. Neither answers the
+  // question a bare invocation is actually asking.
+  if (argc == 1) {
+    print_usage();
+    print_catalog(default_root(argv[0]));
+    return 0;
+  }
+
+  // Subcommands, translated into the flag form the rest of main() reads.
+  std::vector<std::string> store;
+  if (argc > 1) {
+    const std::string sub = argv[1];
+    const bool is_sub = (sub == "list" || sub == "serve" || sub == "embed" ||
+                         sub == "help" || sub == "--help" || sub == "-h");
+    if (is_sub) {
+      // --root is read before anything else, since it decides where we look
+      // for the model we are about to talk about.
+      std::string sub_root;
+      for (int i = 2; i < argc - 1; ++i)
+        if (std::string(argv[i]) == "--root") sub_root = argv[i + 1];
+      if (sub_root.empty()) sub_root = default_root(argv[0]);
+
+      if (sub == "help" || sub == "--help" || sub == "-h") {
+        print_usage();
+        return 0;
+      }
+      if (sub == "list") {
+        print_catalog(sub_root);
+        return 0;
+      }
+
+      // serve / embed both need a model named as the next positional.
+      if (argc < 3 || argv[2][0] == '-') {
+        print_catalog(sub_root);
+        throw std::runtime_error("`" + sub + "` needs a model name");
+      }
+      const std::string want = argv[2];
+      if (sub == "embed" && argc < 4)
+        throw std::runtime_error(
+            "`embed` needs a file: npuembeddings embed <model> <in.txt> "
+            "[out.f32]");
+
+      // Fetch it if we do not have it. This is the whole point of the
+      // subcommand: the checksum comparison that used to live in a batch
+      // file now happens here, inside the executable.
+      const std::string container = npue::hub::ensure_model(
+          sub_root, want, [](const std::string &s) {
+            std::printf("%s\n", s.c_str());
+            std::fflush(stdout);
+          });
+
+      // Which design serves this model. --artifacts still wins if given.
+      std::string art;
+      for (int i = 2; i < argc - 1; ++i)
+        if (std::string(argv[i]) == "--artifacts") art = argv[i + 1];
+      if (art.empty()) {
+        int64_t hidden = 0;
+        try {
+          npue::File f(container);
+          hidden = f.config_int("hidden");
+        } catch (const std::exception &) {
+        }
+        art = pick_artifacts(sub_root, hidden);
+        if (art.empty())
+          throw std::runtime_error(
+              "no NPU design for hidden " + std::to_string(hidden) +
+              " under " + sub_root +
+              " -- this release carries designs for the widths it was built "
+              "with; export one with tools/export_gemm_rtp.py --hidden " +
+              std::to_string(hidden));
+      }
+
+      // Defaults that suit a server rather than a measurement. The flag form
+      // keeps its conservative --threads 1, because a benchmark that quietly
+      // used 24 cores would misreport the per-core claim.
+      std::string threads = "24", pipeline = "2";
+      for (int i = 2; i < argc - 1; ++i) {
+        if (std::string(argv[i]) == "--threads") threads = argv[i + 1];
+        if (std::string(argv[i]) == "--pipeline") pipeline = argv[i + 1];
+      }
+
+      store = {argv[0], sub_root,       "--model",    want,
+               "--artifacts", art,      "--threads",  threads,
+               "--pipeline",  pipeline};
+      if (sub == "serve") {
+        std::string port = "8080", bind = "127.0.0.1";
+        for (int i = 2; i < argc - 1; ++i) {
+          if (std::string(argv[i]) == "--port") port = argv[i + 1];
+          if (std::string(argv[i]) == "--bind") bind = argv[i + 1];
+        }
+        store.push_back("--bind");
+        store.push_back(bind);
+        store.push_back("--serve");
+        store.push_back(port);
+      } else {
+        store.push_back("--embed");
+        store.push_back(argv[3]);
+        if (argc > 4 && argv[4][0] != '-') store.push_back(argv[4]);
+      }
+
+      static std::vector<char *> ptrs;
+      ptrs.clear();
+      for (auto &s : store) ptrs.push_back(s.data());
+      argc = (int)ptrs.size();
+      argv = ptrs.data();
+    }
+  }
+
   const std::string root = (argc > 1) ? argv[1] : "..";
 
   // --prepare-model <dir> [out.npue]: build the model container from an
@@ -949,28 +1621,86 @@ int main(int argc, char **argv) try {
   for (int i = 1; i < argc - 1; ++i)
       if (std::string(argv[i]) == "--prepare-model") {
     const std::string dir = argv[i + 1];
-    std::string out = dir + "/all-MiniLM-L6-v2.npue";
+    // The container is named after the checkpoint directory, not after
+    // MiniLM. This was a literal until a second model made it visible.
+    std::string out =
+        dir + "/" + std::filesystem::path(dir).filename().string() + ".npue";
     if (i + 2 < argc && argv[i + 2][0] != '-') out = argv[i + 2];
 
-    // The layout descriptor the compiled designs expect. It is written here
-    // in exactly the form tools/npue.py's gemm_b_layout() produces, because
-    // the runtime compares its sha256 before dispatching and a difference in
-    // spelling would read as a difference in layout.
-    const std::string layout =
-        // Key order matters: tools/npue.py stores this dict in INSERTION
-        // order and only the HASH sorts keys, so emitting it sorted here
-        // produced a byte-different container with an identical hash.
-        "{\"kind\":\"block_panel\",\"tile_k\":64,\"tile_n\":48,"
-        "\"order\":\"k,n,kt,nt\",\"inner\":\"s,t\","
-        "\"mac_s\":8,\"mac_t\":8,\"dtype\":\"BF16\"}";
-    // sha256 of the canonical layout JSON, as stamped by tools/npue.py.
-    const std::string layout_hash =
-        "94266693ea31aa674279b0cb124eb9a731276064eae1442ac55841dc266dddaf";
+    // Tile size is a PROPERTY OF THE MODEL, not a constant. The design
+    // asserts N % (tile_n * n_cols) == 0, and bge-large's N in
+    // {1024, 3072, 4096} makes 48 illegal -- the legal set there is
+    // {8, 16, 32, 64} and 64 does not fit L1 (65,536 B against the 63 KB
+    // budget), so it must be 32. Both packers now take it and neither
+    // freezes the resulting hash.
+    int64_t tile_k = 64, tile_n = 48;
+    for (int k = 1; k < argc - 1; ++k) {
+      if (std::string(argv[k]) == "--tile-n") tile_n = std::atoi(argv[k + 1]);
+      if (std::string(argv[k]) == "--tile-k") tile_k = std::atoi(argv[k + 1]);
+    }
+    const npue::Layout lay = npue::gemm_b_layout(tile_k, tile_n);
+    const std::string layout = lay.json;
+    const std::string layout_hash = lay.hash;
+    std::printf("  layout     tile (%lld, %lld), hash %s...\n",
+                (long long)tile_k, (long long)tile_n,
+                layout_hash.substr(0, 16).c_str());
+
+    // Pooling comes from the checkpoint's own 1_Pooling/config.json, the
+    // same source tools/pack_npue.py reads. Both packers must agree or
+    // verify_pack_parity fails, which is the point of having the gate.
+    std::string pooling;
+    {
+      std::ifstream pf(dir + "/1_Pooling/config.json");
+      if (!pf)
+        throw std::runtime_error(
+            "no 1_Pooling/config.json under " + dir + " -- cannot tell "
+            "whether this checkpoint pools by mean or by CLS");
+      std::stringstream ps;
+      ps << pf.rdbuf();
+      const std::string pj = ps.str();
+      auto flag = [&](const char *k) {
+        const size_t i = pj.find(k);
+        if (i == std::string::npos) return false;
+        const size_t c = pj.find(':', i);
+        return pj.compare(pj.find_first_not_of(" \t", c + 1), 4, "true") == 0;
+      };
+      const bool cls = flag("pooling_mode_cls_token");
+      const bool mean = flag("pooling_mode_mean_tokens");
+      if (cls == mean)
+        throw std::runtime_error(
+            "1_Pooling/config.json asks for neither or both of cls and mean; "
+            "this runtime implements exactly those two");
+      pooling = cls ? "cls" : "mean";
+      std::printf("  pooling    %s (from 1_Pooling/config.json)\n",
+                  pooling.c_str());
+    }
+
+    // Which repository these weights came from. tools/pack_npue.py reads
+    // CHECKPOINT.json for this and so must we, or the two packers disagree.
+    // A container that misattributes its own weights is a licensing
+    // statement, so an unknown repo REFUSES rather than guessing.
+    std::string source_repo;
+    for (int k = 1; k < argc - 1; ++k)
+      if (std::string(argv[k]) == "--source-repo") source_repo = argv[k + 1];
+    if (source_repo.empty()) {
+      std::ifstream cf(dir + "/CHECKPOINT.json");
+      if (!cf)
+        throw std::runtime_error(
+            "no CHECKPOINT.json under " + dir + " and no --source-repo given "
+            "-- refusing to guess which repository these weights came from");
+      std::stringstream cs;
+      cs << cf.rdbuf();
+      source_repo = npue::http::json_field_string(cs.str(), "repo_id", "");
+      if (source_repo.empty())
+        throw std::runtime_error(dir + "/CHECKPOINT.json has no repo_id");
+    }
+    std::printf("  source     %s\n", source_repo.c_str());
 
     std::printf("NpuEmbeddings -- preparing %s\n", out.c_str());
     npue::prepare_model(dir + "/model.safetensors", dir + "/vocab.txt",
-                        dir + "/config.json", out, "", layout, layout_hash,
-                        64, 48, 256,
+                        dir + "/config.json", pooling, source_repo, out,
+                        "", layout, layout_hash,
+                        tile_k, tile_n, 256,
                         [](const std::string &s) {
                           std::printf("%s\n", s.c_str());
                         });
@@ -1016,8 +1746,7 @@ int main(int argc, char **argv) try {
   // Golden check vectors. Development-only: a release ships the model and
   // the design, not the test fixtures, so their absence is normal and is only
   // an error if the golden check is actually the mode being run.
-  const std::string val = root + "/runtime/artifacts/validation";
-  const bool have_val = std::ifstream(val + "/emb_sum.f32").good();
+
 
   // --tokenize <file> [max_len]: one text per line in, one line of token
   // ids out. No NPU, no model -- this is the mode tools/verify_tokenizer.py
@@ -1028,8 +1757,9 @@ int main(int argc, char **argv) try {
     int max_len = 64;
     if (i + 2 < argc && std::isdigit(static_cast<unsigned char>(argv[i + 2][0])))
       max_len = std::atoi(argv[i + 2]);
-    npue::File vm(root + "/models/all-MiniLM-L6-v2.npue");
-    auto tok = load_tokenizer(vm, root);
+    const std::string vpath = resolve_model_path(root, argc, argv);
+    npue::File vm(vpath);
+    auto tok = load_tokenizer(vm, vpath);
     std::ifstream in(in_path, std::ios::binary);
     if (!in) throw std::runtime_error("cannot open " + in_path);
     std::string line;
@@ -1043,11 +1773,78 @@ int main(int argc, char **argv) try {
     return 0;
   }
 
-  npue::File model(root + "/models/all-MiniLM-L6-v2.npue");
+  // --list-models and exit: the same table --model prints on ambiguity.
+  for (int i = 1; i < argc; ++i)
+    if (std::string(argv[i]) == "--list-models") {
+      print_model_table(discover_models(root));
+      return 0;
+    }
+
+  const std::string model_path = resolve_model_path(root, argc, argv);
+  npue::File model(model_path);
+  set_model_shape(model);
+  g_model_name = std::filesystem::path(model_path).stem().string();
+
+  // Fixtures live per model. The flat directory is the pre-multi-model layout
+  // and is still honoured so an existing checkout keeps working; the
+  // source_sha256 guard below is what makes either location safe.
+  std::string val =
+      root + "/runtime/artifacts/validation/" + g_model_name;
+  if (!std::ifstream(val + "/emb_sum.f32").good())
+    val = root + "/runtime/artifacts/validation";
+  const bool have_val = std::ifstream(val + "/emb_sum.f32").good();
+  // THE FIXTURE MUST BELONG TO THIS MODEL.
+  //
+  // MiniLM-L6 and bge-small have identical hidden, heads, head_dim, ffn,
+  // vocab and golden batch, so every fixture file is the same SIZE. Feeding
+  // one model's fixtures to the other would compare plausible numbers against
+  // the wrong target and report a pass. validation.json has carried the
+  // checkpoint's sha256 since it was written and nothing ever read it --
+  // which is the same shape as the six fail-open bugs before it.
+  if (have_val) {
+    std::ifstream vf(val + "/validation.json");
+    if (!vf)
+      throw std::runtime_error(
+          "found fixtures under " + val + " but no validation.json to say "
+          "which checkpoint they belong to -- re-run "
+          "tools/export_validation.py");
+    std::stringstream vs;
+    vs << vf.rdbuf();
+    const std::string want_sha =
+        npue::http::json_field_string(vs.str(), "source_sha256", "");
+    const std::string got_sha = model.config_string("source_sha256");
+    if (want_sha.empty() || want_sha != got_sha)
+      throw std::runtime_error(
+          "the golden fixtures were made from checkpoint " +
+          want_sha.substr(0, 16) + "... but this model is " +
+          got_sha.substr(0, 16) + "... -- they would compare the right shapes "
+          "against the wrong answers. Re-run tools/export_validation.py.");
+  }
   std::printf("NpuEmbeddings C++ runtime -- full encode\n");
-  std::printf("  model      %zu tensors, %.2f MB, checkpoint %s\n",
-              model.tensor_count(), model.data_length() / 1e6,
+  std::printf("  bo-mode    %s (data-buffer allocation)\n", npu::bo_mode_name());
+  std::printf("  model      %s: %zu tensors, %.2f MB, checkpoint %s\n",
+              g_model_name.c_str(), model.tensor_count(),
+              model.data_length() / 1e6,
               model.config_string("source_sha256").substr(0, 16).c_str());
+  std::printf("  shape      %s: %lld layers, hidden %lld, %lld heads x %lld, "
+              "ffn %lld, %s pooling\n",
+              g_source_repo.c_str(), (long long)g_layers, (long long)g_hidden,
+              (long long)g_heads, (long long)g_head_dim, (long long)g_ffn,
+              g_cls_pool ? "CLS" : "mean");
+
+  // --bo-mode: how data buffers are allocated. MUST be set before any Design
+  // exists, because Design's constructor allocates. See npu_device.cpp for
+  // what the four modes separate.
+  for (int i = 1; i < argc - 1; ++i)
+    if (std::string(argv[i]) == "--bo-mode") {
+      const std::string m = argv[i + 1];
+      if (m == "host_only") npu::set_bo_mode(npu::BoMode::host_only);
+      else if (m == "host_only_1m") npu::set_bo_mode(npu::BoMode::host_only_1m);
+      else if (m == "ext") npu::set_bo_mode(npu::BoMode::ext);
+      else if (m == "ext_1m") npu::set_bo_mode(npu::BoMode::ext_1m);
+      else throw std::runtime_error(
+          "--bo-mode " + m + ": expected host_only, host_only_1m, ext or ext_1m");
+    }
 
   npu::Device dev;
 
@@ -1085,6 +1882,26 @@ int main(int argc, char **argv) try {
   // independent of how MUCH configuration there is. If a trivial 1-column
   // passthrough switches as slowly as a 1-column GEMM, the per-column cost is
   // fixed and unreachable. If it is cheaper, dataflow complexity is a knob.
+  // --probe-bo <design-dir> <chunk_mb> <count>: can this machine hold the XRT
+  // buffers a wider model needs? bge-large wants ~1023 MB across two lanes
+  // (604 MB of staged weights plus 209 MB of A/B/C per lane) against MiniLM's
+  // 175 MB. Answering that with one command beats discovering it after a
+  // four-xclbin build at h=1024.
+  for (int i = 2; i < argc - 3; ++i)
+      if (std::string(argv[i]) == "--probe-bo") {
+    const std::string dir = root + "/runtime/" + argv[i + 1];
+    const size_t chunk = static_cast<size_t>(std::atof(argv[i + 2]) * 1e6);
+    const size_t count = static_cast<size_t>(std::atoi(argv[i + 3]));
+    npu::Design d0(dev, dir);
+    std::printf("  probe      %zu x %.1f MB = %.1f MB, mode %s\n",
+                count, chunk / 1e6, count * chunk / 1e6, npu::bo_mode_name());
+    const double t0 = now_s();
+    const size_t ok = d0.probe_alloc(chunk, count, true);
+    std::printf("  allocated  %zu of %zu (%.1f MB) in %.2f s\n",
+                ok, count, ok * chunk / 1e6, now_s() - t0);
+    return ok == count ? 0 : 3;
+  }
+
   for (int i = 2; i < argc - 1; ++i)
       if (std::string(argv[i]) == "--probe-design") {
     const std::string dir = root + "/runtime/" + argv[i + 1];
@@ -1204,6 +2021,13 @@ int main(int argc, char **argv) try {
                   N1 = binfo.info().N;
     std::printf("\n  probe-rtp -- one xclbin (%s), two shapes\n",
                 argv[i + 1]);
+    // This probe reads C as fp32 directly. A --c-bf16 artifact would still
+    // "work" and produce plausible-looking wrong sums, which is the exact
+    // failure mode tasks/0009 and CLAUDE.md trap 6c are about. Refuse.
+    if (a.info().c_elem_bytes != 4)
+      throw std::runtime_error(
+          "--probe-rtp reads C as fp32; this design emits bf16 C "
+          "(tasks/0045). Use an artifact set exported without --c-bf16.");
 
     const float cB = 0.5f;
     auto run_shape = [&](size_t slot, int64_t M_, int64_t K_, int64_t N_,
@@ -1422,13 +2246,23 @@ int main(int argc, char **argv) try {
 
   // Batch comes from the design, not from a constant here, so a mismatch is
   // impossible rather than merely unlikely.
-  const int64_t rows = d_qkv.info().M, batch = rows / kSeq;
-  if (rows % kSeq || batch < 1)
+  // The design says what sequence length it was built for; the container
+  // says how many positions it can feed. set_design_seq checks the second
+  // against the first rather than trusting either alone.
+  if (d_qkv.info().seq <= 0)
+    throw std::runtime_error(
+        "this design set records no sequence length -- re-export it with "
+        "tools/export_gemm_rtp.py, or add \"seq\": 64 to its design.json if "
+        "you know it was built for seq 64");
+  set_design_seq(d_qkv.info().seq);
+
+  const int64_t rows = d_qkv.info().M, batch = rows / g_seq;
+  if (rows % g_seq || batch < 1)
     throw std::runtime_error("design M=" + std::to_string(rows) +
                              " is not a whole number of seq-" +
-                             std::to_string(kSeq) + " sequences");
+                             std::to_string(g_seq) + " sequences");
   std::printf("  shape      batch %lld x seq %lld  (M = %lld)\n",
-              (long long)batch, (long long)kSeq, (long long)rows);
+              (long long)batch, (long long)g_seq, (long long)rows);
 
   // The goldens are batch 4 -- that is what M3 generated and what the accuracy
   // claim rests on. For larger batches the four sequences are TILED to fill the
@@ -1462,14 +2296,14 @@ int main(int argc, char **argv) try {
   std::vector<float> emb_in, mask, want, amask_i;
   if (have_val) {
     emb_in = tile(read_f32(val + "/emb_sum.f32",
-                           static_cast<size_t>(kGoldenBatch * kSeq * kHidden)),
+                           static_cast<size_t>(kGoldenBatch * g_seq * g_hidden)),
                   reps4);
     mask = tile(read_f32(val + "/add_mask.f32",
-                         static_cast<size_t>(kGoldenBatch * kSeq)), reps4);
+                         static_cast<size_t>(kGoldenBatch * g_seq)), reps4);
     want = read_f32(val + "/embedding_expected.f32",
-                    static_cast<size_t>(kGoldenBatch * kHidden));
+                    static_cast<size_t>(kGoldenBatch * g_hidden));
     amask_i = tile(read_f32(val + "/attention_mask.f32",
-                            static_cast<size_t>(kGoldenBatch * kSeq)), reps4);
+                            static_cast<size_t>(kGoldenBatch * g_seq)), reps4);
   } else {
     // The Encoder needs a mask of the right shape at construction; every
     // other mode overwrites it per chunk before dispatching.
@@ -1553,12 +2387,22 @@ int main(int argc, char **argv) try {
   enc.host_sm = host_sm;
   enc.host_gelu = host_gelu;
   if (host_gelu)
-    std::printf("  gelu       on the HOST (fp32) -- 6 fewer NPU dispatches\n");
+    std::printf("  gelu       on the HOST (fp32) -- %lld fewer NPU dispatches\n",
+                (long long)g_layers);
   if (host_sm)
-    std::printf("  softmax    on the HOST (fp32) -- 6 fewer NPU dispatches\n");
+    std::printf("  softmax    on the HOST (fp32) -- %lld fewer NPU dispatches\n",
+                (long long)g_layers);
   if (host_ln)
-    std::printf("  layernorm  on the HOST (fp32) -- 13 fewer NPU dispatches\n");
+    // One before the layer stack plus two per layer.
+    std::printf("  layernorm  on the HOST (fp32) -- %lld fewer NPU dispatches\n",
+                (long long)(1 + 2 * g_layers));
   const size_t staged = enc.stage_all();
+  // What the allocation mode actually bought, in addresses. Printed
+  // because "1 MB padding gives large-page backing" is a mechanism
+  // claim, and the alignment is the only visible part of it.
+  std::printf("  bo-align   last data buffer aligned to %zu B%s\n",
+              npu::last_bo_alignment(),
+              npu::last_bo_alignment() >= (1u << 21) ? " (>= 2 MB)" : "");
   std::printf("  weights    %.2f MB staged on the device once, not per call\n",
               staged / 1e6);
 
@@ -1610,25 +2454,8 @@ int main(int argc, char **argv) try {
   }
 
   auto pool_and_normalise = [&](const std::vector<float> &h) {
-    std::vector<float> out(batch * kHidden, 0.f);
-    for (int64_t b = 0; b < batch; ++b) {
-      float denom = 0.f;
-      for (int64_t s = 0; s < kSeq; ++s) denom += amask_i[b * kSeq + s];
-      denom = std::max(denom, 1e-9f);
-      for (int64_t s = 0; s < kSeq; ++s) {
-        float m = amask_i[b * kSeq + s];
-        for (int64_t c = 0; c < kHidden; ++c)
-          out[b * kHidden + c] += h[(b * kSeq + s) * kHidden + c] * m;
-      }
-      double nrm = 0.0;
-      for (int64_t c = 0; c < kHidden; ++c) {
-        out[b * kHidden + c] /= denom;
-        nrm += static_cast<double>(out[b * kHidden + c]) * out[b * kHidden + c];
-      }
-      nrm = std::sqrt(std::max(nrm, 1e-24));
-      for (int64_t c = 0; c < kHidden; ++c)
-        out[b * kHidden + c] = static_cast<float>(out[b * kHidden + c] / nrm);
-    }
+    std::vector<float> out(batch * g_hidden, 0.f);
+    pool_rows(h.data(), amask_i.data(), batch, out.data());
     return out;
   };
 
@@ -1672,6 +2499,60 @@ int main(int argc, char **argv) try {
     return 0;
   }
 
+  // --probe-streams: what IS the GEMM's per-dispatch time made of?
+  //
+  // tasks/0048 / OPEN-THREADS T1. `--bench` reports ONE wait figure averaged
+  // over all four shapes, which cannot distinguish the two candidate accounts:
+  //
+  //   compute-bound  -> time tracks MACs
+  //   traffic-bound  -> time tracks bytes moved (tasks/0010's model)
+  //
+  // The four shapes have deliberately different ratios -- ffn_up and ffn_down
+  // have IDENTICAL MACs and differ 1.5x in traffic, which is the discriminating
+  // pair -- so timing them separately decides it.
+  //
+  // No host work in the loop and no result checking: it dispatches whatever is
+  // in the buffers. That is the point. Any host term would be the thing we are
+  // trying to see past.
+  for (int i = 2; i < argc; ++i) if (std::string(argv[i]) == "--probe-streams") {
+    if (!unified || streams.empty())
+      throw std::runtime_error("--probe-streams needs a unified gemm_rtp set");
+    const int reps = 30;
+    const size_t cb = d_qkv.info().c_elem_bytes;
+    const int64_t mrows = 4, tm = 64;      // design rows, tile m
+    std::printf("\n  probe-streams -- %d repeats, no host work, C is %s\n",
+                reps, cb == 2 ? "bf16" : "fp32");
+    std::printf("    %-10s %6s %6s %6s  %8s  %8s  %9s  %8s  %8s\n",
+                "stream", "M", "K", "N", "GMAC", "MB", "us/disp",
+                "GMAC/ms", "GB/s");
+    for (const auto &st : streams) {
+      if (st.batch != batch) continue;
+      d_qkv.bind_instr(static_cast<size_t>(st.slot));
+      d_qkv.dispatch_only();                       // warm
+      const double t0 = now_s();
+      for (int r = 0; r < reps; ++r) d_qkv.dispatch_only();
+      const double us = (now_s() - t0) / reps * 1e6;
+      // tasks/0010's traffic accounting: A re-streamed once per n-block group,
+      // B once per row block, C once.
+      const double nb_groups = double(st.N) / (48.0 * 8.0) > 0
+          ? std::max(1.0, double(st.N) / (48.0 * 8.0)) : 1.0;
+      const double row_blocks = double(st.M) / double(tm) / double(mrows);
+      const double mb = (double(st.M) * st.K * 2 * nb_groups
+                         + double(st.K) * st.N * 2 * row_blocks
+                         + double(st.M) * st.N * cb) / 1e6;
+      const double gmac = double(st.M) * st.K * st.N / 1e9;
+      std::printf("    %-10s %6lld %6lld %6lld  %8.2f  %8.1f  %9.0f  %8.2f  %8.1f\n",
+                  st.op.c_str(), (long long)st.M, (long long)st.K,
+                  (long long)st.N, gmac, mb, us, gmac / (us / 1000.0),
+                  mb / 1e3 / (us / 1e6));
+    }
+    std::printf("\n\n    Read the LAST TWO COLUMNS. If GMAC/ms is flat across shapes the"
+                " design is compute-bound; if GB/s is flat it is traffic-bound;"
+                " if neither, it is something we have not modelled"
+                " (OPEN-THREADS T1).\n");
+    return 0;
+  }
+
   // TEXT IN, VECTORS OUT. One service, used by --embed (batch, from a file)
   // and --serve (an OpenAI-shaped HTTP endpoint). Sharing it is the point:
   // the endpoint cannot drift from the thing the tests measure.
@@ -1704,56 +2585,36 @@ int main(int argc, char **argv) try {
     void chunk(Encoder &e, const std::vector<std::string> &texts,
                int64_t base, int64_t take, std::vector<float> &out,
                int64_t *tokens) const {
-      const size_t row_floats = static_cast<size_t>(kSeq) * kHidden;
+      const size_t row_floats = static_cast<size_t>(g_seq) * g_hidden;
       const int64_t bt = e.use_tier(take);
       std::vector<float> buf(static_cast<size_t>(bt) * row_floats, 0.f);
-      std::vector<float> cmask(static_cast<size_t>(bt) * kSeq, -1.0e30f);
-      std::vector<float> cam(static_cast<size_t>(bt) * kSeq, 0.f);
+      std::vector<float> cmask(static_cast<size_t>(bt) * g_seq, -1.0e30f);
+      std::vector<float> cam(static_cast<size_t>(bt) * g_seq, 0.f);
       int64_t ntok = 0;
       for (int64_t b = 0; b < take; ++b) {
-        const auto en = tok.encode(texts[base + b], static_cast<int>(kSeq));
+        const auto en = tok.encode(texts[base + b], static_cast<int>(g_seq));
         ntok += en.n_tokens;
-        for (int64_t s = 0; s < kSeq; ++s) {
+        for (int64_t s = 0; s < g_seq; ++s) {
           const int32_t id = en.input_ids[s];
           const float m = static_cast<float>(en.attention_mask[s]);
-          cam[b * kSeq + s] = m;
-          cmask[b * kSeq + s] = m > 0 ? 0.f : -1.0e30f;
-          float *dst = buf.data() + (b * kSeq + s) * kHidden;
-          const float *wv = w_word + static_cast<size_t>(id) * kHidden;
-          const float *pv = w_pos + static_cast<size_t>(s) * kHidden;
-          for (int64_t c = 0; c < kHidden; ++c)
+          cam[b * g_seq + s] = m;
+          cmask[b * g_seq + s] = m > 0 ? 0.f : -1.0e30f;
+          float *dst = buf.data() + (b * g_seq + s) * g_hidden;
+          const float *wv = w_word + static_cast<size_t>(id) * g_hidden;
+          const float *pv = w_pos + static_cast<size_t>(s) * g_hidden;
+          for (int64_t c = 0; c < g_hidden; ++c)
             dst[c] = wv[c] + pv[c] + w_typ[c];
         }
       }
       e.add_mask = cmask;
       auto h = e.run(buf);
-      for (int64_t b = 0; b < take; ++b) {
-        float denom = 0.f;
-        for (int64_t s = 0; s < kSeq; ++s) denom += cam[b * kSeq + s];
-        denom = std::max(denom, 1e-9f);
-        std::vector<double> acc(kHidden, 0.0);
-        for (int64_t s = 0; s < kSeq; ++s) {
-          const float m = cam[b * kSeq + s];
-          if (m == 0.f) continue;
-          const float *hr = h.data() + (b * kSeq + s) * kHidden;
-          for (int64_t c = 0; c < kHidden; ++c) acc[c] += hr[c] * m;
-        }
-        double nrm = 0.0;
-        for (int64_t c = 0; c < kHidden; ++c) {
-          acc[c] /= denom;
-          nrm += acc[c] * acc[c];
-        }
-        nrm = std::sqrt(std::max(nrm, 1e-24));
-        float *o = out.data() + (base + b) * kHidden;
-        for (int64_t c = 0; c < kHidden; ++c)
-          o[c] = static_cast<float>(acc[c] / nrm);
-      }
+      pool_rows(h.data(), cam.data(), take, out.data() + base * g_hidden);
       if (tokens) *tokens += ntok;
     }
 
     std::vector<float> embed(const std::vector<std::string> &texts,
                              int64_t *tokens = nullptr) {
-      std::vector<float> out(texts.size() * kHidden, 0.f);
+      std::vector<float> out(texts.size() * g_hidden, 0.f);
       const auto jobs = plan(static_cast<int64_t>(texts.size()));
       std::atomic<int64_t> tok_total{0};
       if (all.size() > 1 && jobs.size() > 1) {
@@ -1783,7 +2644,7 @@ int main(int argc, char **argv) try {
   };
 
   auto make_service = [&]() {
-    EmbedService svc{load_tokenizer(model, root),
+    EmbedService svc{load_tokenizer(model, model_path),
                      model.raw("embeddings.word").as<float>(),
                      model.raw("embeddings.position").as<float>(),
                      model.raw("embeddings.token_type").as<float>(),
@@ -1828,12 +2689,12 @@ int main(int argc, char **argv) try {
                out.size() * sizeof(float));
       if (!of) throw std::runtime_error("failed writing " + out_path);
       std::printf("  wrote      %s  [%zu, %lld] fp32\n", out_path.c_str(),
-                  texts.size(), (long long)kHidden);
+                  texts.size(), (long long)g_hidden);
     } else {
       for (size_t b = 0; b < std::min<size_t>(texts.size(), 4); ++b) {
         std::printf("  [%zu]", b);
         for (int64_t c = 0; c < 6; ++c)
-          std::printf(" %+.4f", out[b * kHidden + c]);
+          std::printf(" %+.4f", out[b * g_hidden + c]);
         std::printf(" ...\n");
       }
     }
@@ -1856,11 +2717,11 @@ int main(int argc, char **argv) try {
       if (std::string(argv[k]) == "--bind") bind_addr = argv[k + 1];
 
     auto svc = make_service();
-    const std::string model_id = "all-MiniLM-L6-v2-npu";
+    const std::string model_id = g_model_name + "-npu";
     std::printf("  tokenizer  %zu tokens, from the .npue\n",
                 svc.tok.vocab_size());
     std::printf("\n  serving http://%s:%d/v1/embeddings   (model %s, seq %lld)\n",
-                bind_addr.c_str(), port, model_id.c_str(), (long long)kSeq);
+                bind_addr.c_str(), port, model_id.c_str(), (long long)g_seq);
     std::printf("  POST {\"input\": \"text\" | [\"a\",\"b\"], "
                 "\"encoding_format\": \"float\"|\"base64\"}\n\n");
 
@@ -1936,15 +2797,15 @@ int main(int argc, char **argv) try {
         if (r) out += ',';
         out += "{\"object\":\"embedding\",\"index\":" + std::to_string(r) +
                ",\"embedding\":";
-        const float *v = emb.data() + r * kHidden;
+        const float *v = emb.data() + r * g_hidden;
         if (fmt == "base64") {
           out += '"';
           out += npue::http::base64(reinterpret_cast<const uint8_t *>(v),
-                                    static_cast<size_t>(kHidden) * sizeof(float));
+                                    static_cast<size_t>(g_hidden) * sizeof(float));
           out += '"';
         } else {
           out += '[';
-          for (int64_t c = 0; c < kHidden; ++c) {
+          for (int64_t c = 0; c < g_hidden; ++c) {
             if (c) out += ',';
             std::snprintf(num, sizeof num, "%.7g", v[c]);
             out += num;
@@ -1965,10 +2826,10 @@ int main(int argc, char **argv) try {
   // pooled, L2-normalised embeddings back. This is the bridge that lets MTEB
   // (Python, .venv-ref) drive the C++ NPU runtime (tasks/0035).
   //
-  //   <dir>/emb_sum.f32         [n_rows, kSeq, kHidden]  fp32
-  //   <dir>/add_mask.f32        [n_rows, kSeq]           fp32, 0 or -1e30
-  //   <dir>/attention_mask.f32  [n_rows, kSeq]           fp32, 1 or 0
-  //   <dir>/out.f32             [n_rows, kHidden]        fp32   (written)
+  //   <dir>/emb_sum.f32         [n_rows, g_seq, g_hidden]  fp32
+  //   <dir>/add_mask.f32        [n_rows, g_seq]           fp32, 0 or -1e30
+  //   <dir>/attention_mask.f32  [n_rows, g_seq]           fp32, 1 or 0
+  //   <dir>/out.f32             [n_rows, g_hidden]        fp32   (written)
   //
   // n_rows need not be a multiple of the design's batch: the last chunk is
   // PADDED with zero rows, which are then discarded. A padded row is masked
@@ -1981,19 +2842,19 @@ int main(int argc, char **argv) try {
     std::ifstream f(dir + "/emb_sum.f32", std::ios::binary | std::ios::ate);
     if (!f) throw std::runtime_error("cannot open " + dir + "/emb_sum.f32");
     const size_t bytes = static_cast<size_t>(f.tellg());
-    const size_t row_floats = static_cast<size_t>(kSeq) * kHidden;
+    const size_t row_floats = static_cast<size_t>(g_seq) * g_hidden;
     if (bytes % (row_floats * sizeof(float)))
       throw std::runtime_error("emb_sum.f32 is not a whole number of "
                                "seq-by-hidden rows");
     const int64_t n_rows = static_cast<int64_t>(bytes /
                                                 (row_floats * sizeof(float)));
     auto all_emb = read_f32(dir + "/emb_sum.f32", n_rows * row_floats);
-    auto all_add = read_f32(dir + "/add_mask.f32", n_rows * kSeq);
-    auto all_am = read_f32(dir + "/attention_mask.f32", n_rows * kSeq);
+    auto all_add = read_f32(dir + "/add_mask.f32", n_rows * g_seq);
+    auto all_am = read_f32(dir + "/attention_mask.f32", n_rows * g_seq);
 
     std::printf("  encode-file %lld sequences in chunks of %lld\n",
                 (long long)n_rows, (long long)batch);
-    std::vector<float> out(static_cast<size_t>(n_rows) * kHidden, 0.f);
+    std::vector<float> out(static_cast<size_t>(n_rows) * g_hidden, 0.f);
 
     const double t0 = now_s();
     for (int64_t base = 0; base < n_rows; base += batch) {
@@ -2002,39 +2863,19 @@ int main(int argc, char **argv) try {
       std::vector<float> chunk(static_cast<size_t>(batch) * row_floats, 0.f);
       std::memcpy(chunk.data(), all_emb.data() + base * row_floats,
                   take * row_floats * sizeof(float));
-      std::vector<float> cmask(static_cast<size_t>(batch) * kSeq, -1.0e30f);
-      std::memcpy(cmask.data(), all_add.data() + base * kSeq,
-                  take * kSeq * sizeof(float));
-      std::vector<float> cam(static_cast<size_t>(batch) * kSeq, 0.f);
-      std::memcpy(cam.data(), all_am.data() + base * kSeq,
-                  take * kSeq * sizeof(float));
+      std::vector<float> cmask(static_cast<size_t>(batch) * g_seq, -1.0e30f);
+      std::memcpy(cmask.data(), all_add.data() + base * g_seq,
+                  take * g_seq * sizeof(float));
+      std::vector<float> cam(static_cast<size_t>(batch) * g_seq, 0.f);
+      std::memcpy(cam.data(), all_am.data() + base * g_seq,
+                  take * g_seq * sizeof(float));
 
       enc.add_mask = cmask;
       auto h = enc.run(chunk);
 
-      // Mean-pool over unmasked positions, then L2 normalise -- the same
-      // pooling the validation path uses.
-      for (int64_t b = 0; b < take; ++b) {
-        float denom = 0.f;
-        for (int64_t s = 0; s < kSeq; ++s) denom += cam[b * kSeq + s];
-        denom = std::max(denom, 1e-9f);
-        std::vector<double> acc(kHidden, 0.0);
-        for (int64_t s = 0; s < kSeq; ++s) {
-          const float m = cam[b * kSeq + s];
-          if (m == 0.f) continue;
-          const float *hr = h.data() + (b * kSeq + s) * kHidden;
-          for (int64_t c = 0; c < kHidden; ++c) acc[c] += hr[c] * m;
-        }
-        double nrm = 0.0;
-        for (int64_t c = 0; c < kHidden; ++c) {
-          acc[c] /= denom;
-          nrm += acc[c] * acc[c];
-        }
-        nrm = std::sqrt(std::max(nrm, 1e-24));
-        float *o = out.data() + (base + b) * kHidden;
-        for (int64_t c = 0; c < kHidden; ++c)
-          o[c] = static_cast<float>(acc[c] / nrm);
-      }
+      // Pool and normalise -- the SAME function the production path uses,
+      // which the comment here used to claim while calling different code.
+      pool_rows(h.data(), cam.data(), take, out.data() + base * g_hidden);
     }
     const double el = now_s() - t0;
 
@@ -2048,6 +2889,18 @@ int main(int argc, char **argv) try {
   }
 
   if (bench > 0) need_goldens();
+
+  // A timed run REFUSES to start when the array is not ours. tasks/0044 read
+  // 221.4 seq/s against a true 694.0 because a leftover npuembed.exe from an
+  // earlier session still held an Active hw_context, and nothing in this
+  // banner said so. See include/npu_contention.hpp.
+  if (bench > 0) {
+    bool allow_contention = false;
+    for (int i = 2; i < argc; ++i)
+      if (std::string(argv[i]) == "--allow-contention") allow_contention = true;
+    if (!npu::require_exclusive_npu(npu::survey_contexts(), allow_contention))
+      return 2;
+  }
 
   if (bench > 0 && pipeline > 1) {
     auto run_all = [&] {
@@ -2068,7 +2921,7 @@ int main(int argc, char **argv) try {
     const double wall = (w1 - w0) / bench, cpu = (c1 - c0) / bench;
     const int64_t seqs = pipeline * batch;
     std::printf("\n  %d pipelined groups of %d x %lld sequences at seq "
-                "%lld\n", bench, pipeline, (long long)batch, (long long)kSeq);
+                "%lld\n", bench, pipeline, (long long)batch, (long long)g_seq);
     std::printf("    wall %8.2f ms   ->  %8.1f seq/s\n", wall * 1e3,
                 seqs / wall);
     std::printf("    cpu  %8.2f ms   ->  %8.2f cores busy\n", cpu * 1e3,
@@ -2112,7 +2965,7 @@ int main(int argc, char **argv) try {
     double c1 = cpu_seconds();
     double wall = (w1 - w0) / bench, cpu = (c1 - c0) / bench;
     std::printf("\n  %d encodes of %lld sequences at seq %lld\n", bench,
-                (long long)batch, (long long)kSeq);
+                (long long)batch, (long long)g_seq);
     std::printf("    wall %8.2f ms   ->  %8.1f seq/s\n", wall * 1e3,
                 batch / wall);
     std::printf("    cpu  %8.2f ms   ->  %8.2f cores busy\n", cpu * 1e3,
@@ -2214,11 +3067,11 @@ int main(int argc, char **argv) try {
   double num = 0.0, den = 0.0, worst_1mcos = 0.0;
   for (int64_t b = 0; b < kGoldenBatch; ++b) {
     double dot = 0.0;
-    for (int64_t c = 0; c < kHidden; ++c) {
-      double diff = emb[b * kHidden + c] - want[b * kHidden + c];
+    for (int64_t c = 0; c < g_hidden; ++c) {
+      double diff = emb[b * g_hidden + c] - want[b * g_hidden + c];
       num += diff * diff;
-      den += static_cast<double>(want[b * kHidden + c]) * want[b * kHidden + c];
-      dot += static_cast<double>(emb[b * kHidden + c]) * want[b * kHidden + c];
+      den += static_cast<double>(want[b * g_hidden + c]) * want[b * g_hidden + c];
+      dot += static_cast<double>(emb[b * g_hidden + c]) * want[b * g_hidden + c];
     }
     worst_1mcos = std::max(worst_1mcos, 1.0 - dot);
   }

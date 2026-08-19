@@ -67,6 +67,32 @@ def sha256(path):
     return h.hexdigest()
 
 
+def read_pooling(model_dir):
+    """Which pooling the checkpoint actually uses, from its own metadata.
+
+    sentence-transformers records this in 1_Pooling/config.json and
+    fetch_model.py already downloads it; until now both packers wrote "mean"
+    as a literal, which is right for MiniLM and wrong for every bge model.
+
+    Ambiguity REFUSES rather than picking. A model using max or
+    mean_sqrt_len pooling is not something this runtime implements, and
+    approximating it with mean would be a silent quality loss.
+    """
+    p = Path(model_dir) / "1_Pooling" / "config.json"
+    if not p.exists():
+        raise SystemExit(f"{p} not found -- cannot determine pooling mode. "
+                         f"Re-fetch with reference/fetch_model.py.")
+    c = json.loads(p.read_text(encoding="utf-8"))
+    modes = [k for k, v in c.items()
+             if k.startswith("pooling_mode_") and v is True]
+    if modes == ["pooling_mode_cls_token"]:
+        return "cls"
+    if modes == ["pooling_mode_mean_tokens"]:
+        return "mean"
+    raise SystemExit(f"{p}: this runtime implements cls and mean pooling; "
+                     f"the checkpoint asks for {modes or 'nothing'}")
+
+
 def add_gemm_b(w, name, mat, tile_k, tile_n, fold=None):
     """Stage a [K,N] GEMM operand: optional scale fold, bf16, pre-tile."""
     mat = np.ascontiguousarray(mat, dtype=np.float32)
@@ -118,7 +144,7 @@ def main():
         "layer_norm_eps": cfg["layer_norm_eps"],
         "vocab_size": cfg["vocab_size"],
         "max_seq_len": args.max_seq,
-        "pooling": "mean", "l2_normalize": True,
+        "pooling": read_pooling(model_dir), "l2_normalize": True,
         "activation": "gelu_erf_exact",
         "tile_k": tk, "tile_n": tn, "mac_s": MAC_S, "mac_t": MAC_T,
         "fusions": {

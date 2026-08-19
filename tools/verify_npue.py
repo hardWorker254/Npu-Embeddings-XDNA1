@@ -35,9 +35,18 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
 sys.path.insert(0, str(REPO / "reference"))
 
+# End-to-end bf16 1-cos, MEASURED, keyed by source repo. Only models we have
+# actually measured belong here; a missing entry means the check reports the
+# absolute number rather than a ratio against someone else's model.
+BF16_BASELINE = {
+    "sentence-transformers/all-MiniLM-L6-v2": 1.271e-05,   # M3, tasks/0005
+    "BAAI/bge-small-en-v1.5": 9.631e-06,                   # tasks/0039
+    "BAAI/bge-large-en-v1.5": 1.355e-05,                   # tasks/0042
+}
+
 from encoder import MiniLMReference                                # noqa: E402
 from precision_study import make_gemm                              # noqa: E402
-from npue import (ALIGN, HEADER_SIZE, MAGIC, VERSION, Reader,      # noqa: E402
+from npue import (ALIGN, HEADER_SIZE, MAGIC, VERSION, Reader, find_goldens,      # noqa: E402
                   to_bf16_bits, untile_b)
 from safetensors_io import load                                    # noqa: E402
 
@@ -200,6 +209,12 @@ def build_from_npue(r, cfg, gemm=None):
     return MiniLMReference(
         w, num_layers=L, num_heads=cfg["num_heads"], eps=cfg["layer_norm_eps"],
         gemm=gemm, qkv_w=qkv_w, qkv_b=qkv_b,
+        # The container records how this model pools. Defaulting to mean here
+        # made a CLS model look 9.3e-02 wrong -- four orders worse than the
+        # same weights measure on the actual NPU -- and the gate below did not
+        # catch it, because it only compared against a baseline this model has
+        # not got.
+        pooling=cfg.get("pooling", "mean"),
         qk_scale=1.0 if folded else math.sqrt(cfg["head_dim"]))
 
 
@@ -219,7 +234,10 @@ def check_goldens(r, cfg, goldens):
     #    comparable to M3's end-to-end bf16 figure of 1-cos = 1.271e-05.
     L = cfg["num_layers"]
     names = ["emb.ln"] + [f"L{i}.ln2" for i in range(L)] + ["last_hidden_state"]
-    M3_BF16_1MCOS = 1.271e-05
+    # M3 measured this end to end for MiniLM-L6. A 12-layer model
+    # legitimately differs, so dividing by it would manufacture a regression.
+    # A model with no measured baseline reports the absolute number.
+    baseline = BF16_BASELINE.get(cfg.get("source_repo"))
 
     runs = {}
     for label, gemm in (("fp32 activations", None),
@@ -245,8 +263,23 @@ def check_goldens(r, cfg, goldens):
         print(f"   {label:<18} 1-cos {1 - cos.min():.3e}   "
               f"similarity shift {shift:.3e}")
         if label == "bf16 activations":
-            ratio = (1 - cos.min()) / M3_BF16_1MCOS
-            print(f"   {'':18} vs M3's end-to-end bf16 ({M3_BF16_1MCOS:.2e}): "
+            if baseline is None:
+                # No relative baseline is not the same as no check. Well below
+                # the runtime's own 2e-03 gate and far above any legitimate
+                # bf16 result, so it catches a wrong pooling or a broken fusion
+                # without pretending to be a precision measurement.
+                ABS_LIMIT = 1e-03
+                print(f"   {'':18} no measured bf16 baseline for "
+                      f"{cfg.get('source_repo')} -- gating on the absolute "
+                      f"limit {ABS_LIMIT:.0e}")
+                if 1 - cos.min() > ABS_LIMIT:
+                    problems.append(
+                        f"1-cos {1 - cos.min():.3e} exceeds the absolute limit "
+                        f"{ABS_LIMIT:.0e} for a model with no measured "
+                        f"baseline")
+                continue
+            ratio = (1 - cos.min()) / baseline
+            print(f"   {'':18} vs the measured bf16 baseline ({baseline:.2e}): "
                   f"{ratio:.2f}x")
             # Packing must not be lossier than bf16 alone. If it were, a fusion
             # is doing damage that the number format does not explain.
@@ -258,7 +291,7 @@ def check_goldens(r, cfg, goldens):
 
 # -- E. isolate what the scale fold costs ---------------------------------
 
-def check_fold_cost(cfg, goldens, packed_path):
+def check_fold_cost(cfg, goldens, packed_path, model_dir):
     """Does folding 1/sqrt(32) into Q cost anything BEYOND bf16 rounding?
 
     It is not obviously free: 1/sqrt(32) is not a power of two, so folding
@@ -269,7 +302,15 @@ def check_fold_cost(cfg, goldens, packed_path):
     print("\nE. what the 1/sqrt(head_dim) fold costs, in isolation")
     unfolded = Path(packed_path).with_name("_verify_nofold.npue")
     import subprocess
+    # --model-dir was missing here, so this packed the DEFAULT checkpoint
+    # and compared it against whichever model was actually under test.
+    # --model-dir AND --tile-n. Forwarding only the first was the same bug one
+    # layer down: bge-large packs at tile_n 32 because its N in
+    # {1024, 3072, 4096} makes 48 illegal, so the unfolded control was being
+    # built at a tile size the model cannot use. The container knows its own.
     cmd = [sys.executable, str(REPO / "tools" / "pack_npue.py"),
+           "--model-dir", str(model_dir),
+           "--tile-k", str(cfg["tile_k"]), "--tile-n", str(cfg["tile_n"]),
            "--no-fold-scale", "--out", str(unfolded)]
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode:
@@ -298,11 +339,33 @@ def check_fold_cost(cfg, goldens, packed_path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--npue", default=str(REPO / "models" / "all-MiniLM-L6-v2.npue"))
-    ap.add_argument("--model-dir", default=str(REPO / "models" / "all-MiniLM-L6-v2"))
-    ap.add_argument("--goldens", default=str(REPO / "reference" / "goldens"
-                                             / "minilm_l6_s64_boundary.safetensors"))
+    ap.add_argument("--model", default="all-MiniLM-L6-v2",
+                    help="sets --npue, --model-dir and --goldens together")
+    ap.add_argument("--seq", type=int, default=64)
+    ap.add_argument("--npue")
+    ap.add_argument("--model-dir")
+    ap.add_argument("--goldens")
     args = ap.parse_args()
+
+    # Three paths that must describe ONE checkpoint. Derive them together by
+    # default, and check the sha256 below whether they were derived or given.
+    if not args.npue:
+        args.npue = str(REPO / "models" / f"{args.model}.npue")
+    if not args.model_dir:
+        # The CHECKPOINT directory, from the container's source_repo -- the
+        # same rule reference/fetch_model.py uses to name it. Deriving it from
+        # the container name broke bge-large-n16.npue, which is bge-large's
+        # weights at a different tile size and has no directory of its own.
+        with Reader(args.npue) as _r0:
+            _repo = _r0.config["source_repo"]
+        args.model_dir = str(REPO / "models" / _repo.split("/")[-1])
+    if not args.goldens:
+        # By checkpoint, not by name: bge-large-n16.npue is the same weights at
+        # a different tile size and shares bge-large's goldens.
+        with Reader(args.npue) as _r:
+            _sha = _r.config["source_sha256"]
+        args.goldens = str(find_goldens(REPO / "reference" / "goldens",
+                                        _sha, args.seq, load)[0])
 
     r = Reader(args.npue)
     cfg = r.config
@@ -312,6 +375,16 @@ def main():
           f"mac (s={cfg['mac_s']}, t={cfg['mac_t']}), "
           f"fusions: {', '.join(k for k, v in cfg['fusions'].items() if v is True)}\n")
 
+    # The .npue, the checkpoint and the goldens must be one checkpoint.
+    # Comparing right-shaped tensors against another model's answers is the
+    # failure the runtime's fixture guard exists for; it applies here too.
+    _g, _gmeta = load(args.goldens)
+    if _gmeta.get("source_sha256") != cfg.get("source_sha256"):
+        print(f"FAIL -- the .npue and the goldens are different checkpoints:\n"
+              f"  .npue    {cfg.get('source_sha256')}\n"
+              f"  goldens  {_gmeta.get('source_sha256')}")
+        return 1
+
     src, _ = load(Path(args.model_dir) / "model.safetensors")
 
     problems = []
@@ -319,7 +392,8 @@ def main():
     problems += check_roundtrip(r, src, cfg, cfg["fusions"]["qk_scale_folded_into_q"])
     problems += check_guard(r)
     problems += check_goldens(r, cfg, args.goldens)
-    problems += check_fold_cost(cfg, args.goldens, args.npue)
+    problems += check_fold_cost(cfg, args.goldens, args.npue,
+                                args.model_dir)
 
     if problems:
         print(f"\nFAIL -- {len(problems)} problem(s):")

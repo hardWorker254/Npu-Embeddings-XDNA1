@@ -34,47 +34,53 @@ ALLOW = [
     "1_Pooling/config.json",
 ]
 
+# STRUCTURAL expectations: what this runtime can execute at all. These are
+# properties of the architecture, not of one checkpoint's size, so they stay
+# literal and a checkpoint that violates them must be refused.
 # docs/04-model/README.md, "Verified config.json (fetched live)".
 EXPECT_CONFIG = {
     "model_type": "bert",
-    "hidden_size": 384,
-    "intermediate_size": 1536,
-    "num_attention_heads": 12,
     "layer_norm_eps": 1e-12,
-    "max_position_embeddings": 512,
     "position_embedding_type": "absolute",
-    "vocab_size": 30522,
     "hidden_act": "gelu",
     "pad_token_id": 0,
     "type_vocab_size": 2,
 }
 
-PER_LAYER = {
-    "attention.self.query.weight": [384, 384],
-    "attention.self.query.bias": [384],
-    "attention.self.key.weight": [384, 384],
-    "attention.self.key.bias": [384],
-    "attention.self.value.weight": [384, 384],
-    "attention.self.value.bias": [384],
-    "attention.output.dense.weight": [384, 384],
-    "attention.output.dense.bias": [384],
-    "attention.output.LayerNorm.weight": [384],
-    "attention.output.LayerNorm.bias": [384],
-    "intermediate.dense.weight": [1536, 384],
-    "intermediate.dense.bias": [1536],
-    "output.dense.weight": [384, 1536],
-    "output.dense.bias": [384],
-    "output.LayerNorm.weight": [384],
-    "output.LayerNorm.bias": [384],
-}
 
-EMBEDDINGS = {
-    "embeddings.word_embeddings.weight": [30522, 384],
-    "embeddings.position_embeddings.weight": [512, 384],
-    "embeddings.token_type_embeddings.weight": [2, 384],
-    "embeddings.LayerNorm.weight": [384],
-    "embeddings.LayerNorm.bias": [384],
-}
+# DIMENSIONAL expectations come from the checkpoint's own config.json and are
+# then used to demand that every tensor agrees with it. That still catches the
+# failure that actually happens -- a config that disagrees with the weights
+# next to it -- without hardcoding one model's width.
+def per_layer(hidden, intermediate):
+    return {
+        "attention.self.query.weight": [hidden, hidden],
+        "attention.self.query.bias": [hidden],
+        "attention.self.key.weight": [hidden, hidden],
+        "attention.self.key.bias": [hidden],
+        "attention.self.value.weight": [hidden, hidden],
+        "attention.self.value.bias": [hidden],
+        "attention.output.dense.weight": [hidden, hidden],
+        "attention.output.dense.bias": [hidden],
+        "attention.output.LayerNorm.weight": [hidden],
+        "attention.output.LayerNorm.bias": [hidden],
+        "intermediate.dense.weight": [intermediate, hidden],
+        "intermediate.dense.bias": [intermediate],
+        "output.dense.weight": [hidden, intermediate],
+        "output.dense.bias": [hidden],
+        "output.LayerNorm.weight": [hidden],
+        "output.LayerNorm.bias": [hidden],
+    }
+
+
+def embeddings(hidden, vocab, positions, type_vocab):
+    return {
+        "embeddings.word_embeddings.weight": [vocab, hidden],
+        "embeddings.position_embeddings.weight": [positions, hidden],
+        "embeddings.token_type_embeddings.weight": [type_vocab, hidden],
+        "embeddings.LayerNorm.weight": [hidden],
+        "embeddings.LayerNorm.bias": [hidden],
+    }
 
 # Dead weight: sentence-transformers never calls the pooler. 147,840 params we
 # must NOT implement. Present in the checkpoint, so allow but do not require.
@@ -103,9 +109,30 @@ def check(local, expect_layers):
     if n_layers != expect_layers:
         problems.append(f"config.num_hidden_layers: expected {expect_layers}, got {n_layers}")
 
-    want = dict(EMBEDDINGS)
+    hidden = cfg.get("hidden_size")
+    heads = cfg.get("num_attention_heads")
+    inter = cfg.get("intermediate_size")
+    vocab = cfg.get("vocab_size")
+    positions = cfg.get("max_position_embeddings")
+    type_vocab = cfg.get("type_vocab_size")
+
+    # What the runtime requires of any width, checked here rather than
+    # discovered at dispatch time.
+    if not (hidden and heads) or hidden % heads:
+        problems.append(f"hidden_size {hidden} is not divisible by "
+                        f"num_attention_heads {heads}")
+    elif (hidden // heads) % 8:
+        problems.append(f"head_dim {hidden // heads} is not a multiple of 8; "
+                        f"the host attention kernels step 8 floats with no tail")
+    if hidden and hidden % 8:
+        problems.append(f"hidden_size {hidden} is not a multiple of 8")
+    if inter and inter % 8:
+        problems.append(f"intermediate_size {inter} is not a multiple of 8")
+
+    want = embeddings(hidden, vocab, positions, type_vocab)
+    pl = per_layer(hidden, inter)
     for i in range(n_layers or 0):
-        for suffix, shape in PER_LAYER.items():
+        for suffix, shape in pl.items():
             want[f"encoder.layer.{i}.{suffix}"] = shape
 
     st = local / "model.safetensors"
@@ -132,6 +159,9 @@ def check(local, expect_layers):
     print(f"    required by arch    : {len(want)}")
     print(f"    ignorable present   : {sorted(names & IGNORABLE)}")
     print(f"  layers                : {n_layers}")
+    print(f"  geometry              : hidden {hidden}, {heads} heads x "
+          f"{hidden // heads if hidden and heads else '?'}, ffn {inter}, "
+          f"vocab {vocab}, {positions} positions")
     return problems
 
 

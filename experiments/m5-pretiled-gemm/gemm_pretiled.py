@@ -94,12 +94,23 @@ TRACE_ROUTING = {2: (1, 1), 4: (0, 0)}
 def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str,
                   emulate_bf16_mmul_with_bfp16, trace_config, trace_row, trace_col,
                   trace_egress_col=0, pretiled=True, tile_order="k,n", inner_st=True,
-                  b_reuse=False, rtp=False, epilogue=None):
+                  b_reuse=False, rtp=False, epilogue=None, c_bf16=False):
     n_aie_rows = 4
     n_aie_cores = n_aie_rows * n_aie_cols
 
     dtype_in = str_to_dtype(dtype_in_str)
     dtype_out = str_to_dtype(dtype_out_str)
+
+    # NPUE-M9 (tasks/0045): c_bf16 narrows C to bf16 ON THE CORE, after the
+    # full K reduction, so the C DMA moves half the bytes. `dtype_out` stays
+    # the ACCUMULATOR type and must stay fp32 -- CLAUDE.md trap 2 forbids
+    # output_dtype=bf16 on the matmul kernel because that re-rounds at every K
+    # step (7.4e-3 against 1.21e-07). Only the TRANSPORT type changes here.
+    dtype_c = str_to_dtype("bf16") if c_bf16 else dtype_out
+    if c_bf16:
+        assert dtype_out is np.float32,             "c_bf16 narrows FROM fp32; the accumulator must be fp32"
+        assert rtp, "c_bf16 is only wired into the rtp worker (tasks/0045)"
+        assert epilogue is None,             "c_bf16 and epilogue='gelu' both own the post-K step; pick one"
 
     matmul_kernel = kernels.mm(
         dim_m=m, dim_k=k, dim_n=n,
@@ -123,13 +134,18 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
 
     A_ty = np.ndarray[(M * K,), np.dtype[dtype_in]]
     B_ty = np.ndarray[(K * N,), np.dtype[dtype_in]]
-    C_ty = np.ndarray[(M * N,), np.dtype[dtype_out]]
+    C_ty = np.ndarray[(M * N,), np.dtype[dtype_c]]
     A_l2_ty = np.ndarray[(m * k * n_A_tiles_per_shim,), np.dtype[dtype_in]]
     B_l2_ty = np.ndarray[(k * n,), np.dtype[dtype_in]]
-    C_l2_ty = np.ndarray[(m * n * n_aie_rows,), np.dtype[dtype_out]]
+    C_l2_ty = np.ndarray[(m * n * n_aie_rows,), np.dtype[dtype_c]]
     A_l1_ty = np.ndarray[(m, k), np.dtype[dtype_in]]
     B_l1_ty = np.ndarray[(k, n), np.dtype[dtype_in]]
-    C_l1_ty = np.ndarray[(m, n), np.dtype[dtype_out]]
+    C_l1_ty = np.ndarray[(m, n), np.dtype[dtype_c]]
+    # The core-local fp32 accumulator the matmul writes into when c_bf16.
+    # SINGLE buffered on purpose: it is filled and drained inside one
+    # iteration, so it costs m*n*4 while the C fifo it feeds saves
+    # 2*m*n*2 -- exactly cancelling. 53,248 B at (64,64,48) either way.
+    C_acc_ty = np.ndarray[(m * n,), np.dtype[dtype_out]]
 
     A_l3l2_fifos = [None] * n_shim_mem_A
     A_l2l1_fifos = [None] * n_aie_rows
@@ -184,12 +200,57 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
     #
     # "mega" is the way around it: one L2 object holding the ENTIRE slice, so
     # the same bytes cost one buffer descriptor instead of 24.
+    # NPUE-M9 (tasks/0046): "asym" is the third attempt at B reuse, and the
+    # first with a primitive that addresses BOTH ends of the transfer.
+    #
+    #   b_reuse=True   -- an L2 fifo deep enough for the slice. Mem-tile BD
+    #                     pool caps depth at 6 (4 cols) / 4 (8 cols); a slice
+    #                     wants 24-48. Fails at the MEM TILE.
+    #   b_reuse="mega" -- one L2 object holding the whole slice, 1 descriptor.
+    #                     The core then has to receive the whole klump:
+    #                     "number of input DMA channel exceeded". Fails at the
+    #                     CORE.
+    #   b_reuse="asym" -- ONE fifo, big on the producer side (few descriptors)
+    #                     and TILE-sized on the consumer side, via
+    #                     consumer_obj_type=. Upstream's mobilenet
+    #                     bottleneck/post_l1.py uses exactly this shape to hold
+    #                     a weight buffer on a mem tile and feed compute tiles
+    #                     chunks of it, with repeat_count replaying it.
+    #
+    # Capacity was never the blocker (tasks/0044 note 0007 s1.4): the column
+    # slice is 108-144 KB at h=384 against ~400 KB free in a 512 KB mem tile.
+    # VERDICT (tasks/0046): "asym" DOES NOT BUILD, and neither can any other B
+    # reuse form at 8 columns. `repeat_count` is "unavailable for shim tiles",
+    # so a single L3-fed fifo cannot replay; and the two-fifo route cannot carry
+    # consumer_obj_type because forward()/split() do not expose it. Underneath
+    # both: `tools/count_dma_channels.py` on the SHIPPING design shows every one
+    # of the 32 core tiles at 2/2 input channels and five of eight mem tiles at
+    # 6/6. There is no channel to give B. The mem-tile arithmetic is exact --
+    # A(1) + B(1) + C(4 core rows) = 6 -- so the C JOIN is what spends the
+    # budget, and freeing it needs CascadeFlow (C returned through one core
+    # instead of four), not a fifo option.
+    #
+    # Kept in the tree, guarded, because the primitive looks right and the next
+    # person will reach for it.
+    asym = b_reuse == "asym"
     mega = b_reuse == "mega"
     B_l2_mega_ty = np.ndarray[(b_slice_tiles * k * n,), np.dtype[dtype_in]]
     b_depth = (2 if mega else
+               0 if asym else            # asym sizes its own fifo below
                b_slice_tiles if b_reuse is True else int(b_reuse or 0))
     for col in range(n_aie_cols):
-        if mega:
+        if asym:
+            # One fifo, no .forward(): the mem tile holds the whole slice and
+            # each core acquires (k, n) tiles out of it. repeat_count replays
+            # the staged bytes for every row block WITHOUT a new L3 fetch,
+            # which is the entire point -- B is streamed from DDR once instead
+            # of n_row_blocks times.
+            B_l2l1_fifos[col] = ObjectFifo(
+                B_l2_mega_ty, name=f"B_L3L2_{col}", depth=1,
+                consumer_obj_type=B_l1_ty,
+                repeat_count=n_row_blocks)
+            B_l3l2_fifos[col] = B_l2l1_fifos[col]
+        elif mega:
             B_l3l2_fifos[col] = ObjectFifo(B_l2_mega_ty, name=f"B_L3L2_{col}",
                                            depth=2)
         elif b_reuse:
@@ -207,7 +268,9 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
         # variants are numerically identical; only where the reorder happens
         # differs.
         rc = n_row_blocks if b_reuse else None
-        if pretiled and inner_st:
+        if asym:
+            pass                      # asym has no second fifo to forward into
+        elif pretiled and inner_st:
             B_l2l1_fifos[col] = B_l3l2_fifos[col].cons().forward(
                 obj_type=B_l1_ty, name=f"B_L2L1_{col}", repeat_count=rc)
         else:
@@ -231,6 +294,30 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
     # bias must already be inside the product -- ride it in as an augmented
     # K-block (A ones-column, B bias-row) so elem_out holds A@B + bias when
     # this runs. No extra fifos, no extra DMA, no extra dispatch.
+    # NPUE-M9 (tasks/0045): the bf16 narrowing epilogue. Separate from the
+    # `epilogue="gelu"` path above -- that one rewrites the fp32 tile in place
+    # and C still leaves as fp32; this one converts fp32 -> bf16 into the fifo
+    # object the DMA drains, which is what halves the transport.
+    narrow_kernel = None
+    if c_bf16:
+        from aie.iron.kernel import ExternalFunction as _EF
+        from aie.iron.kernels._common import _detect_arch as _da, _include_dirs as _id
+        from aie.utils import config as _cfg2
+        from pathlib import Path as _P2
+        _inc2 = _id()
+        _inc2.append(str(_P2(_cfg2.cxx_header_path()) / "aie_kernels"))
+        _inc2.append(str(_P2(_cfg2.cxx_header_path()) / "aie_kernels" / _da()))
+        assert m * n in (1024, 2048, 3072), (
+            f"no narrow entry point for tile m*n={m*n}; "
+            "narrow_f32_bf16.cc has 1024/2048/3072")
+        narrow_kernel = _EF(
+            f"narrow_{m * n}_f32_bf16",
+            source_file=str(_P2(__file__).resolve().parent.parent
+                            / "m5-eltwise" / "kernels" / "narrow_f32_bf16.cc"),
+            arg_types=[C_acc_ty, C_l1_ty],
+            include_dirs=_inc2,
+        )
+
     epilogue_kernel = None
     if epilogue == "gelu":
         from aie.iron.kernel import ExternalFunction
@@ -273,31 +360,72 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
         rtp_barriers = [[WorkerRuntimeBarrier()
                          for _ in range(n_aie_cols)] for _ in range(n_aie_rows)]
 
-        def core_fn(in_a, in_b, out_c, zero, matmul, my_rtp, barrier):
-            barrier.wait_for_value(1)
-            n_out_tiles = my_rtp[0]
-            n_k_blocks = my_rtp[1]
-            for _ in range_(n_out_tiles):
-                elem_out = out_c.acquire(1)
-                zero(elem_out)
-                for _ in range_(n_k_blocks):
-                    elem_in_a = in_a.acquire(1)
-                    elem_in_b = in_b.acquire(1)
-                    matmul(elem_in_a, elem_in_b, elem_out)
-                    in_a.release(1)
-                    in_b.release(1)
-                out_c.release(1)
-            barrier.release_with_value(1)
+        if c_bf16:
+            # One fp32 accumulator per core. The acquire stays BEFORE the K
+            # loop, exactly where it was, so the fifo's double buffering and
+            # the DMA overlap behave identically to the fp32 design -- only
+            # what gets written into the acquired object changes.
+            acc_bufs = [[Buffer(C_acc_ty, name=f"cacc_{r}_{c}")
+                         for c in range(n_aie_cols)] for r in range(n_aie_rows)]
 
-        def _mk(row, col):
-            return Worker(
-                core_fn,
-                [A_l2l1_fifos[row].cons(), B_l2l1_fifos[col].cons(),
-                 C_l1l2_fifos[row][col].prod(), zero_kernel, matmul_kernel,
-                 rtp_bufs[row][col], rtp_barriers[row][col]],
-                stack_size=0xD00,
-                trace=1 if (row == trace_row and col == trace_col) else None,
-            )
+            def core_fn(in_a, in_b, out_c, acc, zero, matmul, narrow,
+                        my_rtp, barrier):
+                barrier.wait_for_value(1)
+                n_out_tiles = my_rtp[0]
+                n_k_blocks = my_rtp[1]
+                for _ in range_(n_out_tiles):
+                    elem_out = out_c.acquire(1)
+                    zero(acc)
+                    for _ in range_(n_k_blocks):
+                        elem_in_a = in_a.acquire(1)
+                        elem_in_b = in_b.acquire(1)
+                        matmul(elem_in_a, elem_in_b, acc)
+                        in_a.release(1)
+                        in_b.release(1)
+                    narrow(acc, elem_out)
+                    out_c.release(1)
+                barrier.release_with_value(1)
+
+            def _mk(row, col):
+                return Worker(
+                    core_fn,
+                    [A_l2l1_fifos[row].cons(), B_l2l1_fifos[col].cons(),
+                     C_l1l2_fifos[row][col].prod(), acc_bufs[row][col],
+                     zero_kernel, matmul_kernel, narrow_kernel,
+                     rtp_bufs[row][col], rtp_barriers[row][col]],
+                    # Same 0xD00 as the fp32 path: narrow_f32_bf16 keeps two
+                    # accumulators live and spills nothing (17 instructions,
+                    # 2-line ZOL -- see tasks/0045). If this ever hangs or
+                    # corrupts, the stack is the first suspect (traps 5b/0031).
+                    stack_size=0xD00,
+                    trace=1 if (row == trace_row and col == trace_col) else None,
+                )
+        else:
+            def core_fn(in_a, in_b, out_c, zero, matmul, my_rtp, barrier):
+                barrier.wait_for_value(1)
+                n_out_tiles = my_rtp[0]
+                n_k_blocks = my_rtp[1]
+                for _ in range_(n_out_tiles):
+                    elem_out = out_c.acquire(1)
+                    zero(elem_out)
+                    for _ in range_(n_k_blocks):
+                        elem_in_a = in_a.acquire(1)
+                        elem_in_b = in_b.acquire(1)
+                        matmul(elem_in_a, elem_in_b, elem_out)
+                        in_a.release(1)
+                        in_b.release(1)
+                    out_c.release(1)
+                barrier.release_with_value(1)
+
+            def _mk(row, col):
+                return Worker(
+                    core_fn,
+                    [A_l2l1_fifos[row].cons(), B_l2l1_fifos[col].cons(),
+                     C_l1l2_fifos[row][col].prod(), zero_kernel, matmul_kernel,
+                     rtp_bufs[row][col], rtp_barriers[row][col]],
+                    stack_size=0xD00,
+                    trace=1 if (row == trace_row and col == trace_col) else None,
+                )
     elif epilogue == "gelu":
         def core_fn(in_a, in_b, out_c, zero, matmul, gelu_epi):
             loop = range(1) if n_tiles_per_core <= 1 else range_(n_tiles_per_core)
@@ -485,13 +613,14 @@ def pretiled_array(
     b_reuse: CompileTime[bool] = False,
     rtp: CompileTime[bool] = False,
     epilogue: CompileTime[str | None] = None,
+    c_bf16: CompileTime[bool] = False,
 ):
     return _build_design(iron.get_current_device(), M, K, N, m, k, n, n_aie_cols,
                          dtype_in_str, dtype_out_str,
                          emulate_bf16_mmul_with_bfp16,
                          trace_config, trace_row, trace_col, trace_egress_col,
                          pretiled, tile_order, inner_st, b_reuse, rtp=rtp,
-                         epilogue=epilogue)
+                         epilogue=epilogue, c_bf16=c_bf16)
 
 
 def run_one(M, K, N, m, k, n, cols, emulate, trace_size, pretiled=True,

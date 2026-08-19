@@ -29,6 +29,11 @@ models/**
 #   & .\.venv-ref\Scripts\python.exe reference\make_goldens.py --taps
 reference/goldens/*_taps.safetensors
 
+# Exported ONNX graphs -- 90-133 MB each, and a deterministic derivative of a
+# sha256-pinned checkpoint, exactly like the taps goldens above.
+# bench_cpu_ort.py regenerates them on demand and caches them here.
+experiments/m8-npu-vs-cpu/artifacts/onnx/
+
 # Packed runtime weights (68.8 MB): a deterministic derivative of the pinned
 # checkpoint. Repack and re-verify with:
 #   & "C:\Users\vegar\.conda\envs\iron\python.exe" tools\pack_npue.py
@@ -111,3 +116,8 @@ dist/
 # OUTPUT of this repository and has its own git history; committing it here
 # would duplicate every file.
 repo/
+
+# External repos cloned for reference reading only (tasks/0044). Not ours,
+# not vendored, not redistributed -- read for architecture and ideas, exactly
+# like ../FastFlowLM. Re-clone with tools noted in tasks/0044/TASK.md.
+externalrepos/

@@ -1,0 +1,44 @@
+{
+  "kind": "hardware measurement",
+  "what": "ONNX Runtime CPU, wall clock, end-to-end throughput",
+  "model": "all-MiniLM-L6-v2",
+  "pooling": "mean",
+  "seq_len": 64,
+  "onnxruntime": "1.24.4",
+  "verified_vs_sentence_transformers": {
+    "max_abs": 1.7136335372924805e-07,
+    "worst_1_minus_cos": 2.3116622616115023e-08
+  },
+  "rows": [
+    {
+      "batch": 4,
+      "repeats": 9,
+      "best_s": 0.018580600037239492,
+      "mean_s": 0.02089202223578468,
+      "median_s": 0.020716900005936623,
+      "seq_per_s_best": 215.27830059218462,
+      "seq_per_s_mean": 191.46064248144646,
+      "seq_per_s_median": 193.0790803090116
+    },
+    {
+      "batch": 32,
+      "repeats": 9,
+      "best_s": 0.12064769997959957,
+      "mean_s": 0.12293984443466696,
+      "median_s": 0.12266679998720065,
+      "seq_per_s_best": 265.23506047285537,
+      "seq_per_s_mean": 260.28990151362626,
+      "seq_per_s_median": 260.869281691044
+    },
+    {
+      "batch": 128,
+      "repeats": 9,
+      "best_s": 0.4368868000456132,
+      "mean_s": 0.45619600001696703,
+      "median_s": 0.4511915000039153,
+      "seq_per_s_best": 292.98207221329676,
+      "seq_per_s_mean": 280.5811537041959,
+      "seq_per_s_median": 283.6932876592074
+    }
+  ]
+}

@@ -8,7 +8,7 @@ It serves an OpenAI-shaped `/v1/embeddings` endpoint, so anything that already
 talks to an embeddings API can point at it instead.
 
 ```bash
-curl http://127.0.0.1:8420/v1/embeddings \
+curl http://127.0.0.1:8080/v1/embeddings \
   -H "Content-Type: application/json" \
   -d '{"input": ["hello world", "another sentence"]}'
 ```
@@ -17,11 +17,16 @@ curl http://127.0.0.1:8420/v1/embeddings \
 
 ## What this is
 
-An implementation of **all-MiniLM-L6-v2** that runs its matrix multiplies on
-the **XDNA2 NPU** in AMD Ryzen AI processors (Strix Point). The kernels are
-written directly against the AI Engine array using
+An implementation of **BERT-family sentence encoders** that runs their matrix
+multiplies on the **XDNA2 NPU** in AMD Ryzen AI processors (Strix Point). The
+kernels are written directly against the AI Engine array using
 [MLIR-AIE / IRON](https://github.com/Xilinx/mlir-aie) — not through ONNX
 Runtime, not through a vendor overlay — and the shipped runtime is C++ and XRT.
+
+Four models are supported today. **`bge-base-en-v1.5` is the one whose
+geometry fits this NPU best** — head_dim 64, and every layer width a multiple
+of 384 — so it is the sensible default; `all-MiniLM-L6-v2` is the fastest and
+`bge-large-en-v1.5` the most accurate.
 
 It is also a **learning project**, and that is visible in the repository. Every
 result has a task log recording what was measured, on which command, and what
@@ -30,14 +35,14 @@ more useful than the successes.
 
 | | |
 |---|---|
-| Model | all-MiniLM-L6-v2 — 6 layers, hidden 384, 384-dim embeddings |
+| Models | all-MiniLM-L6-v2, bge-small/base/large-en-v1.5 — 384 to 1024 hidden |
 | Sequence length | 64 tokens (fixed at build time) |
 | Hardware | AMD Ryzen AI, XDNA2 / Strix Point (developed on a Ryzen AI 9 HX 370) |
 | OS | Windows, native — no WSL |
 | Precision | bf16 with fp32 accumulation on the NPU; fp32 on the host |
 | License | Apache-2.0 |
 
-**What actually runs where.** The 24 GEMMs per encode run on the NPU as
+**What actually runs where.** The GEMMs — 24 per encode on a 6-layer model — run on the NPU as
 instruction streams over a single design. LayerNorm, softmax and GELU run on
 the host in fp32 — that is not a shortcut but a measured decision: at hidden
 384 those ops are too small to earn an NPU dispatch, and moving them to the
@@ -54,15 +59,45 @@ without losing throughput or quality.
 Measured on a Ryzen AI 9 HX 370, against `sentence-transformers` on the same
 machine at the same sequence length:
 
-| | NPU (this project) | CPU (`sentence-transformers`, 12 threads) |
+Measured **interleaved** — all three encoders round-robin in one session, the
+same statistic on every side — because wall clock on a shared machine drifts
+enough that numbers taken minutes apart compare the machine, not the code
+([`0040`](tasks/0040-m9-honest-cpu-baseline/TASK.md)).
+
+Throughput at batch 128, seq 64, in sequences per second:
+
+| model | hidden | layers | **NPU** | torch | ONNX Runtime | **NPU / best CPU** |
+|---|---:|---:|---:|---:|---:|---:|
+| all-MiniLM-L6-v2 | 384 | 6 | **877** | 489 | 234 | **1.79×** |
+| bge-small-en-v1.5 | 384 | 12 | **445** | 290 | 134 | **1.53×** |
+| bge-large-en-v1.5 | 1024 | 24 | **52.8** | 25.1 | 11.4 | **2.11×** |
+
+`bge-base-en-v1.5` (hidden 768, 12 layers) was added later and runs at
+**181 seq/s**; its CPU side has not been re-measured in the same session, so
+no ratio is quoted for it. It is the model whose geometry fits this NPU best —
+head_dim 64, and every layer width a multiple of 384
+([`0051`](tasks/0051-m9-bge-base-and-in-exe-fetch/TASK.md)).
+
+| | NPU | CPU (`sentence-transformers`, 12 threads) |
 |---|---|---|
-| Throughput, large batch | **833–918 seq/s** | 663–710 seq/s |
-| CPU cores occupied | **~5.3** | 12 |
-| Energy per 1000 sequences | **44.0 J** | 85.3 J |
+| CPU cores occupied | **~5.3–6.0** | 12 |
+| Energy per 1000 sequences (MiniLM) | **44.0 J** | 85.3 J |
 | Latency, single text | 15 ms | — |
 
-So: **1.2–1.4× the throughput, on under half the cores, at 1.94× less energy
-per sequence.**
+ONNX Runtime is included because `research/prior-art.md` prescribes it as the
+primary CPU baseline. It is **half** the speed of torch on all three models --
+attention never fuses in the exported graph -- so torch with SDPA is the harder
+opponent and the ratio is taken against it.
+
+So: **1.5–2.1× the throughput on under half the cores**, at 1.94× less energy
+per sequence, and **3.2–4.2× more throughput per core**.
+
+**The advantage grows with model width and shrinks with depth**, and the three
+rows separate the two: bge-small holds width fixed and doubles the layers
+(1.79 → 1.53, because our cost is per dispatch and the CPU has no such term),
+while bge-large's 1024-wide layers take it to 2.11×. That is the prediction
+[`0027`](tasks/0027-m7-width-hypothesis/TASK.md) made from a synthetic sweep,
+now measured on real models.
 
 And the embeddings are the same embeddings:
 
@@ -80,9 +115,12 @@ see [`tools/verify_*.py`](tools/) and the task logs.
 
 Being explicit, because the honest limits are part of the point:
 
-- **One model, one sequence length.** The designs are compiled for
-  all-MiniLM-L6-v2 at seq 64. Longer inputs are truncated. bge-small is a
-  drop-in weight swap by design, but is untested.
+- **Four models, one sequence length.** all-MiniLM-L6-v2 and bge-small-en-v1.5
+  share one compiled design set, bge-base-en-v1.5 has its own (hidden 768), and
+  bge-large-en-v1.5 needs a third because its layer widths make the production
+  tile size illegal. All are compiled for **seq 64**, and longer inputs are
+  truncated. The model is named explicitly — `npuembeddings serve <model>` —
+  so a script breaks loudly rather than silently changing which model it ran.
 - **One machine architecture.** XDNA2 on native Windows. Not XDNA1, not Linux,
   not other NPUs.
 - **The server is a localhost server.** No TLS, no authentication, one request
@@ -97,57 +135,76 @@ Grab the latest `npuembeddings-*-win-x64.zip` from
 [**Releases**](../../releases) and unzip it anywhere — it is about 300 KB:
 
 ```
-npuembed.exe              the runtime            0.6 MB
-gemm_rtp/                 the compiled NPU design 0.6 MB
-get-model.cmd             fetch the weights (first run only)
-run-server.cmd            start the endpoint
+npuembeddings.exe         the runtime            0.7 MB
+artifacts_b128il/         compiled NPU design, hidden 384
+artifacts_base/           compiled NPU design, hidden 768
+list-models.cmd           what this build can run
+serve.cmd                 start the endpoint
 embed.cmd                 embed a text file
 manifest.json             sha256 of every file, and the verified figures
 ```
 
 No installer, no Python, nothing written outside the folder.
 
-### 2. Fetch the model, once
+### 2. Pick a model
 
 ```cmd
-get-model.cmd
+npuembeddings list
 ```
 
-**The weights are not redistributed here.** They are
-[`sentence-transformers/all-MiniLM-L6-v2`](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2),
-Apache-2.0, and worth reading the model card for. `get-model.cmd` downloads
-them from HuggingFace, **checks the checksum against the exact checkpoint this
-build was verified against**, and packs them into `models/all-MiniLM-L6-v2.npue`
-— weights pre-tiled into the order the NPU's DMA reads them, plus the tokenizer
-vocabulary, in one file.
-
-That packing runs inside `npuembed.exe`, so there is still no Python anywhere.
-It is verified byte-identical to the reference packer
-([`tools/verify_pack_parity.py`](tools/verify_pack_parity.py)) — two
-implementations of one binary layout is a real risk, so it is tested rather
-than trusted.
+```
+  model                state     layers hidden  pooling      size  notes
+  all-MiniLM-L6-v2     available      6    384     mean  91 MB dl  smallest and fastest
+  bge-small-en-v1.5    available     12    384      cls 134 MB dl  +2.99 MTEB points over MiniLM
+  bge-base-en-v1.5     available     12    768      cls 438 MB dl  best geometric fit for this NPU
+  bge-large-en-v1.5    available     24   1024      cls 1340 MB dl highest quality, slowest
+```
 
 ### 3. Run the endpoint
 
 ```cmd
-run-server.cmd
+npuembeddings serve bge-base-en-v1.5
 ```
 
+**The weights are not redistributed here**, so the first run fetches them:
+
 ```
-serving http://127.0.0.1:8420/v1/embeddings   (model all-MiniLM-L6-v2-npu, seq 64)
+  bge-base-en-v1.5 is not installed. Fetching it from BAAI/bge-base-en-v1.5.
+  438.0 MB of checkpoint, verified against a checksum built into this executable.
+  ...
+  hash  model.safetensors
+        ok  c7c1988aae201f80...
+  pack  bge-base-en-v1.5.npue
+serving http://127.0.0.1:8080/v1/embeddings   (model bge-base-en-v1.5-npu, seq 64)
 ```
+
+It downloads from HuggingFace, **checks the checksum against the exact
+checkpoint this build was verified against**, cross-checks the model's own
+config against what this build expects, and packs it into
+`models/<name>.npue` — weights pre-tiled into the order the NPU's DMA reads
+them, plus the tokenizer vocabulary, in one file. A checksum or config
+mismatch **stops**, rather than running weights nobody verified.
+
+All of that happens inside `npuembeddings.exe`: no Python, no `curl`, no
+download script. (Before 0.2.0 it *was* a batch script that fetched a binary
+and compared a hardcoded hash — which is indistinguishable from a dropper, so
+antivirus flagged it. Same checks, no script.) The packer is verified
+byte-identical to the reference implementation
+([`tools/verify_pack_parity.py`](tools/verify_pack_parity.py)) — two
+implementations of one binary layout is a real risk, so it is tested rather
+than trusted.
 
 Use it from the official OpenAI client:
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://127.0.0.1:8420/v1", api_key="not-needed")
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="not-needed")
 r = client.embeddings.create(
-    model="all-MiniLM-L6-v2-npu",
+    model="bge-base-en-v1.5-npu",
     input=["a man is playing a guitar", "someone plays guitar at a concert"],
 )
-print(len(r.data[0].embedding))     # 384
+print(len(r.data[0].embedding))     # 768
 ```
 
 Supported: `POST /v1/embeddings` (`input` as a string or array of strings,
@@ -162,28 +219,40 @@ sizes, so a 3-text request runs a 4-sequence encode rather than padding to
 ### 4. Or embed a file directly
 
 ```cmd
-embed.cmd texts.txt out.f32
+npuembeddings embed bge-base-en-v1.5 texts.txt out.f32
 ```
 
-One text per line in; `out.f32` is `[n_texts, 384]` little-endian fp32,
-L2-normalised, in input order.
+One text per line in; `out.f32` is `[n_texts, hidden]` little-endian fp32,
+L2-normalised, in input order — `hidden` is the model's width, shown by
+`npuembeddings list`.
 
 ```python
 import numpy as np
-v = np.fromfile("out.f32", dtype=np.float32).reshape(-1, 384)
+v = np.fromfile("out.f32", dtype=np.float32).reshape(-1, 768)   # bge-base
 ```
 
 ### Useful flags
 
-```
-npuembed.exe <root> --artifacts <dir> [options]
+Run it with no arguments to get this list plus the model table:
 
-  --serve [port]        OpenAI-shaped HTTP endpoint (default 8420)
-  --bind <addr>         interface to bind (default 127.0.0.1)
-  --embed <in> [out]    embed a text file
-  --tokenize <file>     token ids only, one line per input
-  --threads N           host thread budget (default 1)
-  --pipeline N          N concurrent encode lanes over the one design
+```
+npuembeddings                       what this is, and what it can run
+npuembeddings list
+npuembeddings serve <model> [--port N] [--bind ADDR]
+npuembeddings embed <model> <in.txt> [out.f32]
+
+  --port N          listen port (default 8080)
+  --bind ADDR       interface (default 127.0.0.1, localhost only)
+  --threads N       host thread budget (default 24 for serve/embed)
+  --pipeline N      concurrent encode lanes (default 2)
+  --artifacts DIR   override the design set
+  --root DIR        override where models/ and the design live
+```
+
+The flag form is unchanged and still carries the probes and benchmarks:
+
+```
+npuembeddings <root> --model NAME --artifacts DIR --serve [port]
 ```
 
 ## What else you need
@@ -217,9 +286,9 @@ and the verification suite.
 
 ### The model
 
-Not shipped, by choice — see step 2 above. `get-model.cmd` fetches and prepares
-it in one command, and building from source does the same thing through
-[BUILD.md](BUILD.md)'s pipeline.
+Not shipped, by choice — see step 3 above. `npuembeddings serve <model>`
+fetches, verifies and prepares it on first use, and building from source does
+the same thing through [BUILD.md](BUILD.md)'s pipeline.
 
 Redistributing it would have been permitted, since the model is Apache-2.0. It
 would also have been the worse deal: a 66 MB blob in a stranger's zip that

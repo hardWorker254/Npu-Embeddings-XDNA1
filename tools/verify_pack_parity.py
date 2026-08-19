@@ -60,6 +60,11 @@ def main() -> int:
                     default=str(REPO / "models" / "all-MiniLM-L6-v2"))
     ap.add_argument("--exe",
                     default=str(REPO / "runtime" / "build" / "npuembed.exe"))
+    # Tile size stopped being a constant when bge-large arrived: its N in
+    # {1024, 3072, 4096} makes tile_n 48 illegal, so it packs at 32. A gate
+    # that only ever checked 48 would not have covered the packer's newest
+    # parameter -- which is exactly where two implementations drift.
+    ap.add_argument("--tile-n", type=int, default=48)
     args = ap.parse_args()
 
     model_dir = Path(args.model_dir)
@@ -73,19 +78,22 @@ def main() -> int:
         py_out, cc_out = d / "python.npue", d / "cpp.npue"
 
         r = subprocess.run([sys.executable, str(REPO / "tools" / "pack_npue.py"),
-                            "--model-dir", str(model_dir), "--out", str(py_out)],
+                            "--model-dir", str(model_dir), "--out", str(py_out),
+                            "--tile-n", str(args.tile_n)],
                            capture_output=True, text=True)
         if r.returncode != 0:
             print(f"pack_npue.py failed:\n{r.stdout}\n{r.stderr}")
             return 2
 
         r = subprocess.run([args.exe, "--prepare-model", str(model_dir),
-                            str(cc_out)], capture_output=True, text=True)
+                            str(cc_out), "--tile-n", str(args.tile_n)],
+                           capture_output=True, text=True)
         if r.returncode != 0:
             print(f"npuembed --prepare-model failed:\n{r.stdout}\n{r.stderr}")
             return 2
 
         a, b = sha256(py_out), sha256(cc_out)
+        print(f"  tile_n {args.tile_n}, model {model_dir.name}")
         print(f"  pack_npue.py    {describe(py_out)}")
         print(f"  --prepare-model {describe(cc_out)}")
         print(f"\n  python : {a}")

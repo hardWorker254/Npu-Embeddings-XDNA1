@@ -68,6 +68,9 @@ def main() -> int:
     ap.add_argument("--tasks", default=",".join(DEFAULT_TASKS))
     ap.add_argument("--sides", default="cpu,npu",
                     help="which encoders to run")
+    ap.add_argument("--model", default="all-MiniLM-L6-v2",
+                    help="container under models/, without .npue -- both "
+                         "sides use it, so the comparison stays like for like")
     ap.add_argument("--artifacts", default="artifacts_b128il")
     ap.add_argument("--threads", type=int, default=24)
     ap.add_argument("--pipeline", type=int, default=2)
@@ -82,7 +85,7 @@ def main() -> int:
     def build(side):
         if side == "cpu":
             from sentence_transformers import SentenceTransformer
-            m = SentenceTransformer(str(REPO / "models" / "all-MiniLM-L6-v2"),
+            m = SentenceTransformer(str(REPO / "models" / args.model),
                                     device="cpu")
             # MUST match the NPU design's sequence length or the comparison
             # hands the CPU strictly more information.
@@ -91,7 +94,7 @@ def main() -> int:
         sys.path.insert(0, str(HERE))
         from npu_encoder import NpuEncoder
         return NpuEncoder(artifacts=args.artifacts, threads=args.threads,
-                          pipeline=args.pipeline)
+                          pipeline=args.pipeline, model=args.model)
 
     results = {}
     for side in sides:

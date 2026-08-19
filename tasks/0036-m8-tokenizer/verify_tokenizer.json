@@ -1,9 +1,9 @@
 {
   "kind": "verification",
   "task": "0036",
-  "max_len": 128,
-  "n_texts": 6826,
-  "n_exact": 6826,
+  "max_len": 64,
+  "n_texts": 38,
+  "n_exact": 38,
   "agreement": 1.0,
   "mismatches": []
 }

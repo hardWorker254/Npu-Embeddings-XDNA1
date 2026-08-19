@@ -16,18 +16,34 @@
 #include "npu_device.hpp"
 
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
 
+#include "xrt/experimental/xrt_ext.h"
 #include "xrt/xrt_bo.h"
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_kernel.h"
 
 namespace npu {
 namespace {
+
+// -- buffer allocation flavour ---------------------------------------------
+BoMode g_bo_mode = BoMode::host_only;
+size_t g_last_align = 0;
+
+// Largest power of two that divides p, capped at 2 MB (the large-page size we
+// would care about).
+size_t alignment_of(const void *p) {
+  auto v = reinterpret_cast<uintptr_t>(p);
+  if (!v) return 0;
+  size_t a = 1;
+  while (a < (1u << 21) && (v & a) == 0) a <<= 1;
+  return a;
+}
 
 double now_s() {
   return std::chrono::duration<double>(
@@ -88,11 +104,53 @@ std::vector<size_t> json_size_array(const std::string &t,
   return out;
 }
 
+
+// One place that decides how a data buffer is allocated, so the four modes
+// differ in exactly one call each.
+//
+// ext::bo takes no group id. On npu2 there is a single memory group for the
+// data arguments, so this is not a lost constraint -- but if a future device
+// had more, ext mode would need revisiting.
+xrt::bo make_data_bo(const xrt::device &dev, const xrt::kernel &k, size_t bytes,
+                     int group) {
+  constexpr size_t kMB = 1024 * 1024;
+  const size_t padded = (bytes + kMB - 1) / kMB * kMB;
+  xrt::bo b = [&]() -> xrt::bo {
+    switch (g_bo_mode) {
+      case BoMode::host_only:
+        return xrt::bo(dev, bytes, XRT_BO_FLAGS_HOST_ONLY, group);
+      case BoMode::host_only_1m:
+        return xrt::bo(dev, padded, XRT_BO_FLAGS_HOST_ONLY, group);
+      case BoMode::ext:
+        return xrt::ext::bo(dev, bytes);
+      case BoMode::ext_1m:
+        return xrt::ext::bo(dev, padded);
+    }
+    return xrt::bo(dev, bytes, XRT_BO_FLAGS_HOST_ONLY, group);
+  }();
+  (void)k;
+  g_last_align = alignment_of(b.map<void *>());
+  return b;
+}
+
 }  // namespace
 
 struct Device::Impl {
   xrt::device device{0};
 };
+
+void set_bo_mode(BoMode m) { g_bo_mode = m; }
+BoMode bo_mode() { return g_bo_mode; }
+size_t last_bo_alignment() { return g_last_align; }
+const char *bo_mode_name() {
+  switch (g_bo_mode) {
+    case BoMode::host_only:    return "host_only";
+    case BoMode::host_only_1m: return "host_only_1m";
+    case BoMode::ext:          return "ext";
+    case BoMode::ext_1m:       return "ext_1m";
+  }
+  return "?";
+}
 
 Device::Device() : impl_(std::make_unique<Impl>()) {}
 Device::~Device() = default;
@@ -130,7 +188,18 @@ Design::Design(Device &dev, const std::string &dir)
   info_.M = json_int(js, "M", 0);
   info_.K = json_int(js, "K", 0);
   info_.N = json_int(js, "N", 0);
+  info_.seq = json_int(js, "seq", 0);
   info_.b_layout_hash = json_str(js, "b_layout_hash", "");
+
+  // See DesignInfo::c_elem_bytes. Anything other than the two known spellings
+  // is a refusal, not a fallback: an unrecognised dtype means this binary is
+  // older than the artifact and cannot know how wide C is.
+  {
+    const std::string cd = json_str(js, "c_dtype", "f32");
+    if (cd == "bf16") info_.c_elem_bytes = 2;
+    else if (cd == "f32") info_.c_elem_bytes = 4;
+    else throw std::runtime_error(dir + ": unknown c_dtype '" + cd + "'");
+  }
 
   info_.buffer_bytes = json_size_array(js, "buffers");
   if (info_.buffer_bytes.empty()) {
@@ -165,9 +234,9 @@ Design::Design(Device &dev, const std::string &dir)
 
   // Data buffers start at kernel argument 3.
   for (size_t i = 0; i < info_.buffer_bytes.size(); ++i)
-    impl_->bos.emplace_back(d.device, info_.buffer_bytes[i],
-                            XRT_BO_FLAGS_HOST_ONLY,
-                            impl_->kernel.group_id(static_cast<int>(3 + i)));
+    impl_->bos.push_back(make_data_bo(
+        d.device, impl_->kernel, info_.buffer_bytes[i],
+        impl_->kernel.group_id(static_cast<int>(3 + i))));
   impl_->alt.resize(info_.buffer_bytes.size());
   impl_->active.assign(info_.buffer_bytes.size(), 0);
   dev_ = &dev;
@@ -206,11 +275,42 @@ size_t Design::stage(size_t arg_index, const void *data, size_t bytes) {
                              std::to_string(info_.buffer_bytes[arg_index]));
   auto &d = *dev_->impl();
   auto &slots = impl_->alt.at(arg_index);
-  slots.emplace_back(d.device, bytes, XRT_BO_FLAGS_HOST_ONLY,
-                     impl_->kernel.group_id(static_cast<int>(3 + arg_index)));
+  slots.push_back(make_data_bo(
+      d.device, impl_->kernel, bytes,
+      impl_->kernel.group_id(static_cast<int>(3 + arg_index))));
   std::memcpy(slots.back().map<void *>(), data, bytes);
   slots.back().sync(XCL_BO_SYNC_BO_TO_DEVICE);
   return slots.size();     // slot 0 is the design's own buffer
+}
+
+size_t Design::probe_alloc(size_t chunk_bytes, size_t count, bool verbose) {
+  auto &d = *dev_->impl();
+  const int group = impl_->kernel.group_id(3);
+  std::vector<xrt::bo> held;
+  held.reserve(count);
+  size_t ok = 0;
+  for (size_t i = 0; i < count; ++i) {
+    try {
+      const double t0 = now_s();
+      xrt::bo b = make_data_bo(d.device, impl_->kernel, chunk_bytes, group);
+      // TOUCH it. A buffer that is allocated but never written may not have
+      // committed pages, so an untouched probe would report a ceiling that
+      // does not exist.
+      std::memset(b.map<void *>(), 0, chunk_bytes);
+      b.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+      const double ms = (now_s() - t0) * 1e3;
+      held.push_back(std::move(b));
+      ++ok;
+      if (verbose)
+        std::printf("    %3zu: %6.1f MB cumulative %7.1f MB  (%6.1f ms)\n",
+                    i + 1, chunk_bytes / 1e6, (i + 1) * chunk_bytes / 1e6, ms);
+    } catch (const std::exception &e) {
+      std::printf("    FAILED at buffer %zu (%.1f MB cumulative): %s\n",
+                  i + 1, (i + 1) * chunk_bytes / 1e6, e.what());
+      break;
+    }
+  }
+  return ok;
 }
 
 size_t Design::stage_alloc(size_t arg_index, size_t bytes) {
@@ -221,8 +321,9 @@ size_t Design::stage_alloc(size_t arg_index, size_t bytes) {
                              std::to_string(info_.buffer_bytes[arg_index]));
   auto &d = *dev_->impl();
   auto &slots = impl_->alt.at(arg_index);
-  slots.emplace_back(d.device, bytes, XRT_BO_FLAGS_HOST_ONLY,
-                     impl_->kernel.group_id(static_cast<int>(3 + arg_index)));
+  slots.push_back(make_data_bo(
+      d.device, impl_->kernel, bytes,
+      impl_->kernel.group_id(static_cast<int>(3 + arg_index))));
   return slots.size();
 }
 

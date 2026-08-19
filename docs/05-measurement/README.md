@@ -22,7 +22,24 @@ The AIE array emits timestamped events. Kernels bracket their work with `event0(
 entry and `event1()` at exit; pairing them gives **exact cycle counts** per invocation.
 Every kernel in `aie_kernels/` already does this.
 
-### Signal 2 — static instruction count (cross-check)
+### Signal 2 — static instruction count (cross-check, and sometimes enough)
+
+> **Stronger than a cross-check for compute-bound kernels.** AIE cores do not
+> stall — no cache, no dynamic scheduling, no branch misprediction — so the hot
+> loop's instruction count ÷ core clock **is** its execution time. That is not
+> the source-level paper-compute modelling this document warns about elsewhere:
+> counting instructions in *emitted assembly* counts what runs, while modelling
+> from C guesses what the compiler did (and has mispredicted by 5–300×).
+>
+> It matters here more than it would elsewhere, because the production
+> 8-column design **cannot be traced at all** (see below). A method needing
+> only the `.o` is not blocked by routing.
+>
+> `llvm-objdump -d -r build/X.o` — the relocations mark the zero-overhead
+> loop's bounds. Count instructions **and `nop`s**: a `nop` is a VLIW slot the
+> compiler could not fill, i.e. visible evidence the loop is not packed tight.
+> → [note 0006](../../research/notes/0006-peano-loop-hints.md)
+
 
 **AIE cores do not stall.** No caches, no out-of-order execution, no branch prediction,
 fixed instruction latencies. Therefore, for a compute-bound kernel:
@@ -207,11 +224,27 @@ Required for any claim of the form "the NPU is N× faster".
 
 1. **Quiesce the NPU.** Stop FastFlowLM, any Ryzen AI / WinML process, and anything
    else holding a hardware context. Verify with `xrt-smi examine`.
-2. **Record the machine state** in the TASK.md: power plan, on mains or battery
+2. **Record the machine state** *by tool, not by hand* — `compare_three.py`
+   writes it into every result file. A hand-rolled `Win32_Battery` check
+   reported **"ON BATTERY" for a machine with no battery**, because an absent
+   WMI class made the comparison never run and the `else` branch fire. Use
+   `[System.Windows.Forms.SystemInformation]::PowerStatus`. The fields:
+   power plan, on mains or battery
    (Rösti measured 145 → 255 GFLOP/s on mains vs 95 → 111 on battery — it matters
    enormously), background load, and whether the iGPU is busy.
 3. **Same input, same tokenisation, same sequence length bucket, same batch size.**
    Feed pre-tokenised IDs where possible so tokenizer differences do not leak in.
+3b. **INTERLEAVE, and use the same statistic on every side.** Run the encoders
+   round-robin in one session so whatever the machine is doing, it does to all
+   of them. This session measured sentence-transformers at 710, 662.9, 580.3,
+   518.5 and 489.4 seq/s at the same batch on the same machine; a ratio between
+   numbers taken minutes apart measures the machine's mood. Never compare a
+   best-of-N against a mean — that buys the best-of side its whole spread.
+   `experiments/m8-npu-vs-cpu/compare_three.py`.
+3c. **Report steady state, not the ramp.** torch went 469 → 686 seq/s over five
+   rounds while the NPU held to ±1%. Report the second half of the rounds as
+   well as all of them, and take the ratio from the second half — that is the
+   half that favours the CPU.
 4. **Report both** batch-1 latency and large-batch throughput. Finding F2 says these
    tell different stories, and reporting only the flattering one is misleading.
 5. **Report power.** The NPU's case is efficiency as much as speed — the Gemma3 team
@@ -233,3 +266,99 @@ Express kernel results as:
 - **% of the 14.7 TOPS bf16 attainable ceiling** (not the 50 TOPS marketing figure)
 - **Achieved DRAM read bandwidth**, since we are bandwidth-bound — see
   [`../01-hardware/`](../01-hardware/README.md)
+
+## Watching the NPU from Windows — and why its memory never moves
+
+**There is no NPU memory to watch.** XDNA2 has no device-local DRAM. The only
+memory physically on the array is SRAM: **32 × 64 KB L1 = 2 MB** and
+**8 × 512 KB mem tiles = 4 MB** ([`docs/01-hardware`](../01-hardware/README.md)).
+Weights, activations and instruction streams all live in **system DRAM**,
+pinned and mapped into the NPU's address space through the IOMMU. An XRT buffer
+object is host memory. So a tool that reports "NPU memory" would be reporting
+our own process's working set, and none of them do:
+
+- Windows exposes **no NPU counter set at all** — nothing matching NPU, Neural
+  or Compute Accelerator in `Get-Counter -ListSet *`.
+- The NPU is not a `Win32_VideoController`; the only one present is the
+  Radeon 890M. It appears as `NPU Compute Accelerator Device`,
+  `PCI\VEN_1022&DEV_17F0`.
+- `xrt-smi` on Windows (`C:\Windows\System32\AMD\xrt-smi.exe`) has exactly two
+  reports, `aie-partitions` and `all`. Neither is memory.
+
+Measured, batch 128, two lanes, `artifacts_b128il`:
+
+| | |
+|---|---|
+| process peak working set | **607.0 MB** |
+| process private bytes | 581.8 MB |
+| XRT buffers (A 25.2 + B 1.2 + C 50.3 per lane, ×2) | 153.4 MB |
+| host scratch in `Encoder::run` (×2 lanes) | 302.0 MB |
+| mapped `.npue` | 69.0 MB |
+| weights staged on the device once | 21.2 MB |
+
+That accounts for ~546 MB of the 582 MB private, the rest being allocator
+overhead and thread stacks. **Nothing is missing and nothing is hidden — the
+"device" memory is the process memory.**
+
+### Busy percentage *is* observable
+
+The NPU is an **MCDM** device, and MCDM shares the GPU counter infrastructure,
+so NPU busy time arrives as a GPU engine counter scoped to a pid:
+
+```powershell
+.\tools\npu_utilisation.ps1 -Exe build\npuembed.exe -WorkingDirectory runtime `
+  -Arguments ".. --artifacts artifacts_b128il --threads 24 --pipeline 2 --bench 40"
+```
+
+The instance carries `luid_0x00000000_0x000170c6`, matching the NPU's BDF
+`[00c6:00:01.1]` from `xrt-smi examine`, and our runtime issues no graphics
+work, so nothing else can produce it. It agrees with our own accounting:
+
+| | counter | runtime's own `NPU dispatch+wait` |
+|---|---|---|
+| 2 lanes, batch 128 | **50.5%** mean (52.1% peak) | **52.3%** |
+
+### Memory IS attributed — under Shared, never Dedicated
+
+`\GPU Process Memory(pid_*)` does report our buffers. At batch 128, two lanes:
+
+| counter | ours | FastFlowLM `serve gemma3:1b` |
+|---|---:|---:|
+| Total Committed | 229.4 MB | 1234.3 MB |
+| **Shared Usage** | **229.4 MB** | **1234.3 MB** |
+| Local Usage | 229.4 MB | 1234.3 MB |
+| **Dedicated Usage** | **0** | **0** |
+| process working set | 607.0 MB | 2090.5 MB |
+
+Ours tracks the XRT buffer count — 157.4 MB at one lane against 229.4 at two.
+
+**A hypothesis tested and refuted.** We allocate data buffers
+`XRT_BO_FLAGS_HOST_ONLY` while FastFlowLM uses `xrt::ext::bo(device, size)`
+with 1 MB alignment and no host-only flag (`src/include/buffer.hpp`), so the
+obvious guess was that their allocations are device-class and ours are not,
+and that this is why theirs is visible in Task Manager. **It is not**: measured
+side by side, both land in Shared/Local and **neither reports a single byte of
+Dedicated**. There is no dedicated pool on this device for either of us to
+allocate from.
+
+The difference is **magnitude, not mechanism**: a 1B-parameter LLM carries
+~1.2 GB of weights and KV cache; a 22M-parameter embedding model carries 21 MB
+of weights and 153 MB of I/O buffers. 229 MB on a 30 GB machine is easy to
+miss; 1.2 GB is not.
+
+**This is not an NPU performance claim** (rule 1). It is a busy fraction of
+wall time — good for *"is the array actually being used"* and for
+cross-checking our accounting, useless for kernel quality.
+
+### The trap: too few samples reads as 0%
+
+`Get-Counter "\GPU Engine(*)"` enumerates every engine instance on the machine
+and costs **seconds** per call — a 13-second run returned **one** sample, and
+an earlier attempt returned **0.0%** for a configuration that was in fact
+running at 37–39%. A zero from an unsampled counter is indistinguishable from
+a zero from an idle device.
+
+Two fixes, both in `tools/npu_utilisation.ps1`: filter on the instance name
+**inside the counter path** (`\GPU Engine(pid_1234*)\...`), which is fast
+enough to sample properly, and **refuse to print a percentage** below a
+minimum sample count rather than reporting the average of nothing.

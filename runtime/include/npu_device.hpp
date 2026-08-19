@@ -24,6 +24,17 @@
 
 namespace npu {
 
+// How data buffers are allocated. Set before any Design is constructed.
+// See npu_device.cpp -- this exists to make "does allocation flavour affect
+// DMA throughput" a measurement rather than an argument.
+enum class BoMode { host_only, host_only_1m, ext, ext_1m };
+void set_bo_mode(BoMode m);
+BoMode bo_mode();
+const char *bo_mode_name();
+// Alignment of the last data buffer actually handed back, in bytes. Reported
+// so the mode's effect on addresses is visible rather than assumed.
+size_t last_bo_alignment();
+
 // Metadata the build step wrote alongside the xclbin. The runtime asserts on it
 // rather than trusting that the binary on disk matches what it is asked for --
 // tools/export_xclbin.py once handed the same xclbin to four different designs,
@@ -32,12 +43,27 @@ struct DesignInfo {
   std::string name;
   std::string kind;                  // gemm | eltwise | layernorm | softmax
   int64_t M = 0, K = 0, N = 0;       // gemm only
+  // The sequence length the design was compiled for. Distinct from the
+  // container's max_seq_len, which is how many position embeddings were
+  // packed; 0 means an export that predates the field.
+  int64_t seq = 0;
   std::vector<size_t> buffer_bytes;  // in declaration order
 
   // What layout this design's B operand must be in, as the same sha256 that
   // tools/npue.py stamps into every tiled tensor. Empty means the design.json
   // did not say -- which the runtime treats as a failure, not as permission.
   std::string b_layout_hash;
+
+  // Element size of C as the design actually emits it: 4 for fp32, 2 when the
+  // design was exported with `--c-bf16` and narrows on the core after the fp32
+  // K reduction (tasks/0045). READ, never assumed -- a bf16 artifact and an
+  // fp32 one differ only here, and guessing wrong reads every result at the
+  // wrong stride.
+  //
+  // A design.json with no "c_dtype" is an export that predates the field, and
+  // every one of those IS fp32, so 4 is the correct reading of silence rather
+  // than a default papering over a missing value.
+  size_t c_elem_bytes = 4;
 };
 
 class Device {
@@ -105,6 +131,13 @@ public:
   // This is what gives each pipeline of the two-encode overlap (tasks/0033)
   // its own A and C buffers on the shared design.
   size_t stage_alloc(size_t arg_index, size_t bytes);
+
+  // Allocate `count` buffers of `chunk_bytes` through the same path the
+  // encoder uses, touch each so the pages actually commit, and return how
+  // many succeeded. bge-large needs ~1 GB of XRT buffers against MiniLM's
+  // 175 MB, and finding the ceiling costs one command instead of a
+  // four-xclbin build. The buffers are freed when `Design` is destroyed.
+  size_t probe_alloc(size_t chunk_bytes, size_t count, bool verbose);
 
   // Host pointer of a SPECIFIC slot, independent of what is currently bound.
   // A pipeline converts into its own slot outside the dispatch lock; the

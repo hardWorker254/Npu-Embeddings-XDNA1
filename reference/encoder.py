@@ -100,7 +100,12 @@ class MiniLMReference:
 
     def __init__(self, w, num_layers=6, num_heads=12, eps=1e-12, gemm=None,
                  qkv_w=None, qkv_b=None, qk_scale=None, gelu_fn=None,
-                 ln_fn=None, softmax_fn=None):
+                 ln_fn=None, softmax_fn=None, pooling="mean"):
+        if pooling not in ("mean", "cls"):
+            raise ValueError(f"pooling {pooling!r}: expected 'mean' or 'cls'")
+        # MiniLM pools mean, bge pools CLS. Defaulting is safe only because
+        # load_reference() below always passes the checkpoint's own answer.
+        self.pooling = pooling
         self.w = w
         self.gemm = gemm or fp32_gemm
         # M6 hook: the activation, like the GEMM, is swappable, so the same
@@ -263,12 +268,20 @@ class MiniLMReference:
             x = self.ffn(i, x, tap)
         tap("last_hidden_state", x)
 
-        # Mean pooling over non-pad tokens. The denominator is clamped at 1e-9
-        # to match sentence-transformers exactly (docs/04-model).
-        m = attention_mask[:, :, None].astype(np.float32)
-        summed = (x * m).sum(axis=1)
-        denom = np.clip(m.sum(axis=1), 1e-9, None)
-        pooled = summed / denom
+        if self.pooling == "cls":
+            # [CLS] is position 0 by construction; sentence-transformers takes
+            # it without consulting the mask, and so do we.
+            pooled = x[:, 0, :]
+        else:
+            # Mean pooling over non-pad tokens. The denominator is clamped at
+            # 1e-9 to match sentence-transformers exactly (docs/04-model).
+            m = attention_mask[:, :, None].astype(np.float32)
+            summed = (x * m).sum(axis=1)
+            denom = np.clip(m.sum(axis=1), 1e-9, None)
+            pooled = summed / denom
+        # The tap keeps its name across modes so golden files stay structurally
+        # identical between models; pool.mode says which produced it, so a
+        # golden cannot be read as the wrong kind.
         tap("pool.mean", pooled)
 
         norm = np.clip(np.linalg.norm(pooled, axis=1, keepdims=True), 1e-12, None)
@@ -292,4 +305,32 @@ def load_reference(model_dir, num_layers=6, num_heads=12, eps=1e-12):
         num_layers=cfg.get("num_hidden_layers", num_layers),
         num_heads=cfg.get("num_attention_heads", num_heads),
         eps=cfg.get("layer_norm_eps", eps),
+        pooling=read_pooling(model_dir),
     )
+
+
+def read_pooling(model_dir):
+    """Which pooling this checkpoint uses, from its own metadata.
+
+    The same 1_Pooling/config.json both packers read, so the oracle and the
+    .npue cannot disagree about it. Ambiguity refuses rather than guessing:
+    max and mean_sqrt_len pooling are not implemented here, and approximating
+    either with mean would be a silent quality loss.
+    """
+    import json
+    from pathlib import Path
+
+    p = Path(model_dir) / "1_Pooling" / "config.json"
+    if not p.exists():
+        raise FileNotFoundError(
+            f"{p} not found -- cannot tell whether this checkpoint pools by "
+            f"mean or by CLS. Re-fetch with reference/fetch_model.py.")
+    c = json.loads(p.read_text(encoding="utf-8"))
+    modes = [k for k, v in c.items()
+             if k.startswith("pooling_mode_") and v is True]
+    if modes == ["pooling_mode_cls_token"]:
+        return "cls"
+    if modes == ["pooling_mode_mean_tokens"]:
+        return "mean"
+    raise ValueError(f"{p}: this reference implements cls and mean pooling; "
+                     f"the checkpoint asks for {modes or 'nothing'}")
