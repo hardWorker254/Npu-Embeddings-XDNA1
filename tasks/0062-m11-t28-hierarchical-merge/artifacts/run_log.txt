@@ -1,0 +1,73 @@
+$ xrt-smi examine -r all (contention guard, before this session's hardware runs)
+... Partition Index 0, Columns [0..7], all HW Contexts state=Idle
+    (WorkloadsSessionHost.exe, PIDs 10860/14636/16068/16544, same
+    background process every prior session in this repo has noted as
+    resident; not started by this session; no timing claim made anywhere
+    in this task so this does not block anything)
+
+=== FIRST ATTEMPT (before the ffn_down_relay_g2.cc split) ===
+$ python hierarchical_merge_ffn_probe.py
+...
+(16/37)..(26/37) aiecc pipeline stages, then:
+ld.lld: error: duplicate symbol: zero_f32_1024
+>>> defined at zero_f32_1024.cc
+>>>            C:\Users\vegar\.npu\cache\98e911ffd98577474356ec88\zero_f32_1024.o:(zero_f32_1024)
+>>> defined at ffn_down_hop_matmul_g2_64x48x16.cc
+>>>            C:\Users\vegar\.npu\cache\98e911ffd98577474356ec88\ffn_down_hop_matmul_g2_64x48x16.o:(.text.zero_f32_1024+0x0)
+ld.lld: error: duplicate symbol: ffn_down_hop_matmul_g2_64x48x16
+>>> defined at zero_f32_1024.cc
+>>>            ...zero_f32_1024.o:(ffn_down_hop_matmul_g2_64x48x16)
+>>> defined at ffn_down_hop_matmul_g2_64x48x16.cc
+>>>            ...ffn_down_hop_matmul_g2_64x48x16.o:(.text.ffn_down_hop_matmul_g2_64x48x16+0x0)
+ld.lld: error: duplicate symbol: copy_f32_1024
+>>> defined at zero_f32_1024.cc
+>>>            ...zero_f32_1024.o:(copy_f32_1024)
+>>> defined at ffn_down_hop_matmul_g2_64x48x16.cc
+>>>            ...ffn_down_hop_matmul_g2_64x48x16.o:(.text.copy_f32_1024+0x0)
+ld.lld: error: duplicate symbol: zero_f32_1024
+>>> defined at zero_f32_1024.cc
+>>> defined at copy_f32_1024.cc
+ld.lld: error: duplicate symbol: ffn_down_hop_matmul_g2_64x48x16
+>>> defined at zero_f32_1024.cc
+>>> defined at copy_f32_1024.cc
+ld.lld: error: duplicate symbol: copy_f32_1024
+>>> defined at zero_f32_1024.cc
+>>> defined at copy_f32_1024.cc
+clang: error: ld.lld command failed with exit code 1 (use -v to see invocation)
+aiecc: 'C:\dev\mlir-aie\ironenv\Lib\site-packages\llvm-aie\bin\clang' failed
+aiecc: edge 'elfs_{0}.elf' (key 'main_core_0_4') failed
+aiecc: pipeline failed
+Exit code 1
+
+=== FIX: split ffn_down_relay_g2.cc into ffn_down_zero.cc /
+    ffn_down_hop_matmul_g2.cc / ffn_down_copy_out.cc, updated the probe's
+    ExternalFunction source_file= args, deleted ffn_down_relay_g2.cc,
+    full cache purge ===
+
+$ rm -rf ~/.npu/cache/*
+
+=== SECOND ATTEMPT: PASS, first hardware attempt after the fix ===
+$ python hierarchical_merge_ffn_probe.py
+  purged 0 cache candidate(s)
+hierarchical 2-hop merge: 4 GEMM+GELU producer cols -> 2 merge mem tiles (each ALSO local A/B feed) -> 1 relay ffn_down-shaped matmul, k-block (per-hop) acquire/release, NO C tensor for either GEMM stage in the design's own I/O signature:
+  rel_fro   1.726e-03
+  worst abs 9.222e-04
+PASS -- tolerance 3e-2 rel_fro (two chained bf16 narrows plus a non-MMAC second matmul)
+
+=== Different-seed check (rule out a trivial/degenerate pass) ===
+$ python hierarchical_merge_ffn_probe.py --seed 7
+  purged 1 cache candidate(s)
+hierarchical 2-hop merge: ...
+  rel_fro   1.783e-03
+  worst abs 9.978e-04
+PASS -- tolerance 3e-2 rel_fro (two chained bf16 narrows plus a non-MMAC second matmul)
+
+=== Repeat of the default seed (determinism check) ===
+$ python hierarchical_merge_ffn_probe.py --seed 11
+  purged 1 cache candidate(s)
+hierarchical 2-hop merge: ...
+  rel_fro   1.726e-03
+  worst abs 9.222e-04
+PASS -- tolerance 3e-2 rel_fro (two chained bf16 narrows plus a non-MMAC second matmul)
+
+Bit-identical to the first seed-11 run: 1.726e-03 both times.

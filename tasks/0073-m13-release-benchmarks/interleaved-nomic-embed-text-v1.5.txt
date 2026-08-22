@@ -1,0 +1,26 @@
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\compare_three.py --model nomic-embed-text-v1.5 --artifacts artifacts_nomic --rounds 8 --threads 24 --pipeline 4 --out C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0073-m13-release-benchmarks\interleaved-nomic-embed-text-v1.5.json
+  task prefix (all three sides): 'search_document: '
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+<All keys matched successfully>
+model nomic-embed-text-v1.5, batch 128, seq 64, mean pooling
+  machine: Online / NoSystemBattery / Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
+  torch threads 12, ORT intra_op 12, NPU 24 threads / 4 lanes
+  interleaved, 8 rounds, MEAN reported on every side
+
+[transformers] Detected the usage of `get_extended_attention_mask`: This function is deprecated and will be removed in v5.12.0. Please use the new API in `transformers.masking_utils`
+  round 1:  torch    72.8   ort    42.8   npu   164.6 seq/s
+  round 2:  torch    74.2   ort    43.9   npu   164.5 seq/s
+  round 3:  torch    72.9   ort    43.7   npu   164.6 seq/s
+  round 4:  torch    70.8   ort    44.3   npu   165.0 seq/s
+  round 5:  torch    73.3   ort    43.5   npu   165.5 seq/s
+  round 6:  torch    74.0   ort    43.9   npu   164.2 seq/s
+  round 7:  torch    72.6   ort    44.2   npu   164.4 seq/s
+  round 8:  torch    72.1   ort    44.6   npu   165.0 seq/s
+
+  torch        all    72.8   steady(last 4)    73.0   range    70.8-   74.2 seq/s
+  onnxruntime  all    43.9   steady(last 4)    44.0   range    42.8-   44.6 seq/s
+  npu          all   164.7   steady(last 4)   164.8   range   164.2-  165.5 seq/s
+
+  strongest CPU baseline: torch at 73.0 seq/s
+  NPU / strongest CPU   : 2.258x  (steady state, both sides)
+wrote tasks\0073-m13-release-benchmarks\interleaved-nomic-embed-text-v1.5.json

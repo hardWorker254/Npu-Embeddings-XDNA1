@@ -55,17 +55,26 @@ def main() -> int:
     with Reader(npue_path) as r0:
         want_sha = r0.config["source_sha256"]
         n_layers = r0.config["num_layers"]
+        arch = r0.config.get("arch", "bert_abs_gelu_postln")
+
+    # arch=2 (nomic-embed-text-v1.5, tasks/0069-0070) keeps its own goldens
+    # tree -- a different reference oracle (reference/encoder_nomic.py, RoPE +
+    # SwiGLU) wrote them, and find_goldens() matches by source_sha256 content
+    # rather than by directory, so pointing it at the right tree is the only
+    # branch needed here.
+    is_nomic = (arch == "nomic_bert_rope_swiglu")
+    goldens_root = REPO / "reference" / ("goldens_nomic" if is_nomic else "goldens")
+    make_goldens_hint = "make_goldens_nomic.py" if is_nomic else "make_goldens.py"
 
     # By checkpoint, not by name -- see tools/npue.py's find_goldens().
     try:
-        bpath, tpath = find_goldens(REPO / "reference" / "goldens",
-                                    want_sha, args.seq, load)
+        bpath, tpath = find_goldens(goldens_root, want_sha, args.seq, load)
     except FileNotFoundError as e:
         print(f"FAIL -- {e}")
         return 1
     if not tpath.exists():
         print(f"FAIL -- {tpath.name} not found; the boundary goldens are "
-              f"there, so re-run make_goldens.py with --taps")
+              f"there, so re-run {make_goldens_hint} with --taps")
         return 1
 
     _, meta = load(bpath)
@@ -101,8 +110,33 @@ def main() -> int:
     emb_sum = np.ascontiguousarray(taps["emb.sum"].reshape(-1, hidden),
                                    dtype=np.float32)
     am = np.ascontiguousarray(g["attention_mask"], dtype=np.float32)
+    # Same clamp value the C++ runtime itself uses everywhere (main.cpp's
+    # cmask/cmask literals), not the oracle's own np.finfo(float32).min --
+    # both are "very negative" enough that softmax zeroes the masked columns
+    # either way; matching the runtime's OWN convention here is what makes
+    # this a check of the runtime's math, not of a different mask scale.
     add_mask = np.where(am > 0, np.float32(0.0), np.float32(-1.0e30))
-    expected_emb = np.ascontiguousarray(g["hf.out.embedding"], dtype=np.float32)
+
+    if is_nomic:
+        # nomic has no "hf.out.embedding" golden -- sentence-transformers
+        # does NOT L2-normalize this checkpoint (no Normalize module in
+        # modules.json; tasks/0068 sec 5b), so the boundary file only carries
+        # the RAW pooled vector (hf.pool.mean_raw / st.pool.mean_raw). This
+        # runtime always L2-normalizes (g_l2_normalize hardcoded true,
+        # main.cpp) -- reference/encoder_nomic.py's own encode() already taps
+        # BOTH forms explicitly (pool.mean_raw / pool.mean_l2normalized), so
+        # the taps file (regenerated with --taps) is read for the normalized
+        # one rather than re-deriving it here and risking a second, silently
+        # different normalization convention.
+        if "pool.mean_l2normalized" not in taps:
+            print("FAIL -- goldens_nomic taps have no 'pool.mean_l2normalized' "
+                  "-- regenerate with "
+                  "`python reference/make_goldens_nomic.py --taps`")
+            return 1
+        expected_emb = np.ascontiguousarray(taps["pool.mean_l2normalized"],
+                                            dtype=np.float32)
+    else:
+        expected_emb = np.ascontiguousarray(g["hf.out.embedding"], dtype=np.float32)
 
     (out / "emb_sum.f32").write_bytes(emb_sum.tobytes())
     (out / "add_mask.f32").write_bytes(add_mask.tobytes())

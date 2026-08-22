@@ -34,6 +34,16 @@ if hasattr(sys.stdout, "reconfigure"):
 
 REPO = Path(__file__).resolve().parent.parent
 SEQ = 64
+def container_config(model: str) -> dict:
+    """The whole .npue config dict, read once and reused for width, arch,
+    and (for nomic) the prefix table -- all container facts, not constants."""
+    import sys as _sys
+    _sys.path.insert(0, str(REPO / "tools"))
+    from npue import Reader
+    with Reader(REPO / "models" / f"{model}.npue") as r:
+        return dict(r.config)
+
+
 def hidden_of(model: str) -> int:
     """Embedding width, from the container rather than a constant.
 
@@ -42,11 +52,7 @@ def hidden_of(model: str) -> int:
     inferring the width from the data: an inferred width reshapes a truncated
     file into a plausible array.
     """
-    import sys as _sys
-    _sys.path.insert(0, str(REPO / "tools"))
-    from npue import Reader
-    with Reader(REPO / "models" / f"{model}.npue") as r:
-        return int(r.config["hidden"])
+    return int(container_config(model)["hidden"])
 
 # Deliberately mixed: short and long, ASCII and not, near-duplicates (so a
 # similarity mistake shows up as a ranking change), and the golden corpus.
@@ -91,17 +97,52 @@ def main() -> int:
     texts = [t.replace("\r", "") for t in texts]
 
     hidden = hidden_of(args.model)
+    cfg = container_config(args.model)
+    is_nomic = cfg.get("arch") == "nomic_bert_rope_swiglu"
+
+    # nomic REQUIRES a task prefix ("search_document: " etc, tasks/0068 sec
+    # 4). tasks/0071 wired `--prefix` into `npuembed --embed` itself, so the
+    # RUNTIME side now applies its own prefix -- this harness hands it the
+    # RAW texts plus `--prefix <name>` and lets it do the prepending, the
+    # same as any real caller would. The REFERENCE side (sentence-
+    # transformers) has no such flag, so it still needs the prefix prepended
+    # here, by hand, same as before. If the two sides ever disagreed about
+    # WHAT the prefix text is, this comparison would still pass with both
+    # sides wrong the same way -- that risk is why container_config() reads
+    # the prefix from the SAME .npue the runtime just packed, not a literal.
+    ref_texts = texts
+    prefix_name = None
+    if is_nomic:
+        prompts = cfg.get("prompts", {})
+        prompt_default = cfg.get("prompt_default", "")
+        prefix = prompts.get(prompt_default, "")
+        if not prefix:
+            print(f"WARNING: nomic container has no usable prompts/"
+                  f"prompt_default ({prompt_default!r}) -- proceeding WITHOUT "
+                  f"a task prefix, which is a KNOWN-WRONG comparison for this "
+                  f"model (tasks/0068 sec 4).")
+        else:
+            print(f"NOTE (tasks/0071): npuembed --embed now applies its own "
+                  f"--prefix {prompt_default!r} ({prefix!r}) to the RAW "
+                  f"texts below -- this harness only prepends it to the "
+                  f"REFERENCE side (sentence-transformers has no prefix "
+                  f"flag), so this exercises the real `--prefix` flag path "
+                  f"rather than a harness-side workaround.")
+            prefix_name = prompt_default
+            ref_texts = [prefix + t for t in texts]
+
     exe = REPO / "runtime" / "build" / "npuembed.exe"
     with tempfile.TemporaryDirectory(prefix="e2e_") as td:
         d = Path(td)
         (d / "in.txt").write_text("\n".join(texts) + "\n", encoding="utf-8")
-        r = subprocess.run(
-            [str(exe), "..", "--model", args.model,
-             "--artifacts", args.artifacts,
-             "--threads", str(args.threads),
-             "--embed", str(d / "in.txt"), str(d / "out.f32")],
-            cwd=str(REPO / "runtime"), capture_output=True, text=True,
-            encoding="utf-8")
+        cmd = [str(exe), "..", "--model", args.model,
+              "--artifacts", args.artifacts,
+              "--threads", str(args.threads)]
+        if prefix_name is not None:
+            cmd += ["--prefix", prefix_name]
+        cmd += ["--embed", str(d / "in.txt"), str(d / "out.f32")]
+        r = subprocess.run(cmd, cwd=str(REPO / "runtime"),
+                           capture_output=True, text=True, encoding="utf-8")
         if r.returncode != 0:
             print(f"npuembed --embed failed ({r.returncode}):\n{r.stdout}\n{r.stderr}")
             return 2
@@ -109,10 +150,13 @@ def main() -> int:
                             dtype=np.float32).reshape(len(texts), hidden)
 
     from sentence_transformers import SentenceTransformer
+    # nomic needs trust_remote_code=True to load at all (tasks/0068/0069) --
+    # ST's own model card carries the original, hand-maintained modelling
+    # code (not the newer native transformers.models.nomic_bert port).
     st = SentenceTransformer(str(REPO / "models" / args.model),
-                             device="cpu")
+                             trust_remote_code=is_nomic, device="cpu")
     st.max_seq_length = SEQ
-    ref = st.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
+    ref = st.encode(ref_texts, convert_to_numpy=True, normalize_embeddings=True)
 
     cos = (got.astype(np.float64) * ref.astype(np.float64)).sum(axis=1)
     one_m_cos = 1.0 - cos

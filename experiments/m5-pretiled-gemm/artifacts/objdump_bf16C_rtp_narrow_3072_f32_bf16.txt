@@ -1,0 +1,86 @@
+
+C:\Users\vegar\.npu\cache\ea7518951b8120d3933aeabf\narrow_3072_f32_bf16.o:	file format elf32-aie
+
+Disassembly of section .text.narrow_3072_f32_bf16:
+
+00000000 <narrow_3072_f32_bf16>:
+       0: e1 00 00 10 00 78 00 00 00 5b 01 20 00 f0 2c 00      	nopa	;		nopb	;		nops	;		movxm	ls, #0x0;		nopv	
+			00000000:  R_AIE_41	.LBB0_1
+      10: 2c 00 20 00 00 0c    	mova	r0, #0x60;		event	#0
+      16: ba 10 00 b8 01 00 00 b0 a2 03	vlda	 bmll2, [p0], #0x40;		movxm	le, #0x0
+			00000016:  R_AIE_43	.L_LEnd0
+      20: e1 00 00 88 3f b8 02 00 00 5b 01 20 00 b0 b2 03      	vlda	 bmll3, [p0], #0x40;		nopb	;		nops	;		nopx	;		add.nc	lc, r0, #-0x2;		nopv	
+      30: e1 00 00 00 00 00 00 00 00 5b 01 20 00 f0 2c 00      	nopa	;		nopb	;		nops	;		nopxm	;		nopv	
+      40: e1 00 00 00 00 00 00 00 00 5b 01 20 00 b0 a2 03      	vlda	 bmll2, [p0], #0x40;		nopb	;		nops	;		nopxm	;		nopv	
+      50: e1 00 00 00 00 00 00 00 00 5b 01 20 00 b0 b2 03      	vlda	 bmll3, [p0], #0x40;		nopb	;		nops	;		nopxm	;		nopv	
+      60: e1 00 00 58 0c d8 03 00 00 5b 01 20 00 f0 2c 00      	nopa	;		nopb	;		nops	;		nopx	;		mov	crrnd, #0xc;		nopv	
+
+00000070 <.LBB0_1>:
+      70: e1 00 00 00 00 00 00 00 00 5b 01 20 00 b0 a2 03      	vlda	 bmll2, [p0], #0x40;		nopb	;		nops	;		nopxm	;		nopv	
+      80: e1 00 00 00 00 00 00 00 80 12 1d 21 00 b0 b2 03      	vlda	 bmll3, [p0], #0x40;		nopb	;		vst.conv.bf16.fp32	 bmll2, [p1], #0x20;		nopxm	;		nopv	
+
+00000090 <.L_LEnd0>:
+      90: e1 00 00 00 00 00 00 00 80 92 1d 21 00 f0 2c 00      	nopa	;		nopb	;		vst.conv.bf16.fp32	 bmll3, [p1], #0x20;		nopxm	;		nopv	
+      a0: 12 00 00 20 00 f0 2c 00      	nopa	;		nopb	;		nopx	
+      a8: 5c 00 50 50 a2 23    	vst.conv.bf16.fp32	 bmll2, [p1], #0x20;		ret	lr
+      ae: 98 92 1d 09  	vst.conv.bf16.fp32	 bmll3, [p1], #0x20
+      b2: 00 00        	nop	
+      b4: 98 12 1d 09  	vst.conv.bf16.fp32	 bmll2, [p1], #0x20
+      b8: 98 92 1d 09  	vst.conv.bf16.fp32	 bmll3, [p1], #0x20
+      bc: 18 00 10 12  	event	#1
+
+Disassembly of section .text.narrow_2048_f32_bf16:
+
+00000000 <narrow_2048_f32_bf16>:
+       0: e1 00 00 10 00 78 00 00 00 5b 01 20 00 f0 2c 00      	nopa	;		nopb	;		nops	;		movxm	ls, #0x0;		nopv	
+			00000000:  R_AIE_41	.LBB1_1
+      10: 2c 00 20 00 00 08    	mova	r0, #0x40;		event	#0
+      16: ba 10 00 b8 01 00 00 b0 a2 03	vlda	 bmll2, [p0], #0x40;		movxm	le, #0x0
+			00000016:  R_AIE_43	.L_LEnd1
+      20: e1 00 00 88 3f b8 02 00 00 5b 01 20 00 b0 b2 03      	vlda	 bmll3, [p0], #0x40;		nopb	;		nops	;		nopx	;		add.nc	lc, r0, #-0x2;		nopv	
+      30: e1 00 00 00 00 00 00 00 00 5b 01 20 00 f0 2c 00      	nopa	;		nopb	;		nops	;		nopxm	;		nopv	
+      40: e1 00 00 00 00 00 00 00 00 5b 01 20 00 b0 a2 03      	vlda	 bmll2, [p0], #0x40;		nopb	;		nops	;		nopxm	;		nopv	
+      50: e1 00 00 00 00 00 00 00 00 5b 01 20 00 b0 b2 03      	vlda	 bmll3, [p0], #0x40;		nopb	;		nops	;		nopxm	;		nopv	
+      60: e1 00 00 58 0c d8 03 00 00 5b 01 20 00 f0 2c 00      	nopa	;		nopb	;		nops	;		nopx	;		mov	crrnd, #0xc;		nopv	
+
+00000070 <.LBB1_1>:
+      70: e1 00 00 00 00 00 00 00 00 5b 01 20 00 b0 a2 03      	vlda	 bmll2, [p0], #0x40;		nopb	;		nops	;		nopxm	;		nopv	
+      80: e1 00 00 00 00 00 00 00 80 12 1d 21 00 b0 b2 03      	vlda	 bmll3, [p0], #0x40;		nopb	;		vst.conv.bf16.fp32	 bmll2, [p1], #0x20;		nopxm	;		nopv	
+
+00000090 <.L_LEnd1>:
+      90: e1 00 00 00 00 00 00 00 80 92 1d 21 00 f0 2c 00      	nopa	;		nopb	;		vst.conv.bf16.fp32	 bmll3, [p1], #0x20;		nopxm	;		nopv	
+      a0: 12 00 00 20 00 f0 2c 00      	nopa	;		nopb	;		nopx	
+      a8: 5c 00 50 50 a2 23    	vst.conv.bf16.fp32	 bmll2, [p1], #0x20;		ret	lr
+      ae: 98 92 1d 09  	vst.conv.bf16.fp32	 bmll3, [p1], #0x20
+      b2: 00 00        	nop	
+      b4: 98 12 1d 09  	vst.conv.bf16.fp32	 bmll2, [p1], #0x20
+      b8: 98 92 1d 09  	vst.conv.bf16.fp32	 bmll3, [p1], #0x20
+      bc: 18 00 10 12  	event	#1
+
+Disassembly of section .text.narrow_1024_f32_bf16:
+
+00000000 <narrow_1024_f32_bf16>:
+       0: e1 00 00 10 00 78 00 00 00 5b 01 20 00 f0 2c 00      	nopa	;		nopb	;		nops	;		movxm	ls, #0x0;		nopv	
+			00000000:  R_AIE_41	.LBB2_1
+      10: 2c 00 20 00 00 04    	mova	r0, #0x20;		event	#0
+      16: ba 10 00 b8 01 00 00 b0 a2 03	vlda	 bmll2, [p0], #0x40;		movxm	le, #0x0
+			00000016:  R_AIE_43	.L_LEnd2
+      20: e1 00 00 88 3f b8 02 00 00 5b 01 20 00 b0 b2 03      	vlda	 bmll3, [p0], #0x40;		nopb	;		nops	;		nopx	;		add.nc	lc, r0, #-0x2;		nopv	
+      30: e1 00 00 00 00 00 00 00 00 5b 01 20 00 f0 2c 00      	nopa	;		nopb	;		nops	;		nopxm	;		nopv	
+      40: e1 00 00 00 00 00 00 00 00 5b 01 20 00 b0 a2 03      	vlda	 bmll2, [p0], #0x40;		nopb	;		nops	;		nopxm	;		nopv	
+      50: e1 00 00 00 00 00 00 00 00 5b 01 20 00 b0 b2 03      	vlda	 bmll3, [p0], #0x40;		nopb	;		nops	;		nopxm	;		nopv	
+      60: e1 00 00 58 0c d8 03 00 00 5b 01 20 00 f0 2c 00      	nopa	;		nopb	;		nops	;		nopx	;		mov	crrnd, #0xc;		nopv	
+
+00000070 <.LBB2_1>:
+      70: e1 00 00 00 00 00 00 00 00 5b 01 20 00 b0 a2 03      	vlda	 bmll2, [p0], #0x40;		nopb	;		nops	;		nopxm	;		nopv	
+      80: e1 00 00 00 00 00 00 00 80 12 1d 21 00 b0 b2 03      	vlda	 bmll3, [p0], #0x40;		nopb	;		vst.conv.bf16.fp32	 bmll2, [p1], #0x20;		nopxm	;		nopv	
+
+00000090 <.L_LEnd2>:
+      90: e1 00 00 00 00 00 00 00 80 92 1d 21 00 f0 2c 00      	nopa	;		nopb	;		vst.conv.bf16.fp32	 bmll3, [p1], #0x20;		nopxm	;		nopv	
+      a0: 12 00 00 20 00 f0 2c 00      	nopa	;		nopb	;		nopx	
+      a8: 5c 00 50 50 a2 23    	vst.conv.bf16.fp32	 bmll2, [p1], #0x20;		ret	lr
+      ae: 98 92 1d 09  	vst.conv.bf16.fp32	 bmll3, [p1], #0x20
+      b2: 00 00        	nop	
+      b4: 98 12 1d 09  	vst.conv.bf16.fp32	 bmll2, [p1], #0x20
+      b8: 98 92 1d 09  	vst.conv.bf16.fp32	 bmll3, [p1], #0x20
+      bc: 18 00 10 12  	event	#1

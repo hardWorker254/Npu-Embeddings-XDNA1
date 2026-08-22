@@ -1,0 +1,24 @@
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model all-MiniLM-L6-v2 --artifacts artifacts_b128il --threads 24 --pipeline 4 --bench 5
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      all-MiniLM-L6-v2: 78 tensors, 69.00 MB, checkpoint 53aa51172d142c89
+  shape      sentence-transformers/all-MiniLM-L6-v2: 6 layers, hidden 384, 12 heads x 32, ffn 1536, mean pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 6 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 6 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 13 fewer NPU dispatches
+  bo-align   last data buffer aligned to 131072 B
+  weights    21.23 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 6 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall   589.08 ms   ->     869.2 seq/s
+    cpu   4400.00 ms   ->      7.47 cores busy
+    NPU dispatch+wait (serialized)   334.62 ms   56.8%   96 dispatches/group
+    p1 host work                  360.57 ms   61.2%   (conv 43.6  bias 180.3  attn 88.8  elt 47.7)
+    p2 host work                  363.25 ms   61.7%   (conv 45.1  bias 182.6  attn 89.8  elt 45.7)
+    p3 host work                  365.45 ms   62.0%   (conv 44.7  bias 183.7  attn 86.1  elt 51.0)
+    p4 host work                  364.75 ms   61.9%   (conv 43.0  bias 184.1  attn 89.1  elt 48.6)

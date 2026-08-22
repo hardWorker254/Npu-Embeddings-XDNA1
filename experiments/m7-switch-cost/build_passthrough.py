@@ -37,7 +37,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.iron as iron
-from aie.iron import CompileTime, In, ObjectFifo, Out, Program, Runtime, Worker
+from aie.iron import CompileTime, In, ObjectFifo, Out, Program, Runtime, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.device import from_name
 from aie.iron.kernel import ExternalFunction
@@ -102,15 +102,17 @@ def _build(dev, n_elem, n_cols, order="fwd"):
     # produce a BYTE-IDENTICAL final.xclbin, and two insts streams can then be
     # dispatched through one hw_context with no design switch at all.
     idx = list(range(n_cores)) if order == "fwd" else list(reversed(range(n_cores)))
-    rt = Runtime()
-    with rt.sequence(buf_ty, buf_ty) as (X, Y):
-        rt.start(*ws)
-        tg = rt.task_group()
+
+    def sequence(X, Y, fin_prods, fout_conss):
+        tg = TaskGroup()
         for i in idx:
-            rt.fill(fins[i].prod(), X, tap=taps[i], task_group=tg)
-            rt.drain(fouts[i].cons(), Y, tap=taps[i], wait=True, task_group=tg)
-        rt.finish_task_group(tg)
-    return Program(dev, rt).resolve_program()
+            fin_prods[i].fill(X, tap=taps[i], group=tg)
+            fout_conss[i].drain(Y, tap=taps[i], wait=True, group=tg)
+        tg.finish()
+
+    rt = Runtime(sequence, [buf_ty, buf_ty,
+                            [f.prod() for f in fins], [f.cons() for f in fouts]])
+    return Program(dev, rt, workers=ws).resolve_program()
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])

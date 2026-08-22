@@ -1,6 +1,20 @@
 # CURRENT STATUS
 
-*Last updated: 2026-08-19, after [`tasks/0051`](../tasks/0051-m9-bge-base-and-in-exe-fetch/TASK.md).*
+*Last updated: 2026-08-21, after [`tasks/0073`](../tasks/0073-m13-release-benchmarks/TASK.md).*
+
+> **Six models, and a second architecture on the array.**
+> [`0068`](../tasks/0068-m13-nomic-spike-and-oracle/TASK.md)–[`0071`](../tasks/0071-m13-nomic-shippable/TASK.md)
+> added **nomic-embed-text-v1.5** (Apache-2.0) as `arch=2`: RoPE instead of
+> absolute positions, a gated SwiGLU FFN instead of GELU, and the first
+> genuinely new architecture that runs **on the NPU** rather than host-only the
+> way `arch=1` (EmbeddingGemma) does. It needs a task prefix — `--prefix`, and
+> the runtime prints which one it applied, because a wrong prefix is a quality
+> regression no `1-cos` gate can see.
+>
+> Getting there found a **silent correctness bug** in the shipping design
+> generator: above `N = 4096` a design compiled and returned wrong numbers, and
+> bge-large's production `N = 4096` sits at *exactly* the threshold of a strict
+> `>`, so the guarded path had never once executed. See §"Known walls".
 
 > **The shipped CLI is now subcommands**: `npuembeddings list`,
 > `npuembeddings serve <model>`, `npuembeddings embed <model> <file>`, and a
@@ -23,17 +37,45 @@ this file, they are right and this file is old.
 
 ## 1. Where the project is
 
-**Three models run end to end on the NPU, in C++, with no Python in the
-process, all validated against HuggingFace.** M0-M8 are done: the tokenizer
-ships, the MTEB gate passes, and energy is measured. M9 made the runtime
-model-driven and added bge-small and bge-large.
+**Five models run end to end on the NPU, in C++, with no Python in the
+process, all validated against HuggingFace**, plus one (EmbeddingGemma) that
+runs entirely on the host because its geometry does not fit the array. M0-M8
+are done: the tokenizer ships, the MTEB gate passes, and energy is measured.
+M9 made the runtime model-driven; M12 added `arch=1`; M13 added `arch=2`.
 
-| `--model` | hidden | layers | pooling | `1-cos` vs HF | seq/s |
-|---|---:|---:|---|---:|---:|
-| `all-MiniLM-L6-v2` | 384 | 6 | mean | 1.086e-05 | **877** |
-| `bge-small-en-v1.5` | 384 | 12 | CLS | 8.348e-06 | **445** |
-| `bge-base-en-v1.5` | 768 | 12 | CLS | 1.353e-05 | **181** |
-| `bge-large-en-v1.5` | 1024 | 24 | CLS | 8.432e-06 | **52.8** |
+Throughput below is from the **whole-catalogue sweep**
+([`0073`](../tasks/0073-m13-release-benchmarks/TASK.md)) — one session, one
+machine state, one protocol, `--threads 24 --pipeline 4`, mean of three runs,
+contention guard on. It is **end-to-end throughput and not an NPU kernel
+performance claim** (rule 1). Earlier tables here mixed sessions and lane
+counts and were not comparable to themselves.
+
+| `--model` | arch | hidden | layers | pooling | `rel_fro` vs HF | seq/s |
+|---|---|---:|---:|---|---:|---:|
+| `all-MiniLM-L6-v2` | 0 | 384 | 6 | mean | 4.473e-03 | **951** |
+| `bge-small-en-v1.5` | 0 | 384 | 12 | CLS | 3.789e-03 | **494** |
+| `bge-base-en-v1.5` | 0 | 768 | 12 | CLS | 4.297e-03 | **211** |
+| `bge-large-en-v1.5` | 0 | 1024 | 24 | CLS | 3.763e-03 | **60.8** |
+| `nomic-embed-text-v1.5` | **2** | 768 | 12 | mean | 6.119e-03 | **166** |
+| `embeddinggemma-300m` | **1** | 768 | 24 | mean | host-only | ~0.13 |
+
+**Interleaved against the CPU**, one session: 1.85× / 1.60× / 2.49× / 2.47× /
+2.26×, and energy 3.65× / 3.00× / 3.33× / 3.28× / 3.75× better per sequence.
+The caveats are in [`06-performance.md`](06-performance.md) and they matter:
+the CPU side moves ~24% between sessions, so treat a ratio as indicative to
+about ±20%.
+
+**The number that matters is not the ratio.** Those NPU figures were taken with
+torch and ONNX Runtime saturating all twelve cores; measured idle the same
+models give 951 / 494 / 211 / 60.8 / 166 — **within 1.5% on every model.** The
+work is genuinely off the CPU.
+
+`nomic-embed-text-v1.5` was predicted at **150–160 seq/s** before it was
+measured, from one argument — its gated `ffn_up` emits both halves, so it does
+~1.33× bge-base's per-layer GEMM work at the same depth. It landed at **166**,
+so the prior was **4% low**: 211 / 1.33 = 159 against a measured 166. A near
+miss rather than a hit, and recorded as one. `bge-base-en-v1.5` remains **the
+model whose geometry fits this NPU best**.
 
 `bge-base-en-v1.5` was added in [`0051`](../tasks/0051-m9-bge-base-and-in-exe-fetch/TASK.md)
 and is **the model whose geometry fits this NPU best**: head_dim 64, and every
@@ -168,7 +210,7 @@ residual adds, pooling, L2 normalise.
 | wall | message | status |
 |---|---|---|
 | LayerNorm / softmax above 2 columns | `no ShimNOCTile has sufficient DMA capacity` | **Fixable, and the constraint is documented.** A shimNOC DMA has **≤ 6 S2MM channels**, so a flat 32-way join is inexpressible — it must be joined *hierarchically through the mem tiles* (INDEX.md constants). That is exactly what `.split()`/`.join()` does, and it is why GELU now runs at 8 columns. LayerNorm still opens **three** fifos per core and softmax two; neither has been rewritten. [`0027`](../tasks/0027-m7-width-hypothesis/TASK.md) |
-| `hidden ≥ 1536` in the width sweep | `'aie.dma_bd' op Stride 3 exceeds the [1:1048576] range` | **Open.** *Not* the K=1536 BD **size** wall of trap 4 — the exporter already builds `pretiled=True` and it failed anyway. Different field, needs its own investigation |
+| ~~`hidden ≥ 1536` in the width sweep~~ | ~~`'aie.dma_bd' op Stride 3 exceeds the [1:1048576] range`~~ | **CLOSED, and it was worse than a wall.** tasks/0030 fixed the stride by forcing `tb_n_rows = 1` above `m·n_aie_rows·N > 2^20`, so it *builds* — but the fill/drain walk kept stepping by a hardcoded `tb_max_n_rows // 2` and never read the guarded value, so above the threshold it **compiled and returned wrong numbers** (`rel_fro` 7.07e-01, 28/32 row-bands wrong). Never observed because bge-large's N=4096 sits at **exactly** 2^20 and the guard is a strict `>`, so it had never fired in a shipped design. Found and fixed in [`0068`](../tasks/0068-m13-nomic-spike-and-oracle/TASK.md) §6/§6b when nomic's N=6144 crossed it. → [T30](../research/OPEN-THREADS.md) |
 | 8-column design + core trace | `Unable to find a legal routing` | Known. Trace at 2 or 4 columns, throughput at 8 |
 | B reuse in L2 | `no space for this BD` | ObjectFifo depth maps 1:1 to mem-tile BDs; ceiling is 6 tiles at 4 cols, 4 at 8, against a slice needing 24–48. Needs a core-side redesign. [`0010`](../tasks/0010-m5-b-reuse-and-cost-model/TASK.md) |
 
@@ -464,7 +506,9 @@ are rewritten).
    default at `1-cos` 3.4e-04.
 4. **A wider model.** `docs/04-model` already designed for bge-small as a
    drop-in weight swap; **bge-large (h = 1024)** is the interesting one, given
-   §5(b) — but the stride wall at h ≥ 1536 blocks testing much beyond it.
+   §5(b). ~~but the stride wall at h ≥ 1536 blocks testing much beyond it.~~
+   *(Superseded: that wall is gone — see the Known walls table. It was fixed in
+   tasks/0030 and the fix was half-wired until [`0068`](../tasks/0068-m13-nomic-spike-and-oracle/TASK.md).)*
 5. **WordPiece tokenizer**, to close the last gap to a standalone product.
 6. **Attention on the array** (`head_dim = 32` → pad to 64 or fold two heads).
 7. **Energy**, which needs external instrumentation.

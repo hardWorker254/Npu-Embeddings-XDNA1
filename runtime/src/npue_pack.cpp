@@ -28,7 +28,10 @@
 
 #include "npue_pack.hpp"
 
+#include "gemma_tokenizer_gen.hpp"
+
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -285,7 +288,8 @@ public:
     offset_ += pad;
   }
 
-  void write(const std::string &path, const std::string &config_json) const {
+  void write(const std::string &path, const std::string &config_json,
+            uint32_t arch = 0) const {
     std::string js = "{\"config\":" + config_json + ",\"tensors\":[";
     for (size_t i = 0; i < entries_.size(); ++i) {
       const Entry &e = entries_[i];
@@ -314,7 +318,7 @@ public:
     if (!f) throw std::runtime_error("cannot write " + path);
     uint8_t head[64] = {};
     std::memcpy(head, "NPUE", 4);
-    const uint32_t version = 1, arch = 0, flags = 1;   // FLAG_PRETILED
+    const uint32_t version = 1, flags = 1;   // FLAG_PRETILED
     std::memcpy(head + 4, &version, 4);
     std::memcpy(head + 8, &arch, 4);
     std::memcpy(head + 12, &flags, 4);
@@ -391,6 +395,24 @@ static void add_gemm_b(Writer &w, const std::string &name, const Tensor &t,
   const auto tiled = tile_b(m.data(), K, N, tk, tn);
   w.add(name, tiled.data(), tiled.size() * 2, "BF16", "gemm_b", {K, N},
         layout_json, layout_hash);
+}
+
+// Mirror of tools/pack_npue.py's add_gemm_b_host: the [K,N] operand stored
+// PLAIN -- F32, row-major, no tiling. Used only by prepare_model_gemma
+// (arch=1), which has no NPU kernel to pre-tile for (tasks/0064). The
+// checkpoint's nn.Linear weight is [out, in]; transpose to [in, out] = [K, N]
+// so the host does y = x @ W with no runtime transpose, matching add_gemm_b's
+// convention above.
+static void add_gemm_b_host(Writer &w, const std::string &name,
+                            const Tensor &t) {
+  const int64_t N = t.rows(), K = t.cols();     // checkpoint stores [out, in]
+  std::vector<float> m(static_cast<size_t>(K) * N);
+  const float *src = t.f32();
+  for (int64_t r = 0; r < K; ++r)
+    for (int64_t c = 0; c < N; ++c)
+      m[r * N + c] = src[c * K + r];             // transpose to [K, N]
+  w.add(name, m.data(), m.size() * sizeof(float), "F32", "gemm_b_host",
+        {K, N});
 }
 
 Layout gemm_b_layout(int64_t tile_k, int64_t tile_n, int64_t mac_s,
@@ -579,6 +601,601 @@ void prepare_model(const std::string &safetensors, const std::string &vocab,
     std::ostringstream s;
     s << "  packed " << w.count() << " tensors, "
       << (w.data_bytes() / 1e6) << " MB of tensor data";
+    log(s.str());
+  }
+}
+
+// arch=1 mirror of tools/pack_npue.py's pack_gemma() (tasks/0064,
+// tasks/0065). Deliberately NOT threaded through prepare_model() above --
+// 4 RMSNorms/layer (not 2 LayerNorms), MQA, q_norm/k_norm, per-layer RoPE
+// base, separate gate/up GeGLU matrices, two post-pool Dense heads, no
+// biases anywhere, no token_type embedding, no position table -- different
+// enough that sharing code would mean threading Gemma-only branches through
+// every step of the BERT path. Every GEMM operand is stored PLAIN (F32,
+// row-major, no tiling): there is no NPU kernel for this arch, so nothing
+// here ever becomes a DMA descriptor.
+void prepare_model_gemma(const std::string &model_dir, const std::string &out,
+                         const std::string &source_repo,
+                         void (*log)(const std::string &)) {
+  const auto st_buf = slurp(model_dir + "/model.safetensors");
+  const auto src = read_safetensors(st_buf);
+  Sha256 sh;
+  sh.update(st_buf.data(), st_buf.size());
+  const std::string sha = sh.hex();
+
+  auto get = [&](const std::string &n) -> const Tensor & {
+    auto it = src.find(n);
+    if (it == src.end())
+      throw std::runtime_error("checkpoint has no tensor '" + n + "'");
+    if (it->second.dtype != "F32")
+      throw std::runtime_error("checkpoint tensor '" + n + "' is " +
+                               it->second.dtype + "; this packer reads F32");
+    return it->second;
+  };
+  auto get_from = [](const std::map<std::string, Tensor> &m,
+                     const std::string &n) -> const Tensor & {
+    auto it = m.find(n);
+    if (it == m.end())
+      throw std::runtime_error("checkpoint has no tensor '" + n + "'");
+    if (it->second.dtype != "F32")
+      throw std::runtime_error("checkpoint tensor '" + n + "' is " +
+                               it->second.dtype + "; this packer reads F32");
+    return it->second;
+  };
+
+  const auto cfg_buf = slurp(model_dir + "/config.json");
+  const std::string cfg(reinterpret_cast<const char *>(cfg_buf.data()),
+                        cfg_buf.size());
+
+  auto cfg_int = [&](const char *key) -> int64_t {
+    const std::string k = std::string("\"") + key + "\"";
+    const size_t i = cfg.find(k);
+    if (i == std::string::npos)
+      throw std::runtime_error(std::string("config.json has no ") + key);
+    return std::stoll(cfg.substr(cfg.find(':', i) + 1));
+  };
+  auto cfg_str = [&](const char *key) -> std::string {
+    const std::string k = std::string("\"") + key + "\"";
+    const size_t i = cfg.find(k);
+    if (i == std::string::npos)
+      throw std::runtime_error(std::string("config.json has no ") + key);
+    const size_t c = cfg.find(':', i) + 1;
+    const size_t q1 = cfg.find('"', c);
+    const size_t q2 = cfg.find('"', q1 + 1);
+    return cfg.substr(q1 + 1, q2 - q1 - 1);
+  };
+  // The value's EXACT literal text, copied verbatim rather than reparsed and
+  // reformatted. json.dumps(json.loads(x)) only reproduces x byte-for-byte
+  // when x is already Python's canonical shortest-round-trip form -- true of
+  // every numeric field this reads (checked directly against this
+  // checkpoint's config.json: "1e-06", "1000000.0", "10000.0", "512", "256",
+  // "262144", "2048" all round-trip unchanged through Python's json module).
+  // Reformatting these ourselves would risk drifting from Python's float
+  // printer for zero benefit -- the source text already IS the answer.
+  auto cfg_raw = [&](const char *key) -> std::string {
+    const std::string k = std::string("\"") + key + "\"";
+    const size_t i = cfg.find(k);
+    if (i == std::string::npos)
+      throw std::runtime_error(std::string("config.json has no ") + key);
+    size_t c = cfg.find(':', i) + 1;
+    while (c < cfg.size() && std::isspace(static_cast<unsigned char>(cfg[c])))
+      ++c;
+    size_t e = c;
+    while (e < cfg.size() && cfg[e] != ',' && cfg[e] != '}' &&
+          cfg[e] != '\n' && cfg[e] != '\r')
+      ++e;
+    while (e > c && std::isspace(static_cast<unsigned char>(cfg[e - 1])))
+      --e;
+    return cfg.substr(c, e - c);
+  };
+
+  const std::string model_type = cfg_str("model_type");
+  const int64_t L = cfg_int("num_hidden_layers");
+  const int64_t hidden = cfg_int("hidden_size");
+  const int64_t heads = cfg_int("num_attention_heads");
+  const int64_t kv_heads = cfg_int("num_key_value_heads");
+  const int64_t head_dim = cfg_int("head_dim");
+  const int64_t inter = cfg_int("intermediate_size");
+  // cfg.get("_sliding_window_pattern", 6) -- default 6 if the checkpoint
+  // does not carry it.
+  int64_t swp = 6;
+  if (cfg.find("\"_sliding_window_pattern\"") != std::string::npos)
+    swp = cfg_int("_sliding_window_pattern");
+
+  const auto d2_buf = slurp(model_dir + "/2_Dense/model.safetensors");
+  const auto d2 = read_safetensors(d2_buf);
+  const auto d3_buf = slurp(model_dir + "/3_Dense/model.safetensors");
+  const auto d3 = read_safetensors(d3_buf);
+  const Tensor &d2w = get_from(d2, "linear.weight");
+  const Tensor &d3w = get_from(d3, "linear.weight");
+  const int64_t dense_hidden = d2w.shape[0];
+
+  if (log) {
+    std::ostringstream s;
+    s << "packing " << model_dir << " -> " << out
+      << "  (arch=gemma3, HOST-only GEMMs)\n"
+      << "  hidden=" << hidden << " heads=" << heads
+      << " kv_heads=" << kv_heads << " head_dim=" << head_dim
+      << " layers=" << L << " inter=" << inter;
+    log(s.str());
+  }
+
+  // Exact key order and formatting of tools/pack_npue.py's pack_gemma()
+  // config dict -- json.dumps(..., separators=(",", ":")) preserves
+  // insertion order, and this must match it byte for byte.
+  std::string cj;
+  cj += "{\"arch\":\"gemma3_mqa_rope_geglu\"";
+  cj += ",\"model_type\":\"" + model_type + "\"";
+  cj += ",\"source_repo\":\"" + source_repo + "\"";
+  cj += ",\"source_sha256\":\"" + sha + "\"";
+  cj += ",\"num_layers\":" + std::to_string(L);
+  cj += ",\"hidden\":" + std::to_string(hidden);
+  cj += ",\"num_heads\":" + std::to_string(heads);
+  cj += ",\"num_key_value_heads\":" + std::to_string(kv_heads);
+  cj += ",\"head_dim\":" + std::to_string(head_dim);
+  cj += ",\"intermediate\":" + std::to_string(inter);
+  cj += ",\"dense_hidden\":" + std::to_string(dense_hidden);
+  cj += ",\"rms_norm_eps\":" + cfg_raw("rms_norm_eps");
+  cj += ",\"rope_theta\":" + cfg_raw("rope_theta");
+  cj += ",\"rope_local_base_freq\":" + cfg_raw("rope_local_base_freq");
+  cj += ",\"sliding_window\":" + cfg_raw("sliding_window");
+  cj += ",\"sliding_window_pattern\":" + std::to_string(swp);
+  cj += ",\"query_pre_attn_scalar\":" + cfg_raw("query_pre_attn_scalar");
+  cj += ",\"vocab_size\":" + cfg_raw("vocab_size");
+  cj += ",\"max_seq_len\":" + cfg_raw("max_position_embeddings");
+  cj += ",\"pooling\":\"mean_include_prompt\",\"l2_normalize\":true";
+  cj += ",\"activation\":\"gelu_pytorch_tanh\"";
+  cj += ",\"attention_bias\":false,\"dense_bias\":false";
+  cj += ",\"not_implemented\":[\"sliding-window mask (exact for "
+        "seq_len<=512, see reference/encoder_gemma.py's file header)\"]}";
+
+  Writer w;
+  auto add_f32 = [&](const std::string &name, const Tensor &t,
+                     const char *role, const std::vector<int64_t> &shape) {
+    w.add(name, t.data, static_cast<size_t>(t.count()) * 4, "F32", role,
+          shape);
+  };
+
+  const Tensor &embed = get("embed_tokens.weight");
+  add_f32("embed_tokens.weight", embed, "embedding", embed.shape);
+  const Tensor &normw = get("norm.weight");
+  add_f32("norm.weight", normw, "layernorm", normw.shape);
+
+  {
+    // Prefer an already-cached table on disk (byte-identical either way it
+    // got there -- Python or this generator, tasks/0067's verification
+    // confirms the two agree). Otherwise generate it here, in C++, from the
+    // checkpoint's own tokenizer.json + config_sentence_transformers.json --
+    // and write it out to the same cache path, so a second pack of this
+    // model is as fast as the "have" case and the file is inspectable on
+    // disk exactly like the Python tool's output always was. This closes
+    // the one gap tasks/0066 left open: a fresh clone that fetches
+    // EmbeddingGemma had no way to produce gemma_tokenizer.bin without
+    // manually running the Python-only build tool.
+    const std::string tok_path = model_dir + "/gemma_tokenizer.bin";
+    std::ifstream tf(tok_path, std::ios::binary);
+    std::vector<uint8_t> tb;
+    bool generated = false;
+    if (tf.good()) {
+      tf.close();
+      tb = slurp(tok_path);
+    } else {
+      tb = generate_gemma_tokenizer_table(
+          model_dir + "/tokenizer.json",
+          model_dir + "/config_sentence_transformers.json");
+      generated = true;
+      std::ofstream of(tok_path, std::ios::binary);
+      if (!of)
+        throw std::runtime_error("cannot write " + tok_path);
+      of.write(reinterpret_cast<const char *>(tb.data()),
+              static_cast<std::streamsize>(tb.size()));
+      if (!of)
+        throw std::runtime_error("error writing " + tok_path);
+    }
+    w.add("tokenizer.gemma_table", tb.data(), tb.size(), "U8", "tokenizer",
+          {static_cast<int64_t>(tb.size())});
+    if (log) {
+      std::ostringstream s;
+      if (generated)
+        s << "  generated tokenizer.gemma_table (no cached "
+             "gemma_tokenizer.bin found)  " << (tb.size() / 1e6) << " MB";
+      else
+        s << "  tokenizer.gemma_table  " << (tb.size() / 1e6) << " MB";
+      log(s.str());
+    }
+  }
+
+  for (int64_t i = 0; i < L; ++i) {
+    const std::string p = "layers." + std::to_string(i) + ".";
+    const std::string sa = p + "self_attn.";
+    const std::string tag = "layer." + std::to_string(i) + ".";
+
+    add_gemm_b_host(w, tag + "q_proj", get(sa + "q_proj.weight"));
+    add_gemm_b_host(w, tag + "k_proj", get(sa + "k_proj.weight"));
+    add_gemm_b_host(w, tag + "v_proj", get(sa + "v_proj.weight"));
+    {
+      const Tensor &qn = get(sa + "q_norm.weight");
+      add_f32(tag + "q_norm.weight", qn, "layernorm", qn.shape);
+    }
+    {
+      const Tensor &kn = get(sa + "k_norm.weight");
+      add_f32(tag + "k_norm.weight", kn, "layernorm", kn.shape);
+    }
+    add_gemm_b_host(w, tag + "o_proj", get(sa + "o_proj.weight"));
+
+    for (const char *ln : {"input_layernorm", "post_attention_layernorm",
+                           "pre_feedforward_layernorm",
+                           "post_feedforward_layernorm"}) {
+      const Tensor &t = get(p + ln + ".weight");
+      add_f32(tag + ln + ".weight", t, "layernorm", t.shape);
+    }
+
+    const std::string mp = p + "mlp.";
+    add_gemm_b_host(w, tag + "gate_proj", get(mp + "gate_proj.weight"));
+    add_gemm_b_host(w, tag + "up_proj", get(mp + "up_proj.weight"));
+    add_gemm_b_host(w, tag + "down_proj", get(mp + "down_proj.weight"));
+  }
+
+  add_gemm_b_host(w, "dense2.weight", d2w);
+  add_gemm_b_host(w, "dense3.weight", d3w);
+
+  w.write(out, cj, /*arch=*/1);
+  if (log) {
+    std::ostringstream s;
+    s << "\n  tensors    : " << w.count()
+      << "\n  data       : " << (w.data_bytes() / 1e6) << " MB"
+      << "\n  source     : " << sha.substr(0, 16) << "...";
+    log(s.str());
+  }
+}
+
+// nomic's gated FFN: fc11 (untouched "up") and fc12 (SiLU "gate") are two
+// SEPARATE [inter,hidden] checkpoint tensors (nn.Linear [out,in]), fused
+// into ONE [hidden, 2*inter] ffn_up operand along the N axis -- mirrors
+// tools/pack_npue.py's pack_nomic():
+//   up = fc11.weight.T; gate = fc12.weight.T; ffn_up = concat([up,gate],1)
+// add_gemm_b() above only takes one source tensor, so this transposes both
+// into the SAME [K,N] buffer at their own column offset, then tiles once --
+// the same "manual assembly, then tile_b, then w.add" shape prepare_model()
+// uses inline for BERT's 3-way qkv fusion, just for 2 sources instead of 3.
+static void add_gemm_b_concat2(Writer &w, const std::string &name,
+                               const Tensor &a, const Tensor &b,
+                               int64_t tk, int64_t tn,
+                               const std::string &layout_json,
+                               const std::string &layout_hash) {
+  const int64_t K = a.cols();               // both share `hidden` as `in`
+  if (b.cols() != K)
+    throw std::runtime_error(name + ": fc11/fc12 disagree on `in` dim");
+  const int64_t Na = a.rows(), Nb = b.rows();
+  const int64_t N = Na + Nb;
+  std::vector<float> m(static_cast<size_t>(K) * N);
+  const float *sa = a.f32(), *sb = b.f32();
+  for (int64_t r = 0; r < K; ++r) {
+    for (int64_t c = 0; c < Na; ++c) m[r * N + c] = sa[c * K + r];
+    for (int64_t c = 0; c < Nb; ++c) m[r * N + Na + c] = sb[c * K + r];
+  }
+  const auto tiled = tile_b(m.data(), K, N, tk, tn);
+  w.add(name, tiled.data(), tiled.size() * 2, "BF16", "gemm_b", {K, N},
+        layout_json, layout_hash);
+}
+
+// Python's str.splitlines() count for plain-LF ASCII text (vocab.txt has no
+// CR and no exotic Unicode line separators): one line per '\n', plus a final
+// unterminated line if the file does not end with one. Matches
+// tools/pack_npue.py's `len(vocab_path.read_bytes().decode("utf-8")
+// .splitlines())` for this specific input shape -- not a general splitlines
+// reimplementation.
+static int64_t count_lines(const std::vector<uint8_t> &b) {
+  if (b.empty()) return 0;
+  int64_t n = 0;
+  for (uint8_t c : b) if (c == '\n') ++n;
+  if (b.back() != '\n') ++n;
+  return n;
+}
+
+// arch=2 mirror of tools/pack_npue.py's pack_nomic() (tasks/0069, 0070,
+// 0071). See npue_pack.hpp for the departures from prepare_model() above.
+// Every architectural fact asserted below was settled EMPIRICALLY against
+// the real checkpoint in tasks/0068 -- this function only implements that
+// already-settled architecture and asserts the config facts it depends on,
+// so a checkpoint that silently changed underneath it refuses to pack
+// rather than packing wrong (same discipline as pack_nomic()'s docstring).
+void prepare_model_nomic(const std::string &model_dir,
+                         const std::string &pooling,
+                         const std::string &source_repo,
+                         const std::string &out,
+                         const std::string &layout_json,
+                         const std::string &layout_hash,
+                         int64_t tile_k, int64_t tile_n, int64_t max_seq,
+                         void (*log)(const std::string &)) {
+  const auto st_buf = slurp(model_dir + "/model.safetensors");
+  const auto src = read_safetensors(st_buf);
+  Sha256 sh;
+  sh.update(st_buf.data(), st_buf.size());
+  const std::string sha = sh.hex();
+
+  auto get = [&](const std::string &n) -> const Tensor & {
+    auto it = src.find(n);
+    if (it == src.end())
+      throw std::runtime_error("checkpoint has no tensor '" + n + "'");
+    if (it->second.dtype != "F32")
+      throw std::runtime_error("checkpoint tensor '" + n + "' is " +
+                               it->second.dtype + "; this packer reads F32");
+    return it->second;
+  };
+
+  const auto cfg_buf = slurp(model_dir + "/config.json");
+  const std::string cfg(reinterpret_cast<const char *>(cfg_buf.data()),
+                        cfg_buf.size());
+  auto cfg_int = [&](const char *key) -> int64_t {
+    const std::string k = std::string("\"") + key + "\"";
+    const size_t i = cfg.find(k);
+    if (i == std::string::npos)
+      throw std::runtime_error(std::string("config.json has no ") + key);
+    return std::stoll(cfg.substr(cfg.find(':', i) + 1));
+  };
+  auto cfg_str = [&](const char *key) -> std::string {
+    const std::string k = std::string("\"") + key + "\"";
+    const size_t i = cfg.find(k);
+    if (i == std::string::npos)
+      throw std::runtime_error(std::string("config.json has no ") + key);
+    const size_t c = cfg.find(':', i) + 1;
+    const size_t q1 = cfg.find('"', c);
+    const size_t q2 = cfg.find('"', q1 + 1);
+    return cfg.substr(q1 + 1, q2 - q1 - 1);
+  };
+  // The value's EXACT literal text, verbatim -- see prepare_model_gemma()'s
+  // cfg_raw for why this is safe rather than reparsing and reformatting:
+  // both "layer_norm_eps" (1e-12) and "rotary_emb_base" (1000) round-trip
+  // unchanged through Python's json module, checked directly against this
+  // checkpoint's config.json.
+  auto cfg_raw = [&](const char *key) -> std::string {
+    const std::string k = std::string("\"") + key + "\"";
+    const size_t i = cfg.find(k);
+    if (i == std::string::npos)
+      throw std::runtime_error(std::string("config.json has no ") + key);
+    size_t c = cfg.find(':', i) + 1;
+    while (c < cfg.size() && std::isspace(static_cast<unsigned char>(cfg[c])))
+      ++c;
+    size_t e = c;
+    while (e < cfg.size() && cfg[e] != ',' && cfg[e] != '}' &&
+          cfg[e] != '\n' && cfg[e] != '\r')
+      ++e;
+    while (e > c && std::isspace(static_cast<unsigned char>(cfg[e - 1])))
+      --e;
+    return cfg.substr(c, e - c);
+  };
+  auto cfg_is_false = [&](const char *key) { return cfg_raw(key) == "false"; };
+
+  const std::string model_type = cfg_str("model_type");
+  const int64_t L = cfg_int("num_hidden_layers");
+  const int64_t H = cfg_int("num_attention_heads");
+  const int64_t hidden = cfg_int("hidden_size");
+  const int64_t head_dim = cfg_int("head_dim");
+  const int64_t inter = cfg_int("intermediate_size");
+  const int64_t vocab_size = cfg_int("vocab_size");
+  const int64_t type_vocab = cfg_int("type_vocab_size");
+
+  if (hidden != H * head_dim)
+    throw std::runtime_error("hidden=" + std::to_string(hidden) +
+                             " != num_heads*head_dim");
+  if (head_dim % 2)
+    throw std::runtime_error("head_dim is odd -- RoPE cannot half-split it "
+                             "into rotation pairs");
+
+  // rope_theta: ASSERT, never default -- tasks/0068 measured a wrong theta
+  // subtle enough to slip past a loose gate. Compared as a NUMBER (not text)
+  // so "1000" and "1000.0" are both accepted the way Python's `!= 1000`
+  // comparison is type-agnostic; the literal text used in the OUTPUT config
+  // below is still cfg_raw's verbatim copy, whatever its exact spelling.
+  const std::string theta_raw = cfg_raw("rotary_emb_base");
+  if (std::stod(theta_raw) != 1000.0)
+    throw std::runtime_error("rotary_emb_base=" + theta_raw + ", expected "
+                             "1000 -- refusing to pack against an unverified "
+                             "RoPE base");
+
+  // layer_norm_epsilon and layer_norm_eps are two keys for the same value in
+  // this checkpoint's config.json -- read one, assert they agree.
+  const std::string eps_a = cfg_raw("layer_norm_epsilon");
+  const std::string eps_b = cfg_raw("layer_norm_eps");
+  if (std::stod(eps_a) != std::stod(eps_b))
+    throw std::runtime_error("layer_norm_epsilon (" + eps_a +
+                             ") != layer_norm_eps (" + eps_b + ")");
+
+  for (const char *flag : {"qkv_proj_bias", "mlp_fc1_bias", "mlp_fc2_bias"})
+    if (!cfg_is_false(flag))
+      throw std::runtime_error(std::string(flag) + "=" + cfg_raw(flag) +
+                               ", expected false -- this packer zero-fills "
+                               "every bias on the assumption nomic has none");
+  if (!cfg_is_false("prenorm"))
+    throw std::runtime_error("prenorm=" + cfg_raw("prenorm") + ", expected "
+                             "false (post-LN block order)");
+  if (cfg_str("activation_function") != "swiglu" ||
+      cfg_str("hidden_act") != "silu")
+    throw std::runtime_error("expected activation_function=swiglu, "
+                             "hidden_act=silu");
+  if (!cfg_is_false("rotary_emb_interleaved"))
+    throw std::runtime_error("rotary_emb_interleaved=" +
+                             cfg_raw("rotary_emb_interleaved") + " -- this "
+                             "packer/runtime assumes NeoX-style RoPE");
+  if (std::stod(cfg_raw("rotary_emb_fraction")) != 1.0)
+    throw std::runtime_error("rotary_emb_fraction=" +
+                             cfg_raw("rotary_emb_fraction") + ", expected "
+                             "1.0 (whole head rotated)");
+
+  const float scale = static_cast<float>(1.0 / std::sqrt(
+      static_cast<double>(head_dim)));
+
+  if (log) {
+    std::ostringstream s;
+    s << "packing " << model_dir << " -> " << out
+      << "  (arch=nomic_bert_rope_swiglu)\n"
+      << "  hidden=" << hidden << " heads=" << H << " head_dim=" << head_dim
+      << " layers=" << L << " inter=" << inter << " rope_theta=" << theta_raw;
+    log(s.str());
+  }
+
+  // How many embedding rows the tokenizer can actually reach -- nomic pads
+  // vocab_size up to a multiple of 64, and those extra rows are not zero.
+  int64_t n_reachable = 0;
+  std::vector<uint8_t> vb;
+  {
+    std::ifstream vf(model_dir + "/vocab.txt", std::ios::binary);
+    if (vf.good()) {
+      vf.close();
+      vb = slurp(model_dir + "/vocab.txt");
+      n_reachable = count_lines(vb);
+    }
+  }
+
+  // Exact key order of tools/pack_npue.py's pack_nomic() config dict --
+  // json.dumps(..., separators=(",", ":")) preserves insertion order, and
+  // this must match it byte for byte (tools/verify_pack_parity.py's gate).
+  std::string cj;
+  cj += "{\"arch\":\"nomic_bert_rope_swiglu\"";
+  cj += ",\"model_type\":\"" + model_type + "\"";
+  cj += ",\"source_repo\":\"" + source_repo + "\"";
+  cj += ",\"source_sha256\":\"" + sha + "\"";
+  cj += ",\"num_layers\":" + std::to_string(L);
+  cj += ",\"num_heads\":" + std::to_string(H);
+  cj += ",\"hidden\":" + std::to_string(hidden);
+  cj += ",\"head_dim\":" + std::to_string(head_dim);
+  cj += ",\"intermediate\":" + std::to_string(inter);
+  cj += ",\"layer_norm_eps\":" + eps_b;
+  cj += ",\"vocab_size\":" + std::to_string(vocab_size);
+  cj += ",\"max_seq_len\":" + std::to_string(max_seq);
+  cj += ",\"pooling\":\"" + pooling + "\",\"l2_normalize\":true";
+  cj += ",\"activation\":\"silu\",\"gated_ffn\":true";
+  cj += ",\"swiglu_halves\":\"fc11_up|fc12_gate\"";
+  cj += ",\"position_embedding_type\":\"rope\"";
+  cj += ",\"rope_theta\":" + theta_raw;
+  cj += ",\"attention_bias\":false,\"mlp_bias\":false";
+  cj += ",\"tile_k\":" + std::to_string(tile_k) +
+        ",\"tile_n\":" + std::to_string(tile_n) +
+        ",\"mac_s\":" + std::to_string(kMacS) +
+        ",\"mac_t\":" + std::to_string(kMacT);
+  cj += ",\"prompts\":{\"search_document\":\"search_document: \","
+        "\"search_query\":\"search_query: \","
+        "\"clustering\":\"clustering: \","
+        "\"classification\":\"classification: \"}";
+  cj += ",\"prompt_default\":\"search_document\"";
+  cj += ",\"prompts_source\":\"npuembeddings, NOT from the checkpoint -- "
+        "config_sentence_transformers.json carries no 'prompts' dict for "
+        "this checkpoint, so presenting this table as the model's own "
+        "would be a lie in a file other tools read. Same precedent as "
+        "tools/gen_gemma_tokenizer_table.py:63-77.\"";
+  cj += ",\"l2_normalize_note\":\"sentence-transformers does NOT "
+        "L2-normalize this model (measured output norm 20.93, tasks/0068 "
+        "sec 5b) -- l2_normalize:true here matches THIS RUNTIME's own "
+        "hardcoded behaviour (main.cpp g_l2_normalize) and nomic's own "
+        "documented usage (F.normalize), not sentence-transformers' "
+        "default pipeline for this particular model.\"";
+  cj += ",\"fusions\":{\"qkv_fused\":true,\"transposed_to_kn\":true,"
+        "\"qk_scale_folded_into_q\":true,\"gemm_operands_bf16\":true,"
+        "\"biases_and_layernorm_fp32\":true,"
+        "\"gated_ffn_fused_fc11_fc12\":true,"
+        "\"position_embeddings_zeroed_rope_instead\":true}";
+  cj += ",\"not_implemented\":[\"Matryoshka truncation (layer_norm(768) -> "
+        "slice -> normalize is a different post-processing chain, not "
+        "just a shorter vector)\",\"vocab rows " +
+        std::to_string(n_reachable) + "-" + std::to_string(vocab_size - 1) +
+        " are pad_vocab_size_multiple padding: non-zero but unreachable "
+        "from the tokenizer (max id " + std::to_string(n_reachable - 1) +
+        "), packed only so vocab_size and the tensor agree\"]}";
+
+  Writer w;
+  auto add_f32 = [&](const std::string &name, const Tensor &t,
+                     const char *role, const std::vector<int64_t> &shape) {
+    w.add(name, t.data, static_cast<size_t>(t.count()) * 4, "F32", role,
+          shape);
+  };
+  auto add_zero_bias = [&](const std::string &name, int64_t n) {
+    std::vector<float> z(static_cast<size_t>(n), 0.f);
+    w.add(name, z.data(), z.size() * 4, "F32", "bias", {n});
+  };
+
+  // -- embeddings: SAME order as prepare_model() above, including the odd
+  // ln.weight -> tokenizer.vocab -> ln.bias interleaving, which is
+  // load-bearing for byte parity with tools/pack_npue.py. -----------------
+  add_f32("embeddings.word", get("embeddings.word_embeddings.weight"),
+          "embedding", {vocab_size, hidden});
+  // nomic has NO position table -- RoPE is computed inside attention
+  // instead. Zero-filled rather than omitted: Encoder::stage_all() and the
+  // --embed path both dereference "embeddings.position" unconditionally, so
+  // a zero tensor of the right shape is exact (adds nothing) and keeps that
+  // read path untouched.
+  {
+    std::vector<float> zpos(static_cast<size_t>(max_seq) * hidden, 0.f);
+    w.add("embeddings.position", zpos.data(), zpos.size() * 4, "F32",
+          "embedding", {max_seq, hidden});
+  }
+  add_f32("embeddings.token_type", get("embeddings.token_type_embeddings.weight"),
+          "embedding", {type_vocab, hidden});
+  // emb_ln lives at the TOP LEVEL upstream (not embeddings.LayerNorm, as in
+  // BERT).
+  add_f32("embeddings.ln.weight", get("emb_ln.weight"), "layernorm",
+          {hidden});
+  if (!vb.empty()) {
+    w.add("tokenizer.vocab", vb.data(), vb.size(), "U8", "tokenizer",
+          {static_cast<int64_t>(vb.size())});
+    if (log) {
+      std::ostringstream s;
+      s << "  tokenizer.vocab   " << (vb.size() / 1024.0) << " KB";
+      log(s.str());
+    }
+  } else if (log) {
+    log("  WARNING: " + model_dir + "/vocab.txt not found -- .npue will "
+                                    "have no vocab");
+  }
+  add_f32("embeddings.ln.bias", get("emb_ln.bias"), "layernorm", {hidden});
+
+  for (int64_t i = 0; i < L; ++i) {
+    const std::string p = "encoder.layers." + std::to_string(i) + ".";
+    const std::string attn = p + "attn.";
+    const std::string mp = p + "mlp.";
+    const std::string tag = "layer." + std::to_string(i) + ".";
+
+    // Fused upstream already: Wqkv is [2304,768] three-major
+    // [Q(768)|K(768)|V(768)] -- tasks/0068 sec 5 Wqkv row-order check.
+    // 1/sqrt(head_dim) folded into the Q block ONLY (the first `hidden`
+    // columns of the transposed [768,2304] operand) -- legal here because
+    // RoPE is linear in q: rope(s*q) = s*rope(q), so folding the scale
+    // before the GEMM and before RoPE is exact (tools/verify_npue_nomic.py
+    // check E). No qkv bias exists to fold.
+    add_gemm_b(w, tag + "qkv", get(attn + "Wqkv.weight"), tile_k, tile_n,
+               layout_json, layout_hash, scale, hidden);
+    add_zero_bias(tag + "qkv.bias", 3 * hidden);
+
+    add_gemm_b(w, tag + "attn_out", get(attn + "out_proj.weight"), tile_k,
+               tile_n, layout_json, layout_hash);
+    add_zero_bias(tag + "attn_out.bias", hidden);
+    add_f32(tag + "ln1.weight", get(p + "norm1.weight"), "layernorm",
+            {hidden});
+    add_f32(tag + "ln1.bias", get(p + "norm1.bias"), "layernorm", {hidden});
+
+    // Gated ffn_up: [fc11 (up, untouched) | fc12 (gate, gets SiLU)] fused
+    // along N. Runtime computes out = lo * silu(hi) -- see
+    // config["swiglu_halves"]. ONE GEMM, so the array still sees four GEMMs
+    // per layer, not five.
+    add_gemm_b_concat2(w, tag + "ffn_up", get(mp + "fc11.weight"),
+                       get(mp + "fc12.weight"), tile_k, tile_n, layout_json,
+                       layout_hash);
+    add_zero_bias(tag + "ffn_up.bias", 2 * inter);
+
+    add_gemm_b(w, tag + "ffn_down", get(mp + "fc2.weight"), tile_k, tile_n,
+               layout_json, layout_hash);
+    add_zero_bias(tag + "ffn_down.bias", hidden);
+    add_f32(tag + "ln2.weight", get(p + "norm2.weight"), "layernorm",
+            {hidden});
+    add_f32(tag + "ln2.bias", get(p + "norm2.bias"), "layernorm", {hidden});
+  }
+
+  w.write(out, cj, /*arch=*/2);
+  if (log) {
+    std::ostringstream s;
+    s << "\n  tensors    : " << w.count()
+      << "\n  data       : " << (w.data_bytes() / 1e6) << " MB"
+      << "\n  source     : " << sha.substr(0, 16) << "...";
     log(s.str());
   }
 }

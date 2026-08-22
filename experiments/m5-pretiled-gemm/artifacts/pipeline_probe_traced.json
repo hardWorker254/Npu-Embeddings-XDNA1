@@ -1,0 +1,10 @@
+{
+  "M": 128,
+  "K": 64,
+  "N": 48,
+  "finite": true,
+  "rel_frobenius": 0.000905184831407403,
+  "worst_abs": 0.00013026709541615056,
+  "correctness_pass": true,
+  "trace": "no-events"
+}

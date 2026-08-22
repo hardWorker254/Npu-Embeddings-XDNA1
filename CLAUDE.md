@@ -74,7 +74,7 @@ cd C:\dev\mlir-aie
 |---|---|
 | NPU | Ryzen AI 9 HX 370, Strix Point, **XDNA2 / AIE2P / npu2**, 8 cols × 4 rows = 32 tiles |
 | Target | **`aie2p`**, `NPU2=1` (set by `iron_env.ps1`) |
-| IRON | `C:\dev\mlir-aie\ironenv` — mlir-aie 1.3.4, Peano 21.0.0, **Python 3.13.15** |
+| IRON | `C:\dev\mlir-aie\ironenv` — mlir-aie 1.4.x (tracks upstream `main`, currently `1.4.2.dev16+g7e00b57`; wheel-based install, not a source build — see [`.claude/skills/update-mlir-aie`](.claude/skills/update-mlir-aie/SKILL.md) before touching this), Peano 21.0.0.2026080301, **Python 3.13.15** |
 | XRT | **`C:\Xilinx\XRT`** (2.21.0) — *not* `C:\Program Files\...` |
 | Compiler | **Peano only.** No `xchesscc` (needs Vitis, no Windows build) |
 | MSVC | VS Community 2026, toolset 14.51; cmake/ninja/clang on PATH |
@@ -250,6 +250,227 @@ silent.
    → [`docs/05-measurement/`](docs/05-measurement/README.md)
 
 ## Current state
+
+**Update 2026-08-21 (tasks/0068–0070): a FIFTH model — nomic-embed-text-v1.5,
+Apache-2.0 — is the first genuinely NEW architecture running ON THE ARRAY, and
+getting there found a silent correctness bug every shipped model sat one step
+from.** → [`research/OPEN-THREADS.md`](research/OPEN-THREADS.md) T30, T31
+(answered), T32 (open)
+
+- **`arch=2` = RoPE + gated SwiGLU, on the NPU.** This is the model
+  [`0051`](tasks/0051-m9-bge-base-and-in-exe-fetch/TASK.md) rejected by name for
+  v1 and `docs/04-model/README.md` filed as *"right complexity for v2"*. Picked
+  over `e5-base`/`gte-base`/`arctic-embed-m` (all geometrically identical to
+  bge-base, so all catalogue rows and nothing more) because it is the first new
+  architecture that **fits the array**: `head_dim 64`, every N a multiple of
+  384, K set `{768, 3072}`. Contrast arch=1 (Gemma), which is host-only because
+  MQA's `head_dim 256` floors `tile_n` at 16. Hardware `1-cos` **2.599e-05**,
+  end-to-end **2.401e-05**, top-10 neighbour overlap **1.0000** — in family with
+  bge-base's 2.613e-05.
+- **The architecture was settled by RUNNING it, not by reading a model card.**
+  Three questions, each with a discriminating control separating by ~7 orders of
+  magnitude: post-LN (2.401e-07 vs pre-LN 5.031e+00); **`out = fc11(x) *
+  silu(fc12(x))`** — SiLU on **fc12** (1.636e-07 vs swapped 4.022e+00);
+  `mlp.norm` is `Identity()`. RoPE theta is **1000**, not 10000 — and note it is
+  the one wrong reading subtle enough to slip a loose gate (9.2e-02 where every
+  other wrong reading was 0.5–5.0), so it is asserted, never inferred.
+  The numpy oracle lands at `1-cos` **3.573e-13**, tighter than this project's
+  own BERT oracle, gated against two independent implementations that had to
+  agree with each other first.
+- **The packer emits arch-0 tensor NAMES on purpose**, so `stage_all()` and the
+  whole dispatch path are free; `fc11`+`fc12` fuse into one `[768, 6144]`
+  `ffn_up` so the array still sees four GEMMs per layer. Biases and the position
+  table are **zero-filled** (nomic has neither) — exact, and cheaper than
+  nullable branches in the hot path — with the verifier asserting they are zero
+  *and* that the same check finds them non-zero in an arch=0 container.
+- **THE BUG: the C-drain guard has never fired in a shipped design, and half of
+  it was wrong.** `gemm_pretiled.py` guards the DMA stride above
+  `m·n_aie_rows·N > 2^20`; `C_tiles` honoured the guarded `tb_n_rows` while the
+  fill loop computed its own from a hardcoded `tb_max_n_rows // 2`. Above the
+  threshold a design **compiles and returns wrong numbers** (`rel_fro`
+  7.07e-01). **bge-large's production N=4096 is EXACTLY 2^20 and the test is a
+  strict `>`** — the file's own comment records that near-miss without drawing
+  the conclusion. Measuring *at* a boundary never exercises what lies beyond it.
+  Fixed; N=6144 goes 7.076e-01 → **3.283e-07**, below-threshold shapes
+  reproduce, xclbins differ by 74 bytes. **This retires
+  `docs/CURRENT_STATUS.md`'s `hidden ≥ 1536` "build wall"** — it was never a
+  build wall after 0030, it was a silent wrong answer.
+- **`design_fits()` matched on K alone** and nomic's K set is *identical* to
+  bge-base's while its `ffn_up` N is not, so `pick_artifacts` would have handed
+  it a design computing half the FFN width. Now matches the streams'
+  `(op, K, N)`; falsification test recorded. It also exposed that
+  `print_catalog` reported **Gemma "ready"** against any hidden-768 design
+  despite arch=1 having no NPU kernel.
+- **A fail-open caught before commit, and one caught only by hardware.** With
+  container and design in place `list` said "ready" for nomic — true about
+  designs, wrong about outcomes, since `Encoder::run()` is a BERT forward pass
+  and arch=2 reuses BERT's names *deliberately*. `set_model_shape()` now refuses
+  on any unimplemented architecture (exit 2), written as a **whitelist**.
+  Separately, an in-place threaded `swiglu_cpu()` raced across `par()` chunks;
+  **the golden gate PASSED it** and a 13-distinct-sentence e2e run failed at
+  `1-cos` 0.44. That is now **T32**: the golden fixtures tile ONE batch-4 corpus
+  32×, so every "different" row is identical content and the gate is
+  structurally blind to any wrong-ROW bug. Treat a golden PASS as evidence about
+  arithmetic, not indexing.
+- **Shipped in [`0071`](tasks/0071-m13-nomic-shippable/TASK.md)**: `--prefix`
+  names a KEY in the container's own prompts table and the runtime **always
+  prints which prefix it applied**; an unknown name refuses and lists the real
+  ones; and a `--prefix` given to a model with no prompts table now refuses
+  rather than being silently ignored. The C++ packer mirror is **byte-identical
+  first attempt** (sha256 `5bcb931a…`), and the cold path — checkpoint and
+  container both moved aside — fetches 546.9 MB, verifies the pin, packs, picks
+  a design and encodes in one command, producing a byte-identical container.
+- **[`0073`](tasks/0073-m13-release-benchmarks/TASK.md) is the whole-catalogue
+  benchmark sweep**, and getting it to run revealed that **every part of the
+  measurement apparatus that had not run since 0034 or 0038 was broken**:
+  `energy_compare.ps1` had no `-Model` parameter at all (so it has been
+  unrunnable since selection became required, which is why energy exists for
+  MiniLM and nothing else, and it measured 2 lanes when production moved to 4);
+  `npu_encoder.py` could not load nomic and filed every non-MiniLM MTEB result
+  under MiniLM's name; `run_mteb.py` wrote every model to one path and produced
+  **no verdict at all** for a single-side run. Tools rot silently when they are
+  only ever used on one model.
+  → `tools/release_benchmark.ps1` now runs the whole catalogue as one command,
+  and **`make_release.ps1` refuses to assemble a release without a fresh
+  sweep** — "every release ships current benchmarks" is now a property of the
+  build rather than of who remembers.
+- **THE CPU GUARD, and why it exists.** A stray `find` from an earlier command
+  in that session burned **one full core for two and a half hours**, straight
+  through the first interleaved measurement series. torch runs twelve threads
+  and contends directly; the NPU path offloads and barely notices — so the CPU
+  sides came out ~30% low with wild variance, the NPU sides held, and **the
+  ratio looked like a large improvement**. That is
+  [`0044`](tasks/0044-m9-optimisation-sweep/TASK.md)'s ninth fail-open in a
+  mirror: contention hitting only ONE side makes a ratio *confidently wrong*.
+  0044 guarded the NPU side; nobody had transferred the reasoning to the CPU.
+  `release_benchmark.ps1` now does, refusing by default.
+  **Note the diagnostic trap:** `Get-Process | Sort-Object CPU` shows *lifetime*
+  CPU time, so a process that finished an hour ago tops the list and one burning
+  a core right now looks identical. Only the **delta over a sampling window**
+  separates them — an earlier check looked straight at this process and cleared
+  it.
+- **The clean sweep, and the result it was not looking for.** Throughput 951 /
+  494 / 211 / 60.8 / 166 seq/s; interleaved ratios 1.85× / 1.60× / 2.49× /
+  2.47× / 2.26×; energy 3.65× / 3.00× / 3.33× / 3.28× / **3.75×** better.
+  But the number that matters is this: **the NPU throughput measured while
+  torch and ORT saturated all twelve cores is within 1.5% of the same models
+  measured idle** — under 0.5% on four of five. The project's stated goal is to
+  get the work *off the cores*, and every previous number was a throughput
+  ratio, which answers "is it faster" rather than "did the work move". This
+  answers the second.
+- **Caveats that limit what may be claimed.** Interleaving cancels drift hitting
+  both sides ([`0040`](tasks/0040-m9-honest-cpu-baseline/TASK.md)'s rule, and it
+  holds), but not a CPU side that moves **24% between sessions** with tight
+  spreads on both — bge-base's torch was 111.2 in
+  [`0053`](tasks/0053-m10-t26-probe-bge-base-mteb/TASK.md) and 84.5 here, same
+  library versions, **unexplained**. Treat a ratio as indicative to ±20% and the
+  NPU column as solid. Models are also measured back to back, so later ones run
+  on a hotter machine: a ratio is comparable within a model, loosely across
+  them. And energy figures are **not** comparable to
+  [`0034`](tasks/0034-m8-energy/TASK.md)'s 1.94× — that was two lanes,
+  production is four.
+
+**Update 2026-08-21 (tasks/0067): `gemma_tokenizer.bin` gets a C++ generator,
+closing the last EmbeddingGemma fetch gap, and `--token` joins `HF_TOKEN`.**
+A from-scratch JSON parser (`runtime/src/json_min.cpp`) backs a byte-exact
+C++ port of `tools/gen_gemma_tokenizer_table.py`
+(`runtime/src/gemma_tokenizer_gen.cpp`) — verified against the real
+Python-generated table at sha256 `c7a03c2c35ffc2a16b5513bb11c3d04e4a19c84
+acb9254b36765510acbf5bc81`, both exactly 9,020,206 bytes, confirmed from
+both a standalone verifier and the real `--prepare-model` packer.
+`prepare_model_gemma()` now generates-and-caches instead of only reading. A
+fresh clone with only `HF_TOKEN`/`--token` set can self-produce a fully
+working `.npue`, no manual Python step. `embed`/`serve` also gained
+`--token <value>`, taking precedence over `HF_TOKEN`, fail-closed with a
+dual-option message before any network call when neither is set. →
+[`research/OPEN-THREADS.md`](research/OPEN-THREADS.md) T29
+
+**Update 2026-08-20 (tasks/0058–0064): the toolchain upgraded to mlir-aie
+1.4.x, and EmbeddingGemma-300M runs end to end on CPU, wired into
+production.** → [`research/OPEN-THREADS.md`](research/OPEN-THREADS.md) T22
+(closed), T28 (open, reduced scale), T29 (open, CPU path shipped)
+
+- **`C:\dev\mlir-aie` moved from a pinned mlir-aie 1.3.4 checkout to
+  upstream `main`** (currently `1.4.2.dev16+g7e00b57`, past the v1.4.1
+  release), via `python utils\iron_setup.py --dev` — see
+  [`.claude/skills/update-mlir-aie`](.claude/skills/update-mlir-aie/SKILL.md)
+  for the procedure and traps. **`Runtime` was redesigned upstream**
+  (`Runtime()` + `with rt.sequence(...) as (...):` became a callback,
+  `Runtime(seq_fn, fn_args)`, mirroring `Worker(core_fn, fn_args)`) —
+  [note 0008](research/notes/0008-iron-1.4-migration.md) has the full
+  transformation rules. All 15 of this project's own IRON design scripts
+  were migrated; **14 hardware-re-verified bit/value-exact against their
+  historical numbers**, one (`unified_design.py`) blocked by the
+  pre-existing task-0032 16 KB program-memory wall, not a regression.
+  **Production itself is confirmed bit-identical** — all four shipped
+  models reproduce their exact pre-upgrade `1-cos` (tasks/0059) — because
+  shipped `.xclbin`/`.npue` files are static binaries XRT loads regardless
+  of what built them. `tools/export_gemm_rtp.py` (which *rebuilds* those
+  artifacts) needed its own fix for an unrelated MLIR pretty-printer format
+  change (tasks/0060, closes **T22**).
+- **T28's hierarchical 2-hop merge is now built with REAL compute at every
+  stage** (tasks/0062), not the diagnostic identity-copy earlier probes
+  used: GEMM+GELU producer columns → two mem tiles each joining producers
+  while also carrying their own local A/B feed → one relay core reading
+  both via `.cons()` → a real second-stage matmul, checked against an
+  independent fp64 reference at `rel_fro` 1.726e-03. **Scale is reduced**
+  (GROUP=2, not the production GROUP=4/8-column boundary) because a real
+  second-stage matmul needs L1 for a resident weight + accumulator on top
+  of the gathered hops — documented, not solved. T28 stays **OPEN**.
+- **EmbeddingGemma-300M — user decision "Vi kjører Gemma" — runs end to end
+  on the CPU host path, wired into `npuembed.exe`** (tasks/0055, 0061,
+  0063, 0064): a from-scratch numpy reference (1-cos 1.065e-07 vs real
+  HuggingFace) → a from-scratch C++ tokenizer (**SentencePiece BPE, not
+  Unigram** — the original plan's algorithm-family assumption was wrong,
+  caught by reading `tokenizer.json` before writing code; 1,925/1,925
+  byte-identical to HuggingFace) → RMSNorm/RoPE/GeGLU host kernels (36/36
+  verification records PASS, several bit-exact) → a full 24-layer CPU
+  forward pass wired into `main.cpp` as a genuinely separate `arch=1` path
+  that leaves `Encoder::run()`'s BERT path untouched, `1-cos` down to
+  **5.496e-13** against the numpy reference — tighter than any bf16 NPU
+  model in this project, since nothing here rounds through bf16 (no NPU
+  kernel exists for this arch yet; every op runs on the host, matching
+  this project's own "eltwise lives on the host" precedent, extended to
+  the whole model). `hub.cpp` gained fail-closed `HF_TOKEN` bearer-auth
+  support for gated HuggingFace repos — refuses to silently fall back to
+  an ungated mirror in production code. **Not yet done**: a `hub.cpp`
+  catalogue row for EmbeddingGemma (needs a session holding `HF_TOKEN` to
+  pin a real sha256 — a human action, not something this repo can do for
+  itself), the C++ packer mirror's `arch=1` support (Python-only for now),
+  batching/threading on the host GEMM path (~7.9 s/sentence, correctness
+  was the priority), and an MTEB run.
+
+**Update 2026-08-20 (tasks/0052, the 0.3.0 research night): bfp16+bf16C
+passes EVERY accuracy gate — 1-cos 3.6e-04, e2e 9.7e-04, neighbour overlap
+0.9923, MTEB mean +0.16 / worst −0.06 — at 2.20× array GEMM and 1,046 seq/s
+e2e (MiniLM). The lane default is now 4. Stationary-B k=96 measured NEGATIVE.**
+→ [`research/OPEN-THREADS.md`](research/OPEN-THREADS.md) T19, T23, T24, T26, T27
+
+- **The bfp16 story inverted overnight**: bfp16+fp32C reproduces history
+  (2.395e-03, FAIL), but bfp16+**bf16C** measures **6.6× more accurate** —
+  mechanism UNKNOWN (T26; hypothesis: the fp32-C fifo path re-quantises C
+  partials at every k-block under emulation, the bf16-C accumulator-`Buffer`
+  path does not). MTEB confirms independently. Every gate passes; making it a
+  default is still the user's decision (T23). **Reproduces on bge-base at
+  h=768: 1-cos 2.237e-04 PASS, 238.0 seq/s — +35.7% over the 0.2.0
+  configuration in one night** (bge-base MTEB still unrun, T25).
+- **The emulated array is TRAFFIC-bound** (GB/s 32–46; ffn_up slower than
+  ffn_down by its byte ratio) — the byte-levers 0048 retired revive on that
+  path (T27). And the encode is host-walled there: 47% NPU busy at 4 lanes,
+  so bfp16's 2.2× array only buys +9% e2e until T3-class host work lands.
+- **T19 closed negative, on hardware**: k=96 with single-buffered B is 5.2%
+  worse per MAC — vector cycles scale perfectly (exactly 1.5×, still 8
+  cyc/MMAC) but the exposed B fill grows the inter-window gap 84 → 1,193
+  cycles, double the amortisation gain. `--b-depth` stays in gemm_pretiled.
+- **T24 closed**: `--probe-streams` on h=768 validates the 0048 fit at both
+  widths (marginal 4.49 vs 4.72 µs/iter; the identical-MAC pair 0.3% apart).
+  0051's 27% miss was entirely the un-modelled host term.
+- **Lane default 2 → 4** (subcommands only): bge-base 175.4 → **209.1** seq/s
+  (+19%), MiniLM 892.7 → **962.6** (+7.8%), saturation at 5 lanes. 0033's
+  "three lanes plateau" described the pre-tier runtime, not today's.
+- New research flags: `export_gemm_rtp.py --emulate-bfp16` (cache-ambiguous
+  with bf16 builds — safe only under 0030's purge-before-build, says so in
+  its help), `gemm_pretiled.py --b-depth`.
 
 **Update 2026-08-19 (tasks/0051): FOUR models — and bge-base-en-v1.5 is the
 one whose geometry actually fits XDNA2. Also: model fetching now happens

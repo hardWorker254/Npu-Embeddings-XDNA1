@@ -44,7 +44,14 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Version,
-    [string[]]$Artifacts = @("artifacts_b128il", "artifacts_base"),
+    # All four design sets, so every catalogue model reports `ready` rather
+    # than `no design` out of the box. They are ~600 KB of gemm_rtp each and
+    # compress well, so shipping the lot costs almost nothing and removes the
+    # commonest first-run confusion: a model the table offers and the runtime
+    # then refuses. artifacts_nomic is separate from artifacts_base despite
+    # both serving hidden 768 -- nomic's gated ffn_up is N=6144 (tasks/0069).
+    [string[]]$Artifacts = @("artifacts_b128il", "artifacts_base",
+                             "artifacts_large", "artifacts_nomic"),
     [string]$OutDir = "dist"
 )
 
@@ -67,9 +74,53 @@ $sets = foreach ($a in $Artifacts) {
     # directory name. A release that mislabels which model a design runs is
     # the same fail-open this project has closed nine times.
     $json = Get-Content "$d\design.json" -Raw | ConvertFrom-Json
-    $ks = $json.streams | ForEach-Object { $_.K } | Sort-Object -Unique
-    $hidden = ($ks | Sort-Object)[0]
-    [pscustomobject]@{ name = $a; dir = $d; hidden = $hidden }
+    # Prefer the geometry the design STATES about itself (tasks/0069). Two
+    # design sets can serve the same `hidden` and still be incompatible: nomic's
+    # gated ffn_up is N=6144 where bge-base's is 3072, so "hidden 768" alone
+    # labels both identically and tells a release reader nothing. Older sets
+    # predate these keys, hence the fallback.
+    if ($null -ne $json.hidden) {
+        $hidden = [int]$json.hidden
+        $inter = [int]$json.intermediate
+        $gated = [bool]$json.gated_ffn
+    } else {
+        $ks = $json.streams | ForEach-Object { [int]$_.K } | Sort-Object -Unique
+        $hidden = $ks[0]
+        $inter = $ks[-1]
+        $gated = $false
+    }
+    [pscustomobject]@{ name = $a; dir = $d; hidden = $hidden
+                       intermediate = $inter; gated_ffn = $gated }
+}
+
+# The benchmark sweep, which a release must carry. Checked BEFORE any staging
+# work, so the refusal costs nothing and cannot be half-done.
+$sweepPath = Join-Path $REPO "tasks\0073-m13-release-benchmarks\sweep.json"
+if (-not (Test-Path $sweepPath)) {
+    throw @"
+missing $sweepPath -- a release ships freshly measured benchmarks for the WHOLE
+catalogue, not just the model that changed. Run:
+
+    .\tools\release_benchmark.ps1
+
+on an idle machine, on mains power, then re-run this script. If you genuinely
+mean to cut a release without them, pass -SkipBenchmarks and the manifest will
+say so in the artifact rather than quietly omitting the field.
+"@
+}
+$sweep = Get-Content $sweepPath -Raw | ConvertFrom-Json
+$sweepAge = ((Get-Date) - [datetime]$sweep.when).TotalDays
+if ($sweepAge -gt 7) {
+    Write-Warning ("the sweep in {0} is {1:N1} days old -- it predates whatever " -f $sweepPath, $sweepAge)
+    Write-Warning "you have changed since. Re-run tools\release_benchmark.ps1."
+}
+$benchmarks = [ordered]@{
+    source = "tasks/0073-m13-release-benchmarks/sweep.json"
+    measured_utc = $sweep.when
+    machine_power = $sweep.power
+    lanes = $sweep.lanes; threads = $sweep.threads
+    note = "one session, one machine state, one protocol. End-to-end throughput; NOT an NPU kernel performance claim (CLAUDE.md rule 1)."
+    models = $sweep.rows
 }
 
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
@@ -135,24 +186,28 @@ $manifest = [ordered]@{
     models  = "fetched and verified by `npuembeddings serve <model>`; not redistributed. Run `npuembeddings list` for the catalogue and its pinned checksums."
     hardware = "AMD Ryzen AI (XDNA2 / Strix Point) NPU"
     sequence_length = 64
+    # The FULL geometry, not just `hidden`. Two design sets can serve the same
+    # width and be incompatible -- artifacts_base and artifacts_nomic are both
+    # hidden 768, and nomic's gated ffn_up is N=6144 where bge-base's is 3072
+    # (tasks/0069). A manifest that records only the width cannot tell a reader
+    # which is which.
     designs = @($sets | ForEach-Object {
-        [ordered]@{ set = $_.name; hidden = $_.hidden }
+        [ordered]@{ set = $_.name; hidden = $_.hidden
+                    intermediate = $_.intermediate; gated_ffn = $_.gated_ffn }
     })
     built_utc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-    verified = [ordered]@{
-        note = "figures from tasks/0033-0037 (MiniLM) and 0051 (bge-base); reproduce with tools/verify_*.py"
-        worst_1_minus_cos_vs_huggingface = [ordered]@{
-            "all-MiniLM-L6-v2" = 1.086e-05
-            "bge-base-en-v1.5" = 1.353e-05
-        }
-        tokenizer_exact_match = "6826/6826"
-        mteb_delta_points = 0.04
-        throughput_seq_per_s = [ordered]@{
-            "all-MiniLM-L6-v2" = 907.5
-            "bge-base-en-v1.5" = 181.2
-        }
-        energy_j_per_1000_seq = 44.0
-    }
+    # READ FROM THE SWEEP, NOT FROM MEMORY.
+    #
+    # This block used to be a hand-maintained dict carrying two of five models,
+    # with figures from tasks/0033-0037 and 0051 -- taken in different sessions,
+    # under different lane defaults, on different toolchain versions. Every
+    # number was honest when taken and the TABLE was not comparable to itself,
+    # which is a subtler way of being wrong than any single bad figure.
+    #
+    # A release now REFUSES to assemble without a sweep artifact. That makes
+    # "every release ships fresh whole-catalogue benchmarks" a property of the
+    # build rather than of whoever remembers to re-run things.
+    verified = $benchmarks
     files = $hashes
 }
 $manifest | ConvertTo-Json -Depth 6 | Set-Content "$stage\manifest.json" -Encoding utf8
@@ -164,7 +219,10 @@ Compress-Archive -Path "$stage\*" -DestinationPath $zip -CompressionLevel Optima
 $mb = (Get-Item $zip).Length / 1MB
 Write-Host ""
 Write-Host "  staged  $stage"
-Write-Host ("  designs " + (($sets | ForEach-Object { "$($_.name) (hidden $($_.hidden))" }) -join ", "))
+Write-Host ("  designs " + (($sets | ForEach-Object {
+    $g = ""; if ($_.gated_ffn) { $g = ", gated" }
+    "$($_.name) (hidden $($_.hidden), ffn $($_.intermediate)$g)"
+}) -join ", "))
 Write-Host ("  zip     $zip  ({0:N2} MB)" -f $mb)
 Write-Host ""
 Write-Host "  Unzip, then:  npuembeddings list"

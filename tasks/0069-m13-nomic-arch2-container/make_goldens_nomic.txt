@@ -1,0 +1,27 @@
+﻿corpus: 4 sentences, prompt='search_document' ('search_document: '), padded to S=64
+  [0]  12 tokens  ['[CLS]', 'search', '_', 'document', ':', 'a', 'man', 'is', 'eating', 'food', '.', '[SEP]']
+  [1]  26 tokens  ['[CLS]', 'search', '_', 'document', ':', 'le', 'cafe', 'co', '##ute', '5', 'euros', '—', 'c', "'", 'est', 'bien', 'tr', '##op', 'cher', 'pour', 'un', 'es', '##press', '##o', '.', '[SEP]']
+  [2]  21 tokens  ['[CLS]', 'search', '_', 'document', ':', 'the', '北', '京', 'office', 'opens', 'at', '9', '##am', ',', '上', '海', 'at', '10', '##am', '.', '[SEP]']
+  [3]  37 tokens  ['[CLS]', 'search', '_', 'document', ':', 'anti', '##dis', '##est', '##ab', '##lish', '##ment', '##arian', '##ism', ',', 'trans', '##ub', '##stan', '##tia', '##tion', ',', 'and', 'other', 'un', '##ne', '##ces', '##sari', '##ly', 'long', 'words', ';', 'do', 'they', 'token', '##ize', 'correctly', '?', '[SEP]']
+python.exe : 
+At line:2 char:1
++ & ".\.venv-ref\Scripts\python.exe" "reference\make_goldens_nomic.py"  ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Loading weights:   0%|          | 0/112 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 112/112 [00:00<00:00, 5275.14it/s]
+<All keys matched successfully>
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits 
+and faster downloads.
+[transformers] Detected the usage of `get_extended_attention_mask`: This function is deprecated and will be removed in 
+v5.12.0. Please use the new API in `transformers.masking_utils`
+
+oracle 1 (boundary taps): transformers.models.nomic_bert.modeling_nomic_bert.NomicBertModel (native, no trust_remote_code)
+oracle 2 (end-to-end)     : SentenceTransformer(trust_remote_code=True) -- forces the ORIGINAL remote modeling_hf_nomic_bert.py, independent of oracle 1
+
+oracle 1 (native, manual mean-pool) vs oracle 2 (remote, via SentenceTransformer): max abs diff 1.356e-06
+PASS -- oracles agree within 2e-05
+
+wrote reference\goldens_nomic\nomic-embed-text-v1.5_l12_s64_boundary.safetensors  (11.0 MB, 18 tensors)

@@ -1,0 +1,167 @@
+tasks/0057 -- raw command output, in the order run. Copy-pasted from the
+PowerShell session, not summarised. See TASK.md for interpretation.
+
+=====================================================================
+1. join_then_consume_probe.py -- first attempt, depth=2 on C_mem/Y_out
+=====================================================================
+> python join_then_consume_probe.py
+  purged 0 cache candidate(s)
+RuntimeError: [aiecc] Compilation failed with exit code 1:
+...\aie.mlir:2:3: error: 'aie.tile' op allocated buffers exceeded available memory
+  aie.device(npu2) {
+  ^
+...note: MemoryMap:
+	(stack) 	: 0x0-0x7FF 	(2048 bytes)
+	Y_out_buff_0 	: 0x800-0x67FF 	(24576 bytes)
+	Y_out_buff_1 	: 0x6800-0xC7FF 	(24576 bytes)
+	C_mem_cons_buff_0 	: 0xC800-0x127FF 	(24576 bytes)
+	C_mem_cons_buff_1 	: 0x12800-0x187FF 	(24576 bytes)
+	_anonymous2 	: 0x18800-0x18807 	(8 bytes)
+error: 'aie.tile' op Basic sequential allocation failed.
+
+=====================================================================
+2. join_then_consume_probe.py -- fixed (depth=1 on C_mem and Y_out)
+=====================================================================
+> python join_then_consume_probe.py
+  purged 0 cache candidate(s)
+join.cons() handed DIRECTLY to a third on-chip Worker (no second split/forward/join on C_mem):
+  rel_fro 3.550e-08
+PASS -- tolerance 5e-3 rel_fro
+
+=====================================================================
+3. cross_column_join_probe.py -- SRC_COLS=0,1 DEST_COL=0 -- first attempt
+   (host-side tap bug: both columns' fill taps pointed at offset 0)
+=====================================================================
+> python cross_column_join_probe.py
+  purged 0 cache candidate(s)
+JOIN from TWO DIFFERENT COLUMNS' GEMM cores into ONE mem tile (Tile(0,1)), then consumed by a third on-chip Worker:
+  rel_fro 9.944e-01
+FAIL -- tolerance 5e-3 rel_fro
+  (rerun with diagnostics added:)
+  col 0: rel_fro=3.693e-08 got[0,0:4]=[-0.2941249   0.07786673  0.12781592 -0.10261934] want[0,0:4]=[-0.2941249   0.07786673  0.12781592 -0.10261934] got_norm=1.073e+01 want_norm=1.073e+01
+  col 1: rel_fro=1.375e+00 got[0,0:4]=[-0.2941249   0.07786673  0.12781592 -0.10261934] want[0,0:4]=[-0.24109301  0.0473737   0.23883587 -0.04472144] got_norm=1.073e+01 want_norm=1.124e+01
+  swapped-column-order rel_fro=9.944e-01
+FAIL
+  -- diagnosis: col 1's output is BYTE-IDENTICAL to col 0's, not garbage --
+     both columns' GEMM cores were reading the SAME A/B host data because
+     both fill taps were `simple_tiler((TM,K))[0]`, always offset 0. Fixed
+     by tiling the FULL (N_GEMM_COLS*TM,K)/(N_GEMM_COLS*K,N) tensor with
+     simple_tiler's multi-tile form.
+
+=====================================================================
+4. cross_column_join_probe.py -- SRC_COLS=0,1 DEST_COL=0 -- fixed
+=====================================================================
+> rm -rf ~/.npu/cache/*
+> $env:NPUE_SRC_COLS="0,1"; $env:NPUE_DEST_COL="0"; python cross_column_join_probe.py
+  SRC_COLS=[0, 1] DEST_COL=0 (set via NPUE_SRC_COLS / NPUE_DEST_COL env vars)
+  purged 0 cache candidate(s)
+JOIN from TWO DIFFERENT COLUMNS' GEMM cores into ONE mem tile (Tile(0,1)), then consumed by a third on-chip Worker:
+  rel_fro 3.474e-08
+  col 0: rel_fro=3.693e-08 ...
+  col 1: rel_fro=3.262e-08 ...
+  swapped-column-order rel_fro=1.406e+00
+PASS -- tolerance 5e-3 rel_fro
+
+=====================================================================
+5. cross_column_join_probe.py -- SRC_COLS=0,7 DEST_COL=0 (max distance)
+=====================================================================
+> rm -rf ~/.npu/cache/*
+> $env:NPUE_SRC_COLS="0,7"; $env:NPUE_DEST_COL="0"; python cross_column_join_probe.py
+  SRC_COLS=[0, 7] DEST_COL=0 (set via NPUE_SRC_COLS / NPUE_DEST_COL env vars)
+  purged 0 cache candidate(s)
+JOIN from TWO DIFFERENT COLUMNS' GEMM cores into ONE mem tile (Tile(0,1)), then consumed by a third on-chip Worker:
+  rel_fro 3.474e-08
+  col 0: rel_fro=3.693e-08 ...
+  col 1: rel_fro=3.262e-08 ...
+PASS -- tolerance 5e-3 rel_fro
+
+=====================================================================
+6. cross_column_join_probe.py -- SRC_COLS=0..7 (8, incl. DEST_COL=0, local A/B)
+=====================================================================
+> rm -rf ~/.npu/cache/*
+> $env:NPUE_SRC_COLS="0,1,2,3,4,5,6,7"; $env:NPUE_DEST_COL="0"; python cross_column_join_probe.py
+  SRC_COLS=[0, 1, 2, 3, 4, 5, 6, 7] DEST_COL=0
+  purged 0 cache candidate(s)
+RuntimeError: [aiecc] Compilation failed with exit code 1:
+...\aie.mlir:44:23: error: tile (0, 1) requires 8 input/1 output DMA channels, but only 4 input/4 output available
+    %logical_mem_38 = aie.logical_tile<MemTile>(0, 1)
+Error: Tile placement pipeline failed
+
+=====================================================================
+7. cross_column_join_probe.py -- SRC_COLS=1..7 (7, DEST_COL=0 excluded, gather-only)
+=====================================================================
+> rm -rf ~/.npu/cache/*
+> $env:NPUE_SRC_COLS="1,2,3,4,5,6,7"; $env:NPUE_DEST_COL="0"; python cross_column_join_probe.py
+  SRC_COLS=[1, 2, 3, 4, 5, 6, 7] DEST_COL=0
+  purged 0 cache candidate(s)
+RuntimeError: [aiecc] Compilation failed with exit code 1:
+...\aie.mlir:39:23: error: tile (0, 1) requires 7 input/1 output DMA channels, but only 6 input/6 output available
+    %logical_mem_33 = aie.logical_tile<MemTile>(0, 1)
+Error: Tile placement pipeline failed
+
+=====================================================================
+8. cross_column_join_probe.py -- SRC_COLS=1..6 (6, gather-only)
+=====================================================================
+> rm -rf ~/.npu/cache/*
+> $env:NPUE_SRC_COLS="1,2,3,4,5,6"; $env:NPUE_DEST_COL="0"; python cross_column_join_probe.py
+  SRC_COLS=[1, 2, 3, 4, 5, 6] DEST_COL=0
+  purged 0 cache candidate(s)
+RuntimeError: [aiecc] Compilation failed with exit code 1:
+...\aie.mlir:35:23: error: tile (0, 1) requires 1 input/1 output DMA channels, but only 0 input/5 output available
+    %logical_mem_29 = aie.logical_tile<MemTile>(0, 1)
+Error: Tile placement pipeline failed
+  (this is the Y_pipe forward's OWN allocation request, reported AFTER the
+  6-source join already consumed the tile's full 6 IN ports)
+
+=====================================================================
+9. cross_column_join_probe.py -- SRC_COLS=1,2,3,4,5 (5, gather-only)
+=====================================================================
+> rm -rf ~/.npu/cache/*
+> $env:NPUE_SRC_COLS="1,2,3,4,5"; $env:NPUE_DEST_COL="0"; python cross_column_join_probe.py
+  SRC_COLS=[1, 2, 3, 4, 5] DEST_COL=0
+  purged 0 cache candidate(s)
+RuntimeError: [aiecc] Compilation failed with exit code 1:
+...\aie.mlir:2:3: error: 'aie.tile' op allocated buffers exceeded available memory
+  aie.device(npu2) {
+...note: MemoryMap:
+	(stack) 	: 0x0-0x7FF 	(2048 bytes)
+	Y_out_buff_0 	: 0x800-0xF7FF 	(61440 bytes)
+	C_mem_cons_buff_0 	: 0xF800-0x1E7FF 	(61440 bytes)
+	_anonymous5 	: 0x1E800-0x1E807 	(8 bytes)
+error: 'aie.tile' op Basic sequential allocation failed.
+  -- PORTS fit here (no port error was reached); this is the SEPARATE L1
+  wall on the gather-consumer core, which acquires the whole gathered tile
+  in one flat shot (5 * TM*TN*4B * 2 buffers = 122880 B > 62464 B budget).
+
+=====================================================================
+10. cross_column_join_probe.py -- SRC_COLS=0,1,2,3 (4, incl. DEST_COL, local A/B + outbound)
+=====================================================================
+> rm -rf ~/.npu/cache/*
+> $env:NPUE_SRC_COLS="0,1,2,3"; $env:NPUE_DEST_COL="0"; python cross_column_join_probe.py
+  SRC_COLS=[0, 1, 2, 3] DEST_COL=0
+  purged 0 cache candidate(s)
+RuntimeError: [aiecc] Compilation failed with exit code 1:
+...\aie.mlir:25:23: error: tile (0, 1) requires 1 input/1 output DMA channels, but only 0 input/3 output available
+    %logical_mem_19 = aie.logical_tile<MemTile>(0, 1)
+Error: Tile placement pipeline failed
+  -- A(1 in)+B(1 in)+join(4 in)=6, 0 left for Y_pipe's forward (1 more in).
+
+=====================================================================
+11. cross_column_join_probe.py -- SRC_COLS=0,1,2 (3, incl. DEST_COL, local A/B + outbound)
+=====================================================================
+> rm -rf ~/.npu/cache/*
+> $env:NPUE_SRC_COLS="0,1,2"; $env:NPUE_DEST_COL="0"; python cross_column_join_probe.py
+  SRC_COLS=[0, 1, 2] DEST_COL=0
+  purged 0 cache candidate(s)
+RuntimeError: [aiecc] Compilation failed with exit code 1:
+...\aie.mlir:2:3: error: 'aie.tile' op allocated buffers exceeded available memory
+...note: MemoryMap:
+	(stack) 	: 0x0-0x7FF 	(2048 bytes)
+	Y_out_buff_0 	: 0x800-0x97FF 	(36864 bytes)
+	C_mem_cons_buff_0 	: 0x9800-0x127FF 	(36864 bytes)
+	_anonymous3 	: 0x12800-0x12807 	(8 bytes)
+error: 'aie.tile' op Basic sequential allocation failed.
+  -- ports fit (A(1)+B(1)+join(3)+Y_pipe(1)=6, exactly at budget, no port
+  error reached); the SAME one-shot L1 wall as run 9, at smaller scale.
+  N=2 (already proven in run 4) is the largest N this SPECIFIC one-shot
+  gather-consumer design supports end to end.

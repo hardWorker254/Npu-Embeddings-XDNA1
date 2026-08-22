@@ -1,0 +1,104 @@
+﻿
+==============================================================================
+A: nomic ffn_up (real shape): M=8192 K=768 N=6144  tile=(64,64,48)  cols=8
+  L1 budget (Stationary-C, trap 3): 53248 B of 65536 (63 KB nominal limit)  -- N does not enter this formula
+  divisibility checks: M%(m*4)=0  K%k=0  N%(n*cols)=0
+  cols= 8 pretiled[k,n|st] relfro=7.07e-01 FAIL (no trace)
+  COMPILED AND RAN in 22.7s
+  rel_frobenius = 7.074e-01  FAIL (tol 5e-3 for plain bf16)
+
+==============================================================================
+B: nomic ffn_down (positive control): M=8192 K=3072 N=768  tile=(64,64,48)  cols=8
+  L1 budget (Stationary-C, trap 3): 53248 B of 65536 (63 KB nominal limit)  -- N does not enter this formula
+  divisibility checks: M%(m*4)=0  K%k=0  N%(n*cols)=0
+  cols= 8 pretiled[k,n|st] relfro=8.17e-07 PASS (no trace)
+  COMPILED AND RAN in 9.8s
+  rel_frobenius = 8.173e-07  PASS (tol 5e-3 for plain bf16)
+
+==============================================================================
+C: nomic ffn_up, small M: M=1024 K=768 N=6144  tile=(64,64,48)  cols=8
+  L1 budget (Stationary-C, trap 3): 53248 B of 65536 (63 KB nominal limit)  -- N does not enter this formula
+  divisibility checks: M%(m*4)=0  K%k=0  N%(n*cols)=0
+  cols= 8 pretiled[k,n|st] relfro=7.07e-01 FAIL (no trace)
+  COMPILED AND RAN in 8.3s
+  rel_frobenius = 7.067e-01  FAIL (tol 5e-3 for plain bf16)
+
+##############################################################################
+# SUMMARY
+##############################################################################
+  A: nomic ffn_up (real shape)                     NUMERIC-FAIL    rel_fro=7.074e-01
+  B: nomic ffn_down (positive control)             PASS            rel_fro=8.173e-07
+  C: nomic ffn_up, small M                         NUMERIC-FAIL    rel_fro=7.067e-01
+
+==============================================================================
+D: shape A at cols=4: M=8192 K=768 N=6144 tile=(64,64,48) cols=4
+  guard 'm*n_aie_rows*N > 2**20' -> 1572864 > 1048576 = True  (tb_n_rows FORCED TO 1)
+  divisibility: M%(m*4)=0  K%k=0  N%(n*cols)=0
+  COMPILED AND RAN in 7.9s
+  rel_frobenius = 7.075e-01   max_abs_diff = 2.275e+02  (max|ref|=2.275e+02)   FAIL
+  row-band structural check: 28/32 bands of 256 rows have max|err| > 1.0 (bf16 numeric error alone would be ~1e-2, not >1.0)
+
+==============================================================================
+E: shape A, tile_n=32, cols=8: M=8192 K=768 N=6144 tile=(64,64,32) cols=8
+  guard 'm*n_aie_rows*N > 2**20' -> 1572864 > 1048576 = True  (tb_n_rows FORCED TO 1)
+  divisibility: M%(m*4)=0  K%k=0  N%(n*cols)=0
+  COMPILED AND RAN in 11.6s
+  rel_frobenius = 7.080e-01   max_abs_diff = 2.285e+02  (max|ref|=2.285e+02)   FAIL
+  row-band structural check: 28/32 bands of 256 rows have max|err| > 1.0 (bf16 numeric error alone would be ~1e-2, not >1.0)
+
+==============================================================================
+F: shape A, tile_n=16, cols=8: M=8192 K=768 N=6144 tile=(64,64,16) cols=8
+  guard 'm*n_aie_rows*N > 2**20' -> 1572864 > 1048576 = True  (tb_n_rows FORCED TO 1)
+  divisibility: M%(m*4)=0  K%k=0  N%(n*cols)=0
+  COMPILED AND RAN in 12.8s
+  rel_frobenius = 7.075e-01   max_abs_diff = 2.245e+02  (max|ref|=2.245e+02)   FAIL
+  row-band structural check: 28/32 bands of 256 rows have max|err| > 1.0 (bf16 numeric error alone would be ~1e-2, not >1.0)
+
+==============================================================================
+G: N=4096 (guard boundary, AT threshold, sanity control): M=8192 K=768 N=4096 tile=(64,64,48) cols=8
+  guard 'm*n_aie_rows*N > 2**20' -> 1048576 > 1048576 = False  (tb_n_rows stays default)
+  divisibility: M%(m*4)=0  K%k=0  N%(n*cols)=256
+  FAILED TO COMPILE/RUN after 0.2s: ValueError
+Traceback (most recent call last):
+  File "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0068-m13-nomic-spike-and-oracle\probe_n6144_part2.py", line 95, in probe
+    tiled = tile_b(B_logical.view(np.uint16), k, n, s, t, order="k,n")
+  File "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tools\npue.py", line 101, in tile_b
+    raise ValueError(f"[{K},{N}] does not tile into ({tile_k},{tile_n})")
+ValueError: [768,4096] does not tile into (64,48)
+
+==============================================================================
+H: N=4224 (guard boundary, just ABOVE threshold): M=8192 K=768 N=4224 tile=(64,64,48) cols=8
+  guard 'm*n_aie_rows*N > 2**20' -> 1081344 > 1048576 = True  (tb_n_rows FORCED TO 1)
+  divisibility: M%(m*4)=0  K%k=0  N%(n*cols)=0
+  COMPILED AND RAN in 12.4s
+  rel_frobenius = 7.083e-01   max_abs_diff = 2.276e+02  (max|ref|=2.276e+02)   FAIL
+  row-band structural check: 28/32 bands of 256 rows have max|err| > 1.0 (bf16 numeric error alone would be ~1e-2, not >1.0)
+
+##############################################################################
+# PART 2 SUMMARY
+##############################################################################
+  D: shape A at cols=4                                    FAIL  rel_fro=7.075e-01  bad_bands=28/32
+  E: shape A, tile_n=32, cols=8                           FAIL  rel_fro=7.080e-01  bad_bands=28/32
+  F: shape A, tile_n=16, cols=8                           FAIL  rel_fro=7.075e-01  bad_bands=28/32
+  G: N=4096 (guard boundary, AT threshold, sanity control) COMPILE-FAIL
+  H: N=4224 (guard boundary, just ABOVE threshold)        FAIL  rel_fro=7.083e-01  bad_bands=28/32
+
+==============================================================================
+I: N=4096 tile_n=32 (bge-large's REAL production shape, sanity control): M=8192 K=768 N=4096 tile=(64,64,32) cols=8
+  guard 'm*n_aie_rows*N > 2**20' -> 1048576 > 1048576 = False
+  divisibility: M%(m*4)=0  K%k=0  N%(n*cols)=0  N%n=0
+  COMPILED AND RAN in 12.3s
+  rel_frobenius = 3.283e-07  PASS
+
+==============================================================================
+J: N=3840 tile_n=48 (below guard threshold, same tile_n as nomic ffn_up): M=8192 K=768 N=3840 tile=(64,64,48) cols=8
+  guard 'm*n_aie_rows*N > 2**20' -> 983040 > 1048576 = False
+  divisibility: M%(m*4)=0  K%k=0  N%(n*cols)=0  N%n=0
+  COMPILED AND RAN in 11.9s
+  rel_frobenius = 3.291e-07  PASS
+
+##############################################################################
+# PART 3 SUMMARY
+##############################################################################
+  I: N=4096 tile_n=32 (bge-large's REAL production shape, sanity control) PASS rel_fro=3.283e-07
+  J: N=3840 tile_n=48 (below guard threshold, same tile_n as nomic ffn_up) PASS rel_fro=3.291e-07

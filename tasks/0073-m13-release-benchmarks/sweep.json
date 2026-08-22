@@ -1,0 +1,83 @@
+{
+    "cpu_mean_percent":  2,
+    "cpu_contenders":  [
+                           "Spotify ~0.23 core(s)"
+                       ],
+    "threads":  24,
+    "what":  "whole-catalogue release benchmark sweep, one session",
+    "power":  "no battery device reported (desktop, or the class is empty)",
+    "when":  "2026-08-22T03:00:15",
+    "rounds":  8,
+    "bench":  5,
+    "kind":  "hardware measurement",
+    "stages_this_run":  [
+                            "mteb"
+                        ],
+    "cpu_quiet":  false,
+    "rows":  [
+                 {
+                     "model":  "nomic-embed-text-v1.5",
+                     "artifacts":  "artifacts_nomic",
+                     "npu":  true,
+                     "interleaved_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\interleaved-nomic-embed-text-v1.5.txt",
+                     "accuracy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\accuracy-nomic-embed-text-v1.5.txt",
+                     "throughput_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\throughput-nomic-embed-text-v1.5.txt",
+                     "energy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\energy-nomic-embed-text-v1.5.txt",
+                     "mteb_pass":  true,
+                     "mteb_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\mteb-nomic-embed-text-v1.5.txt"
+                 },
+                 {
+                     "model":  "all-MiniLM-L6-v2",
+                     "artifacts":  "artifacts_b128il",
+                     "npu":  true,
+                     "energy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\energy-all-MiniLM-L6-v2.txt",
+                     "accuracy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\accuracy-all-MiniLM-L6-v2.txt",
+                     "throughput_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\throughput-all-MiniLM-L6-v2.txt",
+                     "interleaved_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\interleaved-all-MiniLM-L6-v2.txt",
+                     "mteb_pass":  true,
+                     "mteb_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\mteb-all-MiniLM-L6-v2.txt"
+                 },
+                 {
+                     "model":  "bge-large-en-v1.5",
+                     "artifacts":  "artifacts_large",
+                     "npu":  true,
+                     "interleaved_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\interleaved-bge-large-en-v1.5.txt",
+                     "accuracy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\accuracy-bge-large-en-v1.5.txt",
+                     "throughput_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\throughput-bge-large-en-v1.5.txt",
+                     "energy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\energy-bge-large-en-v1.5.txt",
+                     "mteb_pass":  true,
+                     "mteb_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\mteb-bge-large-en-v1.5.txt"
+                 },
+                 {
+                     "model":  "bge-base-en-v1.5",
+                     "artifacts":  "artifacts_base",
+                     "npu":  true,
+                     "interleaved_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\interleaved-bge-base-en-v1.5.txt",
+                     "accuracy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\accuracy-bge-base-en-v1.5.txt",
+                     "throughput_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\throughput-bge-base-en-v1.5.txt",
+                     "energy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\energy-bge-base-en-v1.5.txt",
+                     "mteb_pass":  true,
+                     "mteb_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\mteb-bge-base-en-v1.5.txt"
+                 },
+                 {
+                     "model":  "bge-small-en-v1.5",
+                     "artifacts":  "artifacts_b128il",
+                     "npu":  true,
+                     "interleaved_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\interleaved-bge-small-en-v1.5.txt",
+                     "accuracy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\accuracy-bge-small-en-v1.5.txt",
+                     "throughput_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\throughput-bge-small-en-v1.5.txt",
+                     "energy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\energy-bge-small-en-v1.5.txt",
+                     "mteb_pass":  true,
+                     "mteb_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\mteb-bge-small-en-v1.5.txt"
+                 },
+                 {
+                     "model":  "embeddinggemma-300m",
+                     "artifacts":  "",
+                     "npu":  false,
+                     "accuracy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\accuracy-embeddinggemma-300m.txt",
+                     "mteb_pass":  null,
+                     "mteb_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0073-m13-release-benchmarks\\mteb-embeddinggemma-300m.txt"
+                 }
+             ],
+    "lanes":  4
+}

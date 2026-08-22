@@ -1,0 +1,48 @@
+{
+  "accuracy": [
+    {
+      "shape": "minilm_bge_small",
+      "h": 384,
+      "tile_n": 48,
+      "K_real": 384,
+      "K_aug": 448,
+      "N": 1536,
+      "M": 1024,
+      "cols": 4,
+      "finite": true,
+      "rel_frobenius": 0.0003167336911932048,
+      "worst_abs": 0.0001303604506802808,
+      "correctness_pass": true
+    }
+  ],
+  "dispatch_latency": [
+    {
+      "shape": "minilm_bge_small",
+      "h": 384,
+      "tile_n": 48,
+      "M": 1024,
+      "N": 1536,
+      "cols": 4,
+      "fused": {
+        "K": 448,
+        "npu_avg_us": 2294.46,
+        "npu_min_us": 2275.5,
+        "e2e_avg_us": 2703.640016261488,
+        "e2e_min_us": 2666.7999918572605,
+        "iters": 5,
+        "warmup": 8
+      },
+      "plain": {
+        "K": 384,
+        "npu_avg_us": 1037.42,
+        "npu_min_us": 1036.2,
+        "e2e_avg_us": 1428.1999901868403,
+        "e2e_min_us": 1419.3999813869596,
+        "iters": 5,
+        "warmup": 8
+      },
+      "fused_over_plain_npu_avg": 2.2116982514314354
+    }
+  ],
+  "traced_cycles": []
+}

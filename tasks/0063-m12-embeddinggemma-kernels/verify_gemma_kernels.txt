@@ -1,0 +1,39 @@
+﻿layer_selection                          PASS
+rmsnorm_full_L0_ln_in                    rmsnorm  rows=256    dim=768    rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+rmsnorm_full_L0_ln_post_attn             rmsnorm  rows=256    dim=768    rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+rmsnorm_full_L0_ln_pre_ffn               rmsnorm  rows=256    dim=768    rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+rmsnorm_full_L0_ln_post_ffn              rmsnorm  rows=256    dim=768    rel_fro=4.769e-13 max_abs=1.863e-09 mean_abs=9.474e-15 max_rel=6.088e-08  PASS
+rmsnorm_full_L5_ln_in                    rmsnorm  rows=256    dim=768    rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+rmsnorm_full_L5_ln_post_attn             rmsnorm  rows=256    dim=768    rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+rmsnorm_full_L5_ln_pre_ffn               rmsnorm  rows=256    dim=768    rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+rmsnorm_full_L5_ln_post_ffn              rmsnorm  rows=256    dim=768    rel_fro=2.750e-11 max_abs=2.384e-07 mean_abs=1.367e-12 max_rel=1.087e-07  PASS
+rmsnorm_full_L11_ln_in                   rmsnorm  rows=256    dim=768    rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+rmsnorm_full_L11_ln_post_attn            rmsnorm  rows=256    dim=768    rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+rmsnorm_full_L11_ln_pre_ffn              rmsnorm  rows=256    dim=768    rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+rmsnorm_full_L11_ln_post_ffn             rmsnorm  rows=256    dim=768    rel_fro=2.547e-10 max_abs=3.815e-06 mean_abs=8.701e-11 max_rel=1.160e-07  PASS
+rmsnorm_full_L23_ln_in                   rmsnorm  rows=256    dim=768    rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+rmsnorm_full_L23_ln_post_attn            rmsnorm  rows=256    dim=768    rel_fro=3.012e-11 max_abs=3.815e-06 mean_abs=1.940e-11 max_rel=1.037e-07  PASS
+rmsnorm_full_L23_ln_pre_ffn              rmsnorm  rows=256    dim=768    rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+rmsnorm_full_L23_ln_post_ffn             rmsnorm  rows=256    dim=768    rel_fro=8.399e-09 max_abs=9.766e-04 mean_abs=3.602e-08 max_rel=1.191e-07  PASS
+rmsnorm_head_L0_q_norm                   rmsnorm  rows=768    dim=256    rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+rmsnorm_head_L0_k_norm                   rmsnorm  rows=256    dim=256    rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+rmsnorm_head_L5_q_norm                   rmsnorm  rows=768    dim=256    rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+rmsnorm_head_L5_k_norm                   rmsnorm  rows=256    dim=256    rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+rmsnorm_head_L11_q_norm                  rmsnorm  rows=768    dim=256    rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+rmsnorm_head_L11_k_norm                  rmsnorm  rows=256    dim=256    rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+rmsnorm_head_L23_q_norm                  rmsnorm  rows=768    dim=256    rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+rmsnorm_head_L23_k_norm                  rmsnorm  rows=256    dim=256    rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+rope_L0_q_full=False                     rope     rows=768    dim=256    rel_fro=4.036e-08 max_abs=9.537e-07 mean_abs=1.091e-08 max_rel=8.955e-05  PASS
+rope_L0_k_full=False                     rope     rows=256    dim=256    rel_fro=4.005e-08 max_abs=9.537e-07 mean_abs=1.152e-08 max_rel=4.504e-05  PASS
+rope_L5_q_full=True                      rope     rows=768    dim=256    rel_fro=3.648e-08 max_abs=9.537e-07 mean_abs=1.365e-08 max_rel=5.495e-04  PASS
+rope_L5_k_full=True                      rope     rows=256    dim=256    rel_fro=2.576e-08 max_abs=9.537e-07 mean_abs=1.725e-08 max_rel=6.288e-04  PASS
+rope_L6_q_full=False                     rope     rows=768    dim=256    rel_fro=3.986e-08 max_abs=9.537e-07 mean_abs=1.264e-08 max_rel=1.636e-04  PASS
+rope_L6_k_full=False                     rope     rows=256    dim=256    rel_fro=4.263e-08 max_abs=1.907e-06 mean_abs=2.034e-08 max_rel=1.241e-03  PASS
+rope_L11_q_full=True                     rope     rows=768    dim=256    rel_fro=3.352e-08 max_abs=9.537e-07 mean_abs=1.181e-08 max_rel=4.898e-03  PASS
+rope_L11_k_full=True                     rope     rows=256    dim=256    rel_fro=1.742e-08 max_abs=1.907e-06 mean_abs=1.922e-08 max_rel=1.908e-04  PASS
+geglu_L0                                 geglu    rows=256    dim=1152   rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+geglu_L5                                 geglu    rows=256    dim=1152   rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+geglu_L11                                geglu    rows=256    dim=1152   rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+geglu_L23                                geglu    rows=256    dim=1152   rel_fro=0.000e+00 max_abs=0.000e+00 mean_abs=0.000e+00 max_rel=0.000e+00  PASS
+
+36/36 records passed (tolerance 1.0e-05)

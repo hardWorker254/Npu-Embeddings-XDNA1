@@ -1,0 +1,220 @@
+
+C:\Users\vegar\.npu\cache\d9a49aa7b74308a952af58c6\main_core_2_3.o:	file format elf32-aie
+
+Disassembly of section .text.core_2_3:
+
+00000000 <core_2_3>:
+       0: e1 00 00 70 00 00 00 04 00 5b 01 20 00 f0 2c 00      	nopa	;		nopb	;		nops	;		paddxm	 [sp], #0x80;		nopv	
+      10: 5c 00 00 b0 aa f5    	st	 r10, [sp, #-84];		nopx	
+      16: 98 95 b5 0f  	st	 r12, [sp, #-76]
+      1a: 98 1d c7 0f  	st	 p6, [sp, #-60]
+      1e: 98 d5 bd 0f  	st	 r14, [sp, #-68]
+      22: 98 9d cb 0f  	st	 p7, [sp, #-56]
+      26: 98 3d a0 0f  	st	 lr, [sp, #-96]
+      2a: 98 15 a5 0f  	st	 r8, [sp, #-92]
+      2e: 98 35 a9 0f  	st	 r9, [sp, #-88]
+      32: 98 75 b1 0f  	st	 r11, [sp, #-80]
+      36: 98 b5 b9 0f  	st	 r13, [sp, #-72]
+      3a: 76 10 00 b0 00 00 80 f5 c1 07 00 00  	mova	r0, #0x0;		st	 r15, [sp, #-64];		movxm	p1, #0x0
+			0000003a:  R_AIE_45	_anonymous9
+      46: 3a 11 00 28 00 00 00 30 82 23	st	 r0, [p1], #4;		movxm	r1, #0x0
+			00000046:  R_AIE_43	C_L1L2_1_2_buff_1
+      50: 76 10 00 30 01 00 80 35 90 07 02 00  	mova	r2, #0x0;		st	 r1, [sp, #-112];		movxm	p2, #0x0
+			00000050:  R_AIE_45	C_L1L2_1_2_buff_0
+      5c: 76 10 00 30 03 00 80 1d 95 07 03 00  	mova	r3, #0x0;		st	 p2, [sp, #-108];		movxm	p6, #0x0
+			0000005c:  R_AIE_45	_anonymous9
+      68: 76 10 00 c8 01 00 80 11 04 01 2a 00  	mova	r10, #0x1;		st	 r0, [p1, #0];		movxm	r14, #0x0
+			00000068:  R_AIE_45	B_L2L1_1_2_cons_buff_1
+      74: 76 10 00 b0 03 00 80 11 14 01 ec ff  	mova	r12, #-0x1;		st	 r0, [p1, #4];		movxm	p7, #0x0
+			00000074:  R_AIE_45	B_L2L1_1_2_cons_buff_0
+
+00000080 <.LBB0_1>:
+      80: 36 c1 3a ce 03 00 00 20 00 f0 2c 00  	nopa	;		nopb	;		nopx	;		st	 r3, [sp, #-100]
+      8c: 98 55 98 0f  	st	 r2, [sp, #-104]
+      90: 00 00        	nop	
+      92: 00 00        	nop	
+      94: 00 00        	nop	
+      96: 18 a8 02 16  	acq	#0x30, r10
+      9a: 00 00        	nop	
+      9c: 00 00        	nop	
+      9e: 44 00 c0 00 00 00    	movxm	p0, #0x0
+			0000009e:  R_AIE_42	rtp_2_1
+      a4: 98 36 04 00  	lda	 r1, [p0, #0]
+		...
+      b0: 00 00        	nop	
+      b2: 18 01 00 10  	movx	r0, #0x0
+      b6: 98 19 00 10  	ge	 r0, r0, r1
+      ba: 84 01 40 00 00 00    	jnz	 r0, #0x0
+			000000ba:  R_AIE_1	.LBB0_8
+		...
+      c8: 98 35 88 0f  	st	 r1, [sp, #-120]
+      cc: 18 31 88 07  	lda	 r1, [sp, #-120]
+      d0: 98 36 15 00  	lda	 r9, [p0, #4]
+		...
+      dc: 18 85 c0 17  	movx	r0, #-0x1f
+      e0: 98 0e 42 10  	ashl	 r1, r1, r0
+      e4: 76 58 00 88 74 80 92 35 8c 07 05 00  	mova	r5, #0x0;		st	 r1, [sp, #-116];		ashl	 r8, r9, r0;		mov	r4, #0x0
+
+000000f0 <.LBB0_3>:
+      f0: e1 00 00 00 00 00 00 00 80 b5 84 27 00 f0 2c 00      	nopa	;		nopb	;		st	 r5, [sp, #-124];		nopxm	;		nopv	
+     100: 5c 00 00 b0 12 f0    	st	 r4, [sp, #-128];		nopx	
+     106: 00 00        	nop	
+     108: 00 00        	nop	
+     10a: 00 00        	nop	
+     10c: 18 c8 a2 16  	acq	#0x35, r12
+     110: 00 00        	nop	
+     112: 00 00        	nop	
+     114: 00 00        	nop	
+     116: 98 16 04 06  	lda	 r0, [p6, #0]
+     11a: 18 31 94 07  	lda	 r1, [sp, #-108]
+     11e: 18 11 90 07  	lda	 r0, [sp, #-112]
+     122: 00 00        	nop	
+     124: 00 00        	nop	
+     126: 04 01 00 00 00 00    	jl	#0x0
+			00000126:  R_AIE_1	zero_f32
+     12c: 00 00        	nop	
+     12e: 00 00        	nop	
+     130: 98 a7 36 10  	eq	 r27, r0, r10
+     134: 2c 34 34 00 00 00    	mova	r0, #0x0;		sel.nez	 r13, r0, r1, r27
+     13a: e4 41 cd 30 d3 02    	ge	 r11, r0, r9;		mov	p0, r13
+     140: b6 60 00 10 00 00 16 20 00 f0 2c 00  	nopa	;		nopb	;		jnz	 r11, #0x0
+			00000140:  R_AIE_4	.LBB0_7
+		...
+     154: 44 00 c0 00 00 00    	movxm	p0, #0x0
+			00000154:  R_AIE_42	A_L2L1_2_1_cons_buff_1
+     15a: 2c 02 3c 00 0b 00    	mova	r11, #0x0;		movx	r15, #0x0
+
+00000160 <.LBB0_5>:
+     160: 18 c8 42 16  	acq	#0x32, r12
+     164: 00 00        	nop	
+     166: 00 00        	nop	
+     168: 00 00        	nop	
+     16a: 98 16 14 06  	lda	 r0, [p6, #4]
+     16e: 00 00        	nop	
+     170: 00 00        	nop	
+     172: 00 00        	nop	
+     174: 18 c8 82 16  	acq	#0x34, r12
+     178: 00 00        	nop	
+     17a: 00 00        	nop	
+     17c: 00 00        	nop	
+     17e: 98 36 24 06  	lda	 r1, [p6, #8]
+     182: 00 00        	nop	
+     184: 00 00        	nop	
+     186: 44 00 20 01 00 00    	movxm	r2, #0x0
+			00000186:  R_AIE_42	A_L2L1_2_1_cons_buff_0
+     18c: 04 01 00 00 00 00    	jl	#0x0
+			0000018c:  R_AIE_1	333c4d33_matmul_bf16_f32
+     192: e4 81 21 f0 d4 06    	eq	 r27, r0, r10;		mov	r0, p0
+     198: 18 2a 00 10  	sel.nez	 r0, r0, r2, r27
+     19c: e4 81 3d f1 d4 0e    	eq	 r27, r1, r10;		mov	r2, p7
+     1a2: 5c 54 04 67 a1 51    	movs	p2, r13;		sel.nez	 r1, r14, r2, r27
+     1a8: 02 70 50 b0 00 60 01 10      	movs	p0, r0;		mov	p1, r1
+     1b0: e1 00 00 78 a5 01 40 05 31 5b 01 20 00 f0 2c 00      	nopa	;		nopb	;		nops	;		rel	#0x31, r10;		nopm	;		nopv	
+     1c0: 18 00 00 10  	nopx	
+     1c4: 00 00        	nop	
+     1c6: 00 00        	nop	
+     1c8: 98 16 14 06  	lda	 r0, [p6, #4]
+		...
+     1d8: 18 07 02 10  	add	r1, r0, #0x1
+     1dc: 18 ff 01 10  	add	r0, r0, #-0x1
+     1e0: 98 1a b6 12  	lt	 r27, r10, r1
+     1e4: 18 1a 00 10  	sel.nez	 r0, r0, r1, r27
+     1e8: 98 11 14 0e  	st	 r0, [p6, #4]
+     1ec: 00 00        	nop	
+     1ee: 00 00        	nop	
+     1f0: 00 00        	nop	
+     1f2: 18 a8 60 16  	rel	#0x33, r10
+     1f6: 00 00        	nop	
+     1f8: 00 00        	nop	
+     1fa: 00 00        	nop	
+     1fc: 98 16 24 06  	lda	 r0, [p6, #8]
+		...
+     208: 00 00        	nop	
+     20a: 18 07 de 13  	add	r15, r15, #0x1
+     20e: 18 07 02 10  	add	r1, r0, #0x1
+     212: 18 ff 01 10  	add	r0, r0, #-0x1
+     216: 98 1a b6 12  	lt	 r27, r10, r1
+     21a: 18 1a 00 10  	sel.nez	 r0, r0, r1, r27
+     21e: 98 ac c2 13  	ltu	 r1, r15, r10
+     222: 98 10 d6 12  	add	 r11, r11, r1
+     226: 98 9c c2 13  	ltu	 r1, r15, r9
+     22a: 98 8a c4 12  	lt	 r2, r11, r8
+     22e: 98 87 f6 12  	eq	 r27, r11, r8
+     232: 18 2a 42 10  	sel.nez	 r1, r1, r2, r27
+     236: 84 01 40 00 00 08    	jnz	 r1, #0x0
+			00000236:  R_AIE_1	.LBB0_5
+     23c: 00 00        	nop	
+     23e: 00 00        	nop	
+     240: 00 00        	nop	
+     242: 98 11 24 0e  	st	 r0, [p6, #8]
+     246: 44 00 c0 00 00 00    	movxm	p0, #0x0
+			00000246:  R_AIE_42	A_L2L1_2_1_cons_buff_1
+     24c: 00 00        	nop	
+     24e: 00 00        	nop	
+
+00000250 <.LBB0_7>:
+     250: 18 a8 c0 16  	rel	#0x36, r10
+     254: 00 00        	nop	
+     256: 00 00        	nop	
+     258: 00 00        	nop	
+     25a: 98 16 04 06  	lda	 r0, [p6, #0]
+     25e: 00 00        	nop	
+     260: 18 91 80 07  	lda	 r4, [sp, #-128]
+     264: 00 00        	nop	
+     266: 00 00        	nop	
+     268: 00 00        	nop	
+     26a: 18 b1 84 07  	lda	 r5, [sp, #-124]
+     26e: 2c 0e 04 20 8e f1    	lda	 r3, [sp, #-116];		add	r1, r0, #0x1
+     274: 18 ff 01 10  	add	r0, r0, #-0x1
+     278: 2c 0e 10 22 06 f1    	lda	 r1, [sp, #-120];		add	r4, r4, #0x1
+     27e: 98 1a b6 12  	lt	 r27, r10, r1
+     282: 18 1a 00 10  	sel.nez	 r0, r0, r1, r27
+     286: 98 ac 02 11  	ltu	 r1, r4, r10
+     28a: 98 10 4a 11  	add	 r5, r5, r1
+     28e: 98 3a 44 11  	lt	 r2, r5, r3
+     292: 98 37 76 11  	eq	 r27, r5, r3
+     296: 98 1c 02 11  	ltu	 r1, r4, r1
+     29a: 18 2a 42 10  	sel.nez	 r1, r1, r2, r27
+     29e: 84 01 40 00 00 08    	jnz	 r1, #0x0
+			0000029e:  R_AIE_1	.LBB0_3
+		...
+     2ac: 98 11 04 0e  	st	 r0, [p6, #0]
+
+000002b0 <.LBB0_8>:
+     2b0: 2c 00 00 20 0a f3    	lda	 r2, [sp, #-104];		nopx	
+     2b6: 00 00        	nop	
+     2b8: 18 71 9c 07  	lda	 r3, [sp, #-100]
+     2bc: 00 00        	nop	
+     2be: 00 00        	nop	
+     2c0: 00 00        	nop	
+     2c2: 44 fe bf f0 ff 7f    	movxm	r1, #0x7fffffff
+     2c8: 18 07 84 10  	add	r2, r2, #0x1
+     2cc: 98 ac 80 10  	ltu	 r0, r2, r10
+     2d0: 98 00 c6 10  	add	 r3, r3, r0
+     2d4: 98 c6 80 10  	xor	 r0, r2, r12
+     2d8: 98 16 c2 10  	xor	 r1, r3, r1
+     2dc: 98 15 00 10  	or	 r0, r0, r1
+     2e0: 84 01 40 00 00 00    	jnz	 r0, #0x0
+			000002e0:  R_AIE_1	.LBB0_1
+     2e6: 00 00        	nop	
+     2e8: 18 a8 00 16  	rel	#0x30, r10
+     2ec: 00 00        	nop	
+     2ee: 00 00        	nop	
+     2f0: 00 00        	nop	
+     2f2: 18 99 cb 07  	lda	 p7, [sp, #-56]
+     2f6: 18 19 c7 07  	lda	 p6, [sp, #-60]
+     2fa: 18 f1 c1 07  	lda	 r15, [sp, #-64]
+     2fe: 18 d1 bd 07  	lda	 r14, [sp, #-68]
+     302: 18 39 a0 07  	lda	 lr, [sp, #-96]
+     306: 18 b1 b9 07  	lda	 r13, [sp, #-72]
+     30a: 18 91 b5 07  	lda	 r12, [sp, #-76]
+     30e: 18 71 b1 07  	lda	 r11, [sp, #-80]
+     312: 18 51 ad 07  	lda	 r10, [sp, #-84]
+     316: 18 31 a9 07  	lda	 r9, [sp, #-88]
+     31a: 18 11 a5 07  	lda	 r8, [sp, #-92]
+     31e: 18 00 28 10  	ret	lr
+     322: 00 00        	nop	
+     324: 00 00        	nop	
+     326: 00 00        	nop	
+     328: c4 01 00 00 f0 ff    	paddxm	 [sp], #-0x80
+     32e: 00 00        	nop	

@@ -1,0 +1,45 @@
+nomic-embed-text-v1.5.npue  (322.08 MB, 150 tensors)
+  arch=nomic_bert_rope_swiglu  tile (64, 48), mac (s=8, t=8)
+  fusions: qkv_fused, transposed_to_kn, qk_scale_folded_into_q, gemm_operands_bf16, biases_and_layernorm_fp32, gated_ffn_fused_fc11_fc12, position_embeddings_zeroed_rope_instead
+
+A. spec conformance
+   ok    header is exactly 64 bytes
+   ok    magic == b'NPUE'
+   ok    version == 1
+   ok    arch == 2 (nomic_bert_rope_swiglu)
+   ok    flags has bit0 (pre-tiled)
+   ok    reserved is zero
+   ok    data_offset 32768 is 4096-aligned
+   ok    json sits between header and data
+   ok    file size == data_offset + data_length
+   ok    all 150 tensors 4096-aligned
+         alignment + json overhead: 145.9 KB on 322.1 MB (0.046%)
+
+B. round-trip (de-tile == bf16 of the fused source, bit-exact)
+   ok    48 operands, 113,246,208 bf16 elements, 0 differing
+         (of which ffn_up: 12 operands, 56,623,104 bf16 elements -- the fused fc11|fc12 check, proving both halves survived in the right order)
+
+C. layout_hash guard
+   ok    matching layout accepted
+   ok    tile_n 48 -> 64 refused
+
+D. zero-fill assertions (nomic has no biases and no position table)
+   arch=2 (nomic-embed-text-v1.5.npue): 49 tensors checked (embeddings.position + 4 x 12 biases)
+   ok    every checked tensor is exactly zero
+   control (bge-base-en-v1.5.npue, arch=bert_abs_gelu_postln): 49 equivalent tensors -- non-zero, as expected
+
+E. scale-fold-through-RoPE proof (rope(s*q) == s*rope(q))
+   fold-before-RoPE vs RoPE-then-scale, seq_len=64, head_dim=64, theta=1000: rel_fro = 0.000e+00
+   ok    within fp32 round-off (< 1e-6)
+
+F. config: rope_theta and swiglu_halves present and correct
+   ok    rope_theta present
+   ok    rope_theta == checkpoint's rotary_emb_base (1000)
+   ok    swiglu_halves present
+   ok    swiglu_halves == "fc11_up|fc12_gate"
+   ok    gated_ffn is True
+   ok    position_embedding_type == 'rope'
+   ok    prompts table present
+   ok    prompts_source labels the table as ours, not the checkpoint's
+
+PASS -- spec conformant, round-trip bit-exact, layout guarded, zero-fills verified against a live control, scale fold proved exact through RoPE, config facts present and correct

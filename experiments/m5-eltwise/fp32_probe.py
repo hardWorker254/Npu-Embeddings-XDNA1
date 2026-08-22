@@ -20,7 +20,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.iron as iron
-from aie.iron import CompileTime, In, ObjectFifo, Out, Program, Runtime, Worker
+from aie.iron import CompileTime, In, ObjectFifo, Out, Program, Runtime, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.device import from_name
 from aie.iron.kernel import ExternalFunction
@@ -65,14 +65,15 @@ def _build(dev, n_elem, symbol):
 
     w = Worker(core_fn, [fin.cons(), fout.prod(), k], stack_size=0xD00)
     taps = TensorTiler2D.simple_tiler((1, n_elem), (1, n_elem))
-    rt = Runtime()
-    with rt.sequence(buf_ty, buf_ty) as (X, Y):
-        rt.start(w)
-        tg = rt.task_group()
-        rt.fill(fin.prod(), X, tap=taps[0], task_group=tg)
-        rt.drain(fout.cons(), Y, tap=taps[0], wait=True, task_group=tg)
-        rt.finish_task_group(tg)
-    return Program(dev, rt).resolve_program()
+
+    def sequence(X, Y, fin_prod, fout_cons):
+        tg = TaskGroup()
+        fin_prod.fill(X, tap=taps[0], group=tg)
+        fout_cons.drain(Y, tap=taps[0], wait=True, group=tg)
+        tg.finish()
+
+    rt = Runtime(sequence, [buf_ty, buf_ty, fin.prod(), fout.cons()])
+    return Program(dev, rt, workers=[w]).resolve_program()
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])

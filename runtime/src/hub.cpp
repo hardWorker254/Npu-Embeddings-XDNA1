@@ -19,6 +19,7 @@
 #include <winhttp.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -58,7 +59,43 @@ const std::vector<CatalogEntry> &table() {
        "45e1954914e29bd74080e6c1510165274ff5279421c89f76c418878732f64ae7",
        "cls", 1024, 24, 16, 4096, 32, 1340.0,
        "highest quality; N=1024 forces tile_n 32, and 24 layers cost "
-       "dispatches"},
+       "dispatches", /*gated=*/false, /*gemma=*/false},
+      // Pin fetched and verified 2026-08-20 (tasks/0066): downloaded
+      // model.safetensors from the OFFICIAL gated google/embeddinggemma-300m
+      // with a real HF_TOKEN, sha256 cbf5a78393b6a033e0b8a63a57549964
+      // f7ed5c6fbeb4ba0694214f36123f2fd2 -- byte-identical to the
+      // unsloth/embeddinggemma-300m mirror tasks/0055-0065 verified all
+      // night, so every 1-cos/parity figure already on record for that
+      // checkpoint is valid for THIS one too, no re-verification needed.
+      // Host-only, CPU path (tasks/0064): no NPU design for this arch yet,
+      // so `tile_n`/`ffn` below are not used for tiling (kept for
+      // verify_config()'s generic hidden/layers/heads/intermediate checks,
+      // which read the same key names from Gemma's config.json).
+      {"embeddinggemma-300m", "google/embeddinggemma-300m",
+       "cbf5a78393b6a033e0b8a63a57549964f7ed5c6fbeb4ba0694214f36123f2fd2",
+       "mean", 768, 24, 3, 1152, 48, 1155.0,
+       "CPU-only host path (no NPU kernel yet); MQA+RoPE+GeGLU; gated, "
+       "needs HF_TOKEN", /*gated=*/true, /*gemma=*/true},
+      // arch=2 (tasks/0068-0071): RoPE + gated SwiGLU, NOT the BERT-family
+      // absolute-position + GELU the other four rows share -- but it packs
+      // to the SAME layout_hash and runs on the SAME NPU designs (tasks/
+      // 0069). sha256 re-derived locally against the downloaded
+      // model.safetensors with npue::sha256_file (tasks/0071) -- matches
+      // the pin reference/fetch_model.py recorded when this checkpoint was
+      // first brought up (tasks/0068), CLAUDE.md rule 6. `gated_ffn=true`
+      // is load-bearing: ffn_up emits 2*ffn (6144, not 3072), and without
+      // this bit design_fits() cannot tell this model apart from
+      // bge-base-en-v1.5's identical {768,3072} K set (tasks/0069 T31).
+      // NEEDS a task prefix (--prefix, tasks/0071) -- omitting one is a
+      // measured quality regression, not just a convention
+      // (docs/04-model/README.md:24).
+      {"nomic-embed-text-v1.5", "nomic-ai/nomic-embed-text-v1.5",
+       "9e7d262b1fe5ea350782829496efa831901b77486bbde1cea54a4c822d010d5c",
+       "mean", 768, 12, 12, 3072, 48, 546.9,
+       "RoPE + gated SwiGLU (arch=2); same array designs as bge-base; "
+       "needs --prefix (search_document / search_query / clustering / "
+       "classification)", /*gated=*/false, /*gemma=*/false,
+       /*gated_ffn=*/true},
   };
   return v;
 }
@@ -77,6 +114,25 @@ const Want kFiles[] = {
     {"vocab.txt", true},
     {"config.json", true},
     {"1_Pooling/config.json", true},
+};
+
+// Gemma's file set: no vocab.txt (its tokenizer lives entirely in
+// tokenizer.json + tokenizer_config.json, packed at build time into
+// gemma_tokenizer.bin by tools/gen_gemma_tokenizer_table.py -- not fetched
+// here, since ensure_model() only fetches the CHECKPOINT, not the generated
+// table); needs the sentence-transformers prompt table and both Dense heads
+// (tasks/0064's two post-pooling projections).
+const Want kFilesGemma[] = {
+    {"model.safetensors", true},
+    {"config.json", true},
+    {"tokenizer.json", true},
+    {"tokenizer_config.json", true},
+    {"config_sentence_transformers.json", true},
+    {"1_Pooling/config.json", true},
+    {"2_Dense/config.json", true},
+    {"2_Dense/model.safetensors", true},
+    {"3_Dense/config.json", true},
+    {"3_Dense/model.safetensors", true},
 };
 
 std::wstring widen(const std::string &s) {
@@ -148,7 +204,7 @@ const CatalogEntry *find(const std::string &name) {
 }
 
 void download(const std::string &url, const std::string &dest,
-              const Log &log) {
+              const Log &log, const std::string &bearer_token) {
   const Url u = parse_url(url);
 
   Handle session(WinHttpOpen(L"NpuEmbeddings/0.2",
@@ -168,6 +224,21 @@ void download(const std::string &url, const std::string &dest,
       conn, L"GET", u.path.c_str(), nullptr, WINHTTP_NO_REFERER,
       WINHTTP_DEFAULT_ACCEPT_TYPES, u.https ? WINHTTP_FLAG_SECURE : 0));
   if (!req) fail("cannot open request for " + url);
+
+  // A gated repo's actual bytes need the bearer token on EVERY hop,
+  // including the redirect target -- WinHTTP re-sends the header
+  // automatically on a same-origin-policy-compatible redirect, and
+  // HuggingFace's resolve/main/ -> CDN redirect includes a pre-signed URL
+  // that does not need it, so either way this is safe to always attach when
+  // a token was given.
+  const std::wstring auth_header =
+      bearer_token.empty() ? std::wstring()
+                           : L"Authorization: Bearer " + widen(bearer_token);
+  if (!auth_header.empty() &&
+      !WinHttpAddRequestHeaders(
+          req, auth_header.c_str(), (DWORD)auth_header.size(),
+          WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE))
+    fail("cannot set Authorization header for " + url);
 
   // WinHTTP follows redirects by default; HuggingFace always redirects
   // `resolve/main/...` to its CDN, so this is the normal path, not an edge
@@ -280,6 +351,25 @@ int64_t json_int(const std::string &s, const std::string &key, int64_t dflt) {
   return std::stoll(s.substr(start, p - start));
 }
 
+// A minimal string-field reader, same "flat, machine-generated" reasoning as
+// json_int above. Used only to read config.json's own "model_type" so the
+// packer dispatch below decides from the CHECKPOINT's stated architecture,
+// never from a catalogue bit -- matching main.cpp's --prepare-model
+// dispatch, and the reasoning in hub.hpp's CatalogEntry::gated_ffn comment
+// for why arch identity should not be inferred from that flag.
+std::string json_str(const std::string &s, const std::string &key) {
+  const std::string k = "\"" + key + "\"";
+  size_t p = s.find(k);
+  if (p == std::string::npos) return {};
+  p = s.find(':', p + k.size());
+  if (p == std::string::npos) return {};
+  const size_t q1 = s.find('"', p + 1);
+  if (q1 == std::string::npos) return {};
+  const size_t q2 = s.find('"', q1 + 1);
+  if (q2 == std::string::npos) return {};
+  return s.substr(q1 + 1, q2 - q1 - 1);
+}
+
 // Refuse a checkpoint whose config disagrees with what this build knows about
 // it. The catalogue's geometry is a claim, and a claim that is never checked
 // is the fail-open shape this project keeps finding (tasks/0038-0045): the
@@ -330,7 +420,7 @@ void verify_config(const CatalogEntry &e, const std::filesystem::path &dir) {
 }  // namespace
 
 std::string ensure_model(const std::string &root, const std::string &name,
-                         const Log &log) {
+                         const Log &log, const std::string &token_override) {
   namespace fs = std::filesystem;
   const fs::path models = fs::path(root) / "models";
   const fs::path container = models / (name + ".npue");
@@ -348,6 +438,43 @@ std::string ensure_model(const std::string &root, const std::string &name,
         "models/.");
   }
 
+  // GATED repositories need a token, and this FAILS CLOSED rather than
+  // falling back to an ungated mirror -- that fallback is a research-only
+  // shortcut (reference/fetch_model_gemma.py does it and says so in its own
+  // output); production code does not get to decide on the user's behalf
+  // that a third-party mirror is an acceptable substitute for the model the
+  // catalogue actually names.
+  //
+  // Precedence: an explicit `--token` (token_override) wins if given;
+  // otherwise fall back to the HF_TOKEN environment variable. Neither value
+  // is ever logged -- only whether one was found.
+  std::string bearer_token;
+  if (e->gated) {
+    if (!token_override.empty()) {
+      bearer_token = token_override;
+    } else if (const char *tok = std::getenv("HF_TOKEN"); tok && *tok) {
+      bearer_token = tok;
+    }
+    if (bearer_token.empty())
+      throw std::runtime_error(
+          "'" + e->name + "' (" + e->repo + ") is a GATED model. Fetching it "
+          "needs two things this run does not have:\n"
+          "    1. accept the model's licence once, at "
+          "https://huggingface.co/" + e->repo + "\n"
+          "    2. a HuggingFace access token for that account, either: pass "
+          "--token <value> on the command line, or set the HF_TOKEN "
+          "environment variable\n"
+          "  Refusing to fall back to an ungated mirror -- that is a "
+          "research-only shortcut, not something this build does silently.");
+    if (e->sha256.empty())
+      throw std::runtime_error(
+          "'" + e->name + "' is catalogued as gated but carries no verified "
+          "sha256 pin in this build (CLAUDE.md rule 6: a checksum pin is a "
+          "result, and needs a session that actually held HF_TOKEN to "
+          "produce one). Fetch and verify it once, then record the real "
+          "hash in runtime/src/hub.cpp's table() before this can run.");
+  }
+
   const fs::path dir = models / name;
   if (log) {
     log("");
@@ -361,14 +488,19 @@ std::string ensure_model(const std::string &root, const std::string &name,
 
   const std::string base =
       "https://huggingface.co/" + e->repo + "/resolve/main/";
-  for (const auto &w : kFiles) {
+  const auto fetch_list = [&]() -> std::vector<Want> {
+    if (e->gemma)
+      return std::vector<Want>(std::begin(kFilesGemma), std::end(kFilesGemma));
+    return std::vector<Want>(std::begin(kFiles), std::end(kFiles));
+  }();
+  for (const auto &w : fetch_list) {
     const fs::path dest = dir / w.rel;
     if (fs::exists(dest)) {
       if (log) log("  have  " + std::string(w.rel));
       continue;
     }
     if (log) log("  get   " + std::string(w.rel));
-    download(base + w.rel, dest.string(), log);
+    download(base + w.rel, dest.string(), log, bearer_token);
   }
 
   // The check that used to be `certutil` in a batch file. Same comparison,
@@ -389,6 +521,11 @@ std::string ensure_model(const std::string &root, const std::string &name,
   }
   if (log) log("        ok  " + got.substr(0, 16) + "...");
 
+  // verify_config()'s numeric checks (hidden_size/num_hidden_layers/
+  // num_attention_heads/intermediate_size) and its 1_Pooling/config.json
+  // pooling check both read key names Gemma's config.json carries too
+  // (confirmed tasks/0066) -- no arch branch needed here, only in the fetch
+  // list above and the packer dispatch below.
   verify_config(*e, dir);
 
   // The pin, written where pack_npue.py and --prepare-model both look for it.
@@ -404,12 +541,25 @@ std::string ensure_model(const std::string &root, const std::string &name,
   }
 
   if (log) log("  pack  " + container.filename().string());
-  const Layout layout = gemm_b_layout(64, e->tile_n);
-  prepare_model((dir / "model.safetensors").string(),
-                (dir / "vocab.txt").string(),
-                (dir / "config.json").string(), e->pooling, e->repo,
-                container.string(), got, layout.json, layout.hash, 64,
-                e->tile_n, 256, nullptr);
+  if (e->gemma) {
+    prepare_model_gemma(dir.string(), container.string(), e->repo, nullptr);
+  } else if (json_str(slurp_text(dir / "config.json"), "model_type") ==
+            "nomic_bert") {
+    // arch=2 (tasks/0071): read from the CHECKPOINT's own config.json, not
+    // from `gated_ffn` -- see the comment on that field in hub.hpp and on
+    // this catalogue row above.
+    const Layout layout = gemm_b_layout(64, e->tile_n);
+    prepare_model_nomic(dir.string(), e->pooling, e->repo, container.string(),
+                        layout.json, layout.hash, 64, e->tile_n, 256,
+                        nullptr);
+  } else {
+    const Layout layout = gemm_b_layout(64, e->tile_n);
+    prepare_model((dir / "model.safetensors").string(),
+                  (dir / "vocab.txt").string(),
+                  (dir / "config.json").string(), e->pooling, e->repo,
+                  container.string(), got, layout.json, layout.hash, 64,
+                  e->tile_n, 256, nullptr);
+  }
 
   if (log) {
     log("  ready " + container.string());

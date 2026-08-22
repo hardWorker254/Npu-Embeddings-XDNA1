@@ -1,212 +1,264 @@
+#loc6 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":11:10)
+#loc9 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":15:15)
+#loc11 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":17:14)
+#loc13 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":19:14)
+#loc15 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":21:14)
+#loc23 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":45:5)
+#loc24 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":45:26)
+#loc25 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":45:52)
+#loc26 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":45:78)
 module {
   aie.device(npu2) {
-    %shim_noc_tile_0_0 = aie.tile(0, 0) {controller_id = #aie.packet_info<pkt_type = 0, pkt_id = 15>}
-    %tile_0_2 = aie.tile(0, 2) {controller_id = #aie.packet_info<pkt_type = 0, pkt_id = 27>}
-    %z_cons_prod_lock_0 = aie.lock(%shim_noc_tile_0_0, 4) {init = 0 : i32, sym_name = "z_cons_prod_lock_0"}
-    %z_cons_cons_lock_0 = aie.lock(%shim_noc_tile_0_0, 5) {init = 0 : i32, sym_name = "z_cons_cons_lock_0"}
-    %z_buff_0 = aie.buffer(%tile_0_2) {address = 1024 : i32, mem_bank = 0 : i32, sym_name = "z_buff_0"} : memref<4096xbf16> 
-    %z_buff_1 = aie.buffer(%tile_0_2) {address = 16384 : i32, mem_bank = 1 : i32, sym_name = "z_buff_1"} : memref<4096xbf16> 
-    %z_prod_lock_0 = aie.lock(%tile_0_2, 4) {init = 2 : i32, sym_name = "z_prod_lock_0"}
-    %z_cons_lock_0 = aie.lock(%tile_0_2, 5) {init = 0 : i32, sym_name = "z_cons_lock_0"}
-    %y_cons_buff_0 = aie.buffer(%tile_0_2) {address = 32768 : i32, mem_bank = 2 : i32, sym_name = "y_cons_buff_0"} : memref<4096xbf16> 
-    %y_cons_buff_1 = aie.buffer(%tile_0_2) {address = 49152 : i32, mem_bank = 3 : i32, sym_name = "y_cons_buff_1"} : memref<4096xbf16> 
-    %y_cons_prod_lock_0 = aie.lock(%tile_0_2, 2) {init = 2 : i32, sym_name = "y_cons_prod_lock_0"}
-    %y_cons_cons_lock_0 = aie.lock(%tile_0_2, 3) {init = 0 : i32, sym_name = "y_cons_cons_lock_0"}
-    %y_prod_lock_0 = aie.lock(%shim_noc_tile_0_0, 2) {init = 0 : i32, sym_name = "y_prod_lock_0"}
-    %y_cons_lock_0 = aie.lock(%shim_noc_tile_0_0, 3) {init = 0 : i32, sym_name = "y_cons_lock_0"}
-    %x_cons_buff_0 = aie.buffer(%tile_0_2) {address = 24576 : i32, mem_bank = 1 : i32, sym_name = "x_cons_buff_0"} : memref<4096xbf16> 
-    %x_cons_buff_1 = aie.buffer(%tile_0_2) {address = 40960 : i32, mem_bank = 2 : i32, sym_name = "x_cons_buff_1"} : memref<4096xbf16> 
-    %x_cons_prod_lock_0 = aie.lock(%tile_0_2, 0) {init = 2 : i32, sym_name = "x_cons_prod_lock_0"}
-    %x_cons_cons_lock_0 = aie.lock(%tile_0_2, 1) {init = 0 : i32, sym_name = "x_cons_cons_lock_0"}
-    %x_prod_lock_0 = aie.lock(%shim_noc_tile_0_0, 0) {init = 0 : i32, sym_name = "x_prod_lock_0"}
-    %x_cons_lock_0 = aie.lock(%shim_noc_tile_0_0, 1) {init = 0 : i32, sym_name = "x_cons_lock_0"}
-    aie.flow(%shim_noc_tile_0_0, DMA : 0, %tile_0_2, DMA : 0)
-    aie.flow(%shim_noc_tile_0_0, DMA : 1, %tile_0_2, DMA : 1)
-    aie.flow(%tile_0_2, DMA : 0, %shim_noc_tile_0_0, DMA : 0)
-    func.func private @saxpy(memref<4096xbf16>, memref<4096xbf16>, memref<4096xbf16>) attributes {link_with = "saxpy.o"}
-    %_anonymous0 = aie.buffer(%tile_0_2) {address = 57344 : i32, mem_bank = 3 : i32, sym_name = "_anonymous0"} : memref<3xi32> 
+    %shim_noc_tile_0_0 = aie.tile(0, 0) {controller_id = #aie.packet_info<pkt_type = 0, pkt_id = 15>} loc(#loc1)
+    %tile_0_2 = aie.tile(0, 2) {controller_id = #aie.packet_info<pkt_type = 0, pkt_id = 27>} loc(#loc1)
+    %z_cons_prod_lock_0 = aie.lock(%shim_noc_tile_0_0, 0) {init = 0 : i32, sym_name = "z_cons_prod_lock_0"} loc(#loc2)
+    %z_cons_cons_lock_0 = aie.lock(%shim_noc_tile_0_0, 1) {init = 0 : i32, sym_name = "z_cons_cons_lock_0"} loc(#loc2)
+    %z_buff_0 = aie.buffer(%tile_0_2) {address = 1024 : i32, mem_bank = 0 : i32, sym_name = "z_buff_0"} : memref<4096xbf16>  loc(#loc2)
+    %z_buff_1 = aie.buffer(%tile_0_2) {address = 16384 : i32, mem_bank = 1 : i32, sym_name = "z_buff_1"} : memref<4096xbf16>  loc(#loc2)
+    %z_prod_lock_0 = aie.lock(%tile_0_2, 0) {init = 2 : i32, sym_name = "z_prod_lock_0"} loc(#loc2)
+    %z_cons_lock_0 = aie.lock(%tile_0_2, 1) {init = 0 : i32, sym_name = "z_cons_lock_0"} loc(#loc2)
+    %y_cons_buff_0 = aie.buffer(%tile_0_2) {address = 32768 : i32, mem_bank = 2 : i32, sym_name = "y_cons_buff_0"} : memref<4096xbf16>  loc(#loc3)
+    %y_cons_buff_1 = aie.buffer(%tile_0_2) {address = 49152 : i32, mem_bank = 3 : i32, sym_name = "y_cons_buff_1"} : memref<4096xbf16>  loc(#loc3)
+    %y_cons_prod_lock_0 = aie.lock(%tile_0_2, 2) {init = 2 : i32, sym_name = "y_cons_prod_lock_0"} loc(#loc3)
+    %y_cons_cons_lock_0 = aie.lock(%tile_0_2, 3) {init = 0 : i32, sym_name = "y_cons_cons_lock_0"} loc(#loc3)
+    %y_prod_lock_0 = aie.lock(%shim_noc_tile_0_0, 2) {init = 0 : i32, sym_name = "y_prod_lock_0"} loc(#loc3)
+    %y_cons_lock_0 = aie.lock(%shim_noc_tile_0_0, 3) {init = 0 : i32, sym_name = "y_cons_lock_0"} loc(#loc3)
+    %x_cons_buff_0 = aie.buffer(%tile_0_2) {address = 24576 : i32, mem_bank = 1 : i32, sym_name = "x_cons_buff_0"} : memref<4096xbf16>  loc(#loc4)
+    %x_cons_buff_1 = aie.buffer(%tile_0_2) {address = 40960 : i32, mem_bank = 2 : i32, sym_name = "x_cons_buff_1"} : memref<4096xbf16>  loc(#loc4)
+    %x_cons_prod_lock_0 = aie.lock(%tile_0_2, 4) {init = 2 : i32, sym_name = "x_cons_prod_lock_0"} loc(#loc4)
+    %x_cons_cons_lock_0 = aie.lock(%tile_0_2, 5) {init = 0 : i32, sym_name = "x_cons_cons_lock_0"} loc(#loc4)
+    %x_prod_lock_0 = aie.lock(%shim_noc_tile_0_0, 4) {init = 0 : i32, sym_name = "x_prod_lock_0"} loc(#loc4)
+    %x_cons_lock_0 = aie.lock(%shim_noc_tile_0_0, 5) {init = 0 : i32, sym_name = "x_cons_lock_0"} loc(#loc4)
+    aie.flow(%shim_noc_tile_0_0, DMA : 0, %tile_0_2, DMA : 0) loc(#loc4)
+    aie.flow(%shim_noc_tile_0_0, DMA : 1, %tile_0_2, DMA : 1) loc(#loc3)
+    aie.flow(%tile_0_2, DMA : 0, %shim_noc_tile_0_0, DMA : 0) loc(#loc2)
+    func.func private @saxpy(memref<4096xbf16>, memref<4096xbf16>, memref<4096xbf16>) attributes {link_with = "saxpy.o"} loc(#loc5)
     %core_0_2 = aie.core(%tile_0_2) {
-      %c1_i32 = arith.constant 1 : i32
-      %c9223372036854775807 = arith.constant 9223372036854775807 : index
-      %c2 = arith.constant 2 : index
-      %c1 = arith.constant 1 : index
-      %c0_i32 = arith.constant 0 : i32
-      %c0 = arith.constant 0 : index
-      %c2_i32 = arith.constant 2 : i32
-      memref.store %c0_i32, %_anonymous0[%c0] : memref<3xi32>
-      memref.store %c0_i32, %_anonymous0[%c1] : memref<3xi32>
-      memref.store %c0_i32, %_anonymous0[%c2] : memref<3xi32>
-      cf.br ^bb1(%c0 : index)
-    ^bb1(%0: index):  // 2 preds: ^bb0, ^bb14
-      %1 = arith.cmpi slt, %0, %c9223372036854775807 : index
-      cf.cond_br %1, ^bb2, ^bb15
+      %c1 = arith.constant 1 : index loc(#loc7)
+      %c9223372036854775807 = arith.constant 9223372036854775807 : index loc(#loc7)
+      %c0 = arith.constant 0 : index loc(#loc7)
+      %c0_i32 = arith.constant 0 : i32 loc(#loc7)
+      %c1_i32 = arith.constant 1 : i32 loc(#loc7)
+      %c2_i32 = arith.constant 2 : i32 loc(#loc7)
+      cf.br ^bb1(%c0, %c0_i32, %c0_i32, %c0_i32 : index, i32, i32, i32) loc(#loc8)
+    ^bb1(%0: index loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":15:15), %1: i32 loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":11:10), %2: i32 loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":11:10), %3: i32 loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":11:10)):  // 2 preds: ^bb0, ^bb14
+      %4 = arith.cmpi slt, %0, %c9223372036854775807 : index loc(#loc8)
+      cf.cond_br %4, ^bb2, ^bb15 loc(#loc8)
     ^bb2:  // pred: ^bb1
-      aie.use_lock(%x_cons_cons_lock_0, AcquireGreaterEqual, 1)
-      %2 = memref.load %_anonymous0[%c0] : memref<3xi32>
-      %3 = arith.index_cast %2 : i32 to index
-      %4 = arith.index_cast %3 : index to i64
-      cf.switch %4 : i64, [
+      aie.use_lock(%x_cons_cons_lock_0, AcquireGreaterEqual, %c1_i32) loc(#loc10)
+      %5 = arith.index_cast %1 : i32 to index loc(#loc11)
+      %6 = arith.index_cast %5 : index to i64 loc(#loc11)
+      cf.switch %6 : i64, [
         default: ^bb5,
         0: ^bb3,
         1: ^bb4
-      ]
+      ] loc(#loc11)
     ^bb3:  // pred: ^bb2
-      cf.br ^bb6(%x_cons_buff_0 : memref<4096xbf16>)
+      cf.br ^bb6(%x_cons_buff_0 : memref<4096xbf16>) loc(#loc11)
     ^bb4:  // pred: ^bb2
-      cf.br ^bb6(%x_cons_buff_1 : memref<4096xbf16>)
+      cf.br ^bb6(%x_cons_buff_1 : memref<4096xbf16>) loc(#loc11)
     ^bb5:  // pred: ^bb2
-      cf.br ^bb6(%x_cons_buff_0 : memref<4096xbf16>)
-    ^bb6(%5: memref<4096xbf16>):  // 3 preds: ^bb3, ^bb4, ^bb5
-      aie.use_lock(%y_cons_cons_lock_0, AcquireGreaterEqual, 1)
-      %6 = memref.load %_anonymous0[%c1] : memref<3xi32>
-      %7 = arith.index_cast %6 : i32 to index
-      %8 = arith.index_cast %7 : index to i64
-      cf.switch %8 : i64, [
+      cf.br ^bb6(%x_cons_buff_0 : memref<4096xbf16>) loc(#loc11)
+    ^bb6(%7: memref<4096xbf16> loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":17:14)):  // 3 preds: ^bb3, ^bb4, ^bb5
+      aie.use_lock(%y_cons_cons_lock_0, AcquireGreaterEqual, %c1_i32) loc(#loc12)
+      %8 = arith.index_cast %2 : i32 to index loc(#loc13)
+      %9 = arith.index_cast %8 : index to i64 loc(#loc13)
+      cf.switch %9 : i64, [
         default: ^bb9,
         0: ^bb7,
         1: ^bb8
-      ]
+      ] loc(#loc13)
     ^bb7:  // pred: ^bb6
-      cf.br ^bb10(%y_cons_buff_0 : memref<4096xbf16>)
+      cf.br ^bb10(%y_cons_buff_0 : memref<4096xbf16>) loc(#loc13)
     ^bb8:  // pred: ^bb6
-      cf.br ^bb10(%y_cons_buff_1 : memref<4096xbf16>)
+      cf.br ^bb10(%y_cons_buff_1 : memref<4096xbf16>) loc(#loc13)
     ^bb9:  // pred: ^bb6
-      cf.br ^bb10(%y_cons_buff_0 : memref<4096xbf16>)
-    ^bb10(%9: memref<4096xbf16>):  // 3 preds: ^bb7, ^bb8, ^bb9
-      aie.use_lock(%z_prod_lock_0, AcquireGreaterEqual, 1)
-      %10 = memref.load %_anonymous0[%c2] : memref<3xi32>
-      %11 = arith.index_cast %10 : i32 to index
-      %12 = arith.index_cast %11 : index to i64
+      cf.br ^bb10(%y_cons_buff_0 : memref<4096xbf16>) loc(#loc13)
+    ^bb10(%10: memref<4096xbf16> loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":19:14)):  // 3 preds: ^bb7, ^bb8, ^bb9
+      aie.use_lock(%z_prod_lock_0, AcquireGreaterEqual, %c1_i32) loc(#loc14)
+      %11 = arith.index_cast %3 : i32 to index loc(#loc15)
+      %12 = arith.index_cast %11 : index to i64 loc(#loc15)
       cf.switch %12 : i64, [
         default: ^bb13,
         0: ^bb11,
         1: ^bb12
-      ]
+      ] loc(#loc15)
     ^bb11:  // pred: ^bb10
-      cf.br ^bb14(%z_buff_0 : memref<4096xbf16>)
+      cf.br ^bb14(%z_buff_0 : memref<4096xbf16>) loc(#loc15)
     ^bb12:  // pred: ^bb10
-      cf.br ^bb14(%z_buff_1 : memref<4096xbf16>)
+      cf.br ^bb14(%z_buff_1 : memref<4096xbf16>) loc(#loc15)
     ^bb13:  // pred: ^bb10
-      cf.br ^bb14(%z_buff_0 : memref<4096xbf16>)
-    ^bb14(%13: memref<4096xbf16>):  // 3 preds: ^bb11, ^bb12, ^bb13
-      func.call @saxpy(%5, %9, %13) : (memref<4096xbf16>, memref<4096xbf16>, memref<4096xbf16>) -> ()
-      aie.use_lock(%x_cons_prod_lock_0, Release, 1)
-      %14 = memref.load %_anonymous0[%c0] : memref<3xi32>
-      %15 = arith.addi %14, %c1_i32 : i32
-      %16 = arith.cmpi sge, %15, %c2_i32 : i32
-      %17 = arith.subi %15, %c2_i32 : i32
-      %18 = arith.select %16, %17, %15 : i32
-      memref.store %18, %_anonymous0[%c0] : memref<3xi32>
-      aie.use_lock(%y_cons_prod_lock_0, Release, 1)
-      %19 = memref.load %_anonymous0[%c1] : memref<3xi32>
-      %20 = arith.addi %19, %c1_i32 : i32
-      %21 = arith.cmpi sge, %20, %c2_i32 : i32
-      %22 = arith.subi %20, %c2_i32 : i32
-      %23 = arith.select %21, %22, %20 : i32
-      memref.store %23, %_anonymous0[%c1] : memref<3xi32>
-      aie.use_lock(%z_cons_lock_0, Release, 1)
-      %24 = memref.load %_anonymous0[%c2] : memref<3xi32>
-      %25 = arith.addi %24, %c1_i32 : i32
-      %26 = arith.cmpi sge, %25, %c2_i32 : i32
-      %27 = arith.subi %25, %c2_i32 : i32
-      %28 = arith.select %26, %27, %25 : i32
-      memref.store %28, %_anonymous0[%c2] : memref<3xi32>
-      %29 = arith.addi %0, %c1 : index
-      cf.br ^bb1(%29 : index)
+      cf.br ^bb14(%z_buff_0 : memref<4096xbf16>) loc(#loc15)
+    ^bb14(%13: memref<4096xbf16> loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":21:14)):  // 3 preds: ^bb11, ^bb12, ^bb13
+      func.call @saxpy(%7, %10, %13) : (memref<4096xbf16>, memref<4096xbf16>, memref<4096xbf16>) -> () loc(#loc16)
+      aie.use_lock(%x_cons_prod_lock_0, Release, %c1_i32) loc(#loc17)
+      %14 = arith.addi %1, %c1_i32 : i32 loc(#loc17)
+      %15 = arith.cmpi sge, %14, %c2_i32 : i32 loc(#loc17)
+      %16 = arith.select %15, %c0_i32, %14 : i32 loc(#loc17)
+      aie.use_lock(%y_cons_prod_lock_0, Release, %c1_i32) loc(#loc18)
+      %17 = arith.addi %2, %c1_i32 : i32 loc(#loc18)
+      %18 = arith.cmpi sge, %17, %c2_i32 : i32 loc(#loc18)
+      %19 = arith.select %18, %c0_i32, %17 : i32 loc(#loc18)
+      aie.use_lock(%z_cons_lock_0, Release, %c1_i32) loc(#loc19)
+      %20 = arith.addi %3, %c1_i32 : i32 loc(#loc19)
+      %21 = arith.cmpi sge, %20, %c2_i32 : i32 loc(#loc19)
+      %22 = arith.select %21, %c0_i32, %20 : i32 loc(#loc19)
+      %23 = arith.addi %0, %c1 : index loc(#loc8)
+      cf.br ^bb1(%23, %16, %19, %22 : index, i32, i32, i32) loc(#loc8)
     ^bb15:  // pred: ^bb1
-      aie.end
-    } {link_files = ["saxpy.o"]}
+      aie.end loc(#loc20)
+    } {link_files = ["saxpy.o"]} loc(#loc6)
     aie.trace.config @trace_core_1_config(%tile_0_2) packet_type = core {
-      aie.trace.reg register = "Trace_Control0" value = 2038038528 mask = 2139029507 comment = "trace mode + start event + stop event"
-      aie.trace.reg register = "Trace_Control1" value = 1 mask = 28703 comment = "packet ID + packet type"
-      aie.trace.reg register = "Stream_Switch_Event_Port_Selection_0" value = 289 mask = 16191 comment = "port 0 ID + port 0 master/slave + port 1 ID + port 1 master/slave"
-      aie.trace.reg register = "Trace_Event0" value = 388309537 mask = 2139062143 comment = "INSTR_EVENT_0 + INSTR_EVENT_1 + INSTR_VECTOR + MEMORY_STALL"
-      aie.trace.reg register = "Trace_Event1" value = 1330321944 mask = 2139062143 comment = "STREAM_STALL + LOCK_STALL + PORT_RUNNING_0 + PORT_RUNNING_1"
-    }
-    aie.runtime_sequence(%arg0: memref<4096xbf16>, %arg1: memref<4096xbf16>, %arg2: memref<4096xbf16>) {
-      aiex.npu.write32 {address = 213200 : ui32, column = 0 : i32, row = 2 : i32, value = 2038038528 : ui32}
-      aiex.npu.write32 {address = 213204 : ui32, column = 0 : i32, row = 2 : i32, value = 1 : ui32}
-      aiex.npu.write32 {address = 261888 : ui32, column = 0 : i32, row = 2 : i32, value = 289 : ui32}
-      aiex.npu.write32 {address = 213216 : ui32, column = 0 : i32, row = 2 : i32, value = 388309537 : ui32}
-      aiex.npu.write32 {address = 213220 : ui32, column = 0 : i32, row = 2 : i32, value = 1330321944 : ui32}
-      aiex.npu.write32 {address = 212992 : ui32, column = 0 : i32, row = 2 : i32, value = 31232 : ui32}
-      aiex.npu.writebd {bd_id = 15 : i32, buffer_length = 2048 : i32, buffer_offset = 0 : i32, burst_length = 64 : i32, column = 0 : i32, d0_size = 0 : i32, d0_stride = 0 : i32, d0_zero_after = 0 : i32, d0_zero_before = 0 : i32, d1_size = 0 : i32, d1_stride = 0 : i32, d1_zero_after = 0 : i32, d1_zero_before = 0 : i32, d2_size = 0 : i32, d2_stride = 0 : i32, d2_zero_after = 0 : i32, d2_zero_before = 0 : i32, enable_packet = 1 : i32, iteration_current = 0 : i32, iteration_size = 0 : i32, iteration_stride = 0 : i32, lock_acq_enable = 0 : i32, lock_acq_id = 0 : i32, lock_acq_val = 0 : i32, lock_rel_id = 0 : i32, lock_rel_val = 0 : i32, next_bd = 0 : i32, out_of_order_id = 0 : i32, packet_id = 0 : i32, packet_type = 0 : i32, row = 0 : i32, use_next_bd = 0 : i32, valid_bd = 1 : i32}
-      aiex.npu.address_patch {addr = 119268 : ui32, arg_idx = 4 : i32, arg_plus = 0 : i32}
-      aiex.npu.maskwrite32 {address = 119304 : ui32, column = 0 : i32, mask = 65280 : ui32, row = 0 : i32, value = 3840 : ui32}
-      aiex.npu.write32 {address = 119308 : ui32, column = 0 : i32, row = 0 : i32, value = 2147483663 : ui32}
-      aiex.npu.write32 {address = 212992 : ui32, column = 0 : i32, row = 0 : i32, value = 32512 : ui32}
-      aiex.npu.write32 {address = 213068 : ui32, column = 0 : i32, row = 0 : i32, value = 127 : ui32}
-      aiex.npu.write32 {address = 213000 : ui32, column = 0 : i32, row = 0 : i32, value = 127 : ui32}
+      aie.trace.reg register = "Trace_Control0" value = 2038038528 mask = 2139029507 comment = "trace mode + start event + stop event" loc(#loc21)
+      aie.trace.reg register = "Trace_Control1" value = 1 mask = 28703 comment = "packet ID + packet type" loc(#loc21)
+      aie.trace.reg register = "Stream_Switch_Event_Port_Selection_0" value = 289 mask = 16191 comment = "port 0 ID + port 0 master/slave + port 1 ID + port 1 master/slave" loc(#loc22)
+      aie.trace.reg register = "Trace_Event0" value = 388309537 mask = 2139062143 comment = "INSTR_EVENT_0 + INSTR_EVENT_1 + INSTR_VECTOR + MEMORY_STALL" loc(#loc21)
+      aie.trace.reg register = "Trace_Event1" value = 1330321944 mask = 2139062143 comment = "STREAM_STALL + LOCK_STALL + PORT_RUNNING_0 + PORT_RUNNING_1" loc(#loc21)
+    } loc(#loc21)
+    aie.runtime_sequence(%arg0: memref<4096xbf16> loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":45:26), %arg1: memref<4096xbf16> loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":45:52), %arg2: memref<4096xbf16> loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":45:78), %arg3: memref<8192xi8> loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":45:5)) {
+      %c213200_i32 = arith.constant 213200 : i32 loc(#loc7)
+      %c2038038528_i32 = arith.constant 2038038528 : i32 loc(#loc7)
+      %c1_i32 = arith.constant 1 : i32 loc(#loc7)
+      %c213204_i32 = arith.constant 213204 : i32 loc(#loc7)
+      %c289_i32 = arith.constant 289 : i32 loc(#loc7)
+      %c261888_i32 = arith.constant 261888 : i32 loc(#loc7)
+      %c388309537_i32 = arith.constant 388309537 : i32 loc(#loc7)
+      %c213216_i32 = arith.constant 213216 : i32 loc(#loc7)
+      %c1330321944_i32 = arith.constant 1330321944 : i32 loc(#loc7)
+      %c213220_i32 = arith.constant 213220 : i32 loc(#loc7)
+      %c31232_i32 = arith.constant 31232 : i32 loc(#loc7)
+      %c212992_i32 = arith.constant 212992 : i32 loc(#loc7)
+      %c0_i32 = arith.constant 0 : i32 loc(#loc7)
+      %c65280_i32 = arith.constant 65280 : i32 loc(#loc7)
+      %c3840_i32 = arith.constant 3840 : i32 loc(#loc7)
+      %c119304_i32 = arith.constant 119304 : i32 loc(#loc7)
+      %c-2147483633_i32 = arith.constant -2147483633 : i32 loc(#loc7)
+      %c119308_i32 = arith.constant 119308 : i32 loc(#loc7)
+      %c32512_i32 = arith.constant 32512 : i32 loc(#loc7)
+      %c127_i32 = arith.constant 127 : i32 loc(#loc7)
+      %c213068_i32 = arith.constant 213068 : i32 loc(#loc7)
+      %c213000_i32 = arith.constant 213000 : i32 loc(#loc7)
+      %c126_i32 = arith.constant 126 : i32 loc(#loc7)
+      %c213064_i32 = arith.constant 213064 : i32 loc(#loc7)
+      aiex.npu.write32(%c213200_i32, %c2038038528_i32) {column = 0 : i32, row = 2 : i32} : i32, i32 loc(#loc21)
+      aiex.npu.write32(%c213204_i32, %c1_i32) {column = 0 : i32, row = 2 : i32} : i32, i32 loc(#loc21)
+      aiex.npu.write32(%c261888_i32, %c289_i32) {column = 0 : i32, row = 2 : i32} : i32, i32 loc(#loc22)
+      aiex.npu.write32(%c213216_i32, %c388309537_i32) {column = 0 : i32, row = 2 : i32} : i32, i32 loc(#loc21)
+      aiex.npu.write32(%c213220_i32, %c1330321944_i32) {column = 0 : i32, row = 2 : i32} : i32, i32 loc(#loc21)
+      aiex.npu.write32(%c212992_i32, %c31232_i32) {column = 0 : i32, row = 2 : i32} : i32, i32 loc(#loc23)
+      aiex.npu.writebd {bd_id = 15 : i32, buffer_length = 2048 : i32, buffer_offset = 0 : i32, burst_length = 64 : i32, column = 0 : i32, d0_size = 0 : i32, d0_stride = 0 : i32, d0_zero_after = 0 : i32, d0_zero_before = 0 : i32, d1_size = 0 : i32, d1_stride = 0 : i32, d1_zero_after = 0 : i32, d1_zero_before = 0 : i32, d2_size = 0 : i32, d2_stride = 0 : i32, d2_zero_after = 0 : i32, d2_zero_before = 0 : i32, enable_packet = 1 : i32, iteration_current = 0 : i32, iteration_size = 0 : i32, iteration_stride = 0 : i32, lock_acq_enable = 0 : i32, lock_acq_id = 0 : i32, lock_acq_val = 0 : i32, lock_rel_id = 0 : i32, lock_rel_val = 0 : i32, next_bd = 0 : i32, out_of_order_id = 0 : i32, packet_id = 0 : i32, packet_type = 0 : i32, row = 0 : i32, use_next_bd = 0 : i32, valid_bd = 1 : i32} loc(#loc23)
+      aiex.npu.address_patch(%c0_i32 : i32) {addr = 119268 : ui32, arg_idx = 3 : i32} loc(#loc23)
+      aiex.npu.maskwrite32(%c119304_i32, %c3840_i32, %c65280_i32) {column = 0 : i32, row = 0 : i32} : i32, i32, i32 loc(#loc23)
+      aiex.npu.write32(%c119308_i32, %c-2147483633_i32) {column = 0 : i32, row = 0 : i32} : i32, i32 loc(#loc23)
+      aiex.npu.write32(%c212992_i32, %c32512_i32) {column = 0 : i32, row = 0 : i32} : i32, i32 loc(#loc23)
+      aiex.npu.write32(%c213068_i32, %c127_i32) {column = 0 : i32, row = 0 : i32} : i32, i32 loc(#loc23)
+      aiex.npu.write32(%c213000_i32, %c127_i32) {column = 0 : i32, row = 0 : i32} : i32, i32 loc(#loc23)
       %0 = aiex.dma_configure_task_for @x_shim_alloc {
-        aie.dma_bd(%arg0 : memref<4096xbf16>, 0, 4096, [<size = 1, stride = 0>, <size = 1, stride = 0>, <size = 1, stride = 0>, <size = 4096, stride = 1>]) {burst_length = 0 : i32}
-        aie.end
-      }
-      aiex.dma_start_task(%0)
+        aie.dma_bd(%arg0 : memref<4096xbf16> offset = 0 len = 4096 sizes = [1, 1, 1, 4096] strides = [0, 0, 0, 1]) loc(#loc28)
+        aie.end loc(#loc29)
+      } loc(#loc27)
+      aiex.dma_start_task(%0) loc(#loc30)
       %1 = aiex.dma_configure_task_for @y_shim_alloc {
-        aie.dma_bd(%arg1 : memref<4096xbf16>, 0, 4096, [<size = 1, stride = 0>, <size = 1, stride = 0>, <size = 1, stride = 0>, <size = 4096, stride = 1>]) {burst_length = 0 : i32}
-        aie.end
-      }
-      aiex.dma_start_task(%1)
+        aie.dma_bd(%arg1 : memref<4096xbf16> offset = 0 len = 4096 sizes = [1, 1, 1, 4096] strides = [0, 0, 0, 1]) loc(#loc32)
+        aie.end loc(#loc33)
+      } loc(#loc31)
+      aiex.dma_start_task(%1) loc(#loc34)
       %2 = aiex.dma_configure_task_for @z_shim_alloc {
-        aie.dma_bd(%arg2 : memref<4096xbf16>, 0, 4096, [<size = 1, stride = 0>, <size = 1, stride = 0>, <size = 1, stride = 0>, <size = 4096, stride = 1>]) {burst_length = 0 : i32}
-        aie.end
-      } {issue_token = true}
-      aiex.dma_start_task(%2)
-      aiex.dma_await_task(%2)
-      aiex.dma_free_task(%0)
-      aiex.dma_free_task(%1)
-      aiex.npu.write32 {address = 213064 : ui32, column = 0 : i32, row = 0 : i32, value = 126 : ui32}
-      aiex.npu.write32 {address = 213000 : ui32, column = 0 : i32, row = 0 : i32, value = 126 : ui32}
-    }
+        aie.dma_bd(%arg2 : memref<4096xbf16> offset = 0 len = 4096 sizes = [1, 1, 1, 4096] strides = [0, 0, 0, 1]) loc(#loc36)
+        aie.end loc(#loc37)
+      } {issue_token = true} loc(#loc35)
+      aiex.dma_start_task(%2) loc(#loc38)
+      aiex.dma_await_task(%2) loc(#loc39)
+      aiex.dma_free_task(%0) loc(#loc40)
+      aiex.dma_free_task(%1) loc(#loc41)
+      aiex.dma_free_task(%2) loc(#loc42)
+      aiex.npu.write32(%c213064_i32, %c126_i32) {column = 0 : i32, row = 0 : i32} : i32, i32 loc(#loc23)
+      aiex.npu.write32(%c213000_i32, %c126_i32) {column = 0 : i32, row = 0 : i32} : i32, i32 loc(#loc23)
+    } loc(#loc23)
     aie.packet_flow(1) {
-      aie.packet_source<%tile_0_2, Trace : 0>
-      aie.packet_dest<%shim_noc_tile_0_0, DMA : 1>
-    } {keep_pkt_header = true}
-    aie.shim_dma_allocation @x_shim_alloc(%shim_noc_tile_0_0, MM2S, 0)
+      aie.packet_source<%tile_0_2, Trace : 0> loc(#loc1)
+      aie.packet_dest<%shim_noc_tile_0_0, DMA : 1> loc(#loc1)
+    } {keep_pkt_header = true} loc(#loc1)
+    aie.shim_dma_allocation @x_shim_alloc(%shim_noc_tile_0_0, MM2S, 0) loc(#loc4)
     %mem_0_2 = aie.mem(%tile_0_2) {
-      %0 = aie.dma_start(S2MM, 0, ^bb1, ^bb3)
+      %c1_i32 = arith.constant 1 : i32 loc(#loc7)
+      %0 = aie.dma_start(S2MM, 0, ^bb1, ^bb3) loc(#loc4)
     ^bb1:  // 2 preds: ^bb0, ^bb2
-      aie.use_lock(%x_cons_prod_lock_0, AcquireGreaterEqual, 1)
-      aie.dma_bd(%x_cons_buff_0 : memref<4096xbf16>, 0, 4096) {bd_id = 0 : i32, next_bd_id = 1 : i32}
-      aie.use_lock(%x_cons_cons_lock_0, Release, 1)
-      aie.next_bd ^bb2
+      aie.use_lock(%x_cons_prod_lock_0, AcquireGreaterEqual, %c1_i32) loc(#loc4)
+      aie.dma_bd(%x_cons_buff_0 : memref<4096xbf16> offset = 0 len = 4096) {bd_id = 0 : i32, next_bd_id = 1 : i32} loc(#loc4)
+      aie.use_lock(%x_cons_cons_lock_0, Release, %c1_i32) loc(#loc4)
+      aie.next_bd ^bb2 loc(#loc4)
     ^bb2:  // pred: ^bb1
-      aie.use_lock(%x_cons_prod_lock_0, AcquireGreaterEqual, 1)
-      aie.dma_bd(%x_cons_buff_1 : memref<4096xbf16>, 0, 4096) {bd_id = 1 : i32, next_bd_id = 0 : i32}
-      aie.use_lock(%x_cons_cons_lock_0, Release, 1)
-      aie.next_bd ^bb1
+      aie.use_lock(%x_cons_prod_lock_0, AcquireGreaterEqual, %c1_i32) loc(#loc4)
+      aie.dma_bd(%x_cons_buff_1 : memref<4096xbf16> offset = 0 len = 4096) {bd_id = 1 : i32, next_bd_id = 0 : i32} loc(#loc4)
+      aie.use_lock(%x_cons_cons_lock_0, Release, %c1_i32) loc(#loc4)
+      aie.next_bd ^bb1 loc(#loc4)
     ^bb3:  // pred: ^bb0
-      %1 = aie.dma_start(S2MM, 1, ^bb4, ^bb6)
+      %1 = aie.dma_start(S2MM, 1, ^bb4, ^bb6) loc(#loc3)
     ^bb4:  // 2 preds: ^bb3, ^bb5
-      aie.use_lock(%y_cons_prod_lock_0, AcquireGreaterEqual, 1)
-      aie.dma_bd(%y_cons_buff_0 : memref<4096xbf16>, 0, 4096) {bd_id = 2 : i32, next_bd_id = 3 : i32}
-      aie.use_lock(%y_cons_cons_lock_0, Release, 1)
-      aie.next_bd ^bb5
+      aie.use_lock(%y_cons_prod_lock_0, AcquireGreaterEqual, %c1_i32) loc(#loc3)
+      aie.dma_bd(%y_cons_buff_0 : memref<4096xbf16> offset = 0 len = 4096) {bd_id = 2 : i32, next_bd_id = 3 : i32} loc(#loc3)
+      aie.use_lock(%y_cons_cons_lock_0, Release, %c1_i32) loc(#loc3)
+      aie.next_bd ^bb5 loc(#loc3)
     ^bb5:  // pred: ^bb4
-      aie.use_lock(%y_cons_prod_lock_0, AcquireGreaterEqual, 1)
-      aie.dma_bd(%y_cons_buff_1 : memref<4096xbf16>, 0, 4096) {bd_id = 3 : i32, next_bd_id = 2 : i32}
-      aie.use_lock(%y_cons_cons_lock_0, Release, 1)
-      aie.next_bd ^bb4
+      aie.use_lock(%y_cons_prod_lock_0, AcquireGreaterEqual, %c1_i32) loc(#loc3)
+      aie.dma_bd(%y_cons_buff_1 : memref<4096xbf16> offset = 0 len = 4096) {bd_id = 3 : i32, next_bd_id = 2 : i32} loc(#loc3)
+      aie.use_lock(%y_cons_cons_lock_0, Release, %c1_i32) loc(#loc3)
+      aie.next_bd ^bb4 loc(#loc3)
     ^bb6:  // pred: ^bb3
-      %2 = aie.dma_start(MM2S, 0, ^bb7, ^bb9)
+      %2 = aie.dma_start(MM2S, 0, ^bb7, ^bb9) loc(#loc2)
     ^bb7:  // 2 preds: ^bb6, ^bb8
-      aie.use_lock(%z_cons_lock_0, AcquireGreaterEqual, 1)
-      aie.dma_bd(%z_buff_0 : memref<4096xbf16>, 0, 4096) {bd_id = 4 : i32, next_bd_id = 5 : i32}
-      aie.use_lock(%z_prod_lock_0, Release, 1)
-      aie.next_bd ^bb8
+      aie.use_lock(%z_cons_lock_0, AcquireGreaterEqual, %c1_i32) loc(#loc2)
+      aie.dma_bd(%z_buff_0 : memref<4096xbf16> offset = 0 len = 4096) {bd_id = 4 : i32, next_bd_id = 5 : i32} loc(#loc2)
+      aie.use_lock(%z_prod_lock_0, Release, %c1_i32) loc(#loc2)
+      aie.next_bd ^bb8 loc(#loc2)
     ^bb8:  // pred: ^bb7
-      aie.use_lock(%z_cons_lock_0, AcquireGreaterEqual, 1)
-      aie.dma_bd(%z_buff_1 : memref<4096xbf16>, 0, 4096) {bd_id = 5 : i32, next_bd_id = 4 : i32}
-      aie.use_lock(%z_prod_lock_0, Release, 1)
-      aie.next_bd ^bb7
+      aie.use_lock(%z_cons_lock_0, AcquireGreaterEqual, %c1_i32) loc(#loc2)
+      aie.dma_bd(%z_buff_1 : memref<4096xbf16> offset = 0 len = 4096) {bd_id = 5 : i32, next_bd_id = 4 : i32} loc(#loc2)
+      aie.use_lock(%z_prod_lock_0, Release, %c1_i32) loc(#loc2)
+      aie.next_bd ^bb7 loc(#loc2)
     ^bb9:  // pred: ^bb6
-      aie.end
-    }
-    aie.shim_dma_allocation @y_shim_alloc(%shim_noc_tile_0_0, MM2S, 1)
-    aie.shim_dma_allocation @z_shim_alloc(%shim_noc_tile_0_0, S2MM, 0)
+      aie.end loc(#loc4)
+    } loc(#loc4)
+    aie.shim_dma_allocation @y_shim_alloc(%shim_noc_tile_0_0, MM2S, 1) loc(#loc3)
+    aie.shim_dma_allocation @z_shim_alloc(%shim_noc_tile_0_0, S2MM, 0) loc(#loc2)
     aie.packet_flow(15) {
-      aie.packet_source<%shim_noc_tile_0_0, TileControl : 0>
-      aie.packet_dest<%shim_noc_tile_0_0, South : 0>
-    } {keep_pkt_header = true, priority_route = true}
-  }
-}
+      aie.packet_source<%shim_noc_tile_0_0, TileControl : 0> loc(#loc1)
+      aie.packet_dest<%shim_noc_tile_0_0, South : 0> loc(#loc1)
+    } {keep_pkt_header = true, priority_route = true} loc(#loc1)
+  } loc(#loc1)
+} loc(#loc)
+#loc = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":1:1)
+#loc1 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":2:3)
+#loc2 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":9:5)
+#loc3 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":8:5)
+#loc4 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":7:5)
+#loc5 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":10:5)
+#loc7 = loc(unknown)
+#loc8 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":15:7)
+#loc10 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":16:14)
+#loc12 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":18:14)
+#loc14 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":20:14)
+#loc16 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":22:9)
+#loc17 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":23:9)
+#loc18 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":24:9)
+#loc19 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":25:9)
+#loc20 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":27:7)
+#loc21 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":29:5)
+#loc22 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":40:7)
+#loc27 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":48:12)
+#loc28 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":49:9)
+#loc29 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":50:9)
+#loc30 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":52:7)
+#loc31 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":53:12)
+#loc32 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":54:9)
+#loc33 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":55:9)
+#loc34 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":57:7)
+#loc35 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":58:12)
+#loc36 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":59:9)
+#loc37 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":60:9)
+#loc38 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":62:7)
+#loc39 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":63:7)
+#loc40 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":64:7)
+#loc41 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":65:7)
+#loc42 = loc("C:\\Users\\vegar\\.npu\\cache\\0096dae2469b7f307eb0f8cc\\aie.mlir":66:7)

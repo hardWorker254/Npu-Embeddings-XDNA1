@@ -44,7 +44,7 @@ from ml_dtypes import bfloat16
 
 import aie.iron as iron
 from aie.iron import (
-    CompileTime, In, ObjectFifo, Out, Program, Runtime, Worker, kernels,
+    CompileTime, In, ObjectFifo, Out, Program, Runtime, TaskGroup, Worker, kernels,
     str_to_dtype,
 )
 from aie.iron.controlflow import range_
@@ -188,20 +188,9 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
         tile_group_steps=(1, n_aie_cols), prune_step=False)
     c_index = 0
 
-    rt = Runtime()
-    with rt.sequence(A_ty, B_ty, C_ty) as (A, B, C):
-        # NPUE: enable tracing on the single marked worker.
-        # egress_shim_col matters: the trace stream needs a route to a shim, and
-        # on a fully-packed array the obvious column is already occupied. Moving
-        # the egress is the difference between "Unable to find a legal routing"
-        # and a working 8-column trace.
-        if trace_config is not None:
-            rt.enable_trace(trace_config.trace_size,
-                            [workers[trace_row][trace_col]],
-                            egress_shim_col=trace_egress_col)
-        rt.start(*[w for row in workers for w in row])
-
-        tg = rt.task_group()
+    def sequence(A, B, C, A_prods, B_prods, C_conss):
+        nonlocal c_index
+        tg = TaskGroup()
         for tb in range(iron.ceildiv(M // m // n_aie_rows, tb_max_n_rows)):
             for pingpong in [0, 1]:
                 if c_index >= len(C_tiles):
@@ -210,22 +199,34 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
                 current_tb_n_rows = min([tb_max_n_rows // 2,
                                          M // m // n_aie_rows - row_base])
                 for col in range(n_aie_cols):
-                    rt.drain(C_l2l3_fifos[col].cons(), C, tap=C_tiles[c_index],
-                             wait=True, task_group=tg)
+                    C_conss[col].drain(C, tap=C_tiles[c_index], wait=True, group=tg)
                     c_index += 1
                     for tile_row in range(current_tb_n_rows):
                         off = ((row_base + tile_row) * n_shim_mem_A + col) % len(A_tiles)
                         if col < n_aie_rows:
-                            rt.fill(A_l3l2_fifos[col].prod(), A, tap=A_tiles[off],
-                                    task_group=tg)
-                        rt.fill(B_l3l2_fifos[col].prod(), B, tap=B_tiles[col],
-                                task_group=tg)
+                            A_prods[col].fill(A, tap=A_tiles[off], group=tg)
+                        B_prods[col].fill(B, tap=B_tiles[col], group=tg)
                 if tb > 0 or (tb == 0 and pingpong > 0):
-                    rt.finish_task_group(tg)
-                    tg = rt.task_group()
-        rt.finish_task_group(tg)
+                    tg.finish()
+                    tg = TaskGroup()
+        tg.finish()
 
-    return Program(dev, rt).resolve_program()
+    rt = Runtime(sequence, [A_ty, B_ty, C_ty,
+                            [f.prod() for f in A_l3l2_fifos],
+                            [f.prod() for f in B_l3l2_fifos],
+                            [f.cons() for f in C_l2l3_fifos]])
+
+    program = Program(dev, rt, workers=[w for row in workers for w in row])
+    # NPUE: enable tracing on the single marked worker.
+    # egress_shim_col matters: the trace stream needs a route to a shim, and
+    # on a fully-packed array the obvious column is already occupied. Moving
+    # the egress is the difference between "Unable to find a legal routing"
+    # and a working 8-column trace.
+    if trace_config is not None:
+        program.enable_trace(trace_config.trace_size,
+                             workers=[workers[trace_row][trace_col]],
+                             egress_shim_col=trace_egress_col)
+    return program.resolve_program()
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])

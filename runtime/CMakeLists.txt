@@ -48,6 +48,19 @@ add_executable(npuembed
   src/npu_device.cpp
   src/npu_contention.cpp
   src/hub.cpp
+  # arch=1 (EmbeddingGemma family, tasks/0061/0063/00XX): all three are
+  # standalone and XRT-free (see their own file headers) -- added here only
+  # so main.cpp's run_gemma_mode() can call them. Nothing in them touches
+  # npu_device.hpp/XRT.
+  src/tokenizer_gemma.cpp
+  src/gemma_kernels.cpp
+  src/gemma_encode.cpp
+  # C++ port of tools/gen_gemma_tokenizer_table.py (tasks/0067): a
+  # dependency-free JSON DOM parser and the table generator built on it.
+  # Both are XRT-free like the arch=1 files above; json_min is generic and
+  # not itself EmbeddingGemma-specific.
+  src/json_min.cpp
+  src/gemma_tokenizer_gen.cpp
 )
 target_include_directories(npuembed PRIVATE include "${XRT_INCLUDE_DIR}")
 if(DEFINED BOOST_ROOT AND EXISTS "${BOOST_ROOT}")

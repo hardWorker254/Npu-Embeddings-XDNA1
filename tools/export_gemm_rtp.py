@@ -55,13 +55,25 @@ SEQ = 64
 STREAM_ORDER = ["qkv", "attn_out", "ffn_up", "ffn_down"]
 
 
-def shapes_for(batch, hidden=384):
+def shapes_for(batch, hidden=384, intermediate=None, gated=False):
+    # NPUE-M13 (tasks/0069): the FFN width used to be hardcoded `4 * hidden`.
+    # That is true of every BERT-family model this project ships, and it is a
+    # property of those checkpoints rather than of the architecture -- so it was
+    # an assumption wearing a constant's clothes. A GATED FFN (SwiGLU/GeGLU)
+    # breaks it twice over: `ffn_up` must emit BOTH halves, N = 2*intermediate,
+    # while `ffn_down` still consumes only one, K = intermediate.
+    #
+    # nomic-embed-text-v1.5: hidden 768, intermediate 3072 (so 4*h happens to
+    # hold), gated -> ffn_up N = 6144. Note that 6144 crosses the C-drain guard
+    # threshold that tasks/0068 found half-wired; do not build this without that
+    # fix in gemm_pretiled.py.
     M, h = batch * SEQ, hidden
+    f = 4 * h if intermediate is None else intermediate
     return {
-        "qkv":      dict(M=M, K=h,     N=3 * h),
-        "attn_out": dict(M=M, K=h,     N=h),
-        "ffn_up":   dict(M=M, K=h,     N=4 * h),
-        "ffn_down": dict(M=M, K=4 * h, N=h),
+        "qkv":      dict(M=M, K=h, N=3 * h),
+        "attn_out": dict(M=M, K=h, N=h),
+        "ffn_up":   dict(M=M, K=h, N=2 * f if gated else f),
+        "ffn_down": dict(M=M, K=f, N=h),
     }
 
 
@@ -100,12 +112,36 @@ def markers_for(shape, m, k, n, c_dtype="f32"):
     `aie.runtime_sequence(%arg0: ..., %arg1: ..., %arg2: ...)` binds each size
     to an ARGUMENT POSITION, so A, B and C cannot trade places whatever their
     element types are.
+
+    TILE-GEOMETRY MARKER, mlir-aie 1.4.x FORMAT (tasks/0060, T22). Up to and
+    including 1.3.4, the sequence-body `aie.dma_bd` op printed each access-
+    pattern dimension as a bracket-tuple (`<size = k, stride = n>`), and the
+    second marker below matched that literally against B's innermost tiled
+    dimension. The 1.4.x MLIR pretty-printer replaced that with a flat
+    `sizes = [...] strides = [...]` pair of arrays for `aie.dma_bd` specif-
+    ically -- `<size = N, stride = M>` bracket-tuples survive ONLY in
+    `aie.objectfifo`'s `dimensionsToStream` attribute, a different op, so the
+    old substring silently stopped matching anything in a freshly built
+    `aie.mlir` (confirmed by grepping a fresh cache dir: 0 hits for the old
+    form, `markers_for` always finding 0 cache candidates).
+
+    Confirmed directly (all four production shapes, m=64/k=64/n=48, cols=2):
+    B's (`%arg1`) `aie.dma_bd` always ends its access pattern with the tile
+    dims as the LAST TWO entries of `sizes`, immediately followed by the
+    `strides` array --
+        sizes = [.., .., 64, 48] strides = [.., .., 48, 1]
+    -- exactly twice per build (the ping/pong pair), in every one of qkv,
+    attn_out, ffn_up and ffn_down, and nowhere else in the file (A's and C's
+    `aie.dma_bd` end their `sizes` in different values). So `f"{k}, {n}]
+    strides = ["` is the direct translation of the old `<size=k, stride=n>`
+    marker into the new textual form: same two numbers, same adjacency
+    requirement, just spelled the way 1.4.x's printer spells it.
     """
     M, K, N = shape["M"], shape["K"], shape["N"]
     return [f"aie.runtime_sequence(%arg0: memref<{M * K}xbf16>, "
             f"%arg1: memref<{K * N}xbf16>, "
             f"%arg2: memref<{M * N}x{c_dtype}>)",
-            f"<size = {k}, stride = {n}>",
+            f"{k}, {n}] strides = [",
             'sym_name = "rtp_0_0"']
 
 
@@ -160,6 +196,14 @@ def main() -> int:
                          "Defaults to just --batch.")
     ap.add_argument("--cols", type=int, default=8)
     ap.add_argument("--hidden", type=int, default=384)
+    ap.add_argument("--intermediate", type=int, default=None,
+                    help="FFN width. Defaults to 4*hidden, which every "
+                         "BERT-family model here happens to satisfy; pass it "
+                         "explicitly for anything else.")
+    ap.add_argument("--gated-ffn", action="store_true",
+                    help="ffn_up emits BOTH halves of a gated FFN "
+                         "(N = 2*intermediate), as SwiGLU/GeGLU need, while "
+                         "ffn_down still takes K = intermediate. tasks/0069.")
     ap.add_argument("-m", type=int, default=64)
     ap.add_argument("-k", type=int, default=64)
     ap.add_argument("-n", type=int, default=48)
@@ -170,6 +214,18 @@ def main() -> int:
                     help="GEMM emits bf16 C (fp32 accumulate, one round at "
                          "the end). Halves C transport; the runtime reads the "
                          "dtype from design.json.")
+    # RESEARCH FLAG (T23). The bfp16-emulated MMAC datapath is 2.9x of array
+    # GEMM time (tasks/0049) at 1-cos ~3.5e-03 -- it FAILED the 2e-03 gate in
+    # 0026 and MTEB (0035) is the authority on reopening it. This flag exists
+    # so that MTEB measurement can be taken; it is NOT a production mode.
+    # Cache note: bfp16 and plain-bf16 builds are AMBIGUOUS in aie.mlir (same
+    # buffer dtypes, same sym names) -- correctness rests entirely on
+    # purge-before-build (tasks/0030, fifth fail-open), which removes every
+    # matching candidate before each fresh build. Re-export the plain set
+    # after using this, for the same reason.
+    ap.add_argument("--emulate-bfp16", action="store_true",
+                    help="RESEARCH: build the GEMM on the bfp16-emulated "
+                         "MMAC datapath (T23 accuracy measurement)")
     args = ap.parse_args()
     tiers = ([int(x) for x in args.batches.split(",")] if args.batches
              else [args.batch])
@@ -188,7 +244,7 @@ def main() -> int:
     # export refuses rather than shipping an artifact that lies about it.
     dirs = {}
     for b in tiers:
-        shapes_b = shapes_for(b, args.hidden)
+        shapes_b = shapes_for(b, args.hidden, args.intermediate, args.gated_ffn)
         for name in STREAM_ORDER:
             sh = shapes_b[name]
             mk = markers_for(sh, args.m, args.k, args.n,
@@ -203,7 +259,7 @@ def main() -> int:
             pretiled_array(A, B, C, M=M, K=K, N=N, m=args.m, k=args.k,
                            n=args.n, n_aie_cols=args.cols,
                            dtype_in_str="bf16", dtype_out_str="f32",
-                           emulate_bf16_mmul_with_bfp16=False,
+                           emulate_bf16_mmul_with_bfp16=args.emulate_bfp16,
                            pretiled=True, trace_config=None, rtp=True,
                            c_bf16=args.c_bf16)
             dirs[(name, b)] = find_cache(mk, args.cols, f"{name}@b{b}")
@@ -240,13 +296,13 @@ def main() -> int:
             slot += 1
             fn = f"insts_{name}_b{b}.bin"
             shutil.copy(dirs[(name, b)] / "insts.bin", out / fn)
-            sh = shapes_for(b, args.hidden)[name]
+            sh = shapes_for(b, args.hidden, args.intermediate, args.gated_ffn)[name]
             stream_meta.append({"op": name, "batch": b, "slot": slot,
                                 "file": fn, "M": sh["M"], "K": sh["K"],
                                 "N": sh["N"],
                                 "src": dirs[(name, b)].name})
 
-    biggest = shapes_for(max(tiers), args.hidden)
+    biggest = shapes_for(max(tiers), args.hidden, args.intermediate, args.gated_ffn)
     c_bytes = 2 if args.c_bf16 else 4
     b_layout = gemm_b_layout(args.k, args.n)
     meta = {
@@ -268,6 +324,18 @@ def main() -> int:
         # max_seq_len is how many position embeddings were packed (256),
         # which is a different and larger number.
         "seq": SEQ,
+        # NPUE-M13 (tasks/0069, thread T31). The geometry this design was built
+        # FOR, stated rather than inferred. `design_fits()` used to ask only
+        # whether `hidden` appeared as some "K" in this file -- which is true of
+        # any design at the same width, whatever its FFN looks like. nomic's K
+        # set {768, 3072} is IDENTICAL to bge-base's while its gated ffn_up is
+        # N=6144 against bge-base's 3072, so that check passes and the runtime
+        # would dispatch a stream built for half the output width, silently.
+        # With these three keys the match can be exact.
+        "hidden": args.hidden,
+        "intermediate": (4 * args.hidden if args.intermediate is None
+                         else args.intermediate),
+        "gated_ffn": args.gated_ffn,
         "tile": {"m": args.m, "k": args.k, "n": args.n},
         "streams": stream_meta,
     }

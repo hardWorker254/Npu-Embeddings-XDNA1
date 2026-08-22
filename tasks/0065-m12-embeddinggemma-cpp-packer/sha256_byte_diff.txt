@@ -1,0 +1,9 @@
+sha256 of python-packed reference (models/embeddinggemma-300m.npue, produced tasks/0064):
+d163731455b2527d88a67a9ebee431ead2bde9bda482736313f571638f495acb *models/embeddinggemma-300m.npue
+
+sha256 of C++-packed output (models/embeddinggemma-300m.cpp_test.npue, this task):
+d163731455b2527d88a67a9ebee431ead2bde9bda482736313f571638f495acb *models/embeddinggemma-300m.cpp_test.npue
+
+file sizes:
+-rw-r--r-- 1 vegar 197609 1239646208 Aug 20 21:16 models/embeddinggemma-300m.cpp_test.npue
+-rw-r--r-- 1 vegar 197609 1239646208 Aug 20 18:30 models/embeddinggemma-300m.npue

@@ -1,0 +1,18 @@
+  [gemm] islot=13 wslot=1 rows=8192 N=2304 a.size=6291456
+  [gemm] islot=14 wslot=2 rows=8192 N=768 a.size=6291456
+  [gemm] islot=15 wslot=3 rows=8192 N=6144 a.size=6291456
+  [gemm] islot=16 wslot=4 rows=8192 N=768 a.size=50331648
+error: Failed to invalidate cache (0xc000000d): The parameter is incorrect.
+
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      nomic-embed-text-v1.5: 150 tensors, 322.05 MB, checkpoint 9e7d262b1fe5ea35
+  shape      nomic-ai/nomic-embed-text-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, mean pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 65536 B
+  weights    226.49 MB staged on the device once, not per call

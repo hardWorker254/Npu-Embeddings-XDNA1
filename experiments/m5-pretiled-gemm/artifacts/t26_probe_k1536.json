@@ -1,0 +1,44 @@
+{
+  "shape": {
+    "M": 256,
+    "K": 1536,
+    "N": 192,
+    "m": 64,
+    "k": 64,
+    "n": 48,
+    "cols": 4
+  },
+  "cells": [
+    {
+      "label": "emulate+fp32C",
+      "emulate": true,
+      "c_bf16": false,
+      "full_rel_fro": 0.01529619864769343,
+      "full_1mcos": 0.00011698103787105563,
+      "split_rel_fro": 0.01529619864769343,
+      "split_1mcos": 0.00011698103787105563,
+      "full_over_split_ratio": 1.0
+    },
+    {
+      "label": "emulate+bf16C",
+      "emulate": true,
+      "c_bf16": true,
+      "full_rel_fro": 0.015394194814460175,
+      "full_1mcos": 0.00011848516733337089,
+      "split_rel_fro": 0.009877524220142939,
+      "split_1mcos": 4.8782525305934854e-05,
+      "full_over_split_ratio": 1.5585074226461784
+    },
+    {
+      "label": "plain+fp32C",
+      "emulate": false,
+      "c_bf16": false,
+      "full_rel_fro": 3.2743010250210357e-07,
+      "full_1mcos": 5.3179682879545e-14,
+      "split_rel_fro": 5.2482581387247743e-08,
+      "split_1mcos": 1.2212453270876722e-15,
+      "full_over_split_ratio": 6.23883379680068
+    }
+  ],
+  "disassembly": {}
+}

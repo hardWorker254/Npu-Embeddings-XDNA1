@@ -1,0 +1,8 @@
+  tile_n 48, model nomic-embed-text-v1.5
+  pack_npue.py    322.08 MB, json 32882 B at 64, data 322.05 MB at 36864, v1 arch2 flags1
+  --prepare-model 322.08 MB, json 32882 B at 64, data 322.05 MB at 36864, v1 arch2 flags1
+
+  python : 5bcb931a908887d30f30a6ea87e7052fdcaf4e60c1221565644d208ebf8f387b
+  c++    : 5bcb931a908887d30f30a6ea87e7052fdcaf4e60c1221565644d208ebf8f387b
+
+PASS -- byte-identical

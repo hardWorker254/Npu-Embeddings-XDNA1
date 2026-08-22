@@ -1,0 +1,73 @@
+
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model nomic-embed-text-v1.5 --artifacts artifacts_nomic --threads 24 --pipeline 4 --bench 5
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      nomic-embed-text-v1.5: 150 tensors, 322.05 MB, checkpoint 9e7d262b1fe5ea35
+  shape      nomic-ai/nomic-embed-text-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, mean pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 2097152 B (>= 2 MB)
+  weights    226.49 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 6 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall  3086.57 ms   ->     165.9 seq/s
+    cpu  16715.62 ms   ->      5.42 cores busy
+    NPU dispatch+wait (serialized)  2796.22 ms   90.6%   192 dispatches/group
+    p1 host work                 1255.63 ms   40.7%   (conv 138.0  bias 723.3  attn 188.8  elt 205.5)
+    p2 host work                 1272.64 ms   41.2%   (conv 145.8  bias 746.6  attn 173.0  elt 207.3)
+    p3 host work                 1238.07 ms   40.1%   (conv 142.9  bias 711.3  attn 174.1  elt 209.8)
+    p4 host work                 1282.59 ms   41.6%   (conv 148.4  bias 772.2  attn 156.2  elt 205.7)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model nomic-embed-text-v1.5 --artifacts artifacts_nomic --threads 24 --pipeline 4 --bench 5
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      nomic-embed-text-v1.5: 150 tensors, 322.05 MB, checkpoint 9e7d262b1fe5ea35
+  shape      nomic-ai/nomic-embed-text-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, mean pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 2097152 B (>= 2 MB)
+  weights    226.49 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 6 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall  3093.56 ms   ->     165.5 seq/s
+    cpu  17215.62 ms   ->      5.56 cores busy
+    NPU dispatch+wait (serialized)  2797.93 ms   90.4%   192 dispatches/group
+    p1 host work                 1287.20 ms   41.6%   (conv 145.0  bias 739.7  attn 193.9  elt 208.6)
+    p2 host work                 1249.88 ms   40.4%   (conv 141.5  bias 716.7  attn 180.3  elt 211.3)
+    p3 host work                 1322.95 ms   42.8%   (conv 150.7  bias 780.9  attn 171.1  elt 220.3)
+    p4 host work                 1292.91 ms   41.8%   (conv 149.8  bias 760.3  attn 159.6  elt 223.3)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model nomic-embed-text-v1.5 --artifacts artifacts_nomic --threads 24 --pipeline 4 --bench 5
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      nomic-embed-text-v1.5: 150 tensors, 322.05 MB, checkpoint 9e7d262b1fe5ea35
+  shape      nomic-ai/nomic-embed-text-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, mean pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 2097152 B (>= 2 MB)
+  weights    226.49 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 6 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall  3099.50 ms   ->     165.2 seq/s
+    cpu  17403.12 ms   ->      5.61 cores busy
+    NPU dispatch+wait (serialized)  2798.93 ms   90.3%   192 dispatches/group
+    p1 host work                 1261.90 ms   40.7%   (conv 142.5  bias 720.9  attn 192.7  elt 205.9)
+    p2 host work                 1280.97 ms   41.3%   (conv 145.1  bias 748.6  attn 171.1  elt 216.1)
+    p3 host work                 1327.36 ms   42.8%   (conv 150.6  bias 768.9  attn 176.5  elt 231.4)
+    p4 host work                 1249.99 ms   40.3%   (conv 145.3  bias 708.5  attn 180.8  elt 215.4)

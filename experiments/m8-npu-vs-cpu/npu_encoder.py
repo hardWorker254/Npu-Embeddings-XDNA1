@@ -48,7 +48,7 @@ class NpuEncoder:
 
     def __init__(self, artifacts="artifacts_b128il", threads=24, pipeline=2,
                  exe=None, model_dir=None, verbose=False,
-                 model="all-MiniLM-L6-v2"):
+                 model="all-MiniLM-L6-v2", prompt=None):
         from transformers import AutoTokenizer
         from safetensors.numpy import load_file
 
@@ -84,14 +84,53 @@ class NpuEncoder:
         self._meta = None
         self.word = pick("embeddings.word_embeddings.weight")
         self.hidden = int(self.word.shape[1])
-        self.pos = pick("embeddings.position_embeddings.weight")
         self.typ = pick("embeddings.token_type_embeddings.weight")
+
+        # ARCH, PREFIX AND POSITIONS, read from the container rather than
+        # assumed (tasks/0071). Two things here were literals that a second
+        # architecture falsifies:
+        #
+        #  * `pos` -- arch=2 (nomic) has NO absolute position table at all; it
+        #    uses RoPE, which the runtime applies inside Encoder::run(). Calling
+        #    pick() for it would raise KeyError, so this bridge simply could not
+        #    load nomic before.
+        #  * the task PREFIX -- nomic requires one ("search_document: "), and
+        #    MTEB is the only gate that can catch a wrong or missing one, since
+        #    both sides of a 1-cos comparison would use the same wrong prefix
+        #    and agree perfectly.
+        sys.path.insert(0, str(REPO / "tools"))
+        from npue import Reader                                    # noqa: E402
+        with Reader(str(REPO / "models" / f"{model}.npue")) as npue:
+            cfg = npue.config
+        self.arch = cfg.get("arch", "bert_abs_gelu_postln")
+        self.rope = cfg.get("position_embedding_type") == "rope"
+        prompts = cfg.get("prompts") or {}
+        name = prompt if prompt is not None else cfg.get("prompt_default")
+        if prompts and name is not None and name not in prompts:
+            raise SystemExit(f"--prompt {name!r} is not in this container's "
+                             f"prompts table {sorted(prompts)}")
+        self.prompt_name = name if prompts else None
+        self.prefix = prompts.get(name, "") if prompts else ""
+
+        self.pos = None if self.rope else pick(
+            "embeddings.position_embeddings.weight")
+        if self.verbose or self.prefix:
+            print(f"[npu_encoder] {model}: arch={self.arch} "
+                  f"positions={'rope (runtime-side)' if self.rope else 'absolute table'} "
+                  f"prefix={self.prefix!r}"
+                  f"{'' if self.prefix else ' (none)'}", file=sys.stderr)
 
     def _encode_texts(self, sentences):
         sentences = [s if isinstance(s, str) else str(s) for s in sentences]
         if not sentences:
             return np.zeros((0, self.hidden), dtype=np.float32)
         n = len(sentences)
+        # The prefix is plain text before [CLS] (verified tasks/0068 sec 4), so
+        # it is prepended BEFORE tokenization and eats into the SEQ budget --
+        # 4 of the 62 usable slots for "search_document: ". That is the real
+        # cost and it must be inside the truncation, not bolted on after it.
+        if self.prefix:
+            sentences = [self.prefix + s for s in sentences]
         enc = self.tok(sentences, padding="max_length", truncation=True,
                        max_length=SEQ, return_tensors="np")
         ids = enc["input_ids"].astype(np.int64)
@@ -100,7 +139,11 @@ class NpuEncoder:
         tt = (np.zeros_like(ids) if tt is None else np.asarray(tt, np.int64))
 
         # word + position + token_type, exactly reference/encoder.py's embed()
-        emb = (self.word[ids] + self.pos[:SEQ][None, :, :] + self.typ[tt])
+        # -- except arch=2, which has no position table: RoPE is applied inside
+        # the runtime, on Q and K, after the qkv GEMM.
+        emb = self.word[ids] + self.typ[tt]
+        if self.pos is not None:
+            emb = emb + self.pos[:SEQ][None, :, :]
         add_mask = np.where(am > 0, np.float32(0.0), np.float32(-1.0e30))
 
         with tempfile.TemporaryDirectory(prefix="npuenc_") as td:
@@ -135,14 +178,23 @@ class NpuEncoder:
         if self._meta is None:
             from mteb.models.model_meta import ModelMeta
             self._meta = ModelMeta(
-                name="NpuEmbeddings/all-MiniLM-L6-v2-npu",
+                # NAME THE MODEL BEING MEASURED. This was the literal
+                # "NpuEmbeddings/all-MiniLM-L6-v2-npu" while `revision` was
+                # already parameterised, so every MTEB result for bge-base,
+                # bge-large or nomic would have been filed under MiniLM's name
+                # -- a fail-open that mislabels the answer rather than breaking
+                # (tasks/0071). Only MiniLM and bge-base had ever been run,
+                # which is why it survived.
+                name="NpuEmbeddings/" + self.model + "-npu",
                 revision="npu-" + self.model + "-" + self.artifacts,
                 release_date=None, languages=["eng-Latn"],
                 n_parameters=None, memory_usage_mb=None,
                 max_tokens=float(SEQ), embed_dim=self.hidden,
                 license=None, open_weights=True, public_training_code=None,
                 public_training_data=None, similarity_fn_name="cosine",
-                use_instructions=False, training_datasets=None,
+                # True when this model takes a task prefix, which is a real
+                # property of nomic and not of the BERT four.
+                use_instructions=bool(self.prefix), training_datasets=None,
                 framework=[], reference=None,
                 # required by mteb 2.x ModelMeta; this model is constructed
                 # directly, never loaded from the hub, so it is a no-op that

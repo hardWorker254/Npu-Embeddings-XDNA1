@@ -1,0 +1,61 @@
+
+  nomic-embed-text-v1.5 is not installed. Fetching it from nomic-ai/nomic-embed-text-v1.5.
+  546.9 MB of checkpoint, verified against a checksum built into this executable.
+
+  get   model.safetensors
+    0%  0.0 MB of 521.6 MB
+    5%  26.1 MB of 521.6 MB
+    10%  52.2 MB of 521.6 MB
+    15%  78.2 MB of 521.6 MB
+    20%  104.3 MB of 521.6 MB
+    25%  130.4 MB of 521.6 MB
+    30%  156.5 MB of 521.6 MB
+    35%  182.6 MB of 521.6 MB
+    40%  208.6 MB of 521.6 MB
+    45%  234.7 MB of 521.6 MB
+    50%  260.8 MB of 521.6 MB
+    55%  286.9 MB of 521.6 MB
+    60%  313.0 MB of 521.6 MB
+    65%  339.0 MB of 521.6 MB
+    70%  365.1 MB of 521.6 MB
+    75%  391.2 MB of 521.6 MB
+    80%  417.3 MB of 521.6 MB
+    85%  443.4 MB of 521.6 MB
+    90%  469.4 MB of 521.6 MB
+    95%  495.5 MB of 521.6 MB
+    100%  521.6 MB of 521.6 MB
+  get   vocab.txt
+    10%  0.0 MB of 0.2 MB
+    25%  0.1 MB of 0.2 MB
+    35%  0.1 MB of 0.2 MB
+    45%  0.1 MB of 0.2 MB
+    70%  0.2 MB of 0.2 MB
+    95%  0.2 MB of 0.2 MB
+    100%  0.2 MB of 0.2 MB
+  get   config.json
+    100%  0.0 MB of 0.0 MB
+  get   1_Pooling/config.json
+    100%  0.0 MB of 0.0 MB
+  hash  model.safetensors
+        ok  9e7d262b1fe5ea35...
+  pack  nomic-embed-text-v1.5.npue
+  ready C:\Users\vegar\Documents\GitHub\NpuEmbeddings\models\nomic-embed-text-v1.5.npue
+
+  prefix     'search_document' -> "search_document: " (container default -- no --prefix given)
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      nomic-embed-text-v1.5: 150 tensors, 322.05 MB, checkpoint 9e7d262b1fe5ea35
+  shape      nomic-ai/nomic-embed-text-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, mean pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 2097152 B (>= 2 MB)
+  weights    226.49 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  tokenizer  30522 tokens, from the .npue
+  input      2 texts
+  embedded   2 texts in 0.09 s  ->  23.4 seq/s
+  wrote      tasks/0071-m13-nomic-shippable/embed_check/coldpath_out.f32  [2, 768] fp32

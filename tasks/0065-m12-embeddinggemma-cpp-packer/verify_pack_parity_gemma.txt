@@ -1,0 +1,8 @@
+  tile_n 48, model embeddinggemma-300m
+  pack_npue.py    1239.65 MB, json 49007 B at 64, data 1239.60 MB at 49152, v1 arch1 flags1
+  --prepare-model 1239.65 MB, json 49007 B at 64, data 1239.60 MB at 49152, v1 arch1 flags1
+
+  python : d163731455b2527d88a67a9ebee431ead2bde9bda482736313f571638f495acb
+  c++    : d163731455b2527d88a67a9ebee431ead2bde9bda482736313f571638f495acb
+
+PASS -- byte-identical

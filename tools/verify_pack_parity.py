@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import struct
 import subprocess
 import sys
@@ -68,7 +69,34 @@ def main() -> int:
     args = ap.parse_args()
 
     model_dir = Path(args.model_dir)
-    for need in ("model.safetensors", "vocab.txt", "config.json"):
+    # arch=1 (EmbeddingGemma / Gemma3) checkpoints have no vocab.txt -- the
+    # tokenizer travels as gemma_tokenizer.bin (tasks/0061), not a WordPiece
+    # vocabulary file -- and pack_gemma() needs the two Dense heads BERT
+    # checkpoints do not have. Detected the same way both packers detect it:
+    # config.json's own model_type, never the directory name.
+    cfg_path = model_dir / "config.json"
+    if not cfg_path.exists():
+        print(f"missing {cfg_path} -- see BUILD.md")
+        return 2
+    model_type = json.loads(cfg_path.read_text(encoding="utf-8")).get(
+        "model_type")
+    is_gemma = model_type == "gemma3_text"
+    # arch=2 (nomic-embed-text-v1.5, tasks/0069-0071): RoPE + gated SwiGLU
+    # rather than BERT's absolute-position + GELU, but it needs the SAME two
+    # files as the BERT family (model.safetensors, vocab.txt) -- no special
+    # file list, and neither packer takes a different CLI shape for it: both
+    # tools/pack_npue.py's main() and `npuembed --prepare-model` dispatch on
+    # config.json's OWN model_type internally, so the subprocess calls below
+    # are identical regardless of arch. This flag exists only to make the
+    # printed diagnosis say which arch was actually compared.
+    is_nomic = model_type == "nomic_bert"
+    need_files = (
+        ("model.safetensors", "2_Dense/model.safetensors",
+         "3_Dense/model.safetensors")
+        if is_gemma else
+        ("model.safetensors", "vocab.txt")
+    )
+    for need in need_files:
         if not (model_dir / need).exists():
             print(f"missing {model_dir / need} -- see BUILD.md")
             return 2
@@ -93,7 +121,9 @@ def main() -> int:
             return 2
 
         a, b = sha256(py_out), sha256(cc_out)
-        print(f"  tile_n {args.tile_n}, model {model_dir.name}")
+        arch_note = " (arch=1 gemma)" if is_gemma else \
+                   " (arch=2 nomic_bert)" if is_nomic else " (arch=0 bert)"
+        print(f"  tile_n {args.tile_n}, model {model_dir.name}{arch_note}")
         print(f"  pack_npue.py    {describe(py_out)}")
         print(f"  --prepare-model {describe(cc_out)}")
         print(f"\n  python : {a}")

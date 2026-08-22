@@ -19,20 +19,20 @@
   ],
   "intrinsics_per_tile": 256,
   "macs_per_tile": 131072,
-  "rel_frobenius": 0.010395308262323133,
+  "rel_frobenius": 0.0005446064177764194,
   "tol": 0.05,
   "correctness_pass": true,
   "cores": [
     {
       "core": "core_trace for tile2,0",
-      "n": 128,
+      "n": 127,
       "min": 945,
-      "avg": 954.671875,
+      "avg": 955.2362204724409,
       "max": 979,
-      "macs_per_cycle": 137.29534034926922,
+      "macs_per_cycle": 137.21422742447348,
       "peak_macs_per_cycle": 256,
-      "efficiency_pct": 53.63099232393329
+      "efficiency_pct": 53.599307587684955
     }
   ],
-  "vector_time": 0.40634920634920635
+  "vector_time": -0.0
 }

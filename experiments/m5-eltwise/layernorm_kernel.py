@@ -35,7 +35,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.iron as iron
-from aie.iron import CompileTime, In, ObjectFifo, Out, Program, Runtime, Worker
+from aie.iron import CompileTime, In, ObjectFifo, Out, Program, Runtime, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile, from_name
 from aie.iron.kernel import ExternalFunction
@@ -153,17 +153,19 @@ def _build(dev, rows, n_cols, variant="base", stack=0xD00):
                                            (1, (rows * COLS) // n_cols))
     param_tap = TensorTiler2D.simple_tiler((1, 2 * COLS), (1, 2 * COLS))[0]
 
-    rt = Runtime()
-    with rt.sequence(buf_ty, vec_ty, buf_ty) as (X, P, Y):
-        rt.start(*workers)
-        tg = rt.task_group()
+    def sequence(X, P, Y, in_prods, p_prods, out_conss):
+        tg = TaskGroup()
         for c in range(n_cols):
-            rt.fill(p_l3l2[c].prod(), P, tap=param_tap, task_group=tg)
-            rt.fill(in_l3l2[c].prod(), X, tap=data_taps[c], task_group=tg)
-            rt.drain(out_l2l3[c].cons(), Y, tap=data_taps[c], wait=True,
-                     task_group=tg)
-        rt.finish_task_group(tg)
-    return Program(dev, rt).resolve_program()
+            p_prods[c].fill(P, tap=param_tap, group=tg)
+            in_prods[c].fill(X, tap=data_taps[c], group=tg)
+            out_conss[c].drain(Y, tap=data_taps[c], wait=True, group=tg)
+        tg.finish()
+
+    rt = Runtime(sequence, [buf_ty, vec_ty, buf_ty,
+                            [f.prod() for f in in_l3l2],
+                            [f.prod() for f in p_l3l2],
+                            [f.cons() for f in out_l2l3]])
+    return Program(dev, rt, workers=workers).resolve_program()
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])

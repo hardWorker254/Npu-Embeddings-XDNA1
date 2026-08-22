@@ -1,0 +1,6 @@
+wrote runtime\artifacts\validation\nomic-embed-text-v1.5   (goldens nomic-embed-text-v1.5_l12_s64_boundary.safetensors)
+  input    (256, 768) fp32  768.0 KB
+  expected (256, 2304) fp32  2304.0 KB
+  emb_sum  (256, 768) fp32   add_mask (4, 64)
+  expected embedding (4, 768) fp32
+  checkpoint 9e7d262b1fe5ea35...

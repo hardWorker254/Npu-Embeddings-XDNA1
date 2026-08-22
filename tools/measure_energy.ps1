@@ -99,7 +99,15 @@ try {
 
     $runs = @()
     for ($i = 1; $i -le $Repeats; $i++) {
-        $m = Measure-Window { cmd /c $Command 2>&1 | Out-String }
+        # `cmd /c $Command 2>&1` lets POWERSHELL join the streams, and on
+        # Windows PowerShell 5.1 that wraps every stderr line of a native
+        # command in an ErrorRecord -- fatal under $ErrorActionPreference =
+        # "Stop", for a program that merely wrote a progress bar to stderr and
+        # exited 0. That is exactly what killed the first whole-catalogue
+        # energy run (tasks/0073): sentence-transformers prints its weight
+        # loading bar to stderr. Move the redirection INSIDE the cmd string so
+        # the OS joins them and PowerShell only ever sees stdout.
+        $m = Measure-Window { cmd /c "$Command 2>&1" | Out-String }
         $runs += $m
         Write-Host ("   run {0}       : {1,7:N2} W  ({2,8:N1} J over {3,6:N2} s)" -f `
             $i, $m.Watts, $m.Joules, $m.Seconds)

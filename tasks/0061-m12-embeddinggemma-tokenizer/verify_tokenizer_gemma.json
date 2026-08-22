@@ -1,0 +1,18 @@
+{
+  "kind": "verification",
+  "model": "embeddinggemma-300m",
+  "max_len": 64,
+  "n_texts": 42,
+  "n_prefixes": 5,
+  "n_total": 210,
+  "n_exact": 210,
+  "agreement": 1.0,
+  "prefixes_tested": [
+    "-",
+    "document",
+    "query",
+    "STS",
+    "Clustering"
+  ],
+  "mismatches": []
+}

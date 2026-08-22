@@ -1,0 +1,13 @@
+{
+  "kind": "hardware measurement",
+  "op": "softmax",
+  "rows": 3072,
+  "cols": 64,
+  "masked_entries": 135168,
+  "rel_fro_vs_golden": 0.017443847428938782,
+  "rel_fro_vs_cpu_model": 0.017109903281022153,
+  "bf16_floor": 0.003225014275461796,
+  "worst_row_sum_error": 0.0061991214752197266,
+  "tolerance": 0.025,
+  "pass": true
+}

@@ -1,0 +1,18 @@
+{
+  "kind": "hardware measurement",
+  "task": "0036",
+  "n_texts": 13,
+  "seq": 64,
+  "artifacts": "artifacts_verify_t22fix",
+  "worst_1_minus_cos": 2.643574029825846e-05,
+  "pairwise_similarity_error": {
+    "mean": 0.00034927742672152817,
+    "p99": 0.0010368602816015482,
+    "max": 0.0011374072637408972,
+    "bound": 0.014542555565858007,
+    "n_pairs": 78
+  },
+  "topk_neighbour_overlap": 1.0,
+  "tolerance": 0.002,
+  "pass": true
+}

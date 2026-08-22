@@ -1,0 +1,194 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+<All keys matched successfully>
+[transformers] Detected the usage of `get_extended_attention_mask`: This function is deprecated and will be removed in v5.12.0. Please use the new API in `transformers.masking_utils`
+
+====================================================================================================
+0. LOAD: tokenizer, real HF model (trust_remote_code, the ORIGINAL nomic modeling_hf_nomic_bert.py), and raw safetensors weights (independent read)
+====================================================================================================
+tokenizer class: BertTokenizer
+tokenizer vocab_size (len of vocab.txt as loaded): 30522
+config prenorm: False
+config activation_function: swiglu  hidden_act: silu
+config rotary_emb_base: 1000  rotary_emb_fraction: 1.0  rotary_emb_interleaved: False
+config head_dim: 64  num_attention_heads: 12
+config layer_norm_epsilon: 1e-12
+config scale_attn_weights: True  scale_attn_by_inverse_layer_idx: False
+config type_vocab_size: 2  vocab_size: 30528
+config mlp_fc1_bias: False  mlp_fc2_bias: False  qkv_proj_bias: False
+config has 'norm_mlp' key: False (absence => getattr default False => nn.Identity)
+
+real model class: NomicBertModel
+real model module file: C:\Users\vegar\.cache\huggingface\modules\transformers_modules\nomic_hyphen_ai\nomic_hyphen_bert_hyphen_2048\7710840340a098cfb869c4f65e87cf2b1b70caca\modeling_hf_nomic_bert.py
+real model.encoder.layers[0].mlp class: NomciBertGatedMLP
+real model.encoder.layers[0].mlp.norm: Identity()
+real model.encoder.layers[0].attn.norm_factor (attention scale denominator): 8.0
+real model.encoder.layers[11].attn.norm_factor (layer 11, checking layer-idx dependence): 8.0
+real model.encoder.layers[0].attn.rotary_emb.base: 1000.0
+real model.encoder.layers[0].attn.rotary_emb.interleaved: False
+real model.encoder.layers[0].attn.rotary_emb.dim: 64.0 (head_dim=64, rotary_emb_fraction=1.0 => full head rotated)
+real model.embeddings has position_embeddings attr: False (max_position_embeddings forced to 0 when rotary_emb_fraction>0, per source)
+
+raw safetensors: 112 tensors loaded independently via safetensors.safe_open
+  encoder.layers.0.attn.Wqkv.weight             shape=(2304, 768)
+  encoder.layers.0.attn.out_proj.weight         shape=(768, 768)
+  encoder.layers.0.mlp.fc11.weight              shape=(3072, 768)
+  encoder.layers.0.mlp.fc12.weight              shape=(3072, 768)
+  encoder.layers.0.mlp.fc2.weight               shape=(768, 3072)
+  encoder.layers.0.norm1.weight                 shape=(768,)
+  encoder.layers.0.norm2.weight                 shape=(768,)
+  embeddings.word_embeddings.weight             shape=(30528, 768)
+  embeddings.token_type_embeddings.weight       shape=(2, 768)
+  emb_ln.weight                                 shape=(768,)
+
+====================================================================================================
+1. REAL FORWARD PASS with hooks on layers[0], layers[0].attn, layers[0].mlp, embeddings
+====================================================================================================
+sentence: 'search_document: The quick brown fox jumps over the lazy dog near the river bank.'
+input_ids: [[101, 3945, 1035, 6254, 1024, 1996, 4248, 2829, 4419, 14523, 2058, 1996, 13971, 3899, 2379, 1996, 2314, 2924, 1012, 102]]
+seq_len: 20  attention_mask all ones: True
+captured embeddings module output (word_emb+token_type_emb, pre emb_ln): (20, 768)
+captured layer0 input hidden_states (= emb_ln(embeddings)): (20, 768)
+captured layer0 output hidden_states: (20, 768)
+captured attn0 input (should equal layer0 input): (20, 768)  max_abs vs h_in_real: 0.0
+captured attn0 output (post out_proj, pre residual+norm1): (20, 768)
+captured mlp0 input (= norm1(attn_out + h_in)): (20, 768)
+captured mlp0 output (down_proj result, pre residual+norm2): (20, 768)
+captured real rotary_emb cos/sin cache shape: (20, 32) (20, 32) (seq_len, head_dim/2)
+
+====================================================================================================
+3. RoPE cos/sin table: numpy build (theta=1000, dim=64) vs real model's own cache
+====================================================================================================
+  cos (theta=1000)                              max_abs=8.930693e-07  rel_fro=1.068320e-07
+  sin (theta=1000)                              max_abs=8.919139e-07  rel_fro=1.875515e-07
+  NEGATIVE CONTROL theta=10000 (wrong):
+  cos (theta=10000, WRONG)                      max_abs=1.504190e+00  rel_fro=4.355822e-01
+
+====================================================================================================
+4. ATTENTION discriminators (real captured attn0 output is ground truth)
+====================================================================================================
+
+[correct config: three-major split, non-interleaved RoPE, scale=1/sqrt(64), RoPE on Q,K only]
+  attn_out (ALL CORRECT)                        max_abs=7.456345e-06  rel_fro=6.686683e-07
+
+[NEGATIVE CONTROL: head-major Wqkv split instead of three-major]
+  attn_out (WRONG: head-major split)            max_abs=3.061262e+01  rel_fro=3.349378e+00
+
+[NEGATIVE CONTROL: interleaved (GPT-J style) RoPE instead of NeoX-style concat(freqs,freqs)]
+  attn_out (WRONG: interleaved RoPE)            max_abs=1.348263e+01  rel_fro=5.605995e-01
+
+[NEGATIVE CONTROL: RoPE also applied to V]
+  attn_out (WRONG: RoPE applied to V too)       max_abs=3.860146e+00  rel_fro=5.172989e-01
+
+[NEGATIVE CONTROL: wrong attention scale 1/sqrt(768) instead of 1/sqrt(64)]
+  attn_out (WRONG: scale=1/sqrt(768))           max_abs=2.412580e+01  rel_fro=6.302516e-01
+
+[NEGATIVE CONTROL: wrong theta=10000 instead of 1000]
+  attn_out (WRONG: theta=10000)                 max_abs=1.411245e+00  rel_fro=9.211252e-02
+
+====================================================================================================
+5. Q2 -- SiLU placement: fc11(x)*silu(fc12(x)) [Cand A] vs silu(fc11(x))*fc12(x) [Cand B]
+====================================================================================================
+  Candidate A: fc11(x) * silu(fc12(x))          max_abs=4.567475e-06  rel_fro=1.635968e-07
+  Candidate B: silu(fc11(x)) * fc12(x)  [WRONG] max_abs=9.971610e+01  rel_fro=4.021992e+00
+
+  ==> Q2 ANSWER: Candidate A (SiLU on fc12, fc11 is the untouched value/up path)   (A rel_fro=1.636e-07 vs B rel_fro=4.022e+00, ratio B/A = 2.458e+07)
+  (this ALSO empirically answers Q3: mlp_numpy has NO norm between the gate-multiply and fc2 -- if a real LayerNorm were applied there for this checkpoint, Candidate A could not match to fp32 precision.)
+
+====================================================================================================
+6. Q1 -- block ordering: post-LN [Cand A] vs pre-LN [Cand B], full independent numpy layer
+====================================================================================================
+  Candidate A: post-LN  (h=norm1(attn(h)+h); h=norm2(mlp(h)+h)) max_abs=2.743131e-06  rel_fro=2.401031e-07
+  Candidate B: pre-LN   (h=h+attn(norm1(h)); h=h+mlp(norm2(h)))  [WRONG] max_abs=1.902271e+02  rel_fro=5.031353e+00
+
+  ==> Q1 ANSWER: Candidate A (post-LN, matches config prenorm=false)   (A rel_fro=2.401e-07 vs B rel_fro=5.031e+00, ratio B/A = 2.095e+07)
+
+====================================================================================================
+7. Q3 -- explicit negative control: MLP with a LayerNorm forced between gate-multiply and fc2
+====================================================================================================
+  MLP with LayerNorm forced before fc2 [WRONG if norm were real] max_abs=1.859473e+02  rel_fro=7.154382e+00
+  (no 'encoder.layers.N.mlp.norm.*' tensor exists in the 112-tensor checkpoint at all --
+   confirmed by key search below -- so even a unit-affine LN has no learned params to be exactly right,
+   and the true Identity (Candidate A of Q2, section 5) already matched near fp32 precision.)
+  keys matching '.mlp.norm' in the 112-tensor checkpoint: [] (expect: [])
+
+====================================================================================================
+8. token_type_embeddings row 0 addition
+====================================================================================================
+  embeddings WITH token_type_embeddings[0] added max_abs=1.192093e-07  rel_fro=2.642460e-08<All keys matched successfully>
+
+  embeddings WITHOUT token_type_embeddings[0]  [WRONG if it should be added] max_abs=1.747335e+00  rel_fro=7.556311e-01
+  ||token_type_embeddings[0]|| = 2.341998 (non-zero row, so 'without' really differs)
+
+====================================================================================================
+9. Padding vocab rows: 30528 (padded) vs vocab.txt's 30522 real rows
+====================================================================================================
+vocab.txt line count: 30522
+config.json vocab_size: 30528  pad_vocab_size_multiple: 64
+word_embeddings.weight rows: 30528
+padding row indices: [30522, 30523, 30524, 30525, 30526, 30527]
+  row 30522: ||w|| = 8.372627e-01, max_abs = 2.182054e-01
+  row 30523: ||w|| = 8.407541e-01, max_abs = 2.182054e-01
+  row 30524: ||w|| = 8.409868e-01, max_abs = 1.931216e-01
+  row 30525: ||w|| = 8.131467e-01, max_abs = 2.162728e-01
+  row 30526: ||w|| = 8.458980e-01, max_abs = 2.298476e-01
+  row 30527: ||w|| = 8.074341e-01, max_abs = 2.085362e-01
+tokenizer.vocab_size - 1 = 30521 (highest id the tokenizer's own vocab table can emit)
+max id present anywhere in tokenizer.get_vocab(): 30521 (pad rows start at 30522; unreachable iff 30521 < 30522: True)
+
+====================================================================================================
+10. Sentence-transformers side-config files, verbatim
+====================================================================================================
+config_sentence_transformers.json:
+{
+  "__version__": {
+    "sentence_transformers": "2.4.0.dev0",
+    "transformers": "4.37.2",
+    "pytorch": "2.1.0+cu121"
+  }
+}
+  contains 'prompts' key: False
+
+sentence_bert_config.json:
+{
+  "max_seq_length": 8192,
+  "do_lower_case": false
+}
+
+modules.json:
+[
+  {
+    "idx": 0,
+    "name": "0",
+    "path": "",
+    "type": "sentence_transformers.models.Transformer"
+  },
+  {
+    "idx": 1,
+    "name": "1",
+    "path": "1_Pooling",
+    "type": "sentence_transformers.models.Pooling"
+  }
+]
+  module types present: ['sentence_transformers.models.Transformer', 'sentence_transformers.models.Pooling']
+  'sentence_transformers.models.Normalize' present: False
+
+====================================================================================================
+11. L2 normalization -- manual mean-pool (numpy, from the real hidden states) vs sentence_transformers.SentenceTransformer(...).encode(...)
+====================================================================================================
+manual mean-pooled embedding norm (NO explicit L2 norm applied): 20.934117387160015
+SentenceTransformer.encode() output norm: 20.934117262308252
+cosine(manual_pooled, st_vec): 0.999999999999998
+  manual_pooled/||manual_pooled|| vs ST.encode() output max_abs=3.616851e+00  rel_fro=9.522311e-01
+  manual_pooled (RAW, unnormalized) vs ST.encode() output [should be far off IF ST normalizes] max_abs=2.801418e-07  rel_fro=6.368247e-08
+
+====================================================================================================
+12. Cross-check vs the NATIVE transformers nomic_bert port (no trust_remote_code)
+====================================================================================================
+Loading weights:   0%|          | 0/112 [00:00<?, ?it/s]Loading weights: 100%|##########| 112/112 [00:00<00:00, 6570.47it/s]
+  native transformers last_hidden_state vs remote-code last_hidden_state max_abs=0.000000e+00  rel_fro=0.000000e+00
+(the native port is HF's own from-scratch reimplementation, driven by the WeightRenaming/WeightConverter table in transformers/conversion_mapping.py -- agreement here is an INDEPENDENT confirmation of Q1/Q2/Q3, not a restatement of the same code path)
+
+====================================================================================================
+DONE
+====================================================================================================
+All sections printed above. See report summary in the task's chat reply.

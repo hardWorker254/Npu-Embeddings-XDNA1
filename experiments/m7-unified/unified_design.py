@@ -69,7 +69,7 @@ from ml_dtypes import bfloat16
 
 import aie.iron as iron
 from aie.iron import (
-    Buffer, CompileTime, In, ObjectFifo, Out, Program, Runtime, Worker,
+    Buffer, CompileTime, In, ObjectFifo, Out, Program, Runtime, TaskGroup, Worker,
     WorkerRuntimeBarrier, kernels, str_to_dtype,
 )
 from aie.iron.controlflow import range_
@@ -306,27 +306,37 @@ def _build(dev, stream, batch, hidden):
     # They get endpoints but no DMA tasks -- statically identical routing,
     # nothing moves. Shim tiles are pinned so the placement (and therefore
     # the static image) cannot differ between streams.
-    def _pin(h, shim):
-        # The endpoint gives the fifo a placed shim tile; registering the
-        # handle in rt._fifos is what gets that tile MATERIALIZED (Program
-        # collects endpoint tiles only from rt.fifos and worker fifos).
-        h.endpoint = RuntimeEndpoint(shim)
-        rt._fifos.add(h)
-
+    #
+    # NPUE-IRON1.4: the old API pinned these from INSIDE the sequence body via
+    # a private rt._fifos.add() (the body ran eagerly, so rt._fifos was fully
+    # populated by the time Program(dev, rt).resolve_program() read it). The
+    # new API's sequence body runs LAST, inside Program.resolve_program() --
+    # AFTER Program has already collected `self._rt.fifos` for tile
+    # resolution -- so a handle registered only from inside the body would
+    # never be seen. Passing the idle handles through Runtime's `fn_args`
+    # instead registers them at Runtime.__init__ time (see
+    # Runtime._register_fn_args / its docstring: "fifo shim endpoints bind
+    # now ... so the fifo has both ends known when the Program resolves it"),
+    # which is early enough. The sequence body receives them as parameters
+    # and simply never touches them -- same "placed but idle" effect as the
+    # old rt._fifos hack, reached through the sanctioned pathway instead of a
+    # private attribute.
     def _pin_idle_gemm():
+        handles = []
         for col in range(GEMM_COLS):
-            _pin(A_l3l2_fifos[col].prod(), Tile(col, 0))
-            _pin(B_l3l2_fifos[col].prod(), Tile(col, 0))
-            _pin(C_l2l3_fifos[col].cons(), Tile(col, 0))
+            shim = Tile(col, 0)
+            handles += [A_l3l2_fifos[col].prod(tile=shim),
+                       B_l3l2_fifos[col].prod(tile=shim),
+                       C_l2l3_fifos[col].cons(tile=shim)]
+        return handles
 
     def _pin_idle_elt():
+        handles = []
         for ci in range(ELT_COLS):
             shim = Tile(GEMM_COLS + ci, 0)
-            _pin(elt_in[ci].prod(), shim)
-            _pin(elt_p[ci].prod(), shim)
-            _pin(elt_out[ci].cons(), shim)
-
-    rt = Runtime()
+            handles += [elt_in[ci].prod(tile=shim), elt_p[ci].prod(tile=shim),
+                       elt_out[ci].cons(tile=shim)]
+        return handles
 
     if stream in GEMM_STREAMS:
         shape = M_by_shape[stream]
@@ -366,21 +376,24 @@ def _build(dev, stream, batch, hidden):
             tile_group_steps=(1, GEMM_COLS), prune_step=False)
         c_index = 0
 
-        def _set_gemm_rtps(*bufs):
-            for b in bufs:
-                b[0] = n_tiles_per_core
-                b[1] = K // k
+        A_prods = [A_l3l2_fifos[col].prod(tile=Tile(col, 0))
+                  for col in range(GEMM_COLS)]
+        B_prods = [B_l3l2_fifos[col].prod(tile=Tile(col, 0))
+                  for col in range(GEMM_COLS)]
+        C_conss = [C_l2l3_fifos[col].cons(tile=Tile(col, 0))
+                  for col in range(GEMM_COLS)]
+        idle_elt = _pin_idle_elt()
 
-        with rt.sequence(A_ty, B_ty, C_ty) as (A, B, C):
-            _pin_idle_elt()
-            rt.inline_ops(_set_gemm_rtps,
-                          [gemm_rtps[rr][cc] for rr in range(N_ROWS)
-                           for cc in range(GEMM_COLS)])
+        def sequence(A, B, C, A_prod_hs, B_prod_hs, C_cons_hs, _idle):
+            nonlocal c_index
             for rr in range(N_ROWS):
                 for cc in range(GEMM_COLS):
-                    rt.set_barrier(gemm_barriers[rr][cc], 1)
-            rt.start(*all_workers)
-            tg = rt.task_group()
+                    gemm_rtps[rr][cc][0] = n_tiles_per_core
+                    gemm_rtps[rr][cc][1] = K // k
+            for rr in range(N_ROWS):
+                for cc in range(GEMM_COLS):
+                    gemm_barriers[rr][cc].set(1)
+            tg = TaskGroup()
             for tb in range(iron.ceildiv(M // m // N_ROWS, tb_max_n_rows)):
                 for pingpong in [0, 1]:
                     if c_index >= len(C_tiles):
@@ -390,23 +403,20 @@ def _build(dev, stream, batch, hidden):
                     current_tb_n_rows = min(
                         [tb_max_n_rows // 2, M // m // N_ROWS - row_base])
                     for col in range(GEMM_COLS):
-                        rt.drain(C_l2l3_fifos[col].cons(), C,
-                                 tap=C_tiles[c_index], wait=True,
-                                 task_group=tg, tile=Tile(col, 0))
+                        C_cons_hs[col].drain(C, tap=C_tiles[c_index],
+                                             wait=True, group=tg)
                         c_index += 1
                         for tile_row in range(current_tb_n_rows):
                             off = ((row_base + tile_row) * GEMM_COLS + col) \
                                 % len(A_tiles)
-                            rt.fill(A_l3l2_fifos[col].prod(), A,
-                                    tap=A_tiles[off], task_group=tg,
-                                    tile=Tile(col, 0))
-                            rt.fill(B_l3l2_fifos[col].prod(), B,
-                                    tap=B_taps[col], task_group=tg,
-                                    tile=Tile(col, 0))
+                            A_prod_hs[col].fill(A, tap=A_tiles[off], group=tg)
+                            B_prod_hs[col].fill(B, tap=B_taps[col], group=tg)
                     if tb > 0 or (tb == 0 and pingpong > 0):
-                        rt.finish_task_group(tg)
-                        tg = rt.task_group()
-            rt.finish_task_group(tg)
+                        tg.finish()
+                        tg = TaskGroup()
+            tg.finish()
+
+        rt = Runtime(sequence, [A_ty, B_ty, C_ty, A_prods, B_prods, C_conss, idle_elt])
     else:
         op = ELT_OPS[stream]
         n_elem = elt_n_elem(stream, batch, hidden)
@@ -426,29 +436,31 @@ def _build(dev, stream, batch, hidden):
         param_tap = TensorTiler2D.simple_tiler(
             (1, 2 * LN_COLS), (1, 2 * LN_COLS))[0]
 
-        def _set_elt_rtps(*bufs):
-            for b in bufs:
+        p_prods = [elt_p[ci].prod(tile=Tile(GEMM_COLS + ci, 0))
+                  for ci in range(ELT_COLS)]
+        in_prods = [elt_in[ci].prod(tile=Tile(GEMM_COLS + ci, 0))
+                   for ci in range(ELT_COLS)]
+        out_conss = [elt_out[ci].cons(tile=Tile(GEMM_COLS + ci, 0))
+                    for ci in range(ELT_COLS)]
+        idle_gemm = _pin_idle_gemm()
+
+        def sequence(X, P, Y, p_prod_hs, in_prod_hs, out_cons_hs, _idle):
+            for b in elt_rtps:
                 b[0] = op
                 b[1] = n_objs_per_core
-
-        with rt.sequence(X_ty, P_ty, Y_ty) as (X, P, Y):
-            _pin_idle_gemm()
-            rt.inline_ops(_set_elt_rtps, list(elt_rtps))
             for i in range(n_cores):
-                rt.set_barrier(elt_barriers[i], 1)
-            rt.start(*all_workers)
-            tg = rt.task_group()
+                elt_barriers[i].set(1)
+            tg = TaskGroup()
             for ci in range(ELT_COLS):
-                shim = Tile(GEMM_COLS + ci, 0)
-                rt.fill(elt_p[ci].prod(), P, tap=param_tap, task_group=tg,
-                        tile=shim)
-                rt.fill(elt_in[ci].prod(), X, tap=data_taps[ci], task_group=tg,
-                        tile=shim)
-                rt.drain(elt_out[ci].cons(), Y, tap=data_taps[ci], wait=True,
-                         task_group=tg, tile=shim)
-            rt.finish_task_group(tg)
+                p_prod_hs[ci].fill(P, tap=param_tap, group=tg)
+                in_prod_hs[ci].fill(X, tap=data_taps[ci], group=tg)
+                out_cons_hs[ci].drain(Y, tap=data_taps[ci], wait=True, group=tg)
+            tg.finish()
 
-    return Program(dev, rt).resolve_program()
+        rt = Runtime(sequence, [X_ty, P_ty, Y_ty,
+                                p_prods, in_prods, out_conss, idle_gemm])
+
+    return Program(dev, rt, workers=all_workers).resolve_program()
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])

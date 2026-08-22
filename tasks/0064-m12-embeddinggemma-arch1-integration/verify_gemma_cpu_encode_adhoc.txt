@@ -1,0 +1,7 @@
+4 texts from runtime/build_gemma_encode/texts.txt
+  [0] 1-cos=6.188383e-13  rel_fro=1.112613e-06  "The quick brown fox jumps over the lazy dog."
+  [1] 1-cos=4.969358e-12  rel_fro=3.153249e-06  "Café résumé naïve façade coöperate."
+  [2] 1-cos=3.188561e-13  rel_fro=7.987088e-07  "人工知能は世界を変える技術です。"
+  [3] 1-cos=4.962697e-13  rel_fro=9.965163e-07  "The AMD Ryzen AI NPU accelerates transformer encod"
+
+worst 1-cos across 4 sentences: 4.969358e-12

@@ -24,6 +24,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--encodes", type=int, default=20)
     ap.add_argument("--batch", type=int, default=128)
+    # WHICH MODEL. This was the literal "all-MiniLM-L6-v2" (tasks/0071), which
+    # is why the energy figure on record exists for exactly one model: the CPU
+    # side of the comparison could not be pointed at any other.
+    ap.add_argument("--model", default="all-MiniLM-L6-v2")
     args = ap.parse_args()
 
     from sentence_transformers import SentenceTransformer
@@ -31,10 +35,23 @@ def main() -> int:
     sys.path.insert(0, str(REPO / "reference"))
     from corpus import SENTENCES, SEQ_LEN
 
-    st = SentenceTransformer(str(REPO / "models" / "all-MiniLM-L6-v2"),
-                             device="cpu")
+    # trust_remote_code: needed by nomic-embed-text-v1.5 on older
+    # transformers/sentence-transformers. Build-time .venv-ref only.
+    st = SentenceTransformer(str(REPO / "models" / args.model),
+                             device="cpu", trust_remote_code=True)
     st.max_seq_length = SEQ_LEN
+
+    # The task prefix is part of the WORK, so an energy-per-sequence figure
+    # that omits it is measuring a shorter sequence than the model actually
+    # runs. Read it from the container, like every other harness now does.
+    sys.path.insert(0, str(REPO / "tools"))
+    from npue import Reader
+    with Reader(str(REPO / "models" / f"{args.model}.npue")) as c:
+        cfg = c.config
+    prefix = (cfg.get("prompts") or {}).get(cfg.get("prompt_default"), "")
     sents = (SENTENCES * ((args.batch // len(SENTENCES)) + 1))[:args.batch]
+    if prefix:
+        sents = [prefix + s for s in sents]
 
     st.encode(sents, batch_size=args.batch, convert_to_numpy=True)   # warm
     t0 = time.perf_counter()

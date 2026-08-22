@@ -49,7 +49,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.iron as iron
-from aie.iron import CompileTime, In, ObjectFifo, Out, Program, Runtime, Worker
+from aie.iron import CompileTime, In, ObjectFifo, Out, Program, Runtime, TaskGroup, Worker
 from aie.iron import kernels
 from aie.iron.controlflow import range_
 from aie.iron.device import from_name
@@ -173,19 +173,21 @@ def gemm_single_core(
     )[0]
     c_taps = TensorTiler2D.group_tiler((M, N), (m, n), (1, N // n))
 
-    rt = Runtime()
-    with rt.sequence(A_ty, B_ty, C_ty) as (A, B, C):
-        if trace_config is not None:
-            rt.enable_trace(trace_config.trace_size, [worker])
-        rt.start(worker)
+    def sequence(A, B, C, a_prod, b_prod, c_cons):
         for tile_row in range(M // m):
-            tg = rt.task_group()
-            rt.fill(fifo_A_L3L2.prod(), A, tap=a_taps[tile_row], task_group=tg)
-            rt.fill(fifo_B_L3L2.prod(), B, tap=b_tap, task_group=tg)
-            rt.drain(fifo_C_L2L3.cons(), C, tap=c_taps[tile_row], task_group=tg, wait=True)
-            rt.finish_task_group(tg)
+            tg = TaskGroup()
+            a_prod.fill(A, tap=a_taps[tile_row], group=tg)
+            b_prod.fill(B, tap=b_tap, group=tg)
+            c_cons.drain(C, tap=c_taps[tile_row], wait=True, group=tg)
+            tg.finish()
 
-    return Program(iron.get_current_device(), rt).resolve_program()
+    rt = Runtime(sequence, [A_ty, B_ty, C_ty,
+                            fifo_A_L3L2.prod(), fifo_B_L3L2.prod(), fifo_C_L2L3.cons()])
+
+    program = Program(iron.get_current_device(), rt, workers=[worker])
+    if trace_config is not None:
+        program.enable_trace(trace_config.trace_size, workers=[worker])
+    return program.resolve_program()
 
 
 def make_inputs(M, K, N, dt):

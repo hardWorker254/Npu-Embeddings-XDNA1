@@ -1,0 +1,48 @@
+﻿goldens  : nomic-embed-text-v1.5_l12_s64_boundary.safetensors
+  model  : nomic-ai/nomic-embed-text-v1.5
+  shape  : batch 4, seq 64, 12 layers
+  prompt : 'search_document' = 'search_document: '
+  sha256   : 9e7d262b1fe5ea35... matches
+
+tensor                                                    shape     max_abs     rel_fro   
+emb.ln                                             (4, 64, 768)   9.537e-07   7.717e-08   ok
+L0.norm2                                           (4, 64, 768)   5.722e-06   3.224e-07   ok
+L1.norm2                                           (4, 64, 768)   1.478e-05   2.807e-07   ok
+L2.norm2                                           (4, 64, 768)   1.717e-05   3.325e-07   ok
+L3.norm2                                           (4, 64, 768)   2.289e-05   3.663e-07   ok
+L4.norm2                                           (4, 64, 768)   2.098e-05   3.924e-07   ok
+L5.norm2                                           (4, 64, 768)   1.192e-05   3.375e-07   ok
+L6.norm2                                           (4, 64, 768)   9.537e-06   3.826e-07   ok
+L7.norm2                                           (4, 64, 768)   7.629e-06   2.669e-07   ok
+L8.norm2                                           (4, 64, 768)   9.537e-06   2.932e-07   ok
+L9.norm2                                           (4, 64, 768)   1.526e-05   2.657e-07   ok
+L10.norm2                                          (4, 64, 768)   1.144e-05   2.908e-07   ok
+L11.norm2                                          (4, 64, 768)   9.537e-06   1.038e-06   ok
+last_hidden_state                                  (4, 64, 768)   9.537e-06   1.038e-06   ok
+pool.mean_raw                                          (4, 768)   2.265e-06   7.575e-07   ok
+pool.mean_raw vs sentence-transformers (remote code)           (4, 768)   2.265e-06   7.770e-07   ok
+
+cosine vs native HF port     : min 1.000000000000  (1-cos max 3.573e-13)
+cosine vs sentence-transf.   : min 1.000000000000  (1-cos max 3.573e-13)
+
+223 taps produced; 208 have no HF counterpart and are validated transitively.
+
+PASS -- all 16 comparisons within rel_fro 2e-06, cosine within 2e-07
+
+====================================================================================================
+DISCRIMINATING CONTROL -- same goldens, deliberately wrong oracle config
+====================================================================================================
+
+[RoPE theta=10000 (WRONG -- real value is 1000)]
+  last_hidden_state  rel_fro=2.254e-01  (correct oracle: 1.038e-06)
+  pooled 1-cos       1.876e-02  (correct oracle: 3.573e-13)
+
+[SwiGLU silu(fc11)*fc12 (WRONG -- real is fc11*silu(fc12))]
+  last_hidden_state  rel_fro=1.291e+00  (correct oracle: 1.038e-06)
+  pooled 1-cos       8.879e-01  (correct oracle: 3.573e-13)
+
+control                                                       last_hidden rel_fro   pooled 1-cos
+RoPE theta=10000 (WRONG -- real value is 1000)                          2.254e-01      1.876e-02
+SwiGLU silu(fc11)*fc12 (WRONG -- real is fc11*silu(fc12))               1.291e+00      8.879e-01
+
+PASS -- both wrong configurations are >>1000x worse than the correct oracle's last_hidden_state rel_fro 1.038e-06. This oracle IS sensitive to what it asserts.

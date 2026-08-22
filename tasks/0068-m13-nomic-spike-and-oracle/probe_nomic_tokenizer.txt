@@ -1,0 +1,241 @@
+==============================================================================
+STEP 1a: vocab.txt across all five models
+==============================================================================
+nomic-embed-text-v1.5        sha256=07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3  lines=30522
+bge-base-en-v1.5             sha256=07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3  lines=30522
+all-MiniLM-L6-v2             sha256=07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3  lines=30522
+bge-small-en-v1.5            sha256=07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3  lines=30522
+bge-large-en-v1.5            sha256=07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3  lines=30522
+
+RESULT: all five vocab.txt files are BYTE-IDENTICAL (same sha256, same line count).
+
+==============================================================================
+STEP 1b: tokenizer_config.json -- fields that matter
+==============================================================================
+field                       nomic                         bge-base                      same?
+do_lower_case               True                          True                          YES
+tokenize_chinese_chars      True                          True                          YES
+strip_accents               None                          None                          YES
+never_split                 <absent>                      None                          **DIFFERS**
+model_max_length            8192                          512                           **DIFFERS**
+cls_token                   [CLS]                         [CLS]                         YES
+sep_token                   [SEP]                         [SEP]                         YES
+pad_token                   [PAD]                         [PAD]                         YES
+unk_token                   [UNK]                         [UNK]                         YES
+mask_token                  [MASK]                        [MASK]                        YES
+tokenizer_class             BertTokenizer                 BertTokenizer                 YES
+do_basic_tokenize           <absent>                      True                          **DIFFERS**
+
+Full nomic tokenizer_config.json keys: ['added_tokens_decoder', 'clean_up_tokenization_spaces', 'cls_token', 'do_lower_case', 'mask_token', 'model_max_length', 'pad_token', 'sep_token', 'strip_accents', 'tokenize_chinese_chars', 'tokenizer_class', 'unk_token']
+Full bge-base tokenizer_config.json keys: ['clean_up_tokenization_spaces', 'cls_token', 'do_basic_tokenize', 'do_lower_case', 'mask_token', 'model_max_length', 'never_split', 'pad_token', 'sep_token', 'strip_accents', 'tokenize_chinese_chars', 'tokenizer_class', 'unk_token']
+
+==============================================================================
+STEP 1c: special_tokens_map.json
+==============================================================================
+cls_token    nomic='[CLS]'    bge-base='[CLS]'    spelling same? YES
+sep_token    nomic='[SEP]'    bge-base='[SEP]'    spelling same? YES
+pad_token    nomic='[PAD]'    bge-base='[PAD]'    spelling same? YES
+unk_token    nomic='[UNK]'    bge-base='[UNK]'    spelling same? YES
+mask_token   nomic='[MASK]'   bge-base='[MASK]'   spelling same? YES
+
+Structural note: nomic's special_tokens_map.json wraps each token in a {content,lstrip,normalized,rstrip,single_word} dict (newer tokenizers serialization); bge-base's is flat strings. This is a file-format difference in a file the C++ tokenizer does not even read (it reads vocab.txt directly and looks up the literal strings [CLS]/[SEP]/[PAD]/[UNK]/[MASK]) -- so it cannot affect token ids.
+
+==============================================================================
+STEP 1d: tokenizer.json -- the authoritative source
+==============================================================================
+-- normalizer -- same? YES
+  nomic   : {"type": "BertNormalizer", "clean_text": true, "handle_chinese_chars": true, "strip_accents": null, "lowercase": true}
+  bge-base: {"type": "BertNormalizer", "clean_text": true, "handle_chinese_chars": true, "strip_accents": null, "lowercase": true}
+-- pre_tokenizer -- same? YES
+  nomic   : {"type": "BertPreTokenizer"}
+  bge-base: {"type": "BertPreTokenizer"}
+-- model (excl. vocab table) -- same? YES
+  nomic   : {"type": "WordPiece", "unk_token": "[UNK]", "continuing_subword_prefix": "##", "max_input_chars_per_word": 100}
+  bge-base: {"type": "WordPiece", "unk_token": "[UNK]", "continuing_subword_prefix": "##", "max_input_chars_per_word": 100}
+-- model.vocab table identical dict? YES
+-- post_processor -- same? YES
+  nomic   : {"type": "TemplateProcessing", "single": [{"SpecialToken": {"id": "[CLS]", "type_id": 0}}, {"Sequence": {"id": "A", "type_id": 0}}, {"SpecialToken": {"id": "[SEP]", "type_id": 0}}], "pair": [{"SpecialToken": {"id": "[CLS]", "type_id": 0}}, {"Sequence": {"id": "A", "type_id": 0}}, {"SpecialToken": {"id": "[SEP]", "type_id": 0}}, {"Sequence": {"id": "B", "type_id": 1}}, {"SpecialToken": {"id": "[SEP]", "type_id": 1}}], "special_tokens": {"[CLS]": {"id": "[CLS]", "ids": [101], "tokens": ["[CLS]"]}, "[SEP]": {"id": "[SEP]", "ids": [102], "tokens": ["[SEP]"]}}}
+  bge-base: {"type": "TemplateProcessing", "single": [{"SpecialToken": {"id": "[CLS]", "type_id": 0}}, {"Sequence": {"id": "A", "type_id": 0}}, {"SpecialToken": {"id": "[SEP]", "type_id": 0}}], "pair": [{"SpecialToken": {"id": "[CLS]", "type_id": 0}}, {"Sequence": {"id": "A", "type_id": 0}}, {"SpecialToken": {"id": "[SEP]", "type_id": 0}}, {"Sequence": {"id": "B", "type_id": 1}}, {"SpecialToken": {"id": "[SEP]", "type_id": 1}}], "special_tokens": {"[CLS]": {"id": "[CLS]", "ids": [101], "tokens": ["[CLS]"]}, "[SEP]": {"id": "[SEP]", "ids": [102], "tokens": ["[SEP]"]}}}
+-- added_tokens -- nomic=['[PAD]', '[UNK]', '[CLS]', '[SEP]', '[MASK]'] bge-base=['[PAD]', '[UNK]', '[CLS]', '[SEP]', '[MASK]'] same? YES
+
+==============================================================================
+STEP 1e (extra): sentence_bert_config.json / config_sentence_transformers.json
+==============================================================================
+nomic sentence_bert_config.json: {
+    "max_seq_length": 8192,
+    "do_lower_case": false
+}
+bge-base sentence_bert_config.json: {
+  "max_seq_length": 512,
+  "do_lower_case": true
+}
+nomic config_sentence_transformers.json (verbatim):
+{
+    "__version__": {
+      "sentence_transformers": "2.4.0.dev0",
+      "transformers": "4.37.2",
+      "pytorch": "2.1.0+cu121"
+    }
+  }
+Contains a 'prompts' key? False
+
+NOTE: nomic's sentence_bert_config.json says max_seq_length=8192, do_lower_case=false. tokenizer_config.json / tokenizer.json's normalizer both say do_lower_case/lowercase=true -- the authoritative source (tokenizer.json's BertNormalizer block) wins, and it agrees with bge-base. The sentence_bert_config field is a sentence-transformers wrapper setting that does not feed the fast tokenizer's normalizer at all; it is reported here as a possible footgun for anyone reading config files by eye, not a real delta.
+
+==============================================================================
+STEP 2: runtime/src/tokenizer.cpp assumptions vs nomic's tokenizer.json
+==============================================================================
+
+tokenizer.cpp / tokenizer.hpp encode a fixed pipeline (comment block at the
+top of tokenizer.cpp, mirrors HF's tokenization_bert.py):
+  _clean_text -> _tokenize_chinese_chars -> whitespace split -> per-token
+  lower()+strip-accents (NFD, drop Mn) -> _run_split_on_punc -> WordPiece
+  (greedy longest-match, '##' continuations, max_input_chars_per_word=100).
+
+Checked against nomic's tokenizer.json (Step 1d output above), field by field:
+
+  lowercase            true   in tokenizer.cpp's Unicode fold tables (built by
+                               tools/gen_tokenizer_tables.py from CPython's
+                               unicodedata) vs nomic's normalizer.lowercase=true
+                               -- MATCH.
+  strip_accents         null  (i.e. inherits do_lower_case -> true) in nomic's
+                               tokenizer.json AND in bge-base's -- the C++ always
+                               strips accents whenever it lowercases (single
+                               fold table, no separate strip_accents branch) --
+                               MATCH, and it is the same behaviour the code
+                               already ships for the four current models.
+  clean_text / CJK       true  tokenizer.cpp's tokenize_plain() does
+                               _clean_text + _tokenize_chinese_chars in one pass
+                               (drops control/NUL/U+FFFD, pads the same Han
+                               ranges) -- MATCH with nomic's
+                               normalizer.clean_text=true,
+                               handle_chinese_chars=true.
+  WordPiece model         type=WordPiece, unk_token=[UNK],
+                               continuing_subword_prefix=##,
+                               max_input_chars_per_word=100 -- all four fields
+                               identical to bge-base's, and identical to the
+                               constants tokenizer.cpp/tokenizer.hpp hard-code
+                               ('##' literal in tokenize_plain, id_of() falls
+                               back to unk_id, max_chars_per_word_=100 default
+                               in tokenizer.hpp) -- MATCH.
+  post_processor        TemplateProcessing [CLS] Sequence [SEP], single
+                               type_id 0 -- MATCH with tokenizer.cpp's
+                               Tokenizer::encode(): push cls_id, tokens,
+                               sep_id, then pad with pad_id / attention_mask 0,
+                               token_type_ids all zero. Identical structure.
+  vocab.txt / specials   vocab.txt byte-identical (Step 1a); the five specials
+                               [CLS]/[SEP]/[PAD]/[UNK]/[MASK] are the ONLY
+                               added_tokens in nomic's tokenizer.json (checked
+                               directly: ['[PAD]', '[UNK]', '[CLS]', '[SEP]',
+                               '[MASK]'], 5 entries) -- exactly what
+                               tokenizer.cpp's build_index() looks up by
+                               literal string and sorts into specials_ for the
+                               added-token pre-pass. MATCH.
+  model_max_length        nomic: 8192 in tokenizer_config.json (2048 in
+                               config.json's max_position_embeddings, 8192 in
+                               sentence_bert_config.json / n_positions) vs
+                               bge-base: 512. tokenizer.cpp does NOT read this
+                               field at all -- Tokenizer::encode(text, max_len)
+                               takes max_len as a CALLER-SUPPLIED argument, not
+                               something parsed from tokenizer_config.json. So
+                               this is not a tokenizer-code delta; it is a
+                               caller-side decision (what --max-len / sequence
+                               bucket the runtime passes in) that the packer /
+                               CLI must set correctly for nomic. NOT a tokenizer.cpp
+                               change, but flagged because CLAUDE.md's own text
+                               about 'eats into the 64-token sequence budget'
+                               shows this project runs short buckets by choice
+                               -- confirm the bucket picked for nomic, whatever
+                               it is, is deliberate and not a leftover default.
+
+CONCLUSION: every field tokenizer.cpp's pipeline is sensitive to (lowercase,
+strip_accents inheritance, clean_text, CJK ranges, WordPiece model params,
+post_processor template, special-token set, vocab table) is IDENTICAL between
+nomic's tokenizer.json and bge-base's. Nothing nomic specifies is left
+unimplemented by the C++, and nothing the C++ assumes is contradicted by
+nomic. The only difference found anywhere in the config files
+(model_max_length / max_seq_length) is not read by tokenizer.cpp at all --
+it is an external parameter, not a tokenizer algorithm delta.
+
+==============================================================================
+STEP 3: HF nomic tokenizer vs HF bge-base tokenizer, same corpus
+==============================================================================
+nomic tokenizer class:    BertTokenizer
+bge-base tokenizer class: BertTokenizer
+
+Corpus size: 45 texts (tools/verify_tokenizer.py's adversarial set + reference/corpus.py's 4 golden sentences + 3 extra cases)
+
+Texts compared: 45
+Identical id sequences: 45
+Mismatches: 0
+
+RESULT: nomic's HF tokenizer and bge-base's HF tokenizer produce IDENTICAL id sequences on EVERY text in this corpus, all 45/45.
+
+Since tasks/0036 already proved the C++ tokenizer is byte-identical to bge-base's HF tokenizer on 6,826/6,826 texts, and this step proves nomic's HF tokenizer == bge-base's HF tokenizer on every text tried here, the C++ tokenizer matches nomic's HF tokenizer BY TRANSITIVITY on this corpus. This is NOT the same claim as tasks/0036's -- it covers 45 adversarial texts, not 6,826, and it has not exercised the actual C++ binary at all (no .npue exists for nomic yet). A direct gate (npuembed --tokenize once a nomic .npue is packed, run through tools/verify_tokenizer.py's harness against nomic's own tokenizer_config.json/vocab.txt) still has to run in a later task before this claim covers the C++ binary directly.
+==============================================================================
+STEP 4: nomic's task prefixes -- token cost and mechanism
+==============================================================================
+config_sentence_transformers.json verbatim:
+{
+  "__version__": {
+    "sentence_transformers": "2.4.0.dev0",
+    "transformers": "4.37.2",
+    "pytorch": "2.1.0+cu121"
+  }
+}
+Contains a 'prompts' dict? False
+
+modules.json (sentence-transformers pipeline):
+[
+  {
+    "idx": 0,
+    "name": "0",
+    "path": "",
+    "type": "sentence_transformers.models.Transformer"
+  },
+  {
+    "idx": 1,
+    "name": "1",
+    "path": "1_Pooling",
+    "type": "sentence_transformers.models.Pooling"
+  }
+]
+
+1_Pooling/config.json:
+{
+  "word_embedding_dimension": 768,
+  "pooling_mode_cls_token": false,
+  "pooling_mode_mean_tokens": true,
+  "pooling_mode_max_tokens": false,
+  "pooling_mode_mean_sqrt_len_tokens": false,
+  "pooling_mode_weightedmean_tokens": false,
+  "pooling_mode_lasttoken": false
+}
+
+No file in the downloaded snapshot defines the task prefixes programmatically -- no 'prompts' dict in config_sentence_transformers.json, no prefix strings anywhere in tokenizer.json's added_tokens (checked: only the 5 standard specials, see Step 1d). This sentence-transformers snapshot (__version__.sentence_transformers = 2.4.0.dev0) predates the library's 'prompts' config feature. The nomic-embed-text-v1.5 model card (not fetched here -- CLAUDE.md restricts this probe to files already in the repo/model download) documents the four prefixes ('search_document: ', 'search_query: ', 'clustering: ', 'classification: ') as something the CALLER must prepend to the raw text before encoding; nothing in this checkpoint's files applies them automatically.
+
+prefix                ids (no specials)                            # tokens (no specials)   # tokens with [CLS]/[SEP]
+'search_document: '   [3945, 1035, 6254, 1024]                     4                        6
+'search_query: '      [3945, 1035, 23032, 1024]                    4                        6
+'clustering: '        [9324, 2075, 1024]                           3                        5
+'classification: '    [5579, 1024]                                 2                        4
+
+prefix='search_document: '    whole-string encode == [CLS]+prefix_ids+text_ids+[SEP]? MATCH
+prefix='search_query: '       whole-string encode == [CLS]+prefix_ids+text_ids+[SEP]? MATCH
+prefix='clustering: '         whole-string encode == [CLS]+prefix_ids+text_ids+[SEP]? MATCH
+prefix='classification: '     whole-string encode == [CLS]+prefix_ids+text_ids+[SEP]? MATCH
+
+RESULT: the prefix is prepended as RAW TEXT before [CLS] -- it is concatenated with the input string and the concatenation is tokenized as a single sequence (WordPiece boundary at the ':' punctuation splits the colon into its own token, then normal whitespace/word tokenization continues into the text). It is not a special token and is not injected by the post_processor template. The C++ side, if it takes a --prefix / task-type flag later, only needs to prepend the literal string to the input before calling Tokenizer::encode() -- no change to tokenizer.cpp's algorithm.
+
+==============================================================================
+VERDICT
+==============================================================================
+Can the existing C++ WordPiece tokenizer serve nomic-embed-text-v1.5 UNCHANGED? YES, on the evidence gathered here.
+- vocab.txt is byte-identical (sha256 match) across nomic and all four shipping models.
+- Every tokenizer.json field tokenizer.cpp's algorithm depends on (normalizer, pre_tokenizer, WordPiece model params, post_processor template, added_tokens set) is identical between nomic and bge-base.
+- HF's own tokenizers for nomic and bge-base agree on every id, on every one of the adversarial + golden + extra texts tried here.
+- The only config difference found (model_max_length: nomic 8192 vs bge-base 512) is not read by tokenizer.cpp -- max_len is a caller-supplied parameter, not a tokenizer-algorithm delta.
+- nomic's task prefixes are plain text prepended before [CLS]; they need caller-side wiring (which string, how many tokens it costs) but no tokenizer.cpp code change.
+
+NOT verified here (still needs a direct gate in a later task):
+- The actual C++ binary has not been run against nomic's vocab.txt or corpus -- no nomic .npue exists yet to drive npuembed --tokenize.
+- Only 45 texts were compared here, not tools/verify_tokenizer.py's full corpus run through the real C++ binary against nomic's own tokenizer_config.json (tasks/0036's 6,826/6,826 number is for bge-base, carried over here only by the transitivity argument above).

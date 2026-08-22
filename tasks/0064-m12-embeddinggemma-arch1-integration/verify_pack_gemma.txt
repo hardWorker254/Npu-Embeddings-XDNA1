@@ -1,0 +1,4 @@
+opened embeddinggemma-300m.npue: arch=1, 317 tensors, config.arch='gemma3_mqa_rope_geglu'
+
+317 checks, 0 failures
+PASS -- every packed tensor is bit-exact against the source checkpoint

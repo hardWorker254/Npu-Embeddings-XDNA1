@@ -1,0 +1,58 @@
+{
+  "kind": "hardware measurement",
+  "task": "0035",
+  "seq_len": 64,
+  "tasks": [
+    "STSBenchmark",
+    "SICK-R",
+    "STS12",
+    "Banking77Classification",
+    "TwentyNewsgroupsClustering"
+  ],
+  "artifacts": "artifacts_base_bfp_cbf16",
+  "pipeline": 2,
+  "note": "seq 64 truncation on BOTH sides; absolute scores are below published seq-256 numbers by construction. The claim is the delta.",
+  "per_side": {
+    "npu": {
+      "STSBenchmark": {
+        "scores": {
+          "test": 0.8640676531900182
+        },
+        "main": 0.8640676531900182,
+        "seconds": 18.23551830003271
+      },
+      "SICK-R": {
+        "scores": {
+          "test": 0.8028553633971857
+        },
+        "main": 0.8028553633971857,
+        "seconds": 111.3492702000076
+      },
+      "STS12": {
+        "scores": {
+          "test": 0.7798387330793957
+        },
+        "main": 0.7798387330793957,
+        "seconds": 36.919716499978676
+      },
+      "Banking77Classification": {
+        "scores": {
+          "test": 0.8392532467532468
+        },
+        "main": 0.8392532467532468,
+        "seconds": 56.07701380003709
+      },
+      "TwentyNewsgroupsClustering": {
+        "scores": {
+          "test": 0.5038253345906034
+        },
+        "main": 0.5038253345906034,
+        "seconds": 337.3231945000007
+      }
+    }
+  },
+  "gate": {
+    "rows": [],
+    "pass": null
+  }
+}

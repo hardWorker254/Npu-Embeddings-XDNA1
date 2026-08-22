@@ -1,0 +1,43 @@
+{
+  "kind": "hardware measurement (manually merged: CPU column from mteb_bge_base.json, NPU column from mteb_bge_base_bfp_cbf16.json)",
+  "task": "0053",
+  "note": "run_mteb.py --sides npu does not self-compute a gate (results[\"cpu\"] is absent from that run); this merges the CPU scores already recorded by the plain-bf16 run (same model, same seq_len=64, same tokenization) with this bfp16+bf16C NPU run rather than re-running CPU a second time.",
+  "artifacts": "artifacts_base_bfp_cbf16",
+  "gate": {
+    "rows": [
+      {
+        "task": "STSBenchmark",
+        "cpu": 0.8641801045690194,
+        "npu_bfp_cbf16": 0.8640676531900182,
+        "delta_points": -0.011245137900117719
+      },
+      {
+        "task": "SICK-R",
+        "cpu": 0.8030112378332059,
+        "npu_bfp_cbf16": 0.8028553633971857,
+        "delta_points": -0.015587443602027573
+      },
+      {
+        "task": "STS12",
+        "cpu": 0.7802844396423574,
+        "npu_bfp_cbf16": 0.7798387330793957,
+        "delta_points": -0.044570656296172295
+      },
+      {
+        "task": "Banking77Classification",
+        "cpu": 0.8398376623376624,
+        "npu_bfp_cbf16": 0.8392532467532468,
+        "delta_points": -0.05844155844156873
+      },
+      {
+        "task": "TwentyNewsgroupsClustering",
+        "cpu": 0.5057593187890396,
+        "npu_bfp_cbf16": 0.5038253345906034,
+        "delta_points": -0.1933984198436156
+      }
+    ],
+    "pass": true,
+    "mean_delta": -0.06464864321670039,
+    "worst_delta": -0.1933984198436156
+  }
+}

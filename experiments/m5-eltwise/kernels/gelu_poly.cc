@@ -316,6 +316,99 @@ void gelu_probe_deg2_bf16(bfloat16 *restrict input, bfloat16 *restrict output) {
 void gelu_epilogue_3072_f32(float *restrict inout) {
   gelu_poly_f32_epilogue(inout, 3072);
 }
+
+// NPUE-M10 (tasks/0054, T28 Del B / B1): bge-large's tile is (64,64,32) --
+// tile_n=32, not 48 (0042: N in {1024,3072,4096} makes 48 illegal) -- so its
+// ffn_up epilogue tile is m*n=2048, not 3072. Same loop body, same 4-chain
+// structure, same 0x2000 stack requirement; only n changes.
+void gelu_epilogue_2048_f32(float *restrict inout) {
+  gelu_poly_f32_epilogue(inout, 2048);
+}
+
+// NPUE-M10 (tasks/0054, T28 Del B / B2): a SEPARATE-core GELU worker, unlike
+// the in-place epilogue above which runs on the SAME core that produced the
+// GEMM tile. This one has independent input/output ObjectFifos (the pipeline
+// prototype's GELU core acquires a GEMM-produced tile from a mem-tile-fed
+// consumer fifo and a fresh tile from its own producer fifo -- two different
+// underlying buffers, not one), so it cannot mutate in place. Vectorised copy
+// then the proven in-place polynomial -- no scalar float math (note 0001).
+void gelu_epilogue_3072_f32_io(float *restrict in, float *restrict out) {
+  auto it = aie::begin_restrict_vector<16>(in);
+  auto ot = aie::begin_restrict_vector<16>(out);
+  for (int i = 0; i < 3072; i += 16) {
+    *ot++ = *it++;
+  }
+  gelu_poly_f32_epilogue(out, 3072);
+}
+
+// NPUE-M10 (tasks/0054, T28 Del B / B2 diagnostic): pure copy, no math at
+// all -- isolates "did the cross-core hop deliver the right bytes" from "is
+// the GELU math on this new two-arg kernel correct", when the pipeline
+// probe's end-to-end rel_fro came out wrong (1.333) and finite.
+void identity_copy_3072_f32(float *restrict in, float *restrict out) {
+  auto it = aie::begin_restrict_vector<16>(in);
+  auto ot = aie::begin_restrict_vector<16>(out);
+  for (int i = 0; i < 3072; i += 16) {
+    *ot++ = *it++;
+  }
+}
+
+// NpuEmbeddings -- tasks/0057, T28 Del C: a plain 6144-element (2-tile) copy,
+// used as the "gather-consumer" core's kernel in join_then_consume_probe.py
+// -- isolates whether a mem-tile JOIN's own .cons() can be handed directly to
+// a THIRD Worker (no second split()/forward() on the same object) from
+// whether any real compute on the gathered data is correct.
+void identity_copy_6144_f32(float *restrict in, float *restrict out) {
+  auto it = aie::begin_restrict_vector<16>(in);
+  auto ot = aie::begin_restrict_vector<16>(out);
+  for (int i = 0; i < 6144; i += 16) {
+    *ot++ = *it++;
+  }
+}
+
+// NPUE-M11 (tasks/0061, T28 hierarchical merge): a GEMM-producer-core
+// epilogue combining gelu_poly_f32_epilogue's math with narrow_f32_bf16.cc's
+// accum::from_vector narrowing -- fp32 accumulator IN, GELU'd bf16 OUT, RNE
+// rounded (aie::set_rounding(conv_even), same reasoning as narrow_f32_bf16.cc
+// and the *_rne kernels: the AIE default `floor` is a systematic downward
+// bias, trap 2b). Needed because the hierarchical-merge probe's SECOND-stage
+// matmul takes bf16 "A" input, and the K-reduction that produced this value
+// must finish in fp32 (trap 2) before any bf16 rounding happens -- this
+// kernel is that one rounding, fused with GELU so it costs no extra pass.
+void gelu_epilogue_3072_f32_to_bf16(float *restrict in,
+                                    bfloat16 *restrict out) {
+  aie::set_rounding(aie::rounding_mode::conv_even);
+  auto it = aie::begin_restrict_vector<16>(in);
+  auto ot = aie::begin_restrict_vector<16>(out);
+  const aie::vector<float, 16> vzero = aie::broadcast<float, 16>(0.0f);
+  const aie::vector<float, 16> vR = aie::broadcast<float, 16>(GELU_R);
+  const aie::vector<float, 16> c0 = aie::broadcast<float, 16>(GELU_C0);
+  const aie::vector<float, 16> c1 = aie::broadcast<float, 16>(GELU_C1);
+  const aie::vector<float, 16> c2 = aie::broadcast<float, 16>(GELU_C2);
+  const aie::vector<float, 16> c3 = aie::broadcast<float, 16>(GELU_C3);
+  const aie::vector<float, 16> c4 = aie::broadcast<float, 16>(GELU_C4);
+  const aie::vector<float, 16> c5 = aie::broadcast<float, 16>(GELU_C5);
+  const aie::vector<float, 16> c6 = aie::broadcast<float, 16>(GELU_C6);
+  const aie::vector<float, 16> c7 = aie::broadcast<float, 16>(GELU_C7);
+  const aie::vector<float, 16> c8 = aie::broadcast<float, 16>(GELU_C8);
+  for (int i = 0; i < 3072; i += 16) {
+    aie::vector<float, 16> x = *it++;
+    aie::vector<float, 16> u = aie::min(aie::abs(x), vR);
+    aie::vector<float, 16> p = c0;
+    p = aie::add(aie::mul(p, u).to_vector<float>(), c1);
+    p = aie::add(aie::mul(p, u).to_vector<float>(), c2);
+    p = aie::add(aie::mul(p, u).to_vector<float>(), c3);
+    p = aie::add(aie::mul(p, u).to_vector<float>(), c4);
+    p = aie::add(aie::mul(p, u).to_vector<float>(), c5);
+    p = aie::add(aie::mul(p, u).to_vector<float>(), c6);
+    p = aie::add(aie::mul(p, u).to_vector<float>(), c7);
+    p = aie::add(aie::mul(p, u).to_vector<float>(), c8);
+    aie::vector<float, 16> res = aie::add(aie::max(x, vzero), p);
+    aie::accum<accfloat, 16> a;
+    a.from_vector(res);
+    *ot++ = a.to_vector<bfloat16>();
+  }
+}
 #endif // NPUE_ELTWISE_IMPL_ONLY
 
 } // extern "C"

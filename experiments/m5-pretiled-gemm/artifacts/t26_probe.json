@@ -1,0 +1,129 @@
+{
+  "shape": {
+    "M": 256,
+    "K": 384,
+    "N": 192,
+    "m": 64,
+    "k": 64,
+    "n": 48,
+    "cols": 4
+  },
+  "cells": [
+    {
+      "label": "emulate+fp32C",
+      "emulate": true,
+      "c_bf16": false,
+      "full_rel_fro": 0.014715274180855085,
+      "full_1mcos": 0.00010825268520364695,
+      "split_rel_fro": 0.014715274180855085,
+      "split_1mcos": 0.00010825268520364695,
+      "full_over_split_ratio": 1.0
+    },
+    {
+      "label": "emulate+bf16C",
+      "emulate": true,
+      "c_bf16": true,
+      "full_rel_fro": 0.014804709689395285,
+      "full_1mcos": 0.00010957347944828832,
+      "split_rel_fro": 0.010734923293651779,
+      "split_1mcos": 5.7612741660273414e-05,
+      "full_over_split_ratio": 1.37911648592312
+    },
+    {
+      "label": "plain+fp32C",
+      "emulate": false,
+      "c_bf16": false,
+      "full_rel_fro": 1.3779490237757776e-07,
+      "full_1mcos": 9.658940314238862e-15,
+      "split_rel_fro": 5.203923855801411e-08,
+      "split_1mcos": 1.7763568394002505e-15,
+      "full_over_split_ratio": 2.6479038932124643
+    }
+  ],
+  "disassembly": {
+    "fp32C_rtp": {
+      "cache_dir": "C:\\Users\\vegar\\.npu\\cache\\d9a49aa7b74308a952af58c6",
+      "objects": [
+        "main_core_0_2.o",
+        "main_core_0_3.o",
+        "main_core_0_4.o",
+        "main_core_0_5.o",
+        "main_core_1_2.o",
+        "main_core_1_3.o",
+        "main_core_1_4.o",
+        "main_core_1_5.o",
+        "main_core_2_2.o",
+        "main_core_2_3.o",
+        "main_core_2_4.o",
+        "main_core_2_5.o",
+        "main_core_3_2.o",
+        "main_core_3_3.o",
+        "main_core_3_4.o",
+        "main_core_3_5.o",
+        "matmul_bf16_f32_333c4d33.o"
+      ],
+      "dumps": [
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_fp32C_rtp_main_core_0_2.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_fp32C_rtp_main_core_0_3.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_fp32C_rtp_main_core_0_4.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_fp32C_rtp_main_core_0_5.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_fp32C_rtp_main_core_1_2.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_fp32C_rtp_main_core_1_3.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_fp32C_rtp_main_core_1_4.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_fp32C_rtp_main_core_1_5.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_fp32C_rtp_main_core_2_2.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_fp32C_rtp_main_core_2_3.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_fp32C_rtp_main_core_2_4.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_fp32C_rtp_main_core_2_5.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_fp32C_rtp_main_core_3_2.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_fp32C_rtp_main_core_3_3.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_fp32C_rtp_main_core_3_4.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_fp32C_rtp_main_core_3_5.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_fp32C_rtp_matmul_bf16_f32_333c4d33.txt"
+      ]
+    },
+    "bf16C_rtp": {
+      "cache_dir": "C:\\Users\\vegar\\.npu\\cache\\ea7518951b8120d3933aeabf",
+      "objects": [
+        "main_core_0_2.o",
+        "main_core_0_3.o",
+        "main_core_0_4.o",
+        "main_core_0_5.o",
+        "main_core_1_2.o",
+        "main_core_1_3.o",
+        "main_core_1_4.o",
+        "main_core_1_5.o",
+        "main_core_2_2.o",
+        "main_core_2_3.o",
+        "main_core_2_4.o",
+        "main_core_2_5.o",
+        "main_core_3_2.o",
+        "main_core_3_3.o",
+        "main_core_3_4.o",
+        "main_core_3_5.o",
+        "matmul_bf16_f32_333c4d33.o",
+        "narrow_3072_f32_bf16.o"
+      ],
+      "dumps": [
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_bf16C_rtp_main_core_0_2.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_bf16C_rtp_main_core_0_3.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_bf16C_rtp_main_core_0_4.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_bf16C_rtp_main_core_0_5.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_bf16C_rtp_main_core_1_2.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_bf16C_rtp_main_core_1_3.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_bf16C_rtp_main_core_1_4.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_bf16C_rtp_main_core_1_5.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_bf16C_rtp_main_core_2_2.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_bf16C_rtp_main_core_2_3.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_bf16C_rtp_main_core_2_4.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_bf16C_rtp_main_core_2_5.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_bf16C_rtp_main_core_3_2.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_bf16C_rtp_main_core_3_3.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_bf16C_rtp_main_core_3_4.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_bf16C_rtp_main_core_3_5.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_bf16C_rtp_matmul_bf16_f32_333c4d33.txt",
+        "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\experiments\\m5-pretiled-gemm\\artifacts\\objdump_bf16C_rtp_narrow_3072_f32_bf16.txt"
+      ]
+    }
+  }
+}

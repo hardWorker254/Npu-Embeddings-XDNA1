@@ -1,0 +1,30 @@
+﻿
+=== minilm_bge_small  h=384  tile_n=48 ===
+  [minilm_bge_small accuracy (fused, K_aug=448)] purged 1 cache candidate(s)
+  [minilm_bge_small] fused gelu(A@B+bias): rel_fro=3.167e-04 worst_abs=1.304e-04 PASS  (K_real=384 K_aug=448 N=1536 tile_n=48)
+  [minilm_bge_small dispatch-latency (fused, K=448)] purged 1 cache candidate(s)
+  [minilm_bge_small] fused  K=448   npu(avg/min)= 2732.2/ 2326.2 us   e2e(avg/min)= 4054.1/ 2871.2 us
+  [minilm_bge_small dispatch-latency (plain, K=384)] purged 1 cache candidate(s)
+  [minilm_bge_small] plain  K=384   npu(avg/min)= 1021.0/  985.7 us   e2e(avg/min)= 1439.0/ 1377.8 us
+  [minilm_bge_small trace (fused, K=448)] purged 1 cache candidate(s)
+  [minilm_bge_small] fused  K=448   traced: n=  40 avg=  7131.9 cyc  min=582  max=15873
+  [minilm_bge_small trace (plain, K=384)] purged 1 cache candidate(s)
+  [minilm_bge_small] plain  K=384   traced: n= 157 avg=  6665.0 cyc  min=583  max=13329
+
+=== bge_base  h=768  tile_n=48 ===
+  [bge_base accuracy (fused, K_aug=832)] purged 0 cache candidate(s)
+  [bge_base] fused gelu(A@B+bias): rel_fro=2.102e-04 worst_abs=1.306e-04 PASS  (K_real=768 K_aug=832 N=3072 tile_n=48)
+  [bge_base dispatch-latency (fused, K=832)] purged 1 cache candidate(s)
+  [bge_base] fused  K=832   npu(avg/min)= 6377.2/ 6059.7 us   e2e(avg/min)= 7668.0/ 6594.0 us
+  [bge_base dispatch-latency (plain, K=768)] purged 2 cache candidate(s)
+  [bge_base] plain  K=768   npu(avg/min)= 3822.1/ 3573.0 us   e2e(avg/min)= 4832.6/ 4067.8 us
+
+=== bge_large  h=1024  tile_n=32 ===
+  [bge_large accuracy (fused, K_aug=1088)] purged 0 cache candidate(s)
+  [bge_large] fused gelu(A@B+bias): rel_fro=1.764e-04 worst_abs=1.307e-04 PASS  (K_real=1024 K_aug=1088 N=4096 tile_n=32)
+  [bge_large dispatch-latency (fused, K=1088)] purged 1 cache candidate(s)
+  [bge_large] fused  K=1088  npu(avg/min)=10790.8/ 9661.1 us   e2e(avg/min)=11865.0/10452.0 us
+  [bge_large dispatch-latency (plain, K=1024)] purged 1 cache candidate(s)
+  [bge_large] plain  K=1024  npu(avg/min)= 6699.4/ 6330.6 us   e2e(avg/min)= 7942.1/ 6920.9 us
+
+wrote artifacts\epilogue_gelu_survey.json

@@ -29,12 +29,29 @@ param(
     [int]$Low = 20,              # encodes in the low run
     [int]$High = 60,             # encodes in the high run
     [int]$Batch = 128,
+    # WHICH MODEL. There was no such parameter (tasks/0071): every npuembed
+    # invocation below omitted --model, which has been REQUIRED since
+    # tasks/0038 made selection explicit once a second model existed. So this
+    # script has been unrunnable since then, and nobody noticed -- because the
+    # one energy figure on record was taken in tasks/0034, back when there was
+    # only one model to measure. That is also why energy exists for MiniLM and
+    # for nothing else.
+    [string]$Model = "all-MiniLM-L6-v2",
     [string]$Artifacts = "artifacts_b128il",
     [int]$Threads = 24,
+    # Lanes. The production default moved 2 -> 4 in tasks/0052; this script
+    # still measured 2, so its figure described a configuration we no longer
+    # ship.
+    [int]$Lanes = 4,
     [int]$Idle = 15,
     [int]$Repeats = 1,
-    [string]$OutDir = "tasks\0034-m8-energy"
+    # PER MODEL. A constant output path is an A/B waiting to overwrite its own
+    # baseline (CLAUDE.md, tasks/0045) -- a whole-catalogue sweep through
+    # tasks\0034-m8-energy would have left one model's numbers.
+    [string]$OutDir = ""
 )
+
+if (-not $OutDir) { $OutDir = "tasks\0073-m13-release-benchmarks\energy-$Model" }
 
 $REPO = Split-Path -Parent $PSScriptRoot
 $RUNTIME = Join-Path $REPO "runtime"
@@ -87,24 +104,24 @@ Write-Host "=== CPU: sentence-transformers, batch $Batch ===" -ForegroundColor C
 $py = Join-Path $REPO ".venv-ref\Scripts\python.exe"
 $results += Run-Pair -Name "cpu-st" -WorkDir $REPO -SeqPerEncode $Batch -CmdFor {
     param($n)
-    "`"$py`" experiments\m8-npu-vs-cpu\energy_cpu_load.py --encodes $n --batch $Batch"
+    "`"$py`" experiments\m8-npu-vs-cpu\energy_cpu_load.py --encodes $n --batch $Batch --model $Model"
 }
 
 Write-Host "=== NPU: single lane ===" -ForegroundColor Cyan
 $results += Run-Pair -Name "npu-single" -WorkDir $RUNTIME -SeqPerEncode $Batch -CmdFor {
     param($n)
-    ".\build\npuembed.exe .. --artifacts $Artifacts --threads $Threads --bench $n"
+    ".\build\npuembed.exe .. --model $Model --artifacts $Artifacts --threads $Threads --bench $n"
 }
 
-Write-Host "=== NPU: pipelined, 2 lanes ===" -ForegroundColor Cyan
-# --bench N with --pipeline 2 runs N GROUPS of 2 encodes, so halve the counts
-# to keep the encode totals identical to the other two configurations.
-$script:Low = $Low / 2; $script:High = $High / 2
-$results += Run-Pair -Name "npu-pipe2" -WorkDir $RUNTIME -SeqPerEncode (2 * $Batch) -CmdFor {
+Write-Host "=== NPU: pipelined, $Lanes lanes ===" -ForegroundColor Cyan
+# --bench N with --pipeline L runs N GROUPS of L encodes, so divide the counts
+# by L to keep the encode totals identical to the other two configurations.
+$script:Low = [int]($Low / $Lanes); $script:High = [int]($High / $Lanes)
+$results += Run-Pair -Name "npu-pipe$Lanes" -WorkDir $RUNTIME -SeqPerEncode ($Lanes * $Batch) -CmdFor {
     param($n)
-    ".\build\npuembed.exe .. --artifacts $Artifacts --threads $Threads --pipeline 2 --bench $n"
+    ".\build\npuembed.exe .. --model $Model --artifacts $Artifacts --threads $Threads --pipeline $Lanes --bench $n"
 }
-$script:Low = $Low * 2; $script:High = $High * 2
+$script:Low = $Low * $Lanes; $script:High = $High * $Lanes
 
 Write-Host ""
 Write-Host "================ RESULT ================" -ForegroundColor Green

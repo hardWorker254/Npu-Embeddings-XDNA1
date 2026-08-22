@@ -29,6 +29,14 @@ models/**
 #   & .\.venv-ref\Scripts\python.exe reference\make_goldens.py --taps
 reference/goldens/*_taps.safetensors
 
+# Same idea, EmbeddingGemma-300M spike (tasks/0055) -- ~382 MB, regenerate:
+#   & .\.venv-ref\Scripts\python.exe reference\make_goldens_gemma.py --taps
+reference/goldens_gemma/*_taps.safetensors
+
+# Same idea, nomic-embed-text-v1.5 (tasks/0069) -- regenerate:
+#   & .\.venv-ref\Scripts\python.exe reference\make_goldens_nomic.py --taps
+reference/goldens_nomic/*_taps.safetensors
+
 # Exported ONNX graphs -- 90-133 MB each, and a deterministic derivative of a
 # sha256-pinned checkpoint, exactly like the taps goldens above.
 # bench_cpu_ort.py regenerates them on demand and caches them here.
@@ -101,6 +109,21 @@ OthersResarch/
 #   python tools\export_xclbin.py
 #   python tools\export_validation.py
 runtime/build/
+# Standalone build dir for the EmbeddingGemma tokenizer test CLI
+# (tasks/0061), compiled by hand with cl.exe -- not part of the CMake
+# npuembed target, has no XRT dependency, regenerate per that task's TASK.md.
+runtime/build_gemma_tok/
+# Standalone build dir for the EmbeddingGemma kernel test CLI (tasks/0063),
+# same reasoning as build_gemma_tok/ above -- also holds the generated
+# test-vector binary (tools/dump_gemma_kernel_vectors.py), itself derived
+# from the sha256-pinned checkpoint, so it stays out of git the same way
+# models/** does.
+runtime/build_gemma_kernels/
+# Standalone build dir for the EmbeddingGemma CPU-encode test CLI
+# (tasks/0064), same reasoning as build_gemma_tok/ and build_gemma_kernels/
+# above -- also holds ad hoc test corpora and output vectors used only for
+# fast local iteration; the ones that matter are copied into the task folder.
+runtime/build_gemma_encode/
 # EVERY exported design set, however it is suffixed: the plain one, the width
 # sweep of tasks/0024 (artifacts1/2/8), the batch sweep of tasks/0025
 # (artifacts_b16*) and the minimal-design control (artifacts_pass). A narrower

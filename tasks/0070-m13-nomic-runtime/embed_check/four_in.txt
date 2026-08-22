@@ -1,0 +1,4 @@
+search_document: A man is playing a guitar on stage.
+search_document: Someone plays a guitar at a concert.
+search_document: A woman is slicing an onion in the kitchen.
+search_document: The stock market closed lower on Tuesday.

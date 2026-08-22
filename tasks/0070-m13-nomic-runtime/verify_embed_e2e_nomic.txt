@@ -1,0 +1,23 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+<All keys matched successfully>
+[transformers] Detected the usage of `get_extended_attention_mask`: This function is deprecated and will be removed in v5.12.0. Please use the new API in `transformers.masking_utils`
+NOTE (tasks/0070): npuembed --embed has NO --prefix flag yet -- wiring it is tasks/0071. This harness manually prepends 'search_document: ' to every text before handing it to BOTH the runtime and the reference, as a workaround so this check exercises nomic's REQUIRED usage rather than comparing prefix-less against prefix-less. A real deployment must currently prepend the prefix itself; npuembed does not do it on its own yet.
+end-to-end: 13 texts, seq 64, artifacts artifacts_nomic
+    #        1-cos   text
+   10    2.401e-05   '   '
+    9    2.401e-05   ''
+    7    2.369e-05   'Tokenization turns text into subword pieces.'
+    0    2.147e-05   'A man is playing a guitar on stage.'
+    8    1.963e-05   'pneumonoultramicroscopicsilicovolcanoconiosis is a long '
+    5    1.760e-05   'Blåbærsyltetøy smaker godt på en skive brød.'
+    1    1.717e-05   'Someone plays a guitar at a concert.'
+   12    1.545e-05   'The quick brown fox jumps over the lazy dog while the ca'
+
+  worst 1-cos 2.401e-05   (tolerance 2e-03)
+  pairwise-similarity error over 78 pairs:
+    mean 7.569e-04   p99 2.633e-03   max 2.633e-03
+    bound implied by the worst 1-cos: 1.386e-02
+  top-10 neighbour overlap: 1.0000
+
+wrote tasks\0070-m13-nomic-runtime\verify_embed_e2e_nomic.json
+PASS -- text in, vector out, matches the reference

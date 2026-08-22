@@ -1,0 +1,13 @@
+search_document: A man is playing a guitar on stage.
+search_document: Someone plays a guitar at a concert.
+search_document: A woman is slicing an onion in the kitchen.
+search_document: The stock market closed lower on Tuesday.
+search_document: Interest rates were raised by the central bank.
+search_document: Blåbærsyltetøy smaker godt på en skive brød.
+search_document: 机器学习模型可以生成句子向量。
+search_document: Tokenization turns text into subword pieces.
+search_document: pneumonoultramicroscopicsilicovolcanoconiosis is a long word
+search_document: 
+search_document:    
+search_document: Short.
+search_document: The quick brown fox jumps over the lazy dog while the cat sleeps quietly in the warm afternoon sun near the window of an old wooden house.

@@ -1,0 +1,4 @@
+The quick brown fox jumps over the lazy dog.
+Café résumé naïve façade coöperate.
+人工知能は世界を変える技術です。
+The AMD Ryzen AI NPU accelerates transformer encoder models by dispatching matmuls to a spatial array of programmable AI engine tiles connected by circuit-switched interconnect.

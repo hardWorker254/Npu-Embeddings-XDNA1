@@ -35,6 +35,36 @@ MAGIC = b"NPUE"
 VERSION = 1
 
 ARCH_BERT_ABS_GELU_POSTLN = 0
+# EmbeddingGemma-300M (Gemma3): RMSNorm x/rms*(1+w), MQA + RoPE + q_norm/
+# k_norm, GeGLU. Runs entirely on the HOST -- see tasks/0064-m12-embeddinggemma-arch1-integration/TASK.md. GEMM operands for this arch are stored PLAIN
+# (F32, row-major [K,N], no block_panel tiling and no layout_hash) because
+# there is no NPU kernel for this arch yet: nothing here ever goes to a DMA
+# descriptor, so the tile_n/L1-budget/DMA-BD-limit machinery the BERT arch
+# needs is not applicable and was deliberately not built.
+ARCH_GEMMA3_MQA_ROPE_GEGLU = 1
+
+# nomic-embed-text-v1.5 (nomic_bert): RoPE (NeoX-style, theta=1000, applied to
+# Q and K only, positions start at 0) + a gated SwiGLU FFN (fc11 is the
+# untouched up-path, fc12 gets SiLU: out = fc11(x) * silu(fc12(x)), fused into
+# one [hidden, 2*intermediate] ffn_up so the array still sees four GEMMs per
+# layer, not five), post-LN, and NO biases anywhere
+# (qkv_proj_bias/mlp_fc1_bias/mlp_fc2_bias all False). Every architectural
+# fact here was settled empirically, not read off a model card -- see
+# tasks/0068-m13-nomic-spike-and-oracle/TASK.md sec 5.
+#
+# Tensor names and emission order are IDENTICAL to arch=0 (BERT) -- see
+# tasks/0069-m13-nomic-arch2-container/TASK.md item 3 -- so
+# Encoder::stage_all() and the whole NPU dispatch path work UNCHANGED.
+# Every "*.bias" tensor and "embeddings.position" are ZERO-FILLED rather than
+# omitted, because the runtime dereferences both unconditionally
+# (main.cpp:702, :2889) -- a zero tensor of the right shape is exact (nomic
+# has no biases, and RoPE replaces the absolute position table) and costs far
+# less than threading nullable branches through the hot path for one new arch.
+#
+# Unlike arch=1 (Gemma, HOST-only), this arch's GEMM operands ARE pre-tiled
+# bf16 block_panel -- exactly like BERT -- because nomic's geometry (head_dim
+# 64, every N a multiple of 384, K in {768, 3072}) fits the array.
+ARCH_NOMIC_ROPE_SWIGLU = 2
 
 FLAG_PRETILED = 1 << 0
 

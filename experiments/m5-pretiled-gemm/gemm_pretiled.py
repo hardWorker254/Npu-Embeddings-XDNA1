@@ -63,7 +63,7 @@ from ml_dtypes import bfloat16
 
 import aie.iron as iron
 from aie.iron import (
-    Buffer, CompileTime, In, ObjectFifo, Out, Program, Runtime, Worker,
+    Buffer, CompileTime, In, ObjectFifo, Out, Program, Runtime, TaskGroup, Worker,
     WorkerRuntimeBarrier, kernels,
     str_to_dtype,
 )
@@ -94,7 +94,8 @@ TRACE_ROUTING = {2: (1, 1), 4: (0, 0)}
 def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str,
                   emulate_bf16_mmul_with_bfp16, trace_config, trace_row, trace_col,
                   trace_egress_col=0, pretiled=True, tile_order="k,n", inner_st=True,
-                  b_reuse=False, rtp=False, epilogue=None, c_bf16=False):
+                  b_reuse=False, rtp=False, epilogue=None, c_bf16=False,
+                  b_l1_depth=2):
     n_aie_rows = 4
     n_aie_cores = n_aie_rows * n_aie_cols
 
@@ -268,14 +269,22 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
         # variants are numerically identical; only where the reorder happens
         # differs.
         rc = n_row_blocks if b_reuse else None
+        # NPUE-M9 (T19, tasks/0052): b_l1_depth=1 single-buffers B in L1 --
+        # the Stationary-B budget `2mk + kn + 2mn` from ICPP'25 (trap 3),
+        # which is what makes k=96 legal where the all-double-buffered
+        # default overflows. The cost it risks is the fetch/compute overlap
+        # on B; tasks/0049 says the DMA idles in the compute's shadow on the
+        # plain-bf16 path, and the traced per-iteration cycles decide.
         if asym:
             pass                      # asym has no second fifo to forward into
         elif pretiled and inner_st:
             B_l2l1_fifos[col] = B_l3l2_fifos[col].cons().forward(
-                obj_type=B_l1_ty, name=f"B_L2L1_{col}", repeat_count=rc)
+                obj_type=B_l1_ty, name=f"B_L2L1_{col}", repeat_count=rc,
+                depth=b_l1_depth)
         else:
             B_l2l1_fifos[col] = B_l3l2_fifos[col].cons().forward(
                 obj_type=B_l1_ty, name=f"B_L2L1_{col}", repeat_count=rc,
+                depth=b_l1_depth,
                 dims_to_stream=[(k // s, s * n), (n // t, t), (s, n), (t, 1)])
         C_l2l3_fifos[col] = ObjectFifo(
             C_l2_ty, name=f"C_L2L3_{col}", depth=fifo_depth,
@@ -328,9 +337,18 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
         _inc.append(str(_P(_cfg.cxx_header_path()) / "aie_kernels"))
         _inc.append(str(_P(_cfg.cxx_header_path()) / "aie_kernels"
                         / _detect_arch()))
-        assert m * n == 3072, "gelu epilogue entry point is fixed at 3072"
+        # NPUE-M10 (tasks/0054, T28 Del B / B1): entry points are hand-written
+        # per tile size in gelu_poly.cc (m*n=64x48=3072 for MiniLM/bge-small/
+        # bge-base's tile_n=48; m*n=64x32=2048 for bge-large's tile_n=32,
+        # 0042's "48 is illegal here"). Fail loudly rather than silently
+        # picking the wrong one if a new tile size shows up.
+        _epi_entry = {3072: "gelu_epilogue_3072_f32",
+                      2048: "gelu_epilogue_2048_f32"}.get(m * n)
+        assert _epi_entry is not None, (
+            f"no gelu epilogue entry point for tile m*n={m * n}; "
+            f"gelu_poly.cc has 2048/3072")
         epilogue_kernel = ExternalFunction(
-            "gelu_epilogue_3072_f32",
+            _epi_entry,
             source_file=str(_P(__file__).resolve().parent.parent
                             / "m5-eltwise" / "kernels" / "gelu_poly.cc"),
             arg_types=[np.ndarray[(m * n,), np.dtype[np.float32]]],
@@ -540,59 +558,79 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
         tile_group_steps=(1, n_aie_cols), prune_step=False)
     c_index = 0
 
-    def _set_rtps(*bufs):
-        for b in bufs:
-            b[0] = n_tiles_per_core
-            b[1] = K // k
+    A_prods = [f.prod() for f in A_l3l2_fifos]
+    B_prods = [f.prod() for f in B_l3l2_fifos]
+    C_conss = [f.cons() for f in C_l2l3_fifos]
 
-    rt = Runtime()
-    with rt.sequence(A_ty, B_ty, C_ty) as (A, B, C):
+    def sequence(A, B, C, A_prod_hs, B_prod_hs, C_cons_hs):
+        nonlocal c_index
         if rtp:
-            rt.inline_ops(_set_rtps,
-                          [rtp_bufs[r][c] for r in range(n_aie_rows)
-                           for c in range(n_aie_cols)])
+            # A Buffer with use_write_rtp=True emits its write inline when
+            # assigned inside the active sequence body -- no separate
+            # inline_ops() call needed (matches
+            # programming_examples/ml/scale_shift.py's `rtp[0] = value`).
             for r in range(n_aie_rows):
                 for c in range(n_aie_cols):
-                    rt.set_barrier(rtp_barriers[r][c], 1)
-        if trace_config is not None:
-            rt.enable_trace(trace_config.trace_size,
-                            [workers[trace_row][trace_col]],
-                            egress_shim_col=trace_egress_col)
-        rt.start(*[w for row in workers for w in row])
+                    rtp_bufs[r][c][0] = n_tiles_per_core
+                    rtp_bufs[r][c][1] = K // k
+            for r in range(n_aie_rows):
+                for c in range(n_aie_cols):
+                    rtp_barriers[r][c].set(1)
 
-        tg = rt.task_group()
+        tg = TaskGroup()
         if b_reuse:
             # Stream each column's B slice from DDR exactly ONCE, before any row
             # block runs. The mem tile replays it n_row_blocks times, so DDR
             # traffic for B drops by that factor -- 2x at M=512, 16x at M=4096.
             for col in range(n_aie_cols):
-                rt.fill(B_l3l2_fifos[col].prod(), B, tap=B_taps[col],
-                        task_group=tg)
-        for tb in range(iron.ceildiv(M // m // n_aie_rows, tb_max_n_rows)):
+                B_prod_hs[col].fill(B, tap=B_taps[col], group=tg)
+        # NPUE-M13 (tasks/0068): the C-drain tap's row-group width is
+        # `tb_n_rows` (computed above, line ~503, and forced to 1 by the
+        # 20-bit DMA-stride guard at line ~511). This fill/drain walk used to
+        # step by the hardcoded `tb_max_n_rows // 2` regardless of what
+        # `tb_n_rows` actually was, so whenever the guard forced tb_n_rows
+        # down to 1 the loop kept filling+computing 2 row blocks per drain
+        # call while each drain tap only covered 1 -- half of every C tile
+        # was silently never DMA'd out (stale host memory, not a numeric
+        # error): rel_fro ~7.07e-01, 28/32 row-bands with max|err| > 1.0.
+        # tb_step below is the outer (2-way ping-pong) stride expressed in
+        # units of tb_n_rows; at the historical unguarded tb_n_rows=2 it
+        # equals tb_max_n_rows=4 exactly, so every shape below the guard
+        # threshold is bit-for-bit unaffected by this change.
+        #
+        # The guard has never fired in any shipped design: bge-large's real
+        # production N=4096 sits at EXACTLY 2**20 and the guard is a strict
+        # '>', so this bug was latent until nomic's N=6144 ffn_up crossed it.
+        tb_step = 2 * tb_n_rows
+        for tb in range(iron.ceildiv(M // m // n_aie_rows, tb_step)):
             for pingpong in [0, 1]:
                 if c_index >= len(C_tiles):
                     break
-                row_base = tb * tb_max_n_rows + pingpong * tb_max_n_rows // 2
-                current_tb_n_rows = min([tb_max_n_rows // 2,
+                row_base = tb * tb_step + pingpong * tb_n_rows
+                current_tb_n_rows = min([tb_n_rows,
                                          M // m // n_aie_rows - row_base])
                 for col in range(n_aie_cols):
-                    rt.drain(C_l2l3_fifos[col].cons(), C, tap=C_tiles[c_index],
-                             wait=True, task_group=tg)
+                    C_cons_hs[col].drain(C, tap=C_tiles[c_index], wait=True, group=tg)
                     c_index += 1
                     for tile_row in range(current_tb_n_rows):
                         off = ((row_base + tile_row) * n_shim_mem_A + col) % len(A_tiles)
                         if col < n_aie_rows:
-                            rt.fill(A_l3l2_fifos[col].prod(), A, tap=A_tiles[off],
-                                    task_group=tg)
+                            A_prod_hs[col].fill(A, tap=A_tiles[off], group=tg)
                         if not b_reuse:
-                            rt.fill(B_l3l2_fifos[col].prod(), B, tap=B_taps[col],
-                                    task_group=tg)
+                            B_prod_hs[col].fill(B, tap=B_taps[col], group=tg)
                 if tb > 0 or (tb == 0 and pingpong > 0):
-                    rt.finish_task_group(tg)
-                    tg = rt.task_group()
-        rt.finish_task_group(tg)
+                    tg.finish()
+                    tg = TaskGroup()
+        tg.finish()
 
-    return Program(dev, rt).resolve_program()
+    rt = Runtime(sequence, [A_ty, B_ty, C_ty, A_prods, B_prods, C_conss])
+
+    program = Program(dev, rt, workers=[w for row in workers for w in row])
+    if trace_config is not None:
+        program.enable_trace(trace_config.trace_size,
+                             workers=[workers[trace_row][trace_col]],
+                             egress_shim_col=trace_egress_col)
+    return program.resolve_program()
 
 
 @iron.jit(aiecc_flags=["--alloc-scheme=basic-sequential"])
@@ -614,23 +652,29 @@ def pretiled_array(
     rtp: CompileTime[bool] = False,
     epilogue: CompileTime[str | None] = None,
     c_bf16: CompileTime[bool] = False,
+    b_l1_depth: CompileTime[int] = 2,
 ):
     return _build_design(iron.get_current_device(), M, K, N, m, k, n, n_aie_cols,
                          dtype_in_str, dtype_out_str,
                          emulate_bf16_mmul_with_bfp16,
                          trace_config, trace_row, trace_col, trace_egress_col,
                          pretiled, tile_order, inner_st, b_reuse, rtp=rtp,
-                         epilogue=epilogue, c_bf16=c_bf16)
+                         epilogue=epilogue, c_bf16=c_bf16,
+                         b_l1_depth=b_l1_depth)
 
 
 def run_one(M, K, N, m, k, n, cols, emulate, trace_size, pretiled=True,
             tile_order="k,n", inner_st=True, b_reuse=False,
-            dtype_in="bf16", dtype_out="f32", verbose=True, trace=True):
+            dtype_in="bf16", dtype_out="f32", verbose=True, trace=True,
+            b_l1_depth=2):
     """Compile + run one configuration. Returns a result dict, or None."""
     dt_in, dt_out = str_to_dtype(dtype_in), str_to_dtype(dtype_out)
 
     in_sz, out_sz = np.dtype(dt_in).itemsize, np.dtype(dt_out).itemsize
-    l1 = 2 * (m * k * in_sz + k * n * in_sz + m * n * out_sz)
+    # Stationary-B budget when B is single-buffered (b_l1_depth=1):
+    # 2mk + kn + 2mn instead of 2(mk + kn + mn). Trap 3 / ICPP'25.
+    l1 = (2 * m * k * in_sz + b_l1_depth * k * n * in_sz
+          + 2 * m * n * out_sz)
     if l1 >= 64 * 1024:
         print(f"  SKIP cols={cols}: tile needs {l1} B of L1 (max 65536)")
         return None
@@ -646,6 +690,9 @@ def run_one(M, K, N, m, k, n, cols, emulate, trace_size, pretiled=True,
     if b_reuse:
         kind += "+reuse"
         slug += "_reuse"
+    if b_l1_depth != 2:
+        kind += f"+bd{b_l1_depth}"
+        slug += f"_bd{b_l1_depth}"
     tag = (f"{slug}_{cols}c_{dtype_in}_{dtype_out}{'_bfp16' if emulate else ''}"
            f"_{M}x{K}x{N}_t{m}x{k}x{n}")
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
@@ -695,6 +742,7 @@ def run_one(M, K, N, m, k, n, cols, emulate, trace_size, pretiled=True,
               dtype_in_str=dtype_in, dtype_out_str=dtype_out,
               emulate_bf16_mmul_with_bfp16=emulate, pretiled=pretiled,
               tile_order=tile_order, inner_st=inner_st, b_reuse=b_reuse,
+              b_l1_depth=b_l1_depth,
               trace_config=cfg)
     if cfg is not None:
         kw.update(trace_row=0, trace_col=tcol, trace_egress_col=egress)
@@ -708,6 +756,7 @@ def run_one(M, K, N, m, k, n, cols, emulate, trace_size, pretiled=True,
 
     out = dict(kind=kind, tile_order=tile_order if pretiled else None,
                cols=cols, cores=4 * cols, M=M, K=K, N=N, m=m, k=k, n=n,
+               b_l1_depth=b_l1_depth,
                dtype_in=dtype_in, dtype_out=dtype_out, emulate_bfp16=emulate,
                rel_frobenius=rel_fro, correctness_pass=ok)
 
@@ -822,6 +871,10 @@ def main() -> int:
     ap.add_argument("-k", type=int, default=64)
     ap.add_argument("-n", type=int, default=48)
     ap.add_argument("--cols", type=int, default=4)
+    ap.add_argument("--b-depth", type=int, default=2,
+                    help="L1 depth of the B fifo. 1 = Stationary-B single "
+                         "buffering (frees k*n*2 bytes of L1, enabling k=96; "
+                         "risks losing B fetch/compute overlap -- T19)")
     ap.add_argument("--emulate-bfp16", action="store_true")
     ap.add_argument("--trace-size", type=int, default=262144)
     ap.add_argument("--no-trace", action="store_true")
@@ -887,7 +940,8 @@ def main() -> int:
                                   args.emulate_bfp16, args.trace_size,
                                   pretiled=kind_pretiled,
                                   tile_order=order or "k,n", inner_st=inner,
-                                  trace=not args.no_trace)
+                                  trace=not args.no_trace,
+                                  b_l1_depth=args.b_depth)
                 except Exception as e:
                     msg = str(e)
                     hit = "exceeds the [0:1023] range" in msg

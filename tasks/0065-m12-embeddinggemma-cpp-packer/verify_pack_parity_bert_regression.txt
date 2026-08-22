@@ -1,0 +1,8 @@
+  tile_n 48, model all-MiniLM-L6-v2
+  pack_npue.py    69.02 MB, json 16488 B at 64, data 69.00 MB at 20480, v1 arch0 flags1
+  --prepare-model 69.02 MB, json 16488 B at 64, data 69.00 MB at 20480, v1 arch0 flags1
+
+  python : a64d53dc8ad0e56b622589858059f19ec102720e5c4c012b6309a6f60aa474ec
+  c++    : a64d53dc8ad0e56b622589858059f19ec102720e5c4c012b6309a6f60aa474ec
+
+PASS -- byte-identical

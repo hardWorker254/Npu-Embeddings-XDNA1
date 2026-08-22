@@ -59,10 +59,37 @@ These are project constraints, not preferences. Each has a reason.
    closed and its own installer terms forbid redistribution. We read that repo for
    architecture only, and vendored nothing from it.
 
+## What runs where
+
+```
+text ──► WordPiece tokenizer ──► embedding gather ──┐
+                                                     │  (C++, host)
+        ┌────────────────────────────────────────────┘
+        ▼
+   N × encoder layer
+     ├── QKV / attn-out / FFN-up / FFN-down GEMMs ──► NPU  (bf16, fp32 accum)
+     ├── attention per head ──────────────────────►  host (AVX2)
+     └── LayerNorm / softmax / GELU ──────────────►  host (fp32, AVX2)
+        │
+        ▼
+   pool ──► L2 normalise ──► vector
+```
+
+The elementwise operators live on the host because each measured *faster and
+more accurate* there than as an NPU dispatch
+([`0032`](../tasks/0032-m7-one-xclbin-production/TASK.md)) — a design switch
+costs ~2.3 ms, so no elementwise op at h=384 earns one. That is a statement
+about dispatch economics, not about the array.
+
 ## Key decisions and why
+
+Two of these carried most of the throughput, and both came out of measurement
+rather than intuition:
 
 | Decision | Rationale |
 |---|---|
+| **One xclbin, many instruction streams** | Changing which design the NPU is configured for costs **2.2–2.6 ms** — far more than a dispatch, and the encoder used to pay it on all 49 of them. Moving the only shape-dependent values into runtime parameters lets all four GEMM shapes *and* all four batch tiers share one static design and one hardware context, so an encode pays **zero** switch cost. 305 → 611 seq/s on its own. → [`0029`](../tasks/0029-m7-one-xclbin-probe/TASK.md), [`0032`](../tasks/0032-m7-one-xclbin-production/TASK.md) |
+| **Several encode lanes over one design** | The NPU serialises dispatches regardless, so one lane's host work overlaps another's NPU work. Measured 1.49× at two lanes; the default is now four. → [`0033`](../tasks/0033-m7-pipelined-lanes/TASK.md), [`0052`](../tasks/0052-m10-research-night/TASK.md) |
 | **IRON Python at build time only** | MLIR-AIE has no C++ design frontend. `aiecc.exe` accepts hand-written `.mlir`, but nothing generates it from C++. Fighting this would stall the project before any embedding runs. |
 | **One validated kernel first** | Debugging a multi-kernel dataflow with no measured baseline is where these projects die. |
 | **bf16 first, int8 second** | bf16 is the AIE2P native multiply, needs no calibration, and is empirically safe (<0.22% max error vs fp32, measured twice independently). int8 adds calibration and scale plumbing on top of kernel bring-up, so failures become hard to attribute. |

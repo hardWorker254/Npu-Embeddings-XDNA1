@@ -1,0 +1,36 @@
+﻿=== default AutoModel.from_pretrained (no trust_remote_code arg) ===
+python.exe : 
+At line:2 char:1
++ & ".\.venv-ref\Scripts\python.exe" "tasks\0069-m13-nomic-arch2-contai ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Loading weights:   0%|          | 0/112 [00:00<?, ?it/s]
+Loading weights:   4%|▍         | 5/112 [00:00<00:02, 47.26it/s]
+Loading weights: 100%|██████████| 112/112 [00:00<00:00, 921.06it/s]
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits 
+and faster downloads.
+<All keys matched successfully>
+[transformers] Detected the usage of `get_extended_attention_mask`: This function is deprecated and will be removed in 
+v5.12.0. Please use the new API in `transformers.masking_utils`
+class: NomicBertModel transformers.models.nomic_bert.modeling_nomic_bert
+num hidden_states: 13  (n_layer=12 -> expect 13)
+hs[0] shape: (2, 32, 768)
+
+native module tree (top level):
+  embeddings
+  rotary_emb
+  layers
+
+hs[-1] == last_hidden_state: True
+
+=== remote code AutoModel.from_pretrained(trust_remote_code=True) ===
+class: NomicBertModel
+max abs diff native vs remote last_hidden_state: 0.0
+
+=== SentenceTransformer, no trust_remote_code ===
+
+Loading weights:   0%|          | 0/112 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 112/112 [00:00<00:00, 5969.02it/s]
+OK, norm: 21.713278

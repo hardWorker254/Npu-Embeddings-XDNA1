@@ -1,0 +1,4 @@
+A man is eating food.
+Le café coûte 5 euros — c'est bien trop cher pour un espresso.
+The 北京 office opens at 9am, 上海 at 10am.
+Antidisestablishmentarianism, transubstantiation, and other unnecessarily long words; do they tokenize correctly?

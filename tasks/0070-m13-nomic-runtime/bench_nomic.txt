@@ -1,0 +1,34 @@
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      nomic-embed-text-v1.5: 150 tensors, 322.05 MB, checkpoint 9e7d262b1fe5ea35
+  shape      nomic-ai/nomic-embed-text-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, mean pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 262144 B
+  weights    226.49 MB staged on the device once, not per call
+  npu        exclusive -- 6 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  3 encodes of 128 sequences at seq 64
+    wall  1284.53 ms   ->      99.6 seq/s
+    cpu   4765.62 ms   ->      3.71 cores busy
+
+    NPU path (copy+sync+dispatch)  1008.50 ms   78.5%   48 dispatches
+      bf16 convert (both ways)       66.10 ms    5.1%
+      sync to device                  9.65 ms    0.8%
+      dispatch + wait               684.70 ms   53.3%    14265 us each
+        submit (build + start)        3.91 ms    0.3%       81 us each
+        wait (hardware)             680.20 ms   53.0%    14171 us each
+      sync from device                8.45 ms    0.7%
+      read out + bias               239.60 ms   18.7%
+    host attention (QK^T, A.V)      80.03 ms    6.2%
+    host gelu                       81.67 ms    6.4%
+    host softmax                     8.61 ms    0.7%
+    host layernorm                  14.65 ms    1.1%
+    everything else                196.01 ms   15.3%
+
+    per design      calls   MACs/call    wait us/call
+    gemm_rtp           48           0         14171

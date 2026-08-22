@@ -59,4 +59,42 @@ void prepare_model(const std::string &safetensors, const std::string &vocab,
                    int64_t tile_k, int64_t tile_n, int64_t max_seq,
                    void (*log)(const std::string &) = nullptr);
 
+// arch=1 (EmbeddingGemma / Gemma3 MQA+RoPE+GeGLU) mirror of
+// tools/pack_npue.py's pack_gemma(). Every GEMM operand is stored PLAIN --
+// F32, row-major [K,N], no block_panel tiling, no layout_hash -- because
+// there is no NPU kernel for this arch yet (tasks/0064). `model_dir` must
+// hold model.safetensors, config.json, 2_Dense/model.safetensors,
+// 3_Dense/model.safetensors and (optionally) gemma_tokenizer.bin.
+// `source_repo` is resolved by the caller exactly as for the BERT path
+// (CHECKPOINT.json or --source-repo), so both packers agree on it.
+void prepare_model_gemma(const std::string &model_dir, const std::string &out,
+                         const std::string &source_repo,
+                         void (*log)(const std::string &) = nullptr);
+
+// arch=2 (nomic-embed-text-v1.5 / RoPE + gated SwiGLU) mirror of
+// tools/pack_npue.py's pack_nomic() (tasks/0069, tasks/0070, tasks/0071).
+// Emits the SAME tensor names and SAME emission order as prepare_model()
+// above, so Encoder::run()'s existing NPU dispatch path works unchanged --
+// with three departures from BERT: no absolute position table (RoPE
+// instead; zero-filled placeholder of the right shape so the unconditional
+// "embeddings.position" read stays untouched), no biases anywhere
+// (zero-filled placeholders, same rationale), and a gated SwiGLU `ffn_up`
+// that fuses fc11 (untouched "up") | fc12 (SiLU "gate") along N -- one GEMM,
+// not two. Every GEMM operand IS pre-tiled here (unlike Gemma): nomic has a
+// real NPU design, so this packer's output is meant to be dispatched, not
+// just loaded.
+//
+// `pooling` and `source_repo` are resolved by the CALLER exactly as for
+// prepare_model() above (same 1_Pooling/config.json and CHECKPOINT.json /
+// --source-repo sources), so the BERT-family and nomic packers cannot
+// disagree about either.
+void prepare_model_nomic(const std::string &model_dir,
+                         const std::string &pooling,
+                         const std::string &source_repo,
+                         const std::string &out,
+                         const std::string &layout_json,
+                         const std::string &layout_hash,
+                         int64_t tile_k, int64_t tile_n, int64_t max_seq,
+                         void (*log)(const std::string &) = nullptr);
+
 }  // namespace npue

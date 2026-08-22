@@ -1,0 +1,17 @@
+packing nomic-embed-text-v1.5 -> nomic-embed-text-v1.5.npue  (arch=nomic_bert_rope_swiglu)
+  hidden=768 heads=12 head_dim=64 layers=12 inter=3072 rope_theta=1000
+  tile (64, 48), mac (s=8, t=8), 1/sqrt(64) = 0.125 folded into Q
+  tokenizer.vocab   226.1 KB (30522 lines)
+
+  operand               [K,N]  k-blocks  n-blocks   tiles  max BD dim
+  qkv             [768, 2304]        12        48     576          48
+  attn_out         [768, 768]        12        16     192          16
+  ffn_up          [768, 6144]        12       128    1536         128
+  ffn_down        [3072, 768]        48        16     768          48
+
+  tensors    : 150  (48 pre-tiled GEMM operands)
+  json       : 32634 B at 64
+  data       : 322.05 MB at 32768
+  file       : 322.08 MB
+  source     : 9e7d262b1fe5ea35...
+  layout_hash: 94266693ea31aa67...

@@ -33,6 +33,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <set>
 #include <sstream>
 #include <functional>
@@ -42,7 +43,10 @@
 #include <thread>
 #include <vector>
 
+#include "gemma_encode.hpp"
+#include "gemma_kernels.hpp"
 #include "hub.hpp"
+#include "json_min.hpp"
 #include "npu_contention.hpp"
 #include "npu_device.hpp"
 #include "npue.hpp"
@@ -89,6 +93,23 @@ int64_t g_ffn = 0, g_layers = 0, g_max_positions = 0;
 bool g_cls_pool = false, g_l2_normalize = true;
 std::string g_model_name, g_source_repo;
 
+// arch=2 (nomic-embed-text-v1.5, tasks/0069-0070): RoPE on Q/K inside the
+// fused qkv buffer, and a gated SwiGLU FFN in place of plain GELU. Both are
+// false/0 for every arch=0 (BERT) container -- set_model_shape() is the only
+// writer, same discipline as every other g_* geometry field above.
+bool g_rope = false, g_gated_ffn = false;
+double g_rope_theta = 0.0;
+
+// nomic's task-prefix table (tasks/0071): name -> literal prefix text, e.g.
+// "search_document" -> "search_document: ". Empty for every container that
+// carries no "prompts" key -- the four BERT models have no prefix concept at
+// all, and `g_prompts.empty()` is the single source of truth for that,
+// rather than a second bool that could drift from it. set_model_shape() is
+// the only writer, cleared unconditionally on every call for the same
+// "no container can leak state into the next" reason as g_rope/g_gated_ffn.
+std::map<std::string, std::string> g_prompts;
+std::string g_prompt_default;
+
 // Batch is NOT a constant: it is read back from the loaded design's M, so the
 // runtime cannot disagree with the xclbin it was handed. Every GEMM in the
 // encoder is over all tokens of all sequences at once, so batching is purely a
@@ -104,10 +125,43 @@ std::string g_model_name, g_source_repo;
 // is read from the containers -- there is no list of models in this binary.
 
 struct ModelEntry {
-  std::string path, name, repo, pooling, error;
+  std::string path, name, repo, pooling, arch, error;
   int64_t layers = 0, hidden = 0, heads = 0, head_dim = 0, ffn = 0, seq = 0;
+  bool gated_ffn = false;
   double mb = 0;
 };
+
+// A config key added after the container format already shipped has to be
+// readable from containers that predate it. This repo's rule is that a missing
+// key THROWS rather than defaulting -- right for geometry, which must never be
+// guessed -- so the back-compat default is stated explicitly, here, at the one
+// place it applies, rather than by weakening config_string(). Same shape as the
+// pre-0036 `tokenizer.vocab` fallback in load_tokenizer().
+//
+// `config_string` returns the raw JSON scalar text, so a JSON `true` arrives as
+// the four characters "true".
+// Which container architectures this build can actually EXECUTE, as opposed to
+// merely load. Kept in one place so the `list` table and the dispatch-time
+// refusal in set_model_shape() cannot drift apart: a table that says "ready"
+// while dispatch throws is its own kind of lie, just a politer one.
+//
+// A packed container and a matching design are NOT sufficient. arch=2 (nomic)
+// deliberately reuses BERT's tensor names and shapes so the packer and the NPU
+// dispatch path work unchanged -- which means the BERT encoder will read it
+// happily and compute the wrong model. tasks/0069.
+bool encoder_implemented(const std::string &arch) {
+  return arch == "bert_abs_gelu_postln" ||      // Encoder, NPU GEMM path
+         arch == "nomic_bert_rope_swiglu" ||    // Encoder, NPU GEMM path (0070)
+         arch == "gemma3_mqa_rope_geglu";       // GemmaEncoder, host-only
+}
+
+bool config_flag(const npue::File &f, const char *key, bool fallback) {
+  try {
+    return f.config_string(key) == "true";
+  } catch (const std::exception &) {
+    return fallback;   // container predates the key: arch 0 and 1 are ungated
+  }
+}
 
 std::vector<ModelEntry> discover_models(const std::string &root) {
   namespace fs = std::filesystem;
@@ -127,11 +181,13 @@ std::vector<ModelEntry> discover_models(const std::string &root) {
       npue::File f(m.path);
       m.repo = f.config_string("source_repo");
       m.pooling = f.config_string("pooling");
+      m.arch = f.config_string("arch");
       m.layers = f.config_int("num_layers");
       m.hidden = f.config_int("hidden");
       m.heads = f.config_int("num_heads");
       m.head_dim = f.config_int("head_dim");
       m.ffn = f.config_int("intermediate");
+      m.gated_ffn = config_flag(f, "gated_ffn", false);
       m.seq = f.config_int("max_seq_len");
       m.mb = f.data_length() / 1e6;
     } catch (const std::exception &e) {
@@ -325,6 +381,31 @@ void pool_rows(const float *h, const float *am, int64_t take, float *out) {
 // default here is indistinguishable from a correct value and this project has
 // shipped six bugs of exactly that shape.
 void set_model_shape(npue::File &m) {
+  // FAIL CLOSED ON AN ARCHITECTURE THIS BINARY DOES NOT IMPLEMENT.
+  //
+  // Encoder::run() started as a pure BERT forward pass: absolute positions, a
+  // plain GELU FFN, no rotary anything. arch=2 (nomic) deliberately reuses
+  // BERT's tensor names and shapes -- that is what makes the packer and NPU
+  // dispatch path free -- so a container this build does NOT implement would
+  // otherwise be read happily and run through the wrong math, returning
+  // embeddings that look entirely reasonable. Nothing downstream could tell.
+  //
+  // The arch=1 (Gemma) containers are dispatched away before they reach here,
+  // but that check lives at three call sites and works by naming the ONE arch
+  // it diverts; anything it does not recognise falls through to this path. So
+  // the guard has to be here, stated as a whitelist of what is IMPLEMENTED
+  // rather than a blacklist of what is not. tasks/0069, extended for arch=2
+  // in tasks/0070 -- encoder_implemented() is the single source both this
+  // refusal and the `list`/`serve` tables read, so they cannot drift.
+  const std::string arch = m.config_string("arch");
+  if (arch != "bert_abs_gelu_postln" && arch != "nomic_bert_rope_swiglu")
+    throw std::runtime_error(
+        "container architecture '" + arch + "' has no encoder in this build. "
+        "The NPU GEMM designs for it may well be present -- the tensor names "
+        "and shapes are shared with BERT on purpose -- but running it through "
+        "the BERT encoder would silently return embeddings for the wrong "
+        "model. Refusing.");
+
   g_layers = m.config_int("num_layers");
   g_hidden = m.config_int("hidden");
   g_heads = m.config_int("num_heads");
@@ -335,6 +416,78 @@ void set_model_shape(npue::File &m) {
   // which is 256 while the designs are compiled for 64. The sequence length
   // belongs to the design and is set by set_design_seq().
   g_max_positions = m.config_int("max_seq_len");
+
+  // arch=2: RoPE on Q/K (never V) inside the fused qkv buffer, and a gated
+  // SwiGLU FFN. Both default false/0 -- deterministic every call, so a BERT
+  // container after a nomic one in the same process (there is none today,
+  // but nothing enforces that) cannot inherit stale state.
+  g_gated_ffn = config_flag(m, "gated_ffn", false);
+  g_rope = false;
+  g_rope_theta = 0.0;
+  if (arch == "nomic_bert_rope_swiglu") {
+    const std::string pet = m.config_string("position_embedding_type");
+    if (pet != "rope")
+      throw std::runtime_error(
+          "container arch is nomic_bert_rope_swiglu but "
+          "position_embedding_type is '" + pet + "', expected 'rope' -- "
+          "refusing rather than guessing how position is encoded");
+    if (!g_gated_ffn)
+      throw std::runtime_error(
+          "container arch is nomic_bert_rope_swiglu but gated_ffn is not "
+          "true -- refusing rather than running a plain (ungated) FFN over "
+          "a fused fc11|fc12 weight");
+    // swiglu_halves pins which half of the fused ffn_up gets SiLU. READ IT,
+    // do not trust the constant -- tools/pack_npue.py writes this exact
+    // string today, but a packer that silently changed the fusion order
+    // would otherwise compute out = silu(fc11(x)) * fc12(x), the wrong
+    // candidate tasks/0068 Q2 measured at rel_fro 4.022e+00 (2.5e7x worse).
+    const std::string halves = m.config_string("swiglu_halves");
+    if (halves != "fc11_up|fc12_gate")
+      throw std::runtime_error(
+          "unrecognised swiglu_halves ordering '" + halves + "' -- expected "
+          "'fc11_up|fc12_gate'; refusing rather than guessing which half of "
+          "the fused ffn_up gets SiLU");
+    g_rope_theta = m.config_double("rope_theta");
+    if (g_rope_theta <= 0.0)
+      throw std::runtime_error(
+          "nomic_bert_rope_swiglu container has a non-positive rope_theta");
+    g_rope = true;
+  }
+
+  // The task-prefix table (tasks/0071). Optional: the four BERT models'
+  // containers carry no "prompts" key at all, and that has to leave
+  // g_prompts genuinely empty -- not throw -- so resolve_prefix() below can
+  // use emptiness as "this model has no prefix concept" without a second
+  // flag that could drift from it. config_string() throws on a missing key,
+  // so the absence check is a try/catch, same shape as config_flag() above.
+  g_prompts.clear();
+  g_prompt_default.clear();
+  {
+    std::string raw;
+    try {
+      raw = m.config_string("prompts");
+    } catch (const std::exception &) {
+      // No "prompts" key -- this container has no task-prefix concept.
+      // g_prompts stays empty, which IS the "no prefix" signal.
+    }
+    if (!raw.empty()) {
+      const npue::json::Value v = npue::json::parse(raw);
+      for (const auto &kv : v.as_object())
+        g_prompts[kv.first] = kv.second.as_string();
+      if (g_prompts.empty())
+        throw std::runtime_error(
+            "container has a 'prompts' key but it parsed to zero entries -- "
+            "refusing rather than silently running with no prefix");
+      // prompt_default is REQUIRED once prompts exists: a container that
+      // advertises a prefix table but names no default is malformed, not
+      // merely prefix-less.
+      g_prompt_default = m.config_string("prompt_default");
+      if (g_prompts.find(g_prompt_default) == g_prompts.end())
+        throw std::runtime_error(
+            "prompt_default '" + g_prompt_default + "' is not a key in "
+            "this container's own prompts table");
+    }
+  }
 
   // Pooling is data. sentence-transformers ships the answer in
   // 1_Pooling/config.json and the packer copies it here; a container that
@@ -373,6 +526,64 @@ void set_design_seq(int64_t seq) {
         "design seq " + std::to_string(seq) + " exceeds the " +
         std::to_string(g_max_positions) + " position embeddings in the .npue");
   g_seq = seq;
+}
+
+// Resolves --prefix against the container's own task-prefix table
+// (tasks/0071). Returns the literal text to prepend to every input text
+// before tokenization -- "" for a container with no "prompts" table
+// (g_prompts.empty()), which is BYTE-IDENTICAL to this runtime's behaviour
+// before this task for MiniLM/bge-small/bge-base/bge-large: no prefix
+// concept, no banner line, nothing prepended.
+//
+// A model that DOES have a prompts table always prints which prefix it is
+// about to apply, on stderr, whether the user named one explicitly or the
+// container's own prompt_default was used -- a silently-applied default is
+// exactly how the wrong prefix ships (docs/04-model/README.md:24, and
+// tasks/0070 shipped once already without this). An unknown --prefix name
+// lists the container's real options rather than guessing.
+std::string resolve_prefix(int argc, char **argv) {
+  std::string name;
+  bool from_cli = false;
+  for (int i = 1; i < argc - 1; ++i)
+    if (std::string(argv[i]) == "--prefix") { name = argv[i + 1]; from_cli = true; }
+
+  if (g_prompts.empty()) {
+    // REFUSE rather than ignore. This model has no task-prefix concept, so a
+    // --prefix the caller asked for cannot be applied -- and silently
+    // proceeding would hand back vectors the caller believes are prefixed.
+    // That is the same shape as the status lines this project has had to fix
+    // repeatedly: reporting the intention rather than the value. A script
+    // sweeping one --prefix across the whole catalogue SHOULD break here,
+    // because its BERT results would otherwise differ from what it intended.
+    if (from_cli)
+      throw std::runtime_error(
+          "--prefix '" + name + "' was given, but this model has no task "
+          "prefixes -- its container carries no 'prompts' table, so nothing "
+          "would be prepended. Refusing rather than returning vectors that "
+          "are not what was asked for.");
+    return std::string();
+  }
+
+  if (name.empty()) name = g_prompt_default;
+
+  const auto it = g_prompts.find(name);
+  if (it == g_prompts.end()) {
+    std::vector<std::string> names;
+    names.reserve(g_prompts.size());
+    for (const auto &kv : g_prompts) names.push_back(kv.first);
+    std::sort(names.begin(), names.end());
+    std::string list;
+    for (size_t i = 0; i < names.size(); ++i)
+      list += (i ? ", " : "") + names[i];
+    throw std::runtime_error(
+        "--prefix '" + name + "' is not one of this model's task prefixes: "
+        "[" + list + "]");
+  }
+
+  std::fprintf(stderr, "  prefix     '%s' -> \"%s\"%s\n", name.c_str(),
+              it->second.c_str(),
+              from_cli ? "" : " (container default -- no --prefix given)");
+  return it->second;
 }
 
 std::vector<float> read_f32(const std::string &path, size_t count) {
@@ -626,6 +837,21 @@ struct Encoder {
   // MB of allocate-and-touch per encode at batch 128, and ~280 MB at
   // bge-large's width. resize() after the first call is a no-op.
   std::vector<float> qkvbuf, ctx, proj, up, down, scores;
+  // arch=2 only: swiglu_cpu()'s output, [rows][g_ffn] -- a separate buffer
+  // from `up` because an in-place version of this compaction is NOT safe
+  // under threading (see swiglu_cpu's own comment). Empty/unused for every
+  // arch=0 container.
+  std::vector<float> gated;
+
+  // arch=2 RoPE tables, [g_seq, g_head_dim] each, built ONCE per Encoder (not
+  // per layer, not per call) the first time apply_rope_qkv() runs. Every
+  // layer shares the same table -- unlike Gemma, nomic has a single rope_theta
+  // for the whole model, not a per-layer local/global split (gemma_kernels.hpp
+  // trap 2b). Using npue::gemma_rope_tables() here even though nothing about
+  // it is Gemma-specific: it is plain NeoX RoPE table construction, and
+  // duplicating it for a second arch would be the actual mistake.
+  std::vector<float> rope_cos, rope_sin;
+  bool rope_ready = false;
 
   // Device-resident weights, one slot per layer per design, plus the bias
   // pointers straight into the mapped file. Filled by stage_all().
@@ -977,6 +1203,91 @@ struct Encoder {
     t_hostgelu += now_s() - t0;
   }
 
+  // arch=2 gated FFN activation: [rows][2*inter] -> [rows][inter].
+  //   out[r][j] = lo[r][j] * silu(hi[r][j])
+  // lo = cols [0, inter) (fc11, the untouched up-path), hi = cols
+  // [inter, 2*inter) (fc12, the SiLU gate) -- pinned by the container's
+  // swiglu_halves == "fc11_up|fc12_gate", asserted once in set_model_shape()
+  // rather than trusted here.
+  //
+  // silu(x) = x / (1 + exp(-x)); exp(-x) = exp2(-x*log2e), reusing
+  // exp2_avx2 instead of adding a second exponential. The argument floor
+  // mirrors softmax_cpu's -120: when x (the gate, hi[j]) is large positive,
+  // -x*log2e is large negative, and unfloored that corrupts exp2_avx2's
+  // internal int32 conversion (cvttps2dq's "indefinite integer" case)
+  // instead of cleanly underflowing toward 0 -- the same failure mode
+  // softmax's own masked (very negative) rows hit without that floor.
+  //
+  // OUT OF PLACE, into a caller-supplied buffer -- NOT the in-place scheme
+  // this function originally shipped with. The "safe in-place, compacting
+  // forward" proof this comment used to carry was WRONG, and it was wrong in
+  // exactly the way the task that wrote it demanded be checked for
+  // ("VERIFY this claim numerically... rather than trusting the algebra") --
+  // caught by that numerical check, on real hardware, tasks/0070:
+  //   Row r WRITES [r*inter, (r+1)*inter) and READS [r*2*inter,(r+1)*2*inter).
+  //   The original proof showed no row r' > r can have its READ range
+  //   clobbered by row r's WRITE -- true, but it never checked r' < r. Row
+  //   r's write range and row r' = floor(r/2)'s READ range overlap for
+  //   EVERY r >= 1 (write=[r*inter,(r+1)*inter), read=[2r'*inter,(2r'+2)*inter),
+  //   and r=2r' or r=2r'+1 both fall inside that read range by construction).
+  //   Sequentially this is harmless (r' < r is always processed first in an
+  //   ascending loop, so its read completes before r's write). Threaded, it
+  //   is not: pool->run() hands CONTIGUOUS chunks to independent threads with
+  //   no ordering between them, so whenever r and floor(r/2) land in
+  //   different chunks (e.g. r'=63 in one thread's chunk, r=127 in another's,
+  //   with no happens-before edge), row 127's write can race row 63's read.
+  //   Measured effect: rows immediately after such a boundary came back
+  //   catastrophically wrong (rel err up to 1.23, i.e. wrong sign / wrong
+  //   magnitude, not bf16 noise) while every other row matched the oracle to
+  //   ~1e-3 -- found via reference/encoder_nomic.py's own L0.fc11/fc12/gated
+  //   taps, which isolated the corruption to exactly this function on a
+  //   4-sentence batch after `--embed` (the golden gate never caught it
+  //   because it tiles ONE 4-sentence batch 32x, so every "different" row is
+  //   actually identical content and a wrong-row read is indistinguishable
+  //   from a right-row read).
+  void swiglu_cpu(const std::vector<float> &x, std::vector<float> &out) {
+    double t0 = now_s();
+    const int64_t inter = g_ffn;
+    const int64_t n_rows = rows;
+    pool->run([&](int w, int nw) {
+      const int64_t chunk = (n_rows + nw - 1) / nw;
+      const int64_t lo_r = std::min<int64_t>(n_rows, chunk * w);
+      const int64_t hi_r = std::min<int64_t>(n_rows, lo_r + chunk);
+      for (int64_t r = lo_r; r < hi_r; ++r) {
+        const float *lo = x.data() + r * 2 * inter;
+        const float *hi = lo + inter;
+        float *dst = out.data() + r * inter;
+        int64_t j = 0;
+#if defined(__AVX2__)
+        const __m256 log2e = _mm256_set1_ps(1.4426950408889634f);
+        const __m256 argfloor = _mm256_set1_ps(-120.0f);
+        const __m256 one = _mm256_set1_ps(1.0f);
+        for (; j + 8 <= inter; j += 8) {
+          __m256 xv = _mm256_loadu_ps(hi + j);
+          __m256 a = _mm256_max_ps(
+              _mm256_mul_ps(_mm256_sub_ps(_mm256_setzero_ps(), xv), log2e),
+              argfloor);
+          __m256 e = exp2_avx2(a);
+          __m256 s = _mm256_div_ps(xv, _mm256_add_ps(one, e));
+          __m256 loV = _mm256_loadu_ps(lo + j);
+          _mm256_storeu_ps(dst + j, _mm256_mul_ps(loV, s));
+        }
+#endif
+        for (; j < inter; ++j) {
+          const float xv = hi[j];
+          float a = -xv * 1.4426950408889634f;
+          if (a < -120.0f) a = -120.0f;
+          const float e = std::exp2(a);
+          const float s = xv / (1.0f + e);
+          dst[j] = lo[j] * s;
+        }
+      }
+    });
+    // Reuses gelu_cpu's bucket -- it is the same "FFN activation, on the
+    // host, in place of an NPU dispatch" cost this timer already names.
+    t_hostgelu += now_s() - t0;
+  }
+
   void layer_norm(std::vector<float> &x, size_t slot) {
     if (host_ln) { layer_norm_cpu(x, slot - 1); return; }
     double t0 = now_s();
@@ -1214,6 +1525,76 @@ struct Encoder {
     }
   }
 
+  // arch=2: rotate Q and K IN PLACE inside the fused qkv buffer -- Q at
+  // column offset 0, K at `hidden`, V at `2*hidden` -- rather than repacking
+  // into [B,H,S,D] the way gemma_encode.cpp does. Repacking would be a
+  // ~200 MB shuffle per layer at production batch; rotating the 64 floats of
+  // each head in place needs no extra buffer at all.
+  //
+  // For each (b, s) row and each head h, at `row_base + q_off + h*head_dim`
+  // (`half = head_dim/2`):
+  //   for d in [0, half):
+  //     x1 = v[d]; x2 = v[d + half]
+  //     v[d]        = x1*cos[s][d] - x2*sin[s][d]
+  //     v[d + half] = x2*cos[s][d] + x1*sin[s][d]
+  // Both halves read cos[s][d]/sin[s][d] for the SAME d -- that is what
+  // NeoX's concat(freqs, freqs) means (gemma_kernels.hpp's own
+  // gemma_rope_tables() already duplicates the table this way), so only the
+  // first `half` columns of the table are ever read here. Applied to Q
+  // (offset 0) and K (offset g_hidden). NEVER V.
+  void apply_rope_qkv(std::vector<float> &qkv) {
+    if (!rope_ready) {
+      // Built ONCE per Encoder: g_seq/g_head_dim/g_rope_theta are fixed for
+      // the whole design (set_design_seq() runs once, before any Encoder
+      // exists), so every layer of every call shares this table.
+      rope_cos.resize(static_cast<size_t>(g_seq * g_head_dim));
+      rope_sin.resize(static_cast<size_t>(g_seq * g_head_dim));
+      npue::gemma_rope_tables(g_seq, g_head_dim, g_rope_theta,
+                              rope_cos.data(), rope_sin.data());
+      rope_ready = true;
+    }
+    const int64_t half = g_head_dim / 2;
+    const int64_t row_stride = 3 * g_hidden;
+    const int64_t n_rows = batch * g_seq;
+    float *__restrict p = qkv.data();
+    const float *__restrict cos_p = rope_cos.data();
+    const float *__restrict sin_p = rope_sin.data();
+
+    auto rotate_pair = [half](float *v, const float *cs, const float *sn) {
+      int64_t d = 0;
+#if defined(__AVX2__)
+      for (; d + 8 <= half; d += 8) {
+        __m256 x1 = _mm256_loadu_ps(v + d);
+        __m256 x2 = _mm256_loadu_ps(v + d + half);
+        __m256 c = _mm256_loadu_ps(cs + d);
+        __m256 s = _mm256_loadu_ps(sn + d);
+        __m256 o1 = _mm256_sub_ps(_mm256_mul_ps(x1, c), _mm256_mul_ps(x2, s));
+        __m256 o2 = _mm256_add_ps(_mm256_mul_ps(x2, c), _mm256_mul_ps(x1, s));
+        _mm256_storeu_ps(v + d, o1);
+        _mm256_storeu_ps(v + d + half, o2);
+      }
+#endif
+      for (; d < half; ++d) {
+        const float x1 = v[d], x2 = v[d + half];
+        v[d] = x1 * cs[d] - x2 * sn[d];
+        v[d + half] = x2 * cs[d] + x1 * sn[d];
+      }
+    };
+
+    pool->run([&](int w, int nw) {
+      for (int64_t row = w; row < n_rows; row += nw) {
+        const int64_t s = row % g_seq;    // [b][s] row order -> s = row % seq
+        const float *cs = cos_p + s * g_head_dim;
+        const float *sn = sin_p + s * g_head_dim;
+        float *row_base = p + row * row_stride;
+        for (int64_t h = 0; h < g_heads; ++h) {
+          rotate_pair(row_base + h * g_head_dim, cs, sn);              // Q
+          rotate_pair(row_base + g_hidden + h * g_head_dim, cs, sn);   // K
+        }
+      }
+    });
+  }
+
   std::vector<float> run(const std::vector<float> &emb_in) {
     std::vector<float> x = emb_in;
     layer_norm(x, s_ln[0]);
@@ -1221,7 +1602,8 @@ struct Encoder {
     qkvbuf.resize(rows * 3 * g_hidden);
     ctx.resize(rows * g_hidden);
     proj.resize(rows * g_hidden);
-    up.resize(rows * g_ffn);
+    up.resize(rows * (g_gated_ffn ? 2 : 1) * g_ffn);
+    if (g_gated_ffn) gated.resize(rows * g_ffn);
     down.resize(rows * g_hidden);
     scores.resize(batch * g_heads * g_seq * g_seq);
 
@@ -1230,6 +1612,11 @@ struct Encoder {
       std::memcpy(residual.data(), x.data(), x.size() * sizeof(float));
 
       gemm(qkv, is_qkv, x, s_qkv[L], b_qkv[L], qkvbuf, 3 * g_hidden);
+      // arch=2: rotate Q and K in place, strictly after the GEMM (RoPE is a
+      // per-position rotation of the projected q/k, not of the input) and
+      // strictly before qk() reads them. No-op (false) for every arch=0
+      // container.
+      if (g_rope) apply_rope_qkv(qkvbuf);
 
       double ta = now_s();
       // QK^T per head, on the host: [64,32]x[32,64] does not tile (head_dim 32
@@ -1261,14 +1648,24 @@ struct Encoder {
       layer_norm(x, s_ln[1 + 2 * L]);
 
       std::memcpy(residual.data(), x.data(), x.size() * sizeof(float));
-      gemm(ffn_up, is_fu, x, s_fu[L], b_fu[L], up, g_ffn);
+      gemm(ffn_up, is_fu, x, s_fu[L], b_fu[L], up,
+           g_gated_ffn ? 2 * g_ffn : g_ffn);
 
-      if (host_gelu)
-        gelu_cpu(up);
-      else
-        eltwise(gelu, up.data(), up.size());
-
-      gemm(ffn_down, is_fd, up, s_fd[L], b_fd[L], down, g_hidden);
+      // arch=2: SwiGLU (fc11 * silu(fc12), fused as one [hidden, 2*inter]
+      // ffn_up) in place of plain GELU over a [hidden, inter] ffn_up --
+      // writes into the separate `gated` buffer (see swiglu_cpu's own
+      // comment for why NOT in place). Every arch=0 container has
+      // g_gated_ffn == false and takes the untouched branch below.
+      if (g_gated_ffn) {
+        swiglu_cpu(up, gated);
+        gemm(ffn_down, is_fd, gated, s_fd[L], b_fd[L], down, g_hidden);
+      } else {
+        if (host_gelu)
+          gelu_cpu(up);
+        else
+          eltwise(gelu, up.data(), up.size());
+        gemm(ffn_down, is_fd, up, s_fd[L], b_fd[L], down, g_hidden);
+      }
       add_into(x, down);
       layer_norm(x, s_ln[2 + 2 * L]);
     }
@@ -1355,27 +1752,54 @@ std::string default_root(const char *argv0) {
   return "..";
 }
 
-// Does this design set serve a model of this width? qkv, attn_out and ffn_up
-// all have K = hidden, so `hidden` must appear as a K in design.json. Checked
-// rather than assumed because a design built for another width has the same
-// filenames and loads fine -- it would simply compute the wrong thing.
-bool design_fits(const std::string &design_dir, int64_t hidden) {
+// Does this design set serve THIS model? Every op's (K, N) must match what the
+// model's geometry implies -- not merely `hidden` appearing as some "K".
+//
+// The old predicate asked only the latter, and its own comment named precisely
+// the danger it was failing to catch: "a design built for another width has the
+// same filenames and loads fine -- it would simply compute the wrong thing."
+// That was sound only because every model shipped so far has ffn == 4*hidden,
+// which makes `hidden` determine all four shapes. It stops being sound the
+// moment two models share a K set and differ in an N.
+//
+// nomic-embed-text-v1.5 is the first: its K set {768, 3072} is IDENTICAL to
+// bge-base's, while its gated ffn_up is N=6144 against bge-base's N=3072. The
+// old check accepts bge-base's design for nomic, and the runtime then
+// dispatches a stream built for HALF the output width -- no error, no warning,
+// the gate half silently lost. tasks/0069, thread T31.
+//
+// Matched against the `streams` array, which every design.json has carried
+// since 0032, so this works unchanged on design sets exported long before the
+// geometry keys existed -- no re-export needed to close the hole.
+bool design_fits(const std::string &design_dir, int64_t hidden,
+                 int64_t intermediate, bool gated_ffn) {
+  if (hidden <= 0 || intermediate <= 0) return false;
   std::ifstream f(design_dir + "/gemm_rtp/design.json");
   if (!f) return false;
   std::stringstream b;
   b << f.rdbuf();
-  const std::string s = b.str();
-  const std::string want = "\"K\": " + std::to_string(hidden);
-  const std::string want2 = "\"K\":" + std::to_string(hidden);
-  auto exact = [&](const std::string &pat) {
-    for (size_t p = s.find(pat); p != std::string::npos;
-         p = s.find(pat, p + 1)) {
-      const size_t e = p + pat.size();
-      if (e >= s.size() || !isdigit((unsigned char)s[e])) return true;
-    }
-    return false;
+  const std::vector<StreamEntry> streams = parse_streams(b.str());
+  if (streams.empty()) return false;
+
+  struct Want { const char *op; int64_t K, N; };
+  const Want want[] = {
+      {"qkv",      hidden,       3 * hidden},
+      {"attn_out", hidden,       hidden},
+      {"ffn_up",   hidden,       gated_ffn ? 2 * intermediate : intermediate},
+      {"ffn_down", intermediate, hidden},
   };
-  return exact(want) || exact(want2);
+  // Every op must be PRESENT, and EVERY occurrence of it must match -- a design
+  // carrying one right batch tier and one wrong one does not fit.
+  for (const Want &w : want) {
+    bool seen = false;
+    for (const StreamEntry &s : streams) {
+      if (s.op != w.op) continue;
+      seen = true;
+      if (s.K != w.K || s.N != w.N) return false;
+    }
+    if (!seen) return false;
+  }
+  return true;
 }
 
 // The design set for a model, when --artifacts is not given.
@@ -1385,11 +1809,12 @@ bool design_fits(const std::string &design_dir, int64_t hidden) {
 // source tree (<root>/runtime/artifacts*/gemm_rtp). Each candidate is tested
 // by whether its design actually serves this width, so the answer is a fact
 // about the design rather than a naming convention.
-std::string pick_artifacts(const std::string &root, int64_t hidden) {
+std::string pick_artifacts(const std::string &root, int64_t hidden,
+                           int64_t intermediate, bool gated_ffn) {
   namespace fs = std::filesystem;
-  if (hidden <= 0) return "";
+  if (hidden <= 0 || intermediate <= 0) return "";
   std::error_code ec;
-  if (design_fits(root, hidden)) return root;
+  if (design_fits(root, hidden, intermediate, gated_ffn)) return root;
 
   // Sorted, so the choice is reproducible rather than filesystem-order
   // dependent -- and never by mtime, which a JIT cache hit does not restamp
@@ -1401,7 +1826,7 @@ std::string pick_artifacts(const std::string &root, int64_t hidden) {
       if (it->is_directory(ec)) cands.push_back(it->path().string());
   std::sort(cands.begin(), cands.end());
   for (const auto &c : cands)
-    if (design_fits(c, hidden)) return c;
+    if (design_fits(c, hidden, intermediate, gated_ffn)) return c;
   return "";
 }
 
@@ -1426,6 +1851,19 @@ void print_usage() {
       "    --pipeline N      concurrent encode lanes (default 2)\n"
       "    --artifacts DIR   override the design set\n"
       "    --root DIR        override where models/ and the design live\n"
+      "    --token VALUE     HuggingFace access token for a GATED model\n"
+      "                      (falls back to the HF_TOKEN env var if omitted)\n"
+      "    --prefix NAME     task prefix to prepend to every input text --\n"
+      "                      only meaningful for a model whose container\n"
+      "                      carries a prompt table (e.g. nomic-embed-text,\n"
+      "                      which needs 'search_document' or\n"
+      "                      'search_query'; an unknown NAME refuses and\n"
+      "                      lists the real options). Silently a no-op for\n"
+      "                      a model with no such table (all four BERT\n"
+      "                      models). Defaults to the container's own\n"
+      "                      choice -- always printed on stderr either way.\n"
+      "                      For `serve`, one prefix applies to every\n"
+      "                      request for the life of the process.\n"
       "\n"
       "  The flag form is unchanged and still works:\n"
       "    npuembeddings <root> --model NAME --artifacts DIR --serve [port]\n"
@@ -1450,9 +1888,23 @@ void print_catalog(const std::string &root) {
     // "installed" is not the same as "runnable": the design set for this
     // width has to be present too, and a release ships one width. Saying so
     // here beats a confusing failure at dispatch.
-    const bool have_design = !pick_artifacts(root, e.hidden).empty();
-    const char *state = !m ? "available"
-                           : (have_design ? "ready" : "no design");
+    const bool have_design =
+        !pick_artifacts(root, e.hidden, e.ffn, e.gated_ffn).empty();
+    // arch=1 (Gemma) has no NPU kernel at all and runs entirely on the host
+    // (tasks/0064), so neither "ready" nor "no design" describes it: the first
+    // is a lie about the array, the second implies it will not run. It used to
+    // report "ready" whenever ANY hidden-768 design happened to be present,
+    // which was the first of those lies.
+    // "no encoder" is NOT the same as "no design": nomic-embed-text-v1.5 has a
+    // matching design set and a packed container, and would still return
+    // embeddings for the wrong model if run through the BERT encoder. Saying
+    // "ready" because the design matches would be exactly the fail-open
+    // set_model_shape() now refuses at dispatch. tasks/0069.
+    const char *state = !m                              ? "available"
+                        : e.gemma                       ? "cpu"
+                        : !encoder_implemented(m->arch) ? "no encoder"
+                        : have_design                   ? "ready"
+                                                        : "no design";
     char size[32];
     if (m)
       std::snprintf(size, sizeof size, "%.0f MB", m->mb);
@@ -1479,7 +1931,12 @@ void print_catalog(const std::string &root) {
       continue;
     }
     std::printf("  %-20s %-9s %6lld %6lld %8s %6.0f MB  %s\n", m.name.c_str(),
-                pick_artifacts(root, m.hidden).empty() ? "no design" : "ready",
+                // Same three-way split as the catalogue table above: a
+                // host-only arch is neither "ready" nor "no design".
+                !encoder_implemented(m.arch)              ? "no encoder"
+                : m.arch == "gemma3_mqa_rope_geglu"       ? "cpu"
+                : pick_artifacts(root, m.hidden, m.ffn, m.gated_ffn).empty()
+                    ? "no design" : "ready",
                 (long long)m.layers, (long long)m.hidden, m.pooling.c_str(),
                 m.mb, m.repo.c_str());
   }
@@ -1487,8 +1944,125 @@ void print_catalog(const std::string &root) {
   std::printf(
       "\n  ready      installed, with a matching NPU design -- `serve` runs it\n"
       "  available  not downloaded yet -- `serve` fetches and verifies it\n"
-      "  no design  installed, but no design set for this width is present\n"
+      "  cpu        installed; this architecture has no NPU kernel yet and\n"
+      "             runs entirely on the host\n"
+      "  no design  installed, but no design set for this geometry is present\n"
+      "  no encoder installed, and a design may match, but this build has no\n"
+      "             forward pass for the architecture -- it will refuse rather\n"
+      "             than return embeddings for the wrong model\n"
       "\n  npuembeddings serve <model>\n\n");
+}
+
+// arch=1 (EmbeddingGemma family): every op runs on the HOST -- see
+// runtime/include/gemma_encode.hpp for why (no NPU kernel/design exists yet
+// for this arch, matching this project's own "eltwise lives on the host"
+// precedent, just extended to the whole model since nothing here has a
+// design either). This is a SEPARATE code path from Encoder::run() above,
+// not a branch inside it: Encoder holds seven npu::Design& members that a
+// Gemma container has no NPU design to construct in the first place, so
+// forcing this into that constructor would mean fabricating throwaway
+// design objects rather than genuinely sharing code. The BERT path is
+// untouched -- this function is reachable only when the .npue's own
+// config["arch"] says so (see the dispatch in main() below), never guessed
+// from a model name.
+int run_gemma_mode(npue::File &model, const std::string &model_path,
+                   int argc, char **argv) {
+  npue::GemmaEncoder enc(model);
+  std::printf("NpuEmbeddings C++ runtime -- EmbeddingGemma (arch=1)\n");
+  std::printf("  model      %s\n", model_path.c_str());
+  std::printf("  hidden     %lld, tokenizer %zu tokens\n",
+              (long long)enc.hidden(), enc.tok.vocab_size());
+  std::printf("  NOTE: every op runs on the CPU -- no NPU dispatch, no design "
+             "set installed or needed for this arch yet. Any seq/s number "
+             "below is host-only and is NOT an NPU performance claim "
+             "(CLAUDE.md rule 1).\n");
+
+  // FAIL LOUDLY rather than silently ignoring --serve: this arch has no
+  // /v1/embeddings HTTP endpoint wired up yet (EmbedService/the http.hpp
+  // listener live entirely below the BERT-only section of main(), which
+  // this early-dispatch never reaches). Without this check, `npuembeddings
+  // serve embeddinggemma-300m` would run the one-line demo encode below,
+  // print nothing wrong, and exit 0 -- succeeding at nothing while claiming
+  // to, exactly the fail-open shape CLAUDE.md's history warns about
+  // repeatedly. --embed (batch, from a file) is the only mode this arch
+  // supports today.
+  for (int i = 1; i < argc; ++i)
+    if (std::string(argv[i]) == "--serve")
+      throw std::runtime_error(
+          "arch=1 (EmbeddingGemma) has no --serve / HTTP endpoint yet -- "
+          "only --embed <in.txt> [out.f32] is implemented. See "
+          "tasks/0064-m12-embeddinggemma-arch1-integration/TASK.md's Next "
+          "section.");
+
+  int max_len = 64;
+  std::string prefix = "document";
+  for (int i = 1; i < argc - 1; ++i) {
+    if (std::string(argv[i]) == "--max-len") max_len = std::atoi(argv[i + 1]);
+    if (std::string(argv[i]) == "--prefix") prefix = argv[i + 1];
+  }
+
+  for (int i = 1; i < argc - 1; ++i)
+      if (std::string(argv[i]) == "--embed") {
+    const std::string in_path = argv[i + 1];
+    std::string out_path;
+    if (i + 2 < argc && argv[i + 2][0] != '-') out_path = argv[i + 2];
+
+    std::vector<std::string> texts;
+    {
+      std::ifstream in(in_path, std::ios::binary);
+      if (!in) throw std::runtime_error("cannot open " + in_path);
+      std::string line;
+      while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        texts.push_back(line);
+      }
+    }
+    std::printf("  input      %zu texts, max_len=%d, prefix='%s'\n",
+                texts.size(), max_len, prefix.c_str());
+
+    const double t0 = now_s();
+    std::vector<float> out(texts.size() * static_cast<size_t>(enc.hidden()));
+    for (size_t t = 0; t < texts.size(); ++t) {
+      const auto v = enc.encode_one(texts[t], max_len, prefix);
+      std::memcpy(out.data() + t * v.size(), v.data(),
+                  v.size() * sizeof(float));
+    }
+    const double el = now_s() - t0;
+    std::printf("  embedded   %zu texts in %.2f s  ->  %.2f seq/s (host-only)\n",
+                texts.size(), el, texts.size() / std::max(el, 1e-9));
+
+    if (!out_path.empty()) {
+      std::ofstream of(out_path, std::ios::binary);
+      of.write(reinterpret_cast<const char *>(out.data()),
+               static_cast<std::streamsize>(out.size() * sizeof(float)));
+      if (!of) throw std::runtime_error("failed writing " + out_path);
+      std::printf("  wrote      %s  [%zu, %lld] fp32\n", out_path.c_str(),
+                  texts.size(), (long long)enc.hidden());
+    } else {
+      for (size_t b = 0; b < std::min<size_t>(texts.size(), 4); ++b) {
+        std::printf("  [%zu]", b);
+        for (int64_t c = 0; c < 6; ++c)
+          std::printf(" %+.4f", out[b * static_cast<size_t>(enc.hidden()) + c]);
+        std::printf(" ...\n");
+      }
+    }
+    return 0;
+  }
+
+  // No --embed: encode one built-in demo sentence so a bare invocation shows
+  // the model actually runs. This is NOT a golden-gated validation (no
+  // per-model fixture is wired up for this arch yet) -- the real gate is
+  // tools/verify_gemma_cpu_encode.py against reference/encoder_gemma.py, run
+  // out-of-process; see tasks/0064-m12-embeddinggemma-arch1-integration/
+  // TASK.md for that result.
+  const auto v = enc.encode_one(
+      "The AMD Ryzen AI NPU accelerates transformer encoder models.",
+      max_len, prefix);
+  std::printf("  demo encode, first 6 of %lld: ", (long long)enc.hidden());
+  for (int64_t c = 0; c < 6; ++c) std::printf(" %+.4f", v[c]);
+  std::printf(" ...\n");
+  std::printf("  use --embed <in.txt> [out.f32] to embed real text.\n");
+  return 0;
 }
 
 }  // namespace
@@ -1516,10 +2090,16 @@ int main(int argc, char **argv) try {
                          sub == "help" || sub == "--help" || sub == "-h");
     if (is_sub) {
       // --root is read before anything else, since it decides where we look
-      // for the model we are about to talk about.
+      // for the model we are about to talk about. --token is read here too
+      // (rather than only where ensure_model() needs it) so its scan sits
+      // next to --root's, matching this function's existing per-flag-loop
+      // style; never printed anywhere below.
       std::string sub_root;
-      for (int i = 2; i < argc - 1; ++i)
+      std::string cli_token;
+      for (int i = 2; i < argc - 1; ++i) {
         if (std::string(argv[i]) == "--root") sub_root = argv[i + 1];
+        if (std::string(argv[i]) == "--token") cli_token = argv[i + 1];
+      }
       if (sub_root.empty()) sub_root = default_root(argv[0]);
 
       if (sub == "help" || sub == "--help" || sub == "-h") {
@@ -1549,41 +2129,102 @@ int main(int argc, char **argv) try {
           sub_root, want, [](const std::string &s) {
             std::printf("%s\n", s.c_str());
             std::fflush(stdout);
-          });
+          }, cli_token);
+
+      // arch=1 (EmbeddingGemma) has no NPU design at all -- the artifacts
+      // lookup below is a BERT-only question that must never be asked for
+      // it (tasks/0066: it threw "no NPU design for hidden 768" on a fresh
+      // root with no BERT designs installed, even though the fetch+pack
+      // above had already succeeded). Route straight to run_gemma_mode with
+      // the subcommand's ORIGINAL argv (in.txt/out.f32 at argv[3]/argv[4] --
+      // the flag-form rewrite a few lines down hasn't happened yet), the
+      // same dispatch the early `--prepare-model`-adjacent check uses for a
+      // container reached directly by path.
+      {
+        bool is_gemma = false;
+        try {
+          npue::File gpeek(container);
+          is_gemma = (gpeek.config_string("arch") == "gemma3_mqa_rope_geglu");
+        } catch (const std::exception &) {
+          // Not a container config_string() can read the way we expect --
+          // fall through to the BERT path below, which will fail with its
+          // own, more specific error if this really is not a BERT
+          // container. Deliberately NOT wrapping run_gemma_mode() itself in
+          // this catch: once we know it IS Gemma, any error it throws is a
+          // real, informative error that must propagate, not get silently
+          // swallowed into the wrong (BERT) failure path.
+        }
+        if (is_gemma) {
+          if (sub == "serve")
+            throw std::runtime_error(
+                "arch=1 (EmbeddingGemma) has no --serve / HTTP endpoint yet "
+                "-- only `embed <model> <in.txt> [out.f32]` is implemented.");
+          std::vector<std::string> gstore = {argv[0], "--embed", argv[3]};
+          if (argc > 4 && argv[4][0] != '-') gstore.push_back(argv[4]);
+          std::vector<char *> gptrs;
+          for (auto &s : gstore) gptrs.push_back(s.data());
+          npue::File gmodel(container);
+          return run_gemma_mode(gmodel, container, (int)gptrs.size(),
+                                gptrs.data());
+        }
+      }
 
       // Which design serves this model. --artifacts still wins if given.
       std::string art;
       for (int i = 2; i < argc - 1; ++i)
         if (std::string(argv[i]) == "--artifacts") art = argv[i + 1];
       if (art.empty()) {
-        int64_t hidden = 0;
+        int64_t hidden = 0, inter = 0;
+        bool gated = false;
         try {
           npue::File f(container);
           hidden = f.config_int("hidden");
+          inter = f.config_int("intermediate");
+          gated = config_flag(f, "gated_ffn", false);
         } catch (const std::exception &) {
         }
-        art = pick_artifacts(sub_root, hidden);
+        art = pick_artifacts(sub_root, hidden, inter, gated);
         if (art.empty())
           throw std::runtime_error(
               "no NPU design for hidden " + std::to_string(hidden) +
-              " under " + sub_root +
-              " -- this release carries designs for the widths it was built "
-              "with; export one with tools/export_gemm_rtp.py --hidden " +
-              std::to_string(hidden));
+              " intermediate " + std::to_string(inter) +
+              (gated ? " (gated FFN)" : "") + " under " + sub_root +
+              " -- this release carries designs for the geometries it was "
+              "built with; export one with tools/export_gemm_rtp.py --hidden " +
+              std::to_string(hidden) + " --intermediate " +
+              std::to_string(inter) + (gated ? " --gated-ffn" : ""));
       }
 
       // Defaults that suit a server rather than a measurement. The flag form
       // keeps its conservative --threads 1, because a benchmark that quietly
       // used 24 cores would misreport the per-core claim.
-      std::string threads = "24", pipeline = "2";
+      // pipeline 4, not 2: measured 2026-08-20 (tasks/0052) -- bge-base
+      // 175.4 -> 209.1 seq/s and MiniLM 892.7 -> 962.6 going 2 -> 4 lanes,
+      // saturating at 5. The cost is group latency (a 4-lane group is ~2.4 s
+      // of work on bge-base), which a throughput server accepts.
+      std::string threads = "24", pipeline = "4";
       for (int i = 2; i < argc - 1; ++i) {
         if (std::string(argv[i]) == "--threads") threads = argv[i + 1];
         if (std::string(argv[i]) == "--pipeline") pipeline = argv[i + 1];
       }
+      // --prefix (tasks/0071): passed through unchanged when given. Absent
+      // by default -- resolve_prefix() falls back to the container's own
+      // prompt_default, or is a no-op for a model with no prompts table.
+      std::string prefix;
+      bool have_prefix = false;
+      for (int i = 2; i < argc - 1; ++i)
+        if (std::string(argv[i]) == "--prefix") {
+          prefix = argv[i + 1];
+          have_prefix = true;
+        }
 
       store = {argv[0], sub_root,       "--model",    want,
                "--artifacts", art,      "--threads",  threads,
                "--pipeline",  pipeline};
+      if (have_prefix) {
+        store.push_back("--prefix");
+        store.push_back(prefix);
+      }
       if (sub == "serve") {
         std::string port = "8080", bind = "127.0.0.1";
         for (int i = 2; i < argc - 1; ++i) {
@@ -1626,6 +2267,51 @@ int main(int argc, char **argv) try {
     std::string out =
         dir + "/" + std::filesystem::path(dir).filename().string() + ".npue";
     if (i + 2 < argc && argv[i + 2][0] != '-') out = argv[i + 2];
+
+    // arch=1 (EmbeddingGemma / Gemma3 family): a completely different tensor
+    // shape and container, routed to its own packer rather than threaded
+    // through the BERT logic below -- tools/pack_npue.py's main() makes the
+    // same decision the same way. Detected from the checkpoint's OWN
+    // config.json (model_type), never assumed from --prepare-model's
+    // directory name. tasks/0065-m12-embeddinggemma-cpp-packer.
+    {
+      std::ifstream cfg_probe(dir + "/config.json");
+      if (cfg_probe) {
+        std::stringstream cs;
+        cs << cfg_probe.rdbuf();
+        const std::string model_type =
+            npue::http::json_field_string(cs.str(), "model_type", "");
+        if (model_type == "gemma3_text") {
+          std::string source_repo;
+          for (int k = 1; k < argc - 1; ++k)
+            if (std::string(argv[k]) == "--source-repo")
+              source_repo = argv[k + 1];
+          if (source_repo.empty()) {
+            std::ifstream cf(dir + "/CHECKPOINT.json");
+            if (!cf)
+              throw std::runtime_error(
+                  "no CHECKPOINT.json under " + dir + " and no --source-repo "
+                  "given -- refusing to guess which repository these "
+                  "weights came from");
+            std::stringstream ckcs;
+            ckcs << cf.rdbuf();
+            source_repo =
+                npue::http::json_field_string(ckcs.str(), "repo_id", "");
+            if (source_repo.empty())
+              throw std::runtime_error(dir + "/CHECKPOINT.json has no "
+                                       "repo_id");
+          }
+          std::printf("  source     %s\n", source_repo.c_str());
+          std::printf("NpuEmbeddings -- preparing %s\n", out.c_str());
+          npue::prepare_model_gemma(dir, out, source_repo,
+                                    [](const std::string &s) {
+                                      std::printf("%s\n", s.c_str());
+                                    });
+          std::printf("  wrote %s\n", out.c_str());
+          return 0;
+        }
+      }
+    }
 
     // Tile size is a PROPERTY OF THE MODEL, not a constant. The design
     // asserts N % (tile_n * n_cols) == 0, and bge-large's N in
@@ -1696,6 +2382,36 @@ int main(int argc, char **argv) try {
     }
     std::printf("  source     %s\n", source_repo.c_str());
 
+    // arch=2 (nomic-embed-text-v1.5): RoPE + gated SwiGLU rather than
+    // BERT's absolute-position + GELU -- routed to its own packer, mirroring
+    // tools/pack_npue.py's `model_type == "nomic_bert"` branch in main().
+    // Detected the same way the gemma3_text branch above is (config.json's
+    // OWN model_type), never assumed from --prepare-model's directory name.
+    // Placed HERE, after tile_k/tile_n/layout/pooling/source_repo are
+    // already resolved above, because nomic shares every one of those
+    // resolutions with the BERT path unchanged -- only the packer differs.
+    // tasks/0071.
+    {
+      std::ifstream cfg_probe2(dir + "/config.json");
+      if (cfg_probe2) {
+        std::stringstream cs2;
+        cs2 << cfg_probe2.rdbuf();
+        const std::string model_type =
+            npue::http::json_field_string(cs2.str(), "model_type", "");
+        if (model_type == "nomic_bert") {
+          std::printf("NpuEmbeddings -- preparing %s (arch=nomic_bert_rope_swiglu)\n",
+                      out.c_str());
+          npue::prepare_model_nomic(dir, pooling, source_repo, out, layout,
+                                    layout_hash, tile_k, tile_n, 256,
+                                    [](const std::string &s) {
+                                      std::printf("%s\n", s.c_str());
+                                    });
+          std::printf("  wrote %s\n", out.c_str());
+          return 0;
+        }
+      }
+    }
+
     std::printf("NpuEmbeddings -- preparing %s\n", out.c_str());
     npue::prepare_model(dir + "/model.safetensors", dir + "/vocab.txt",
                         dir + "/config.json", pooling, source_repo, out,
@@ -1706,6 +2422,38 @@ int main(int argc, char **argv) try {
                         });
     std::printf("  wrote %s\n", out.c_str());
     return 0;
+  }
+
+  // arch=1 (EmbeddingGemma family): resolved and dispatched EARLY, before
+  // the --artifacts resolution below -- which THROWS if no BERT NPU design
+  // is found under `root`, a precondition this arch does not share (it has
+  // no NPU design at all, by design -- see run_gemma_mode's own comment).
+  // Without this early exit, a Gemma-only invocation on a machine with no
+  // BERT design installed would fail before ever reaching the model it
+  // actually asked for. Exceptions here are swallowed and fall through to
+  // the ORIGINAL resolution path below unchanged, which reports the real
+  // error (missing model, ambiguous --model, ...) exactly as if this block
+  // did not exist -- the model is opened via mmap twice in the Gemma case
+  // (once here, once implicitly inside run_gemma_mode via the File this
+  // block constructs), which is cheap and never touches the BERT path.
+  {
+    std::string peek_path;
+    try {
+      peek_path = resolve_model_path(root, argc, argv);
+    } catch (const std::exception &) {
+    }
+    if (!peek_path.empty()) {
+      bool is_gemma = false;
+      try {
+        npue::File peek(peek_path);
+        is_gemma = (peek.config_string("arch") == "gemma3_mqa_rope_geglu");
+      } catch (const std::exception &) {
+      }
+      if (is_gemma) {
+        npue::File gmodel(peek_path);
+        return run_gemma_mode(gmodel, peek_path, argc, argv);
+      }
+    }
   }
 
   int bench = 0;
@@ -2562,6 +3310,11 @@ int main(int argc, char **argv) try {
     Encoder *lead;
     std::vector<Encoder *> all;
     int64_t fallback_batch;
+    // "" for every model with no prompts table (tasks/0071) -- see
+    // resolve_prefix(). Prepended to the RAW text before tokenization, the
+    // same place tools/verify_embed_e2e.py's workaround did it, so the two
+    // agree on what "applying a prefix" means.
+    std::string prefix_text;
 
     // Greedy against the tier ladder: 64 texts with tiers {4,16,32,128}
     // becomes 32+32, both exact, instead of one half-padded 128.
@@ -2592,7 +3345,10 @@ int main(int argc, char **argv) try {
       std::vector<float> cam(static_cast<size_t>(bt) * g_seq, 0.f);
       int64_t ntok = 0;
       for (int64_t b = 0; b < take; ++b) {
-        const auto en = tok.encode(texts[base + b], static_cast<int>(g_seq));
+        const auto en = prefix_text.empty()
+            ? tok.encode(texts[base + b], static_cast<int>(g_seq))
+            : tok.encode(prefix_text + texts[base + b],
+                        static_cast<int>(g_seq));
         ntok += en.n_tokens;
         for (int64_t s = 0; s < g_seq; ++s) {
           const int32_t id = en.input_ids[s];
@@ -2644,11 +3400,15 @@ int main(int argc, char **argv) try {
   };
 
   auto make_service = [&]() {
+    // Resolved once, here -- the actual "startup" of the thing that embeds
+    // text (--embed and --serve each call make_service() exactly once), not
+    // on every invocation of this binary (tasks/0071).
+    const std::string prefix_text = resolve_prefix(argc, argv);
     EmbedService svc{load_tokenizer(model, model_path),
                      model.raw("embeddings.word").as<float>(),
                      model.raw("embeddings.position").as<float>(),
                      model.raw("embeddings.token_type").as<float>(),
-                     &enc, {}, batch};
+                     &enc, {}, batch, prefix_text};
     svc.all.push_back(&enc);
     for (auto &lp : lanes) svc.all.push_back(lp.get());
     return svc;
@@ -2724,6 +3484,18 @@ int main(int argc, char **argv) try {
                 bind_addr.c_str(), port, model_id.c_str(), (long long)g_seq);
     std::printf("  POST {\"input\": \"text\" | [\"a\",\"b\"], "
                 "\"encoding_format\": \"float\"|\"base64\"}\n\n");
+    // The OpenAI /v1/embeddings shape has no per-request prefix field, and
+    // adding a non-standard one would break that compatibility contract --
+    // so for a model with a prompts table, the prefix chosen at `serve`
+    // startup (resolve_prefix(), printed above on stderr) applies to EVERY
+    // request uniformly for the life of this process. Simpler than a
+    // per-request field, and visible programmatically via GET /health's
+    // "prefix" key below, not just in the startup log (tasks/0071).
+    if (!svc.prefix_text.empty())
+      std::printf("  NOTE: every request is embedded with the task prefix "
+                  "'%s' prepended (see the 'prefix' line above) -- there is "
+                  "no per-request override; restart with a different "
+                  "--prefix to change it.\n\n", svc.prefix_text.c_str());
 
     const size_t kMaxTexts = 2048;
     npue::http::Server server(static_cast<uint16_t>(port), bind_addr);
@@ -2737,7 +3509,14 @@ int main(int argc, char **argv) try {
 
       if (req.method == "GET" && (req.path == "/health" || req.path == "/")) {
         body = "{\"status\":\"ok\",\"model\":\"" + model_id +
-               "\",\"backend\":\"amd-xdna2-npu\"}";
+               "\",\"backend\":\"amd-xdna2-npu\"";
+        // Server-wide, not per-request (see the NOTE printed at startup):
+        // present only for a model that has a prefix concept at all, so a
+        // BERT model's /health response is unchanged.
+        if (!svc.prefix_text.empty())
+          body += ",\"prefix\":\"" +
+                 npue::http::json_escape(svc.prefix_text) + "\"";
+        body += "}";
         return;
       }
       if (req.method == "GET" && req.path == "/v1/models") {
