@@ -1,0 +1,5 @@
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\run_mteb.py --model bge-large-en-v1.5.int8n64 --artifacts artifacts_int8c_large_n64 --threads 24 --pipeline 4 "--cpu-model bge-large-en-v1.5" --out C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0085-m13-release-sweep\mteb-bge-large-en-v1.5.int8n64.json
+usage: run_mteb.py [-h] [--tasks TASKS] [--sides SIDES] [--model MODEL]
+                   [--cpu-model CPU_MODEL] [--artifacts ARTIFACTS]
+                   [--threads THREADS] [--pipeline PIPELINE] [--out OUT]
+run_mteb.py: error: unrecognized arguments: --cpu-model bge-large-en-v1.5

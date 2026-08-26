@@ -1,0 +1,20 @@
+packing bge-large-en-v1.5 -> bge-large-en-v1.5.int8.npue
+  tile (64, 32), mac (s=8, t=8), 1/sqrt(64) = 0.125 folded into Q
+  tokenizer.vocab   226.1 KB (30522 lines)
+  calibrated on 128 texts, 96 GEMM call sites, alpha=0.5
+
+  int8: 96 operands, weight rel_fro mean 1.171e-02, worst 2.238e-02 (layer.21.ffn_down)
+
+  operand               [K,N]  k-blocks  n-blocks   tiles  max BD dim
+  qkv            [1024, 3072]        16        96    1536          96
+  attn_out       [1024, 1024]        16        32     512          32
+  ffn_up         [1024, 4096]        16       128    2048         128
+  ffn_down       [4096, 1024]        64        32    2048          64
+  (row-major DDR would need K=4096 as a BD dimension for ffn_down -- over 1023, which is why it could not be expressed before)
+
+  tensors    : 486  (96 pre-tiled GEMM operands)
+  json       : 90477 B at 64
+  data       : 431.16 MB at 94208
+  file       : 431.25 MB
+  source     : 45e1954914e29bd7...
+  layout_hash: f0a4a8965049d757...  (i8 operands)

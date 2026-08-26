@@ -91,9 +91,31 @@ if(MSVC)
   # which reads as a missing dependency and is really a missing flag.
   # /O2 explicitly: a Release-less single-config generator would otherwise build
   # this unoptimised, and the host-side bf16 conversion is 13.8 M elements per
-  # encode. /arch:AVX2 enables the vectorised conversion in main.cpp -- Strix
-  # Point is Zen 5, so AVX2 is a floor, not an assumption.
-  target_compile_options(npuembed PRIVATE /W3 /EHsc /Zc:__cplusplus /O2 /arch:AVX2)
+  # encode.
+  #
+  # /arch: THE HOST ISA IS A MEASUREMENT, NOT A DEFAULT (tasks/0084).
+  # This said AVX2 for a year on the grounds that "Strix Point is Zen 5, so
+  # AVX2 is a floor". True, and a long way below the ceiling: CPUID on this
+  # machine reports AVX512F/DQ/BW/VL, AVX512_VNNI and AVX512_BF16 all present.
+  # The project has been meticulous about the NPU's ISA and never once queried
+  # the host's -- while the host is ~60% of an encode.
+  #
+  # Most of the host eltwise is hand-written _mm256_* intrinsics, which stay
+  # 256-bit whatever this flag says. What it moves is the AUTO-vectorised code,
+  # and that is where attention lives: av() has no intrinsics at all and qk()
+  # has two, and together they are 19.1% of a bge-large int8 encode running at
+  # 88% of AVX2 FMA peak (tasks/0084) -- i.e. tuned out, and wideable only by
+  # the compiler.
+  # DEFAULT AVX2, AND THAT IS A MEASUREMENT (tasks/0086). Both hot attention
+  # kernels now have hand-written 512-bit paths behind `__AVX512F__`, and
+  # neither pays: A.V is unchanged and QK^T is SLOWER (98.7 -> 106.6 ms). They
+  # are kept because they are the evidence, and compiled out because they lose.
+  # tasks/0084 left this at AVX512 while its own text said the default stays
+  # AVX2 -- a default disagreeing with its own justification.
+  set(NPUE_HOST_ARCH "AVX2" CACHE STRING
+      "MSVC /arch: level for the host kernels (AVX2 or AVX512)")
+  target_compile_options(npuembed PRIVATE /W3 /EHsc /Zc:__cplusplus /O2
+                         /arch:${NPUE_HOST_ARCH})
   # XRT headers use std::min/max; the Windows macros break them. XRT's own
   # headers also define NOMINMAX, so let theirs win rather than warning.
   target_compile_definitions(npuembed PRIVATE WIN32_LEAN_AND_MEAN)

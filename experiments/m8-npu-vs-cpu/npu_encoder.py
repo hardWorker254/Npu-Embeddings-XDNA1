@@ -48,7 +48,7 @@ class NpuEncoder:
 
     def __init__(self, artifacts="artifacts_b128il", threads=24, pipeline=2,
                  exe=None, model_dir=None, verbose=False,
-                 model="all-MiniLM-L6-v2", prompt=None):
+                 model="all-MiniLM-L6-v2", prompt=None, cpu_model=None):
         from transformers import AutoTokenizer
         from safetensors.numpy import load_file
 
@@ -63,7 +63,67 @@ class NpuEncoder:
         self.pipeline = pipeline
         self.verbose = verbose
 
-        md = Path(model_dir or REPO / "models" / model)
+        # The CHECKPOINT directory, which an int8 container no longer shares a
+        # name with (tasks/0078): the container is `<model>.int8`, the
+        # tokenizer and embedding tables still live in `<model>`.
+        md = Path(model_dir or REPO / "models" / (cpu_model or model))
+        # Set before the arch split below: the arch=1 branch returns early, and
+        # `mteb_model_meta` reads this on every encode.
+        self._meta = None
+
+        # ARCH FIRST, because arch=1 shares almost none of the setup below.
+        # This used to read the three embedding tables before it knew what it
+        # was looking at, so a Gemma container died on a KeyError for
+        # `embeddings.word_embeddings.weight` -- a tensor that architecture
+        # does not have and never had.
+        sys.path.insert(0, str(REPO / "tools"))
+        from npue import Reader                                    # noqa: E402
+        with Reader(str(REPO / "models" / f"{model}.npue")) as npue:
+            cfg = npue.config
+        self.arch = cfg.get("arch", "bert_abs_gelu_postln")
+        self.gemma = self.arch == "gemma3_mqa_rope_geglu"
+
+        prompts = cfg.get("prompts") or {}
+        name = prompt if prompt is not None else cfg.get("prompt_default")
+        if prompts and name is not None and name not in prompts:
+            raise SystemExit(f"--prompt {name!r} is not in this container's "
+                             f"prompts table {sorted(prompts)}")
+        self.prompt_name = name if prompts else None
+        self.prefix = prompts.get(name, "") if prompts else ""
+        # Kept so encode() can switch prompts per task, the way mteb does for
+        # a SentenceTransformer. Empty for every BERT-family container.
+        self.prompts_table = prompts
+        self._prefix_checked = False
+
+        if self.gemma:
+            # ARCH=1 TAKES A DIFFERENT BRIDGE, and a simpler one (0075).
+            #
+            # The arch=0/2 bridge tokenizes in Python and hands the runtime an
+            # embedding SUM plus masks, because those architectures' input is
+            # word+position+type and the C++ WordPiece tokenizer was written
+            # later. arch=1 has neither shape: no position table, input is
+            # `embed_tokens[id] * sqrt(hidden)`, and its tokenizer is a C++
+            # SentencePiece BPE that Python has no equivalent of here. It does
+            # have `--embed`: text in, vectors out, one process. That is
+            # strictly less machinery, so use it.
+            #
+            # Consequence worth stating: on this path the TOKENIZER IS ALSO
+            # UNDER TEST, unlike the other two archs where both sides share
+            # HuggingFace's. tasks/0061 measured it at 1,925/1,925 sequences
+            # byte-identical to HuggingFace, so this is a documented equality
+            # rather than an assumption -- but it is a wider comparison, and
+            # the MTEB delta covers the tokenizer too.
+            self.tok = None
+            self.word = self.typ = self.pos = None
+            self.rope = True
+            self.hidden = int(cfg["hidden"])
+            if self.verbose or self.prefix:
+                print(f"[npu_encoder] {model}: arch={self.arch} "
+                      f"bridge=--embed (C++ tokenizer), "
+                      f"prefix={self.prompt_name!r} {self.prefix!r}",
+                      file=sys.stderr)
+            return
+
         self.tok = AutoTokenizer.from_pretrained(str(md))
 
         # The three embedding tables, straight from the checkpoint. The .npue
@@ -86,31 +146,16 @@ class NpuEncoder:
         self.hidden = int(self.word.shape[1])
         self.typ = pick("embeddings.token_type_embeddings.weight")
 
-        # ARCH, PREFIX AND POSITIONS, read from the container rather than
-        # assumed (tasks/0071). Two things here were literals that a second
-        # architecture falsifies:
-        #
-        #  * `pos` -- arch=2 (nomic) has NO absolute position table at all; it
-        #    uses RoPE, which the runtime applies inside Encoder::run(). Calling
-        #    pick() for it would raise KeyError, so this bridge simply could not
-        #    load nomic before.
-        #  * the task PREFIX -- nomic requires one ("search_document: "), and
-        #    MTEB is the only gate that can catch a wrong or missing one, since
-        #    both sides of a 1-cos comparison would use the same wrong prefix
-        #    and agree perfectly.
-        sys.path.insert(0, str(REPO / "tools"))
-        from npue import Reader                                    # noqa: E402
-        with Reader(str(REPO / "models" / f"{model}.npue")) as npue:
-            cfg = npue.config
-        self.arch = cfg.get("arch", "bert_abs_gelu_postln")
+        # POSITIONS, read from the container rather than assumed (tasks/0071).
+        # `pos` was a literal that a second architecture falsifies: arch=2
+        # (nomic) has NO absolute position table at all; it uses RoPE, which
+        # the runtime applies inside Encoder::run(). Calling pick() for it
+        # would raise KeyError, so this bridge simply could not load nomic
+        # before. (The task PREFIX is read above, before the arch split, for
+        # the same reason: MTEB is the only gate that can catch a wrong or
+        # missing one, since both sides of a 1-cos comparison would use the
+        # same wrong prefix and agree perfectly.)
         self.rope = cfg.get("position_embedding_type") == "rope"
-        prompts = cfg.get("prompts") or {}
-        name = prompt if prompt is not None else cfg.get("prompt_default")
-        if prompts and name is not None and name not in prompts:
-            raise SystemExit(f"--prompt {name!r} is not in this container's "
-                             f"prompts table {sorted(prompts)}")
-        self.prompt_name = name if prompts else None
-        self.prefix = prompts.get(name, "") if prompts else ""
 
         self.pos = None if self.rope else pick(
             "embeddings.position_embeddings.weight")
@@ -120,10 +165,87 @@ class NpuEncoder:
                   f"prefix={self.prefix!r}"
                   f"{'' if self.prefix else ' (none)'}", file=sys.stderr)
 
+    def _encode_gemma(self, sentences):
+        """arch=1: text in, vectors out, through `npuembed --embed`.
+
+        The prefix is applied INSIDE the exe (`--prefix <name>`), not prepended
+        here, because this architecture's tokenizer lives in C++ and the prefix
+        has to be inside the truncation to seq 64 exactly as it is on the
+        sentence-transformers side. That means the two sides agree only if the
+        exe's prefix text equals the container's -- they come from the same
+        checkpoint by two different routes (gemma_tokenizer.bin vs the
+        container config), so ASSERT it rather than trust it. The exe prints
+        the prefix it applied for exactly this reason.
+        """
+        n = len(sentences)
+        with tempfile.TemporaryDirectory(prefix="npuenc_") as td:
+            d = Path(td)
+            txt, out_f = d / "in.txt", d / "out.f32"
+            # One text per line, so a newline inside a text would silently
+            # become two rows. MTEB corpora do contain them.
+            flat = [s.replace("\r", " ").replace("\n", " ") for s in sentences]
+            txt.write_text("\n".join(flat) + "\n", encoding="utf-8",
+                           newline="\n")
+            cmd = [str(self.exe), "..", "--model", self.model,
+                   "--artifacts", self.artifacts,
+                   "--threads", str(self.threads),
+                   *(["--prefix", self.prompt_name]
+                     if self.prompt_name else []),
+                   "--embed", str(txt), str(out_f)]
+            if self.pipeline > 1:
+                cmd += ["--pipeline", str(self.pipeline)]
+            r = subprocess.run(cmd, cwd=str(REPO / "runtime"),
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                raise RuntimeError(f"npuembed failed ({r.returncode}):\n"
+                                   f"{r.stdout}\n{r.stderr}")
+            self._check_prefix_echo(r.stdout)
+            out = np.frombuffer(out_f.read_bytes(), dtype=np.float32)
+        if out.size != n * self.hidden:
+            raise RuntimeError(f"expected {n * self.hidden} floats, "
+                               f"got {out.size}")
+        return out.reshape(n, self.hidden).copy()
+
+    def _check_prefix_echo(self, stdout):
+        """The exe prints `prefix='<name>' -> <text>`; require the text to be
+        the container's. Checked ONCE, then remembered -- it cannot change
+        between calls, and re-parsing every batch would cost more than it
+        proves."""
+        if getattr(self, "_prefix_checked", False):
+            return
+        for line in stdout.splitlines():
+            i = line.find("' -> ")
+            if "prefix='" not in line or i < 0:
+                continue
+            # NOT .strip(). Every one of this model's prefixes ends in a
+            # space -- "title: none | text: " -- and that space is what
+            # separates the prefix from the text. Stripping it made this check
+            # fail against a runtime that was correct, which is the right
+            # failure for a check to have but the wrong reason.
+            # splitlines() has already removed the line ending.
+            got = line[i + 5:]
+            want = self.prefix if self.prefix else "(none)"
+            if got != want:
+                raise RuntimeError(
+                    f"prefix mismatch: the runtime applied {got!r} while the "
+                    f"container's prompts table says {want!r} for "
+                    f"{self.prompt_name!r}. Both come from the same checkpoint "
+                    f"by different routes, so this is drift, not a choice -- "
+                    f"and the MTEB delta would read it as a datapath result.")
+            self._prefix_checked = True
+            return
+        raise RuntimeError("the runtime did not report which prefix it "
+                           "applied -- refusing to measure, because an "
+                           "unreported prefix cannot be checked against the "
+                           "CPU side (an absent data source is not a negative "
+                           "reading)")
+
     def _encode_texts(self, sentences):
         sentences = [s if isinstance(s, str) else str(s) for s in sentences]
         if not sentences:
             return np.zeros((0, self.hidden), dtype=np.float32)
+        if self.gemma:
+            return self._encode_gemma(sentences)
         n = len(sentences)
         # The prefix is plain text before [CLS] (verified tasks/0068 sec 4), so
         # it is prepended BEFORE tokenization and eats into the SEQ budget --
@@ -228,9 +350,51 @@ class NpuEncoder:
                 texts.extend(list(batch))
         return texts
 
+    # THE PROMPT MTEB ASKS FOR, not the container's default (0075).
+    #
+    # mteb hands a SentenceTransformer a `prompt=` kwarg chosen from the
+    # model's OWN prompts table by task type -- for STS12 it passes
+    # "task: sentence similarity | query: ". It cannot do that for this class,
+    # so without this method the CPU side encoded
+    #     "title: none | text: task: sentence similarity | query: <text>"
+    # and the NPU side encoded
+    #     "title: none | text: <text>"
+    # -- two different strings, and the measured M8 delta was the PROMPT
+    # rather than the datapath. It read as -1.88 points mean / -3.49 worst,
+    # with the tell hiding in plain sight: STS and clustering (both cosine
+    # geometry) lost 2.4-3.5 points while Banking77 (a linear classifier,
+    # which absorbs a constant shift) was +0.07. Meanwhile the two sides'
+    # embeddings agreed to 1-cos 8.4e-06 on the very same STS12 texts.
+    #
+    # The lookup order mirrors mteb's own for SentenceTransformers: the task
+    # NAME first, then task type + prompt type, then task type, then prompt
+    # type. Anything unmatched falls back to the container's default, which is
+    # what every BERT-family model gets (their containers carry no prompts
+    # table at all, so this whole method is a no-op for them).
+    def _prompt_name_for(self, task_metadata, prompt_type):
+        if not self.prompts_table:
+            return self.prompt_name
+        name = getattr(task_metadata, "name", None)
+        ttype = getattr(task_metadata, "type", None)
+        ptype = getattr(prompt_type, "value", prompt_type)
+        for cand in (name,
+                     f"{ttype}-{ptype}" if ttype and ptype else None,
+                     ttype, ptype):
+            if cand and cand in self.prompts_table:
+                return cand
+        return self.prompt_name
+
     def encode(self, inputs, *, task_metadata=None, hf_split=None,
                hf_subset=None, prompt_type=None, batch_size=None, **kwargs):
         texts = self._texts_from(inputs)
+        want = self._prompt_name_for(task_metadata, prompt_type)
+        if want != self.prompt_name:
+            self.prompt_name = want
+            self.prefix = self.prompts_table.get(want, "")
+            self._prefix_checked = False       # re-verify the echo for the new one
+            if self.verbose:
+                print(f"[npu_encoder] prompt -> {want!r} {self.prefix!r}",
+                      file=sys.stderr)
         return self._encode_texts(texts)
 
     def similarity(self, a, b):

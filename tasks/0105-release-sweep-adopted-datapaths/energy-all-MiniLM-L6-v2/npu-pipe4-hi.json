@@ -1,0 +1,23 @@
+﻿{
+    "kind":  "hardware measurement",
+    "label":  "npu-pipe4-15",
+    "command":  ".\\build\\npuembed.exe .. --model all-MiniLM-L6-v2 --artifacts artifacts_minilm_bfp16 --threads 24 --pipeline 4 --bench 15",
+    "meter":  "RAPL_Package0_PKG",
+    "energy_unit_j":  3.6E-09,
+    "repeats":  1,
+    "idle_before_w":  5.5693435100206035,
+    "idle_after_w":  5.8574644328715841,
+    "idle_w":  5.7134039714460938,
+    "idle_drift":  0.050428942936806845,
+    "runs":  [
+                 {
+                     "joules":  260.22353999759997,
+                     "seconds":  8.908,
+                     "watts":  29.212341715042658
+                 }
+             ],
+    "mean_watts":  29.212341715042658,
+    "mean_joules":  260.22353999759997,
+    "best_joules":  260.22353999759997,
+    "marginal_j":  209.32853741995817
+}

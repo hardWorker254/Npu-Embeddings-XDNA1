@@ -1,0 +1,91 @@
+T21 raw command output -- 2026-08-23
+Env: cd C:\dev\mlir-aie ; . .\iron_env.ps1 ; cd C:\Users\vegar\Documents\GitHub\NpuEmbeddings
+
+=== shipped MiniLM int8+c-bf16, tile n=48, cols=8 (artifacts_int8c_mini) ===
+run1:
+    stream          M      K      N      GMAC        MB    us/disp   GMAC/ms      GB/s
+    qkv          8192    384   1152      3.62      66.1       1170      3.10      56.5
+    attn_out     8192    384    384      1.21      22.0        614      1.97      35.9
+    ffn_up       8192    384   1536      4.83      88.1       1534      3.15      57.4
+    ffn_down     8192   1536    384      4.83      69.2       1184      4.08      58.5
+
+run2:
+    qkv          8192    384   1152      3.62      66.1       1193      3.04      55.4
+    attn_out     8192    384    384      1.21      22.0        630      1.92      34.9
+    ffn_up       8192    384   1536      4.83      88.1       1544      3.13      57.0
+    ffn_down     8192   1536    384      4.83      69.2       1197      4.04      57.8
+
+ffn_up mean (2 runs): 1539 us
+
+=== per-shape legal max n at cols=8 (n%16==0, n*8 | N, kernel entry point m*n in {1024,2048,3072,4096}) ===
+qkv       N=1152: n | 144, mult of 16 -> {16,48}          max legal n = 48 (== shipped)
+attn_out  N=384:  n | 48,  mult of 16 -> {16,48}          max legal n = 48 (== shipped)
+ffn_down  N=384:  same as attn_out                        max legal n = 48 (== shipped)
+ffn_up    N=1536: n | 192, mult of 16 -> {16,32,48,64}     max legal n = 64 (SHIPPED IS SUBOPTIMAL)
+
+n=128 is L1-legal (57,344 B < 64,512 B budget) and N-legal for all four MiniLM shapes at
+n*cols=1024, BUT there is no c-bf16 narrowing kernel entry point for m*n=8192 (gemm_pretiled.py
+_ok = (1024,2048,3072,4096) for the i32 accumulator) -- would need a new
+narrow_8192_i32_bf16 entry point, kernel work out of scope for this measurement task.
+
+=== new build: standalone single-op "solo" design, ffn_up only, n=64, cols=8 ===
+export tool: scratchpad/export_solo_shape.py (trimmed copy of tools/export_gemm_rtp.py's
+per-shape build loop, skips the 4-shape cross-identity check, writes a design.json with
+ONE stream entry so --probe-streams accepts it as "unified").
+
+  python export_solo_shape.py --out runtime\artifacts_t21_ffnup_n64 --op ffn_up \
+      --M 8192 --K 384 --N 1536 -n 64 --cols 8
+  -> ffn_up [8192, 384, 1536] n=64 cols=8 -> d087be818729bb46476be6e0 (cache dir)
+  -> wrote runtime\artifacts_t21_ffnup_n64\gemm_rtp
+
+Container: needed a MiniLM int8 container tiled at tile-n=64 to match this design's
+b_layout_hash (production containers are tiled at tile-n=48). tile_b() only requires
+N % tile_n == 0 (not N % (tile_n*cols) == 0 -- that stronger constraint is the DESIGN's,
+not the container's), and 384/1152/1536 are all divisible by 64, so packing succeeds even
+though the unified 4-stream PRODUCTION design at n=64 would not build for 3 of 4 shapes:
+
+  .\.venv-ref\Scripts\python.exe tools\pack_npue.py --model-dir models\all-MiniLM-L6-v2 \
+      --out models\all-MiniLM-L6-v2.int8n64.npue --int8 --tile-n 64
+  -> layout_hash: 1db6190b44916327...  (matches the solo design's wanted hash exactly)
+
+  .\runtime\build\npuembed.exe . --model all-MiniLM-L6-v2.int8n64 \
+      --artifacts artifacts_t21_ffnup_n64 --probe-streams
+
+run1: ffn_up  8192  384  1536  4.83  88.1  1341  3.60  65.7
+run2: ffn_up  8192  384  1536  4.83  88.1  1353  3.57  65.1
+run3: ffn_up  8192  384  1536  4.83  88.1  1359  3.55  64.8
+mean (3 runs): 1351 us
+
+=== control: solo design, ffn_up only, n=48, cols=8 (methodology check) ===
+  python export_solo_shape.py --out runtime\artifacts_t21_ffnup_n48 --op ffn_up \
+      --M 8192 --K 384 --N 1536 -n 48 --cols 8
+  .\runtime\build\npuembed.exe . --model all-MiniLM-L6-v2.int8 \
+      --artifacts artifacts_t21_ffnup_n48 --probe-streams
+  -> ffn_up  8192  384  1536  4.83  88.1  1542  3.13  57.1
+
+Solo-n48 (1542 us) vs shipped-unified-n48 (1534/1544, mean 1539 us): 0.2% apart -- the solo
+single-op export methodology reproduces the unified design's per-shape number faithfully,
+which is the control that makes the n=64 comparison trustworthy.
+
+=== verdict ===
+ffn_up-only at its own legal max (n=64): 1351 us
+ffn_up at the shipped uniform geometry (n=48): 1539 us
+ratio: 1539 / 1351 = 1.139x  (13.9% faster for ffn_up alone)
+
+Four-shape sum, shipped (all n=48): 1181(qkv mean)+622(attn_out mean)+1539(ffn_up)+1191(ffn_down mean)
+  qkv mean = (1170+1193)/2 = 1181.5
+  attn_out mean = (614+630)/2 = 622
+  ffn_down mean = (1184+1197)/2 = 1190.5
+  sum = 1181.5+622+1539+1190.5 = 4533 us
+
+Four-shape sum, per-shape-optimal (qkv/attn_out/ffn_down at n=48, ffn_up at n=64):
+  sum = 1181.5+622+1351+1190.5 = 4345 us
+
+4533 -> 4345 = 4.15% less GEMM-array time from letting ONE of the four shapes use its own
+legal geometry, entirely concentrated in ffn_up. The other three shapes are already AT their
+legal maximum for cols=8 -- there is no more to give there, only in ffn_up.
+
+Correctness: not independently re-verified for the n=64 solo design this session (no
+full-encode/golden wiring for a one-stream artifact set). Inference: the SAME kernel entry
+point (narrow_4096_i32_bf16, m*n=4096) is the one 0081 measured bit-exact for bge-large's
+n=64 design; only the tile's N-dimension host, not the arithmetic, differs here.

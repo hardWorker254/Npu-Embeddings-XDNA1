@@ -1,0 +1,20 @@
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model embeddinggemma-300m --artifacts artifacts_gemma_bfp16 --embed C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0074-m13-gemma-on-npu\corpus_520.txt --threads 24 --pipeline 4 --guard-contention --prefix document
+NpuEmbeddings C++ runtime -- EmbeddingGemma (arch=1)
+  model      C:\Users\vegar\Documents\GitHub\NpuEmbeddings\models\embeddinggemma-300m.npue
+  npu        exclusive -- 7 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+  hidden     768, tokenizer 262144 tokens
+  path       NPU -- 4 GEMMs/layer x 24 layers = 96 dispatches, ONE xclbin, one hw_context
+  designs    C:\Users\vegar\Documents\GitHub\NpuEmbeddings/runtime/artifacts_gemma_bfp16  (16 streams, 4 batch tiers)
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 7e00b57955e108fe9d8e9419f5828a0c7e650858
+  qkv        N=1536  (q[0,768) k[768,1024) v[1024,1280), 256 zero-padded cols)
+  staged     212.3 MB of tiled bf16 weights on the device
+  host       RMSNorm x97, RoPE, GeGLU, MQA attention (2.3% of MACs)
+  input      520 texts, seq=64, prefix='document' -> title: none | text: 
+  pipeline   4 concurrent lanes, one NPU mutex, 6 host threads per lane
+  embedded   520 texts in 2.91 s  ->  178.9 seq/s (wall clock, end-to-end -- NOT an NPU kernel claim, CLAUDE.md rule 1)
+  breakdown  npu 3346 ms (in 1459, dispatch 1683, out 205) | conv 726 | bias 1352 | norm 1632 | attn 2778 | rope 404 | geglu 0 | tok 10  [480 dispatches]
+  [0] -0.0153 -0.0062 -0.0007 +0.0219 +0.0116 +0.0541 ...
+  [1] -0.0467 +0.0185 +0.0152 -0.0109 +0.0116 -0.0125 ...
+  [2] +0.0105 +0.0117 +0.0540 -0.0115 -0.0331 -0.0077 ...
+  [3] -0.0811 +0.0129 +0.0153 +0.0331 -0.0478 +0.0802 ...

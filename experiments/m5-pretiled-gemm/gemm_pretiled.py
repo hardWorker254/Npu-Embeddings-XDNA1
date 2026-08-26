@@ -95,7 +95,7 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
                   emulate_bf16_mmul_with_bfp16, trace_config, trace_row, trace_col,
                   trace_egress_col=0, pretiled=True, tile_order="k,n", inner_st=True,
                   b_reuse=False, rtp=False, epilogue=None, c_bf16=False,
-                  b_l1_depth=2):
+                  b_l1_depth=2, fifo_depth=2, poison=False):
     n_aie_rows = 4
     n_aie_cores = n_aie_rows * n_aie_cols
 
@@ -109,9 +109,31 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
     # step (7.4e-3 against 1.21e-07). Only the TRANSPORT type changes here.
     dtype_c = str_to_dtype("bf16") if c_bf16 else dtype_out
     if c_bf16:
-        assert dtype_out is np.float32,             "c_bf16 narrows FROM fp32; the accumulator must be fp32"
+        # NPUE-M13 (tasks/0080): the int8 datapath narrows from int32. Same
+        # transport saving, different reason -- under bf16 the GEMM is
+        # iteration-bound (0048) and this bought +4.9%; under int8 it is
+        # traffic-bound again (0010's model, refitted at R2 0.987) and C is 61%
+        # of the traffic on three of four production shapes. int32 -> bf16
+        # needs no extra core operand, so unlike a per-column rescale on the
+        # core it does not run into trap 3b's 2-in / 2-out wall.
+        assert dtype_out in (np.float32, np.int32),             "c_bf16 narrows FROM the accumulator; fp32 or int32 only"
         assert rtp, "c_bf16 is only wired into the rtp worker (tasks/0045)"
         assert epilogue is None,             "c_bf16 and epilogue='gelu' both own the post-K step; pick one"
+
+    # T26 rounding-mode ablation (tasks/0099, research/OPEN-THREADS.md T26).
+    # `poison` is a DIFFERENT thing from `c_bf16`: it adds a THROWAWAY
+    # zero()+narrow() call after the real fp32 output is already released --
+    # C's transport dtype stays fp32 the whole time. Its only purpose is the
+    # side effect 0098 found by reading the kernel source: narrow_f32_bf16.o
+    # contains an unrestored `mov crrnd, #0xc`, and CLAUDE.md trap 2b already
+    # warns `set_rounding` is core-wide state that leaks between kernels
+    # sharing a core. Placed AFTER out_c.release so it can only poison a
+    # LATER dispatch on this physical core, never the one computing its own
+    # real output -- the same "tied at stage 1" structure 0056/0098 predict.
+    if poison:
+        assert not c_bf16, "poison and c_bf16 both add a narrow call; pick one -- this ablation's whole point is fp32 transport throughout"
+        assert rtp, "poison reuses the rtp worker's per-core Buffer plumbing"
+        assert epilogue is None, "poison and epilogue both own the post-K step; pick one"
 
     matmul_kernel = kernels.mm(
         dim_m=m, dim_k=k, dim_n=n,
@@ -128,7 +150,13 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
     assert N % (n * n_aie_cols) == 0, "B must tile into (k, n*n_aie_cols) blocks"
     assert m % r == 0 and k % s == 0 and n % t == 0
 
-    fifo_depth = 2
+    # DEPTH IS THE PREFETCH DISTANCE. depth=2 is double buffering: the DMA
+    # fills one object while the core computes on the other, which is how an
+    # AIE design overlaps movement with compute at all. It is also the leading
+    # `2 *` in trap 3's L1 budget -- the overlap is not free, it is paid for in
+    # L1 bytes, and a deeper prefetch buys distance at the cost of tile size.
+    # Parameterised in tasks/0083 to measure which of those two the datapath
+    # actually wants.
     n_tiles_per_core = (M // m) * (N // n) // n_aie_cores
     n_shim_mem_A = n_aie_rows if n_aie_cols > n_aie_rows else n_aie_cols
     n_A_tiles_per_shim = n_aie_rows // n_aie_cols if n_aie_cols < 4 else 1
@@ -142,10 +170,12 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
     A_l1_ty = np.ndarray[(m, k), np.dtype[dtype_in]]
     B_l1_ty = np.ndarray[(k, n), np.dtype[dtype_in]]
     C_l1_ty = np.ndarray[(m, n), np.dtype[dtype_c]]
-    # The core-local fp32 accumulator the matmul writes into when c_bf16.
+    # The core-local accumulator the matmul writes into when c_bf16 -- fp32 on
+    # the bf16 datapath, int32 on the int8 one, both 4 bytes.
     # SINGLE buffered on purpose: it is filled and drained inside one
     # iteration, so it costs m*n*4 while the C fifo it feeds saves
-    # 2*m*n*2 -- exactly cancelling. 53,248 B at (64,64,48) either way.
+    # 2*m*n*2 -- exactly cancelling. 53,248 B at (64,64,48) either way, and
+    # 38,912 B for the int8 operands -- unchanged by narrowing in both cases.
     C_acc_ty = np.ndarray[(m * n,), np.dtype[dtype_out]]
 
     A_l3l2_fifos = [None] * n_shim_mem_A
@@ -308,7 +338,8 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
     # and C still leaves as fp32; this one converts fp32 -> bf16 into the fifo
     # object the DMA drains, which is what halves the transport.
     narrow_kernel = None
-    if c_bf16:
+    poison_narrow_kernel = None
+    if c_bf16 or poison:
         from aie.iron.kernel import ExternalFunction as _EF
         from aie.iron.kernels._common import _detect_arch as _da, _include_dirs as _id
         from aie.utils import config as _cfg2
@@ -316,16 +347,52 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
         _inc2 = _id()
         _inc2.append(str(_P2(_cfg2.cxx_header_path()) / "aie_kernels"))
         _inc2.append(str(_P2(_cfg2.cxx_header_path()) / "aie_kernels" / _da()))
-        assert m * n in (1024, 2048, 3072), (
-            f"no narrow entry point for tile m*n={m*n}; "
-            "narrow_f32_bf16.cc has 1024/2048/3072")
-        narrow_kernel = _EF(
-            f"narrow_{m * n}_f32_bf16",
-            source_file=str(_P2(__file__).resolve().parent.parent
-                            / "m5-eltwise" / "kernels" / "narrow_f32_bf16.cc"),
-            arg_types=[C_acc_ty, C_l1_ty],
-            include_dirs=_inc2,
-        )
+        # The accumulator dtype picks the source file and the entry point. Both
+        # kernels expose the same three tile sizes and the same signature, so
+        # nothing downstream of here knows which one it got.
+        _acc_tag = "i32" if dtype_out is np.int32 else "f32"
+        # 4096 (tile_n=64) exists only on the int8 side -- at bf16's 2-byte
+        # operands that tile needs 65,536 B of a 63 KB L1 (tasks/0081).
+        _ok = (1024, 2048, 3072, 4096) if _acc_tag == "i32" else (1024, 2048, 3072)
+        _narrow_src = str(_P2(__file__).resolve().parent.parent / "m5-eltwise"
+                          / "kernels" / f"narrow_{_acc_tag}_bf16.cc")
+        # narrow_f32_bf16.cc ALWAYS writes bf16 -- use a dedicated bf16 type
+        # for the second arg rather than the outer C_l1_ty, which is only
+        # bf16 when c_bf16 is set. Under `poison`, c_bf16 is False (fp32
+        # transport throughout, by construction) so C_l1_ty is fp32 here and
+        # would be the wrong type for this kernel's real, compiled signature.
+        _narrow_out_ty = np.ndarray[(m, n), np.dtype[str_to_dtype("bf16")]]
+        if c_bf16:
+            assert m * n in _ok, (
+                f"no narrow entry point for tile m*n={m*n}; "
+                f"narrow_{_acc_tag}_bf16.cc has {'/'.join(str(v) for v in _ok)}")
+            narrow_kernel = _EF(
+                f"narrow_{m * n}_{_acc_tag}_bf16",
+                source_file=_narrow_src,
+                arg_types=[C_acc_ty, _narrow_out_ty],
+                include_dirs=_inc2,
+            )
+        if poison:
+            # T26 ablation (tasks/0099): the THROWAWAY narrow call's own
+            # scratch buffers are sized independently of the real tile (m,n)
+            # -- picking the SMALLEST legal entry point (1024, not m*n=3072
+            # at MiniLM's tile) keeps this well inside the 63 KB L1 budget
+            # (trap 3) on top of the real fp32-C path's own 53,248 B, which
+            # a 3072-sized scratch pair (18,432 B) does not: measured, this
+            # exact overflow ('aie.tile' op allocated buffers exceeded
+            # available memory) on the first build attempt at m*n=3072.
+            # Nothing about the VALUES narrowed here matters -- only that the
+            # instruction executes -- so an unrelated, smaller entry point is
+            # exactly as good a throwaway as the real tile size would be.
+            _POISON_TILE = 1024
+            _poison_acc_ty = np.ndarray[(_POISON_TILE,), np.dtype[dtype_out]]
+            _poison_out_ty = np.ndarray[(_POISON_TILE,), np.dtype[str_to_dtype("bf16")]]
+            poison_narrow_kernel = _EF(
+                f"narrow_{_POISON_TILE}_{_acc_tag}_bf16",
+                source_file=_narrow_src,
+                arg_types=[_poison_acc_ty, _poison_out_ty],
+                include_dirs=_inc2,
+            )
 
     epilogue_kernel = None
     if epilogue == "gelu":
@@ -415,6 +482,64 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
                     # accumulators live and spills nothing (17 instructions,
                     # 2-line ZOL -- see tasks/0045). If this ever hangs or
                     # corrupts, the stack is the first suspect (traps 5b/0031).
+                    stack_size=0xD00,
+                    trace=1 if (row == trace_row and col == trace_col) else None,
+                )
+        elif poison:
+            # T26 ablation (tasks/0099). Structurally the PLAIN fp32-C worker
+            # below -- the real output goes straight into out_c, C's transport
+            # dtype never changes -- plus one extra, discarded call per
+            # dispatch: zero a scratch accumulator and narrow() it into a
+            # scratch tile that is connected to NO ObjectFifo (never DMA'd,
+            # never read by anything). The narrow() call is a real external-
+            # function call across a compilation boundary (narrow_f32_bf16.o
+            # is compiled independently, see 0098's objdump evidence), so the
+            # compiler cannot see its output is unused and elide it -- it
+            # still executes on hardware, still writes `crrnd`. Placed AFTER
+            # out_c.release(1): it cannot affect the tile this same dispatch
+            # just computed, only a LATER one on this core.
+            poison_acc_bufs = [[Buffer(_poison_acc_ty, name=f"poison_acc_{r}_{c}")
+                                 for c in range(n_aie_cols)]
+                                for r in range(n_aie_rows)]
+            poison_out_bufs = [[Buffer(_poison_out_ty, name=f"poison_out_{r}_{c}")
+                                 for c in range(n_aie_cols)]
+                                for r in range(n_aie_rows)]
+
+            def core_fn(in_a, in_b, out_c, poison_acc, poison_out, zero,
+                        matmul, poison_narrow, my_rtp, barrier):
+                barrier.wait_for_value(1)
+                n_out_tiles = my_rtp[0]
+                n_k_blocks = my_rtp[1]
+                for _ in range_(n_out_tiles):
+                    elem_out = out_c.acquire(1)
+                    zero(elem_out)
+                    for _ in range_(n_k_blocks):
+                        elem_in_a = in_a.acquire(1)
+                        elem_in_b = in_b.acquire(1)
+                        matmul(elem_in_a, elem_in_b, elem_out)
+                        in_a.release(1)
+                        in_b.release(1)
+                    out_c.release(1)
+                    # No zero() here on purpose: narrow_f32_bf16 is called for
+                    # its SIDE EFFECT on crrnd, not its output -- poison_out is
+                    # never read by anything, so narrowing whatever bits are
+                    # already in poison_acc is exactly as good a throwaway as
+                    # narrowing zeros, and skipping the zero() call keeps this
+                    # scratch pair off the zero_kernel's expected tile shape.
+                    poison_narrow(poison_acc, poison_out)
+                barrier.release_with_value(1)
+
+            def _mk(row, col):
+                return Worker(
+                    core_fn,
+                    [A_l2l1_fifos[row].cons(), B_l2l1_fifos[col].cons(),
+                     C_l1l2_fifos[row][col].prod(),
+                     poison_acc_bufs[row][col], poison_out_bufs[row][col],
+                     zero_kernel, matmul_kernel, poison_narrow_kernel,
+                     rtp_bufs[row][col], rtp_barriers[row][col]],
+                    # Same stack budget as the plain fp32-C worker (0xD00) --
+                    # the poison scratch is a plain Buffer, not an extra live
+                    # accumulator in the matmul's own register pressure.
                     stack_size=0xD00,
                     trace=1 if (row == trace_row and col == trace_col) else None,
                 )
@@ -653,6 +778,8 @@ def pretiled_array(
     epilogue: CompileTime[str | None] = None,
     c_bf16: CompileTime[bool] = False,
     b_l1_depth: CompileTime[int] = 2,
+    fifo_depth: CompileTime[int] = 2,
+    poison: CompileTime[bool] = False,
 ):
     return _build_design(iron.get_current_device(), M, K, N, m, k, n, n_aie_cols,
                          dtype_in_str, dtype_out_str,
@@ -660,7 +787,8 @@ def pretiled_array(
                          trace_config, trace_row, trace_col, trace_egress_col,
                          pretiled, tile_order, inner_st, b_reuse, rtp=rtp,
                          epilogue=epilogue, c_bf16=c_bf16,
-                         b_l1_depth=b_l1_depth)
+                         b_l1_depth=b_l1_depth, fifo_depth=fifo_depth,
+                         poison=poison)
 
 
 def run_one(M, K, N, m, k, n, cols, emulate, trace_size, pretiled=True,
@@ -700,11 +828,28 @@ def run_one(M, K, N, m, k, n, cols, emulate, trace_size, pretiled=True,
     trace_json = ARTIFACTS / f"trace_{tag}.json"
     mlir_copy = ARTIFACTS / f"mlir_{tag}.mlir"
 
-    A = iron.rand((M, K), dtype=dt_in, device="npu")
-    B = iron.rand((K, N), dtype=dt_in, device="npu")
-    C = iron.zeros(M * N, dtype=dt_out, device="npu")
-    A_np = A.numpy().copy()
-    B_logical = B.numpy().copy()          # the mathematical [K,N] operand
+    # INTEGER dtypes need their own generator (tasks/0077). `iron.rand` draws
+    # floats in [0,1) and casts, which for i8 gives an ALL-ZERO operand -- the
+    # reference norm is then 0 and rel_fro comes out `nan`, i.e. the harness
+    # reports a failure that is entirely its own. Caught while probing T20.
+    if np.issubdtype(np.dtype(dt_in), np.integer):
+        _rng = np.random.default_rng(7)
+        _lim = np.iinfo(np.dtype(dt_in)).max
+        A_np = _rng.integers(-_lim, _lim + 1, size=(M, K)).astype(dt_in)
+        B_logical = _rng.integers(-_lim, _lim + 1, size=(K, N)).astype(dt_in)
+        A = iron.zeros((M, K), dtype=dt_in, device="npu")
+        B = iron.zeros((K, N), dtype=dt_in, device="npu")
+        C = iron.zeros(M * N, dtype=dt_out, device="npu")
+        # Tensor.__setitem__, never .numpy()[:] -- CLAUDE.md trap 6b.
+        A[:] = A_np
+        B[:] = B_logical
+        assert np.array_equal(A.numpy(), A_np), "A did not reach the device"
+    else:
+        A = iron.rand((M, K), dtype=dt_in, device="npu")
+        B = iron.rand((K, N), dtype=dt_in, device="npu")
+        C = iron.zeros(M * N, dtype=dt_out, device="npu")
+        A_np = A.numpy().copy()
+        B_logical = B.numpy().copy()      # the mathematical [K,N] operand
 
     if pretiled:
         # Build the pre-tiled buffer with the SAME tile_b() that packs .npue,
@@ -716,18 +861,28 @@ def run_one(M, K, N, m, k, n, cols, emulate, trace_size, pretiled=True,
             b_col_maj=False, c_col_maj=False, use_chess=False,
             emulate_bf16_mmul_with_bfp16=emulate, vectorized=True).mac_dims
         st = (s, t) if inner_st else (None, None)
-        tiled = tile_b(B_logical.view(np.uint16), k, n, *st, order=tile_order)
+        # ITEMSIZE-GENERAL (tasks/0077). `tile_b`/`untile_b` in tools/npue.py
+        # are already dtype-agnostic -- they only reshape and transpose -- but
+        # this call site viewed everything as uint16, which is a fact about
+        # bf16 rather than about the layout. The view exists at all because
+        # ml_dtypes' bfloat16 does not survive some numpy ops; an unsigned
+        # integer of the same width does, and reinterpreting is free.
+        # With i8 the old form failed as "cannot reshape array of size 73728
+        # into shape (384,384)" -- exactly half of 384x384, i.e. the array read
+        # as 2-byte elements.
+        _uview = {1: np.uint8, 2: np.uint16, 4: np.uint32}[np.dtype(dt_in).itemsize]
+        tiled = tile_b(B_logical.view(_uview), k, n, *st, order=tile_order)
         # Write through Tensor.__setitem__, not through .numpy().
         # `B.numpy()` syncs FROM the device and returns the host buffer; writing
         # into that array never syncs back, and only the first dispatch in a
         # process happens to come out right. `B[:] = x` syncs both ways.
         # See tasks/0009 -- this cost a full misdiagnosis.
-        B[:] = tiled.view(bfloat16).reshape(K, N)
+        B[:] = tiled.view(dt_in).reshape(K, N)
         # Prove the permutation is invertible on exactly these bytes before
         # trusting a hardware result that depends on it.
-        back = untile_b(B.numpy().reshape(-1).view(np.uint16), K, N, k, n, *st,
+        back = untile_b(B.numpy().reshape(-1).view(_uview), K, N, k, n, *st,
                         order=tile_order)
-        assert np.array_equal(back, B_logical.view(np.uint16)), "tile_b round-trip failed"
+        assert np.array_equal(back, B_logical.view(_uview)), "tile_b round-trip failed"
 
     tcol, egress = TRACE_ROUTING.get(cols, (None, None))
     cfg = None
@@ -751,8 +906,20 @@ def run_one(M, K, N, m, k, n, cols, emulate, trace_size, pretiled=True,
     got = C.numpy().reshape(M, N).astype(np.float64)
     ref = A_np.astype(np.float64) @ B_logical.astype(np.float64)
     rel_fro = float(np.linalg.norm(got - ref) / np.linalg.norm(ref))
-    tol = 5e-2 if emulate else 5e-3
-    ok = rel_fro <= tol
+    # An int8 x int8 -> int32 GEMM has NO rounding anywhere in the reduction,
+    # so the honest gate is EXACT equality, not a tolerance -- 2608.13756's
+    # "integer alibi" used as a test. A tolerance here would pass a kernel that
+    # is subtly wrong. Overflow is what would break the argument, so it is
+    # asserted rather than assumed.
+    if np.issubdtype(np.dtype(dt_in), np.integer):
+        assert K * int(np.iinfo(np.dtype(dt_in)).max) ** 2 < 2 ** 31, \
+            "this K could overflow the int32 accumulator; the exactness gate " \
+            "below would then be testing the wrong thing"
+        ok = bool(np.array_equal(got, ref))
+        tol = 0.0
+    else:
+        tol = 5e-2 if emulate else 5e-3
+        ok = rel_fro <= tol
 
     out = dict(kind=kind, tile_order=tile_order if pretiled else None,
                cols=cols, cores=4 * cols, M=M, K=K, N=N, m=m, k=k, n=n,

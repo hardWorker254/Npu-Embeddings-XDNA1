@@ -40,6 +40,15 @@ struct GemmaEncoded {
   std::vector<int32_t> input_ids;
   std::vector<int32_t> attention_mask;   // 1 for real tokens, 0 for padding
   int32_t n_tokens = 0;                  // before padding, incl. <bos>/<eos>
+
+  // The untruncated count, and whether anything was dropped. Same reasoning
+  // as npue::Encoded's pair -- see tokenizer.hpp. Note that for this
+  // tokenizer the count INCLUDES the task prefix, because the prefix is
+  // prepended before tokenization and therefore spends real sequence budget:
+  // a caller sizing its inputs against `max_len` without accounting for the
+  // prefix would be over by however many tokens "search_document: " costs.
+  int32_t n_tokens_full = 0;
+  bool truncated = false;
 };
 
 class GemmaTokenizer {

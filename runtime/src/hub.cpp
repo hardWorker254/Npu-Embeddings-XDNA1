@@ -13,13 +13,16 @@
 
 #include "hub.hpp"
 
+#include "json_min.hpp"
 #include "npue_pack.hpp"
 
 #include <windows.h>
 #include <winhttp.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -41,7 +44,8 @@ namespace {
 // reference/fetch_model.py wrote when each model was first brought up and
 // validated against its goldens.
 const std::vector<CatalogEntry> &table() {
-  static const std::vector<CatalogEntry> v = {
+  static const std::vector<CatalogEntry> v = [] {
+    std::vector<CatalogEntry> rows = {
       {"all-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L6-v2",
        "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db",
        "mean", 384, 6, 12, 1536, 48, 90.9,
@@ -67,15 +71,17 @@ const std::vector<CatalogEntry> &table() {
       // unsloth/embeddinggemma-300m mirror tasks/0055-0065 verified all
       // night, so every 1-cos/parity figure already on record for that
       // checkpoint is valid for THIS one too, no re-verification needed.
-      // Host-only, CPU path (tasks/0064): no NPU design for this arch yet,
-      // so `tile_n`/`ffn` below are not used for tiling (kept for
-      // verify_config()'s generic hidden/layers/heads/intermediate checks,
-      // which read the same key names from Gemma's config.json).
+      // NPU path since tasks/0074: `gated_ffn` (GeGLU -- ffn_up emits both
+      // halves, N = 2*1152) and `qkv_n` = 1536 (MQA's 1280-wide Q|K|V,
+      // zero-padded so `N % (tile_n * n_aie_cols)` holds at tile_n=48). Both
+      // are load-bearing for `list`: without them design_fits() asks for
+      // N=1152 and N=2304 on the wrong two streams and this row reports "no
+      // design" against its own correct design set.
       {"embeddinggemma-300m", "google/embeddinggemma-300m",
        "cbf5a78393b6a033e0b8a63a57549964f7ed5c6fbeb4ba0694214f36123f2fd2",
        "mean", 768, 24, 3, 1152, 48, 1155.0,
-       "CPU-only host path (no NPU kernel yet); MQA+RoPE+GeGLU; gated, "
-       "needs HF_TOKEN", /*gated=*/true, /*gemma=*/true},
+       "MQA+RoPE+GeGLU on the array (4 GEMMs/layer); gated, needs HF_TOKEN",
+       /*gated=*/true, /*gemma=*/true, /*gated_ffn=*/true, /*qkv_n=*/1536},
       // arch=2 (tasks/0068-0071): RoPE + gated SwiGLU, NOT the BERT-family
       // absolute-position + GELU the other four rows share -- but it packs
       // to the SAME layout_hash and runs on the SAME NPU designs (tasks/
@@ -96,7 +102,37 @@ const std::vector<CatalogEntry> &table() {
        "needs --prefix (search_document / search_query / clustering / "
        "classification)", /*gated=*/false, /*gemma=*/false,
        /*gated_ffn=*/true},
-  };
+    };
+    // THE bfp16 ADOPTION (tasks/0104, T23), set by NAME rather than by
+    // rewriting every row's positional initialiser above -- the struct's
+    // trailing fields (gated/gemma/gated_ffn/qkv_n) are themselves positional
+    // and most rows already stop short of them, so reaching `datapath` from
+    // the literal would mean restating every field in between for every row,
+    // for a decision that has nothing to do with any of them. Real,
+    // same-session MTEB gate verdicts (`--sides cpu,npu`, tasks/0101/0103):
+    // five of six PASS at bfp16+bf16-C and are adopted; bge-small FAILS at
+    // -0.5010 against the -0.5 line (bit-reproducible, not noise) and stays
+    // on the plain-bf16 design it always shipped. See docs/CURRENT_STATUS.md
+    // for the verdict table.
+    //
+    // ENUMERATED, not "everything except bge-small". The exclusion form was
+    // written first and is a fail-open: a seventh built-in row added later
+    // would inherit bfp16 without anyone ever having gated it, which is the
+    // failure class docs/CURRENT_STATUS.md sec 4 lists five of. An allowlist
+    // makes a new model default to plain bf16 -- CatalogEntry::datapath's own
+    // default -- until someone measures it and adds it here.
+    static const char *kAdoptedBfp16[] = {
+        "all-MiniLM-L6-v2",         // MTEB +0.12 / worst -0.07
+        "bge-base-en-v1.5",         // MTEB -0.06 / worst -0.19
+        "bge-large-en-v1.5",        // MTEB +0.13 / worst -0.01
+        "nomic-embed-text-v1.5",    // MTEB +0.01 / worst -0.25
+        "embeddinggemma-300m",      // MTEB +0.16 / worst -0.02
+    };
+    for (auto &e : rows)
+      for (const char *n : kAdoptedBfp16)
+        if (e.name == n) { e.datapath = "bfp16"; break; }
+    return rows;
+  }();
   return v;
 }
 
@@ -195,12 +231,153 @@ Url parse_url(const std::string &url) {
 
 }  // namespace
 
-const std::vector<CatalogEntry> &catalog() { return table(); }
+namespace {
+// Built-ins first, then whatever `add` wrote. ONE writer
+// (`load_user_catalog`), called once from main() before anything reads this.
+std::vector<CatalogEntry> &merged() {
+  static std::vector<CatalogEntry> v = table();
+  return v;
+}
+bool g_user_loaded = false;
+
+std::filesystem::path user_catalog_path(const std::string &root) {
+  return std::filesystem::path(root) / "models" / "catalog.json";
+}
+}  // namespace
+
+const std::vector<CatalogEntry> &catalog() { return merged(); }
 
 const CatalogEntry *find(const std::string &name) {
-  for (const auto &e : table())
+  for (const auto &e : merged())
     if (e.name == name) return &e;
   return nullptr;
+}
+
+void load_user_catalog(const std::string &root, const Log &log) {
+  if (g_user_loaded) return;          // idempotent: main() may probe twice
+  g_user_loaded = true;
+  const auto p = user_catalog_path(root);
+  std::error_code ec;
+  if (!std::filesystem::exists(p, ec)) return;
+
+  std::ifstream f(p, std::ios::binary);
+  std::stringstream b;
+  b << f.rdbuf();
+  const std::string txt = b.str();
+  if (txt.empty()) return;
+
+  npue::json::Value doc;
+  try {
+    doc = npue::json::parse(txt);
+  } catch (const std::exception &e) {
+    // LOUD, not silent. A malformed user catalogue means `serve <name>` will
+    // fail with "unknown model" for a model the user believes they added, and
+    // the reason has to be visible at that moment.
+    if (log) log("  WARNING: " + p.string() + " is not valid JSON (" +
+                 e.what() + ") -- ignoring it; every model it added is now "
+                 "unknown to this build");
+    return;
+  }
+  if (!doc.is_object() || !doc.as_object().count("models")) return;
+
+  for (const auto &m : doc.at("models").as_array()) {
+    CatalogEntry e;
+    auto s = [&](const char *k) -> std::string {
+      return m.as_object().count(k) ? m.at(k).as_string() : std::string();
+    };
+    auto i = [&](const char *k, int64_t d) -> int64_t {
+      return m.as_object().count(k) ? (int64_t)m.at(k).as_number() : d;
+    };
+    auto bl = [&](const char *k) -> bool {
+      return m.as_object().count(k) && m.at(k).as_bool();
+    };
+    e.name = s("name");
+    e.repo = s("repo");
+    e.sha256 = s("sha256");
+    e.pooling = s("pooling");
+    e.hidden = i("hidden", 0);
+    e.layers = i("layers", 0);
+    e.heads = i("heads", 0);
+    e.ffn = i("ffn", 0);
+    e.tile_n = i("tile_n", 48);
+    e.download_mb = (double)i("download_mb", 0);
+    e.note = s("note");
+    e.gated = bl("gated");
+    e.gemma = bl("gemma");
+    e.gated_ffn = bl("gated_ffn");
+    e.qkv_n = i("qkv_n", 0);
+    if (e.name.empty() || e.repo.empty()) continue;
+    // A user row must never shadow a built-in. `add` refuses to write one, so
+    // reaching here means the file was hand-edited -- say so and keep the
+    // built-in, whose pin this repository actually validated.
+    bool shadows = false;
+    for (const auto &b0 : table())
+      if (b0.name == e.name) shadows = true;
+    if (shadows) {
+      if (log) log("  WARNING: " + p.string() + " redefines the built-in model '" +
+                   e.name + "' -- ignoring the file's version and keeping the "
+                   "built-in, whose checksum this build validated");
+      continue;
+    }
+    merged().push_back(std::move(e));
+  }
+}
+
+void add_to_user_catalog(const std::string &root, const CatalogEntry &e) {
+  for (const auto &b0 : table())
+    if (b0.name == e.name)
+      throw std::runtime_error(
+          "'" + e.name + "' is a built-in model. Refusing to shadow it: its "
+          "checksum was validated against goldens by this repository, and a "
+          "user row that replaced it would leave every table saying the same "
+          "name while serving different weights. Pick another name.");
+  for (const auto &u : merged())
+    if (u.name == e.name)
+      throw std::runtime_error("'" + e.name + "' is already in " +
+                               user_catalog_path(root).string());
+
+  merged().push_back(e);
+
+  auto esc = [](const std::string &s) {
+    std::string o;
+    for (char c : s) {
+      if (c == '"' || c == '\\') { o += '\\'; o += c; }
+      else if (c == '\n') o += "\\n";
+      else o += c;
+    }
+    return o;
+  };
+  std::string j = "{\n  \"comment\": \"Written by `npuembeddings add`. Rows "
+                  "here are MERGED AFTER the built-in catalogue and may not "
+                  "shadow it. A row whose sha256 is empty is NOT verified.\",\n"
+                  "  \"models\": [\n";
+  bool first = true;
+  for (const auto &u : merged()) {
+    bool builtin = false;
+    for (const auto &b0 : table())
+      if (b0.name == u.name) builtin = true;
+    if (builtin) continue;
+    if (!first) j += ",\n";
+    first = false;
+    j += "    {\"name\": \"" + esc(u.name) + "\", \"repo\": \"" + esc(u.repo) +
+         "\", \"sha256\": \"" + esc(u.sha256) + "\", \"pooling\": \"" +
+         esc(u.pooling) + "\", \"hidden\": " + std::to_string(u.hidden) +
+         ", \"layers\": " + std::to_string(u.layers) + ", \"heads\": " +
+         std::to_string(u.heads) + ", \"ffn\": " + std::to_string(u.ffn) +
+         ", \"tile_n\": " + std::to_string(u.tile_n) + ", \"qkv_n\": " +
+         std::to_string(u.qkv_n) + ", \"gated\": " +
+         (u.gated ? "true" : "false") + ", \"gemma\": " +
+         (u.gemma ? "true" : "false") + ", \"gated_ffn\": " +
+         (u.gated_ffn ? "true" : "false") + ", \"note\": \"" + esc(u.note) +
+         "\"}";
+  }
+  j += "\n  ]\n}\n";
+
+  const auto p = user_catalog_path(root);
+  std::filesystem::create_directories(p.parent_path());
+  std::ofstream of(p, std::ios::binary);
+  of << j;
+  if (!of) throw std::runtime_error("failed writing " + p.string());
 }
 
 void download(const std::string &url, const std::string &dest,
@@ -419,6 +596,106 @@ void verify_config(const CatalogEntry &e, const std::filesystem::path &dir) {
 
 }  // namespace
 
+CatalogEntry probe_repo(const std::string &repo, const Log &log,
+                        const std::string &token_override) {
+  namespace fs = std::filesystem;
+  std::string slug = repo;
+  for (char &c : slug)
+    if (c == '/' || c == '\\' || c == ':') c = '_';
+  const fs::path tmp = fs::temp_directory_path() / ("npue_probe_" + slug);
+  fs::create_directories(tmp);
+
+  std::string bearer = token_override;
+  if (bearer.empty())
+    if (const char *t = std::getenv("HF_TOKEN"); t && *t) bearer = t;
+
+  const std::string base = "https://huggingface.co/" + repo + "/resolve/main/";
+  if (log) log("  reading " + repo + "/config.json");
+  download(base + "config.json", (tmp / "config.json").string(), nullptr,
+           bearer);
+  const std::string cfg = slurp_text(tmp / "config.json");
+
+  CatalogEntry e;
+  e.repo = repo;
+  e.name = repo.substr(repo.find_last_of('/') + 1);
+  e.hidden = json_int(cfg, "hidden_size", 0);
+  e.layers = json_int(cfg, "num_hidden_layers", 0);
+  e.heads = json_int(cfg, "num_attention_heads", 0);
+  e.ffn = json_int(cfg, "intermediate_size", 0);
+  const std::string mt = json_str(cfg, "model_type");
+  if (e.hidden <= 0 || e.layers <= 0 || e.heads <= 0 || e.ffn <= 0)
+    throw std::runtime_error(
+        repo + "/config.json does not carry the four geometry fields this "
+        "runtime needs (hidden_size, num_hidden_layers, "
+        "num_attention_heads, intermediate_size). It may not be an "
+        "encoder checkpoint at all.");
+
+  // WHICH ARCHITECTURE, from the checkpoint's own model_type -- the same
+  // dispatch both packers use. A finetune inherits its base model's
+  // model_type, which is exactly why finetunes are the supported case.
+  e.gemma = (mt == "gemma3_text");
+  e.gated_ffn = e.gemma || (mt == "nomic_bert");
+  e.gated = e.gemma;      // the Gemma family is licence-gated upstream
+
+  // MQA/GQA narrows the fused qkv and then the packer pads it. Both facts are
+  // DERIVED here, never copied from whatever model this was finetuned from --
+  // a finetune that changed its head layout would otherwise be handed a
+  // design built for the original (tasks/0074's T31-shaped fail-open).
+  const int64_t kv = json_int(cfg, "num_key_value_heads", e.heads);
+  const int64_t hd = json_int(cfg, "head_dim", e.hidden / std::max<int64_t>(e.heads, 1));
+
+  // Largest legal tile_n: every N must divide `tile_n * 8` (8 columns), and
+  // (64, tile_n) must fit the 63 KB L1 budget -- which rules out 64. This is
+  // gemm_pretiled.py's own constraint, restated where the container is
+  // described rather than where it is compiled.
+  auto legal = [&](int64_t t, int64_t qkvn) {
+    const int64_t ns[4] = {qkvn, e.hidden, e.gated_ffn ? 2 * e.ffn : e.ffn,
+                           e.hidden};
+    for (int64_t n : ns)
+      if (n % (t * 8)) return false;
+    if (e.hidden % 64 || e.ffn % 64) return false;
+    return 2 * (64 * 64 * 2 + 64 * t * 2 + 64 * t * 4) < 64512;
+  };
+  const int64_t qkv_used = e.gemma ? (e.hidden + 2 * kv * hd) : 3 * e.hidden;
+  e.tile_n = 0;
+  for (int64_t t : {48, 32, 24, 16, 8}) {
+    const int64_t gran = t * 8;
+    const int64_t padded = ((qkv_used + gran - 1) / gran) * gran;
+    if (legal(t, padded)) {
+      e.tile_n = t;
+      e.qkv_n = e.gemma ? padded : 0;   // only arch=1 states it
+      break;
+    }
+  }
+  if (e.tile_n == 0)
+    throw std::runtime_error(
+        "no legal tile geometry for " + repo + " (hidden " +
+        std::to_string(e.hidden) + ", intermediate " + std::to_string(e.ffn) +
+        "): its widths do not tile across 8 columns at any tile_n this "
+        "runtime supports. The array cannot serve this shape without a new "
+        "design, which `add` does not build.");
+
+  if (log) log("  reading " + repo + "/1_Pooling/config.json");
+  download(base + "1_Pooling/config.json",
+           (tmp / "pooling.json").string(), nullptr, bearer);
+  const std::string pj = slurp_text(tmp / "pooling.json");
+  const bool cls = pj.find("\"pooling_mode_cls_token\": true") != std::string::npos ||
+                   pj.find("\"pooling_mode_cls_token\":true") != std::string::npos;
+  const bool mean = pj.find("\"pooling_mode_mean_tokens\": true") != std::string::npos ||
+                    pj.find("\"pooling_mode_mean_tokens\":true") != std::string::npos;
+  if (cls == mean)
+    throw std::runtime_error(
+        repo + "/1_Pooling/config.json asks for a pooling mode this runtime "
+        "does not implement (it does cls and mean). Refusing rather than "
+        "approximating it.");
+  e.pooling = cls ? "cls" : "mean";
+  e.note = "added locally from " + repo;
+
+  std::error_code ec;
+  fs::remove_all(tmp, ec);
+  return e;
+}
+
 std::string ensure_model(const std::string &root, const std::string &name,
                          const Log &log, const std::string &token_override) {
   namespace fs = std::filesystem;
@@ -430,7 +707,7 @@ std::string ensure_model(const std::string &root, const std::string &name,
   const CatalogEntry *e = find(name);
   if (!e) {
     std::string known;
-    for (const auto &c : table()) known += "\n    " + c.name;
+    for (const auto &c : merged()) known += "\n    " + c.name;
     throw std::runtime_error(
         "'" + name + "' is not installed and is not a model this build knows "
         "how to fetch. Known models:" + known +
@@ -480,9 +757,17 @@ std::string ensure_model(const std::string &root, const std::string &name,
     log("");
     log("  " + e->name + " is not installed. Fetching it from " + e->repo +
         ".");
-    log("  " + human(uint64_t(e->download_mb * 1024 * 1024)) +
-        " of checkpoint, verified against a checksum built into this "
-        "executable.");
+    // Say which of the two this actually is. The old line claimed a
+    // verification unconditionally, which would have been a lie for a row
+    // `add` wrote without a pin -- and `download_mb` is 0 for those, because
+    // nothing probed the size.
+    if (unpinned(*e))
+      log("  NO CHECKSUM PIN for this model -- it was added locally and will "
+          "NOT be verified.");
+    else
+      log("  " + human(uint64_t(e->download_mb * 1024 * 1024)) +
+          " of checkpoint, verified against a checksum built into this "
+          "executable.");
     log("");
   }
 
@@ -508,7 +793,23 @@ std::string ensure_model(const std::string &root, const std::string &name,
   if (log) log("  hash  model.safetensors");
   const std::string got =
       npue::sha256_file((dir / "model.safetensors").string());
-  if (got != e->sha256) {
+  if (unpinned(*e)) {
+    // NO PIN, BY THE USER'S CHOICE (`add <repo>` with no sha256). We cannot
+    // verify what we fetched, and pretending otherwise is worse than saying
+    // so -- this is the one place in the fetch path that fails OPEN, and it
+    // does it loudly. The digest is printed so it can be pinned afterwards.
+    if (log) {
+      log("");
+      log("  !! WARNING: '" + e->name + "' was added WITHOUT a sha256 pin.");
+      log("  !! These weights were NOT verified against anything. Whatever");
+      log("  !! " + e->repo + " served just now is what will be packed.");
+      log("  !! Its digest is:");
+      log("  !!   " + got);
+      log("  !! To pin it, re-add with that value:");
+      log("  !!   npuembeddings add " + e->repo + " " + got);
+      log("");
+    }
+  } else if (got != e->sha256) {
     throw std::runtime_error(
         "CHECKSUM MISMATCH for " + e->repo + "/model.safetensors\n"
         "    expected " + e->sha256 + "\n"
@@ -519,7 +820,7 @@ std::string ensure_model(const std::string &root, const std::string &name,
         "upstream repository has changed and this build's accuracy numbers "
         "no longer describe it.");
   }
-  if (log) log("        ok  " + got.substr(0, 16) + "...");
+  if (log && !unpinned(*e)) log("        ok  " + got.substr(0, 16) + "...");
 
   // verify_config()'s numeric checks (hidden_size/num_hidden_layers/
   // num_attention_heads/intermediate_size) and its 1_Pooling/config.json
@@ -534,10 +835,16 @@ std::string ensure_model(const std::string &root, const std::string &name,
   // executable does not show up as a diff against one fetched by the Python
   // path. Two writers of one file should not disagree about its formatting.
   {
+    // For an UNPINNED row, record the digest actually received rather than
+    // the empty pin: the packer stamps this into the container as
+    // `source_sha256`, and a container recording "" would lose the only
+    // evidence of which bytes it was built from. The distinction between
+    // "verified against a pin" and "this is merely what arrived" lives in the
+    // catalogue, which is where a reader can act on it.
     std::ofstream cf(dir / "CHECKPOINT.json", std::ios::binary);
     cf << "{\n  \"repo_id\": \"" << e->repo
        << "\",\n  \"file\": \"model.safetensors\",\n  \"sha256\": \""
-       << e->sha256 << "\"\n}";
+       << (unpinned(*e) ? got : e->sha256) << "\"\n}";
   }
 
   if (log) log("  pack  " + container.filename().string());

@@ -1,0 +1,34 @@
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      all-MiniLM-L6-v2: 78 tensors, 69.00 MB, checkpoint 53aa51172d142c89
+  shape      sentence-transformers/all-MiniLM-L6-v2: 6 layers, hidden 384, 12 heads x 32, ffn 1536, mean pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 6 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 6 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 13 fewer NPU dispatches
+  bo-align   last data buffer aligned to 131072 B
+  weights    21.23 MB staged on the device once, not per call
+  npu        exclusive -- 7 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 encodes of 128 sequences at seq 64
+    wall   183.42 ms   ->     697.9 seq/s
+    cpu    809.38 ms   ->      4.41 cores busy
+
+    NPU path (copy+sync+dispatch)   133.78 ms   72.9%   24 dispatches
+      bf16 convert (both ways)       16.11 ms    8.8%
+      sync to device                  3.70 ms    2.0%
+      dispatch + wait                73.95 ms   40.3%     3081 us each
+        submit (build + start)        1.23 ms    0.7%       51 us each
+        wait (hardware)              72.66 ms   39.6%     3028 us each
+      sync from device                5.84 ms    3.2%
+      read out + bias                34.18 ms   18.6%
+    host attention (QK^T, A.V)      21.57 ms   11.8%   (qk 12.0  av 9.5)
+    host gelu                        7.13 ms    3.9%
+    host softmax                     3.09 ms    1.7%
+    host layernorm                   3.54 ms    1.9%
+    everything else                 14.30 ms    7.8%   (residual adds, pooling, embedding lookup)
+
+    per design      calls   MACs/call    wait us/call
+    gemm_rtp           24           0          3028

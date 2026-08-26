@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <stdexcept>
@@ -23,6 +24,40 @@
 #include <vector>
 
 namespace npue {
+
+// An input that does not fit the sequence length this runtime is running at.
+//
+// A DISTINCT type rather than a plain runtime_error, because it is the
+// CALLER's fault rather than the runtime's: the serve path maps it to HTTP
+// 400, and a 500 here would tell an operator to go looking at the NPU.
+//
+// It exists at all because silent truncation is this project's most dangerous
+// fail-open, and the only one whose blast radius is the ANSWER rather than the
+// run. A truncated text still returns a correctly shaped, correctly normed,
+// perfectly deterministic vector, so every downstream guard passes while the
+// measurement is wrong -- the same shape as traps 6b/6c/7c/7d in CLAUDE.md,
+// one layer further out. Documents sharing an administrative preamble are the
+// worst case: cut them all at the same point and their vectors become
+// byte-identical, so retrieval degrades to a coin flip wearing a similarity
+// score rather than to visibly bad results.
+//
+// Report the value you read, never the intention: `n_tokens` is what the text
+// ACTUALLY tokenized to, not what was kept.
+struct InputTooLong : std::runtime_error {
+  InputTooLong(size_t index, int64_t n_tokens, int64_t limit)
+      : std::runtime_error(
+            "input " + std::to_string(index) + " is " +
+            std::to_string(n_tokens) + " tokens, but this runtime is running "
+            "at sequence length " + std::to_string(limit) + ". Split the text "
+            "into shorter pieces, or run a design exported for a longer "
+            "sequence (tools/export_gemm_rtp.py --seq N). Passing "
+            "--allow-truncation cuts it at " + std::to_string(limit) +
+            " tokens instead and DISCARDS the rest."),
+        index(index), n_tokens(n_tokens), limit(limit) {}
+  size_t index;      // which input in the request/batch
+  int64_t n_tokens;  // the untruncated token count, including [CLS]/[SEP]
+  int64_t limit;     // the sequence length the design was compiled for
+};
 
 struct TensorInfo {
   std::string name;

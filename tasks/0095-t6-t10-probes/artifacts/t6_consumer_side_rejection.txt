@@ -1,0 +1,26 @@
+Attempt: mark the CONSUMER (a compute core using ordinary a.acquire()/a.release())
+as the aie_stream wire-only endpoint, i.e. aie_stream=(1, 0) on the input fifo
+`fin` in a copy of exp2_probe's design (see t6_probe_in_stream.py, MODE=instream).
+
+Build command (compile-only, --dev npu2):
+  python probe_in_stream.py instream <outdir>
+
+Result: control build (MODE=off, ordinary fifo) succeeds. instream build FAILS
+at the same aiecc stage that succeeds for the control:
+
+RuntimeError: [aiecc] Compilation failed with exit code 1:
+...
+aie.mlir:14:14: error: 'aie.objectfifo.acquire' op cannot acquire from objectfifo stream port
+        %1 = aie.objectfifo.acquire @ein(Consume, 1) : !aie.objectfifosubview<memref<1024xbf16>>
+             ^
+aie.mlir:14:14: note: see current operation: %22 = "aie.objectfifo.acquire"()
+  <{objFifo_name = @ein_cons, port = 1 : i32, size = 1 : i32}> : () ->
+  !aie.objectfifosubview<memref<1024xbf16>>
+aiecc: edge 'input_with_addresses.mlir' (key 'input.mlir') failed
+aiecc: pipeline failed
+
+Conclusion: aie_stream is not a transparent flag. The kernel body on the marked
+endpoint must be rewritten to use put_ms()/get_ss() (core-issued stream
+instructions) instead of ObjectFifo acquire()/release() -- IRON's own verifier
+refuses the mismatch outright, at compile time, rather than silently doing
+something else.

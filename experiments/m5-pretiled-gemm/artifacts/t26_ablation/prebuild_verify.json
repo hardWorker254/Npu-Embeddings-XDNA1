@@ -1,0 +1,30 @@
+{
+  "poison": {
+    "cache_dir": "C:\\Users\\vegar\\.npu\\cache\\e84663f16396b304c8067aaa",
+    "has_poison_marker": true,
+    "objdump": {
+      "matmul_bf16_f32_333c4d33.o": {
+        "lines": 310,
+        "rnd_matches": 3
+      },
+      "narrow_1024_f32_bf16.o": {
+        "lines": 86,
+        "rnd_matches": 3
+      }
+    }
+  },
+  "bf16c": {
+    "cache_dir": "C:\\Users\\vegar\\.npu\\cache\\abfa6803fbb92d41af3ef70a",
+    "has_poison_marker": false,
+    "objdump": {
+      "matmul_bf16_f32_333c4d33.o": {
+        "lines": 310,
+        "rnd_matches": 3
+      },
+      "narrow_3072_f32_bf16.o": {
+        "lines": 86,
+        "rnd_matches": 3
+      }
+    }
+  }
+}

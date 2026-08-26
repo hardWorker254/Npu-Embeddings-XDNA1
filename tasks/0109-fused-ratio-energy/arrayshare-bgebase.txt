@@ -1,0 +1,35 @@
+﻿NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-base-en-v1.5: 150 tensors, 265.26 MB, checkpoint c7c1988aae201f80
+  shape      BAAI/bge-base-en-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, CLS pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 131072 B
+  weights    169.87 MB staged on the device once, not per call
+  npu        exclusive -- 3 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 encodes of 128 sequences at seq 64
+    wall   483.20 ms   ->     264.9 seq/s
+    cpu   3034.38 ms   ->      6.28 cores busy
+
+    NPU path (copy+sync+dispatch)   346.02 ms   71.6%   48 dispatches
+      bf16 convert (both ways)        9.25 ms    1.9%
+      sync to device                 13.11 ms    2.7%
+      dispatch + wait               225.75 ms   46.7%     4703 us each
+        submit (build + start)        2.99 ms    0.6%       62 us each
+        wait (hardware)             222.54 ms   46.1%     4636 us each
+      sync from device               11.30 ms    2.3%
+      read out + bias                86.61 ms   17.9%
+    host attention (QK^T, A.V)      67.69 ms   14.0%   (qk 39.2  av 28.5)
+    host softmax                     6.27 ms    1.3%
+    host layernorm                  59.29 ms   12.3%
+    everything else                  3.93 ms    0.8%   (residual adds, pooling, embedding lookup)
+
+    per design      calls   MACs/call    wait us/call
+    gemm_rtp           48           0          4636

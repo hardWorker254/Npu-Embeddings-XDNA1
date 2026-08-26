@@ -1,0 +1,3 @@
+﻿  purged 1 cache candidate(s)
+CONST_PATTERN bisection rung: bf16 core->mem-tile->shim forward() drain, NO upstream compute on the path:
+FAIL -- pattern mismatch, first diff at 259

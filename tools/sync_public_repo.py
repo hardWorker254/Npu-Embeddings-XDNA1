@@ -262,8 +262,24 @@ def main() -> int:
         if not f.endswith(".md"):
             continue
         text = (out_root / f).read_text(encoding="utf-8")
+        # CODE IS NOT A LINK. A task log that quotes the tasks/README.md row it
+        # added -- inside a ```markdown fence, which is how nearly all of them
+        # do it -- is showing SOURCE, and GitHub renders it as source. Scanning
+        # it for links reports 17 false 404s and, worse, would refuse the very
+        # file explaining a link repair. Same for an inline code span: 0089
+        # spells out the FORMAT of a register bullet, `* [Tn](CLOSED-THREADS.md#tn)`,
+        # which is a description rather than a destination.
+        fenced = False
         for i, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith(("```", "~~~")):
+                fenced = not fenced
+                continue
+            if fenced:
+                continue
             for m in LINK_RE.finditer(line):
+                before = line[:m.start()]
+                if before.count("`") % 2 == 1:          # inside a code span
+                    continue
                 target = m.group(2).split("#", 1)[0].strip()
                 if not target or target.startswith(
                         ("http://", "https://", "mailto:", "#")):

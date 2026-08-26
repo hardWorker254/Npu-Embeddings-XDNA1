@@ -1,0 +1,210 @@
+  qkv@b4: purged 1 cache candidate(s)
+  b4    qkv           [256, 384, 1152] -> f494d552c0c442b6c546eaf9
+  attn_out@b4: purged 1 cache candidate(s)
+  b4    attn_out       [256, 384, 384] -> abf713c4b91a702ac6c4a735
+  ffn_up@b4: purged 1 cache candidate(s)
+  b4    ffn_up        [256, 384, 1536] -> 865b1813d11d09f36fa82e45
+  ffn_down@b4: purged 1 cache candidate(s)
+  b4    ffn_down      [256, 1536, 384] -> 8e104b9e80235ad68a16a299
+  qkv@b16: purged 1 cache candidate(s)
+  b16   qkv          [1024, 384, 1152] -> 01c3868c8b8817e7cf296d24
+  attn_out@b16: purged 1 cache candidate(s)
+  b16   attn_out      [1024, 384, 384] -> e6d08c1c26e9689f9b198a14
+  ffn_up@b16: purged 1 cache candidate(s)
+  b16   ffn_up       [1024, 384, 1536] -> 8cee923df1e7cfc836ce4f2f
+  ffn_down@b16: purged 1 cache candidate(s)
+  b16   ffn_down     [1024, 1536, 384] -> 206060ecfc3442d78588bc44
+  qkv@b32: purged 1 cache candidate(s)
+  b32   qkv          [2048, 384, 1152] -> 0092f872ecd832ab470744ac
+  attn_out@b32: purged 1 cache candidate(s)
+  b32   attn_out      [2048, 384, 384] -> 1cd622aba571f0653d29315e
+  ffn_up@b32: purged 1 cache candidate(s)
+  b32   ffn_up       [2048, 384, 1536] -> 5feda4728fbfff64d5030d03
+  ffn_down@b32: purged 1 cache candidate(s)
+  b32   ffn_down     [2048, 1536, 384] -> bd249a8d96c59120b3a404e6
+  qkv@b128: purged 1 cache candidate(s)
+  b128  qkv          [8192, 384, 1152] -> 5ecbb3a4d92a4174c6985dba
+  attn_out@b128: purged 1 cache candidate(s)
+  b128  attn_out      [8192, 384, 384] -> 323e19399cbd2d7bfb67aeee
+  ffn_up@b128: purged 1 cache candidate(s)
+  b128  ffn_up       [8192, 384, 1536] -> afc71bda6566ac76b32a8e59
+  ffn_down@b128: purged 1 cache candidate(s)
+  b128  ffn_down     [8192, 1536, 384] -> a3d07fdc6e3ad609496da1c1
+  identity qkv@b128 vs qkv@b4    76 differing bytes  OK
+  identity qkv@b128 vs attn_out@b4    76 differing bytes  OK
+  identity qkv@b128 vs ffn_up@b4    73 differing bytes  OK
+  identity qkv@b128 vs ffn_down@b4    74 differing bytes  OK
+  identity qkv@b128 vs qkv@b16   79 differing bytes  OK
+  identity qkv@b128 vs attn_out@b16   71 differing bytes  OK
+  identity qkv@b128 vs ffn_up@b16   74 differing bytes  OK
+  identity qkv@b128 vs ffn_down@b16   76 differing bytes  OK
+  identity qkv@b128 vs qkv@b32   71 differing bytes  OK
+  identity qkv@b128 vs attn_out@b32   71 differing bytes  OK
+  identity qkv@b128 vs ffn_up@b32   71 differing bytes  OK
+  identity qkv@b128 vs ffn_down@b32   67 differing bytes  OK
+  identity qkv@b128 vs attn_out@b128  69 differing bytes  OK
+  identity qkv@b128 vs ffn_up@b128  73 differing bytes  OK
+  identity qkv@b128 vs ffn_down@b128  68 differing bytes  OK
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 7e00b57955e108fe9d8e9419f5828a0c7e650858
+
+  wrote runtime\artifacts_minilm_bfp16\gemm_rtp -- ONE xclbin, 16 streams (4 shapes x 4 batch tiers)
+XRT build version: 2.21.0
+Build hash: 15e6319be8de1e76a6150111a3861729e988fdb5
+Build date: 2026-05-07 16:04:09
+Git branch: HEAD
+PID: 63028
+UID: 0
+[Tue Aug 25 11:25:51 2026 GMT]
+HOST: MINISFORUMX1
+EXE: 
+[XRT] ERROR: Failed to submit command to hw queue (0xc00002b6): The device has been removed.
+
+  qkv@b4: purged 1 cache candidate(s)
+  b4    qkv           [256, 768, 2304] -> 27f91aec7950240f3d3d5d32
+  attn_out@b4: purged 1 cache candidate(s)
+  b4    attn_out       [256, 768, 768] -> ee81799cdd901c96edf46f12
+  ffn_up@b4: purged 1 cache candidate(s)
+  b4    ffn_up        [256, 768, 3072] -> f7c97ab90b6771dc21d090bc
+  ffn_down@b4: purged 1 cache candidate(s)
+  b4    ffn_down      [256, 3072, 768] -> 4801c72ff1e1c9091ba755db
+  qkv@b16: purged 1 cache candidate(s)
+  b16   qkv          [1024, 768, 2304] -> 9d9f5f43aef275b837a4de19
+  attn_out@b16: purged 1 cache candidate(s)
+  b16   attn_out      [1024, 768, 768] -> 9494e691024beaa9dc576950
+  ffn_up@b16: purged 1 cache candidate(s)
+  b16   ffn_up       [1024, 768, 3072] -> 920a0f932b9dab9270d393a2
+  ffn_down@b16: purged 1 cache candidate(s)
+  b16   ffn_down     [1024, 3072, 768] -> 7b91321b8391b97bdb82fc7e
+  qkv@b32: purged 1 cache candidate(s)
+  b32   qkv          [2048, 768, 2304] -> f95e6247832c7a8cff0145b5
+  attn_out@b32: purged 1 cache candidate(s)
+  b32   attn_out      [2048, 768, 768] -> 3bd45580a4a7489323252fc8
+  ffn_up@b32: purged 1 cache candidate(s)
+  b32   ffn_up       [2048, 768, 3072] -> 711901bc6322d367458357e0
+  ffn_down@b32: purged 1 cache candidate(s)
+  b32   ffn_down     [2048, 3072, 768] -> 772e7e5b120d9e76be76d409
+  qkv@b128: purged 1 cache candidate(s)
+  b128  qkv          [8192, 768, 2304] -> b34b969d566eb7cd79e1527f
+  attn_out@b128: purged 1 cache candidate(s)
+  b128  attn_out      [8192, 768, 768] -> 3720a0e9f5240397847c7764
+  ffn_up@b128: purged 1 cache candidate(s)
+  b128  ffn_up       [8192, 768, 3072] -> 1b20aa28a06a07846bfc492b
+  ffn_down@b128: purged 1 cache candidate(s)
+  b128  ffn_down     [8192, 3072, 768] -> ddb956bfb013d6f28f44236a
+  identity qkv@b128 vs qkv@b4    81 differing bytes  DIVERGED
+static configurations diverged -- the streams do NOT share an xclbin, refusing to export a lying artifact
+  qkv@b128: purged 1 cache candidate(s)
+  b128  qkv         [8192, 1024, 3072] -> 231987bc39a1d44bd534395f
+  attn_out@b128: purged 1 cache candidate(s)
+  b128  attn_out    [8192, 1024, 1024] -> 055984206788fd910b5febcb
+  ffn_up@b128: purged 1 cache candidate(s)
+  b128  ffn_up      [8192, 1024, 4096] -> 1085889c8a07935c06c70e61
+  ffn_down@b128: purged 1 cache candidate(s)
+  b128  ffn_down    [8192, 4096, 1024] -> d123a633201bc0b31f09cb0d
+  identity qkv@b128 vs attn_out@b128  68 differing bytes  OK
+  identity qkv@b128 vs ffn_up@b128  70 differing bytes  OK
+  identity qkv@b128 vs ffn_down@b128  68 differing bytes  OK
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 7e00b57955e108fe9d8e9419f5828a0c7e650858
+
+  wrote runtime\artifacts_large_bfp16\gemm_rtp -- ONE xclbin, 4 streams (4 shapes x 1 batch tiers)
+  qkv@b4: purged 1 cache candidate(s)
+  b4    qkv           [256, 768, 2304] -> 27f91aec7950240f3d3d5d32
+  attn_out@b4: purged 1 cache candidate(s)
+  b4    attn_out       [256, 768, 768] -> ee81799cdd901c96edf46f12
+  ffn_up@b4: purged 1 cache candidate(s)
+  b4    ffn_up        [256, 768, 6144] -> 1076bbc77b9120d6bbdb252d
+  ffn_down@b4: purged 1 cache candidate(s)
+  b4    ffn_down      [256, 3072, 768] -> 4801c72ff1e1c9091ba755db
+  qkv@b16: purged 1 cache candidate(s)
+  b16   qkv          [1024, 768, 2304] -> 9d9f5f43aef275b837a4de19
+  attn_out@b16: purged 1 cache candidate(s)
+  b16   attn_out      [1024, 768, 768] -> 9494e691024beaa9dc576950
+  ffn_up@b16: purged 1 cache candidate(s)
+  b16   ffn_up       [1024, 768, 6144] -> 8b60dcc4c2a06d183d73e337
+  ffn_down@b16: purged 1 cache candidate(s)
+  b16   ffn_down     [1024, 3072, 768] -> 7b91321b8391b97bdb82fc7e
+  qkv@b32: purged 1 cache candidate(s)
+  b32   qkv          [2048, 768, 2304] -> f95e6247832c7a8cff0145b5
+  attn_out@b32: purged 1 cache candidate(s)
+  b32   attn_out      [2048, 768, 768] -> 3bd45580a4a7489323252fc8
+  ffn_up@b32: purged 1 cache candidate(s)
+  b32   ffn_up       [2048, 768, 6144] -> 428c5cb1c2c22db27b95f873
+  ffn_down@b32: purged 1 cache candidate(s)
+  b32   ffn_down     [2048, 3072, 768] -> 772e7e5b120d9e76be76d409
+  qkv@b128: purged 1 cache candidate(s)
+  b128  qkv          [8192, 768, 2304] -> b34b969d566eb7cd79e1527f
+  attn_out@b128: purged 1 cache candidate(s)
+  b128  attn_out      [8192, 768, 768] -> 3720a0e9f5240397847c7764
+  ffn_up@b128: purged 1 cache candidate(s)
+  b128  ffn_up       [8192, 768, 6144] -> 82f4437088cd15701faea41d
+  ffn_down@b128: purged 1 cache candidate(s)
+  b128  ffn_down     [8192, 3072, 768] -> ddb956bfb013d6f28f44236a
+  identity qkv@b128 vs qkv@b4    75 differing bytes  OK
+  identity qkv@b128 vs attn_out@b4    72 differing bytes  OK
+  identity qkv@b128 vs ffn_up@b4    74 differing bytes  OK
+  identity qkv@b128 vs ffn_down@b4    69 differing bytes  OK
+  identity qkv@b128 vs qkv@b16   76 differing bytes  OK
+  identity qkv@b128 vs attn_out@b16   70 differing bytes  OK
+  identity qkv@b128 vs ffn_up@b16   71 differing bytes  OK
+  identity qkv@b128 vs ffn_down@b16   73 differing bytes  OK
+  identity qkv@b128 vs qkv@b32   75 differing bytes  OK
+  identity qkv@b128 vs attn_out@b32   70 differing bytes  OK
+  identity qkv@b128 vs ffn_up@b32   72 differing bytes  OK
+  identity qkv@b128 vs ffn_down@b32   71 differing bytes  OK
+  identity qkv@b128 vs attn_out@b128  70 differing bytes  OK
+  identity qkv@b128 vs ffn_up@b128  72 differing bytes  OK
+  identity qkv@b128 vs ffn_down@b128  70 differing bytes  OK
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 7e00b57955e108fe9d8e9419f5828a0c7e650858
+
+  wrote runtime\artifacts_nomic_bfp16\gemm_rtp -- ONE xclbin, 16 streams (4 shapes x 4 batch tiers)
+  qkv@b4: purged 1 cache candidate(s)
+  b4    qkv           [256, 768, 1536] -> 38f2fc6219aa9d44cf7eca55
+  attn_out@b4: purged 1 cache candidate(s)
+  b4    attn_out       [256, 768, 768] -> ee81799cdd901c96edf46f12
+  ffn_up@b4: purged 1 cache candidate(s)
+  b4    ffn_up        [256, 768, 2304] -> 27f91aec7950240f3d3d5d32
+  ffn_down@b4: purged 1 cache candidate(s)
+  b4    ffn_down      [256, 1152, 768] -> 53f3124d2d0fc4589af2e8cc
+  qkv@b16: purged 1 cache candidate(s)
+  b16   qkv          [1024, 768, 1536] -> 1f248289d0900801b96b78b9
+  attn_out@b16: purged 1 cache candidate(s)
+  b16   attn_out      [1024, 768, 768] -> 9494e691024beaa9dc576950
+  ffn_up@b16: purged 1 cache candidate(s)
+  b16   ffn_up       [1024, 768, 2304] -> 9d9f5f43aef275b837a4de19
+  ffn_down@b16: purged 1 cache candidate(s)
+  b16   ffn_down     [1024, 1152, 768] -> c6c43fd77acef37f520f9b4a
+  qkv@b32: purged 1 cache candidate(s)
+  b32   qkv          [2048, 768, 1536] -> 0cb95eabf316fe1439b4db82
+  attn_out@b32: purged 1 cache candidate(s)
+  b32   attn_out      [2048, 768, 768] -> 3bd45580a4a7489323252fc8
+  ffn_up@b32: purged 1 cache candidate(s)
+  b32   ffn_up       [2048, 768, 2304] -> f95e6247832c7a8cff0145b5
+  ffn_down@b32: purged 1 cache candidate(s)
+  b32   ffn_down     [2048, 1152, 768] -> 9f9ae1a9fc8857eb9a41aa5a
+  qkv@b128: purged 1 cache candidate(s)
+  b128  qkv          [8192, 768, 1536] -> 25b8fb9ad0491ec0c22096fd
+  attn_out@b128: purged 1 cache candidate(s)
+  b128  attn_out      [8192, 768, 768] -> 3720a0e9f5240397847c7764
+  ffn_up@b128: purged 1 cache candidate(s)
+  b128  ffn_up       [8192, 768, 2304] -> b34b969d566eb7cd79e1527f
+  ffn_down@b128: purged 1 cache candidate(s)
+  b128  ffn_down     [8192, 1152, 768] -> e12c97193b1eac24578c0d8c
+  identity qkv@b128 vs qkv@b4    76 differing bytes  OK
+  identity qkv@b128 vs attn_out@b4    74 differing bytes  OK
+  identity qkv@b128 vs ffn_up@b4    75 differing bytes  OK
+  identity qkv@b128 vs ffn_down@b4    74 differing bytes  OK
+  identity qkv@b128 vs qkv@b16   74 differing bytes  OK
+  identity qkv@b128 vs attn_out@b16   72 differing bytes  OK
+  identity qkv@b128 vs ffn_up@b16   73 differing bytes  OK
+  identity qkv@b128 vs ffn_down@b16   72 differing bytes  OK
+  identity qkv@b128 vs qkv@b32   73 differing bytes  OK
+  identity qkv@b128 vs attn_out@b32   73 differing bytes  OK
+  identity qkv@b128 vs ffn_up@b32   70 differing bytes  OK
+  identity qkv@b128 vs ffn_down@b32   71 differing bytes  OK
+  identity qkv@b128 vs attn_out@b128  71 differing bytes  OK
+  identity qkv@b128 vs ffn_up@b128  72 differing bytes  OK
+  identity qkv@b128 vs ffn_down@b128  69 differing bytes  OK
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 7e00b57955e108fe9d8e9419f5828a0c7e650858
+
+  wrote runtime\artifacts_gemma_bfp16\gemm_rtp -- ONE xclbin, 16 streams (4 shapes x 4 batch tiers)
+ALL SIX RE-EXPORTED

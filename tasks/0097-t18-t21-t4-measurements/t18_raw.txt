@@ -1,0 +1,68 @@
+T18 raw command output -- 2026-08-23
+Env: cd C:\dev\mlir-aie ; . .\iron_env.ps1 ; cd C:\Users\vegar\Documents\GitHub\NpuEmbeddings
+xrt-smi examine --report aie-partitions checked before and after: no foreign "Active" hw_context
+throughout this session (only long-lived Idle WorkloadsSessionHost.exe rows, which the project's
+own npu_contention.hpp gate treats as non-contending -- it refuses only on a foreign Active row).
+
+=== probe-streams, artifacts_b128il (fp32 C), 3 repeats ===
+run1:
+    stream          M      K      N      GMAC        MB    us/disp   GMAC/ms      GB/s
+    qkv          8192    384   1152      3.62      84.9       3005      1.21      28.3
+    attn_out     8192    384    384      1.21      28.3       1344      0.90      21.1
+    ffn_up       8192    384   1536      4.83     113.2       3861      1.25      29.3
+    ffn_down     8192   1536    384      4.83      75.5       3907      1.24      19.3
+  mean = (3005+1344+3861+3907)/4 = 3029.25 us
+
+run2:
+    qkv          8192    384   1152      3.62      84.9       3008      1.20      28.2
+    attn_out     8192    384    384      1.21      28.3       1361      0.89      20.8
+    ffn_up       8192    384   1536      4.83     113.2       3869      1.25      29.3
+    ffn_down     8192   1536    384      4.83      75.5       3910      1.24      19.3
+  mean = 3037.0 us
+
+run3:
+    qkv          8192    384   1152      3.62      84.9       3012      1.20      28.2
+    attn_out     8192    384    384      1.21      28.3       1359      0.89      20.8
+    ffn_up       8192    384   1536      4.83     113.2       3865      1.25      29.3
+    ffn_down     8192   1536    384      4.83      75.5       3912      1.24      19.3
+  mean = 3037.0 us
+
+probe mean across 3 runs: 3034.4 us, spread 0.26%
+
+=== --bench 5, artifacts_b128il, --threads 24, 3 repeats ===
+run1:
+    dispatch + wait                73.87 ms   41.5%     3078 us each
+        submit (build + start)      1.18 ms    0.7%       49 us each
+        wait (hardware)             72.61 ms   40.8%     3026 us each
+    per design      calls   MACs/call    wait us/call
+    gemm_rtp           24           0          3026
+
+run2:
+      dispatch + wait                73.86 ms   41.6%     3077 us each
+        submit (build + start)        1.22 ms    0.7%       51 us each
+        wait (hardware)              72.57 ms   40.9%     3024 us each
+
+run3:
+      dispatch + wait                74.21 ms   41.4%     3092 us each
+        submit (build + start)        1.30 ms    0.7%       54 us each
+        wait (hardware)              72.84 ms   40.7%     3035 us each
+
+bench "wait (hardware)" across 3 runs: 3026, 3024, 3035 -- mean 3028.3 us, spread 0.19%
+bench "submit" across 3 runs: 49, 51, 54 us -- mean 51.3 us (1.7% of dispatch+wait)
+bench "dispatch+wait" (submit+wait) across 3 runs: 3078, 3077, 3092 -- mean 3082.3 us
+
+Comparison:
+  probe mean (submit+wait, no host work, no syncs)         3034.4 us
+  bench "wait" only (hardware r.wait(), full encode path)  3028.3 us   <- 0.2% from probe
+  bench "submit+wait"                                      3082.3 us  <- 1.6% from probe
+
+=== probe-streams, artifacts_cbf16 (bf16 C), 1 run (no full manifest -> --bench not runnable on this set) ===
+    stream          M      K      N      GMAC        MB    us/disp   GMAC/ms      GB/s
+    qkv          8192    384   1152      3.62      66.1       2974      1.22      22.2
+    attn_out     8192    384    384      1.21      22.0       1278      0.95      17.2
+    ffn_up       8192    384   1536      4.83      88.1       3890      1.24      22.6
+    ffn_down     8192   1536    384      4.83      69.2       3909      1.24      17.7
+  mean = 3012.75 us  (0048 originally reported 3038 us probe / 2999 us bench "wait" for this
+  set; bench could not be re-run today because artifacts_cbf16 only ships gemm_rtp/, no
+  eltwise pieces or manifest.json -- it predates the full-encode wiring. Not rebuilt this
+  session; the fp32-C set above is the one with a same-session bench comparison.)

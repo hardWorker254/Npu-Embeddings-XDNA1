@@ -1,0 +1,219 @@
+﻿skipping stages: accuracy, throughput, energy, mteb
+power: no battery device reported (desktop, or the class is empty)
+cpu: 3.7% mean over the sampling window
+  processes burning CPU right now:
+    clion64 (pid 24944) ~1.6 core(s)
+    msedge (pid 16732) ~0.46 core(s)
+    Rider.Backend (pid 23224) ~0.24 core(s)
+  -AllowCpuContention given: ratios from this sweep are NOT defensible.
+
+############ all-MiniLM-L6-v2 ############
+-- interleaved CPU ratio (8 rounds)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\compare_three.py --model all-MiniLM-L6-v2 
+--artifacts artifacts_minilm_bfp16 --rounds 8 --threads 24 --pipeline 4 --out 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0109-fused-ratio-energy\interleaved-all-MiniLM-L6-v2.json
+
+Loading weights:   0%|          | 0/103 [00:00<?, ?it/s]
+Loading weights: 100%|â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆ| 103/103 [00:00<00:00, 5847.58it/s]
+model all-MiniLM-L6-v2, batch 128, seq 64, mean pooling
+  machine: Online / NoSystemBattery / Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
+  torch threads 12, ORT intra_op 12, NPU 24 threads / 4 lanes
+  interleaved, 8 rounds, MEAN reported on every side
+
+  round 1:  torch   703.8   ort   300.7   npu  1452.5 seq/s
+  round 2:  torch   751.5   ort   300.4   npu  1423.1 seq/s
+  round 3:  torch   761.2   ort   279.8   npu  1417.8 seq/s
+  round 4:  torch   702.9   ort   290.2   npu  1414.7 seq/s
+  round 5:  torch   806.3   ort   299.7   npu  1421.0 seq/s
+  round 6:  torch   751.7   ort   301.4   npu  1409.7 seq/s
+  round 7:  torch   754.6   ort   285.6   npu  1453.5 seq/s
+  round 8:  torch   732.3   ort   289.9   npu  1455.8 seq/s
+
+  torch        all   745.6   steady(last 4)   761.2   range   702.9-  806.3 seq/s
+  onnxruntime  all   293.5   steady(last 4)   294.2   range   279.8-  301.4 seq/s
+  npu          all  1431.0   steady(last 4)  1435.0   range  1409.7- 1455.8 seq/s
+
+  strongest CPU baseline: torch at 761.2 seq/s
+  NPU / strongest CPU   : 1.885x  (steady state, both sides)
+wrote tasks\0109-fused-ratio-energy\interleaved-all-MiniLM-L6-v2.json
+
+############ bge-small-en-v1.5 ############
+-- interleaved CPU ratio (8 rounds)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\compare_three.py --model bge-small-en-v1.5 
+--artifacts artifacts_small_bf16 --rounds 8 --threads 24 --pipeline 4 --out 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0109-fused-ratio-energy\interleaved-bge-small-en-v1.5.json
+
+Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]
+Loading weights: 100%|â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆ| 199/199 [00:00<00:00, 5018.23it/s]
+model bge-small-en-v1.5, batch 128, seq 64, cls pooling
+  machine: Online / NoSystemBattery / Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
+  torch threads 12, ORT intra_op 12, NPU 24 threads / 4 lanes
+  interleaved, 8 rounds, MEAN reported on every side
+
+  round 1:  torch   390.7   ort   165.4   npu   641.0 seq/s
+  round 2:  torch   402.9   ort   163.4   npu   634.9 seq/s
+  round 3:  torch   395.0   ort   164.7   npu   639.0 seq/s
+  round 4:  torch   398.9   ort   156.5   npu   636.5 seq/s
+  round 5:  torch   387.4   ort   159.9   npu   634.3 seq/s
+  round 6:  torch   355.1   ort   157.1   npu   637.9 seq/s
+  round 7:  torch   371.4   ort   161.6   npu   629.7 seq/s
+  round 8:  torch   385.1   ort   156.0   npu   629.1 seq/s
+
+  torch        all   385.8   steady(last 4)   374.7   range   355.1-  402.9 seq/s
+  onnxruntime  all   160.6   steady(last 4)   158.6   range   156.0-  165.4 seq/s
+  npu          all   635.3   steady(last 4)   632.8   range   629.1-  641.0 seq/s
+
+  strongest CPU baseline: torch at 374.7 seq/s
+  NPU / strongest CPU   : 1.688x  (steady state, both sides)
+wrote tasks\0109-fused-ratio-energy\interleaved-bge-small-en-v1.5.json
+
+############ bge-base-en-v1.5 ############
+-- interleaved CPU ratio (8 rounds)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\compare_three.py --model bge-base-en-v1.5 
+--artifacts artifacts_base_bfp16 --rounds 8 --threads 24 --pipeline 4 --out 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0109-fused-ratio-energy\interleaved-bge-base-en-v1.5.json
+
+Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]
+Loading weights: 100%|â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆ| 199/199 [00:00<00:00, 4349.21it/s]
+model bge-base-en-v1.5, batch 128, seq 64, cls pooling
+  machine: Online / NoSystemBattery / Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
+  torch threads 12, ORT intra_op 12, NPU 24 threads / 4 lanes
+  interleaved, 8 rounds, MEAN reported on every side
+
+  round 1:  torch   115.8   ort    56.5   npu   314.8 seq/s
+  round 2:  torch   102.2   ort    48.6   npu   317.6 seq/s
+  round 3:  torch   114.9   ort    58.6   npu   318.3 seq/s
+  round 4:  torch   118.3   ort    58.9   npu   322.1 seq/s
+  round 5:  torch   115.5   ort    58.5   npu   322.6 seq/s
+  round 6:  torch   117.7   ort    55.0   npu   316.8 seq/s
+  round 7:  torch   118.4   ort    57.3   npu   322.6 seq/s
+  round 8:  torch   117.8   ort    57.0   npu   321.3 seq/s
+
+  torch        all   115.1   steady(last 4)   117.3   range   102.2-  118.4 seq/s
+  onnxruntime  all    56.3   steady(last 4)    57.0   range    48.6-   58.9 seq/s
+  npu          all   319.5   steady(last 4)   320.8   range   314.8-  322.6 seq/s
+
+  strongest CPU baseline: torch at 117.3 seq/s
+  NPU / strongest CPU   : 2.734x  (steady state, both sides)
+wrote tasks\0109-fused-ratio-energy\interleaved-bge-base-en-v1.5.json
+
+############ bge-large-en-v1.5 ############
+-- interleaved CPU ratio (8 rounds)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\compare_three.py --model bge-large-en-v1.5 
+--artifacts artifacts_large_bfp16 --rounds 8 --threads 24 --pipeline 4 --out 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0109-fused-ratio-energy\interleaved-bge-large-en-v1.5.json
+
+Loading weights:   0%|          | 0/391 [00:00<?, ?it/s]
+Loading weights:  82%|â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ– | 319/391 [00:00<00:00, 3185.62it/s]
+Loading weights: 100%|â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆ| 391/391 [00:00<00:00, 3503.49it/s]
+model bge-large-en-v1.5, batch 128, seq 64, cls pooling
+  machine: Online / NoSystemBattery / Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
+  torch threads 12, ORT intra_op 12, NPU 24 threads / 4 lanes
+  interleaved, 8 rounds, MEAN reported on every side
+
+  round 1:  torch    34.4   ort    16.8   npu    92.4 seq/s
+  round 2:  torch    34.0   ort    16.2   npu    93.2 seq/s
+  round 3:  torch    35.1   ort    17.5   npu    93.2 seq/s
+  round 4:  torch    35.2   ort    17.6   npu    94.3 seq/s
+  round 5:  torch    34.1   ort    16.9   npu    94.4 seq/s
+  round 6:  torch    35.7   ort    17.5   npu    93.8 seq/s
+  round 7:  torch    35.6   ort    17.6   npu    94.0 seq/s
+  round 8:  torch    34.7   ort    17.6   npu    94.6 seq/s
+
+  torch        all    34.8   steady(last 4)    35.0   range    34.0-   35.7 seq/s
+  onnxruntime  all    17.2   steady(last 4)    17.4   range    16.2-   17.6 seq/s
+  npu          all    93.7   steady(last 4)    94.2   range    92.4-   94.6 seq/s
+
+  strongest CPU baseline: torch at 35.0 seq/s
+  NPU / strongest CPU   : 2.691x  (steady state, both sides)
+wrote tasks\0109-fused-ratio-energy\interleaved-bge-large-en-v1.5.json
+
+############ nomic-embed-text-v1.5 ############
+-- interleaved CPU ratio (8 rounds)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\compare_three.py --model nomic-embed-text-v1.5 
+--artifacts artifacts_nomic_bfp16 --rounds 8 --threads 24 --pipeline 4 --out 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0109-fused-ratio-energy\interleaved-nomic-embed-text-v1.5.json
+  task prefix (all three sides): 'search_document: '
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits 
+and faster downloads.
+<All keys matched successfully>
+model nomic-embed-text-v1.5, batch 128, seq 64, mean pooling
+  machine: Online / NoSystemBattery / Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
+  torch threads 12, ORT intra_op 12, NPU 24 threads / 4 lanes
+  interleaved, 8 rounds, MEAN reported on every side
+
+[transformers] Detected the usage of `get_extended_attention_mask`: This function is deprecated and will be removed in 
+v5.12.0. Please use the new API in `transformers.masking_utils`
+  round 1:  torch    72.6   ort    43.7   npu   261.2 seq/s
+  round 2:  torch    74.7   ort    43.3   npu   258.9 seq/s
+  round 3:  torch    73.4   ort    44.0   npu   255.9 seq/s
+  round 4:  torch    69.5   ort    44.1   npu   259.0 seq/s
+  round 5:  torch    74.1   ort    44.0   npu   259.2 seq/s
+  round 6:  torch    73.1   ort    43.8   npu   259.3 seq/s
+  round 7:  torch    70.5   ort    42.0   npu   256.8 seq/s
+  round 8:  torch    73.4   ort    43.2   npu   258.6 seq/s
+
+  torch        all    72.6   steady(last 4)    72.7   range    69.5-   74.7 seq/s
+  onnxruntime  all    43.5   steady(last 4)    43.3   range    42.0-   44.1 seq/s
+  npu          all   258.6   steady(last 4)   258.5   range   255.9-  261.2 seq/s
+
+  strongest CPU baseline: torch at 72.7 seq/s
+  NPU / strongest CPU   : 3.553x  (steady state, both sides)
+wrote tasks\0109-fused-ratio-energy\interleaved-nomic-embed-text-v1.5.json
+
+############ embeddinggemma-300m ############
+-- interleaved CPU ratio (8 rounds)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\compare_three.py --model embeddinggemma-300m 
+--artifacts artifacts_gemma_bfp16 --rounds 8 --threads 24 --pipeline 4 --out 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0109-fused-ratio-energy\interleaved-embeddinggemma-300m.json
+  task prefix (all three sides): 'title: none | text: '  [NPU side applies it in-process]
+
+Loading weights:   0%|          | 0/314 [00:00<?, ?it/s]
+Loading weights: 100%|â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆ| 314/314 [00:00<00:00, 3148.77it/s]
+
+Loading weights:   0%|          | 0/314 [00:00<?, ?it/s]
+Loading weights: 100%|â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆ| 314/314 [00:00<00:00, 8729.33it/s]
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\transformers\cache_utils.py:215: 
+TracerWarning: torch.tensor results are registered as constants in the trace. You can safely ignore this warning if 
+you use this function to create tensors out of constant variables that would be the same every time you call this 
+function. In any other case, this might cause the trace to be incorrect.
+  self._sliding_window_tensor = torch.tensor(self.sliding_window, dtype=torch.long)
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\transformers\masking_utils.py:212: 
+TracerWarning: Converting a tensor to a Python boolean might cause the trace to be incorrect. We can't record the data 
+flow of Python values, so this value will be treated as a constant in the future. This means that the trace might not 
+generalize to other inputs!
+  if (padding_length := kv_length + kv_offset - attention_mask.shape[-1]) > 0:
+  ONNX Runtime side UNAVAILABLE for embeddinggemma-300m: RuntimeError: invalid unordered_map<K, T> key
+  -> the CPU baseline for this model is torch alone, and the ratio below says so.
+model embeddinggemma-300m, batch 128, seq 64, mean pooling
+  machine: Online / NoSystemBattery / Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
+  torch threads 12, ORT intra_op 12, NPU 24 threads / 4 lanes
+  interleaved, 8 rounds, MEAN reported on every side
+
+npuembed failed:
+NpuEmbeddings C++ runtime -- EmbeddingGemma (arch=1)
+  model      ..\models\embeddinggemma-300m.npue
+
+  !! CANNOT VERIFY THE ARRAY IS IDLE: `xrt-smi examine -r all` ran but no hw_context rows parsed -- the output format 
+may have changed
+     An absent data source is not a negative reading (tasks/0040).
+
+  Refusing to report a throughput. Close the other process, or pass --allow-contention
+  if you actually want a contended number and will label it as one.
+
+
+
+
+================ SWEEP DONE ================
+  logs and per-model artifacts: tasks\0109-fused-ratio-energy
+  index: C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0109-fused-ratio-energy\sweep.json
+
+  Every figure above is end-to-end throughput or a host-side cost.
+  NONE of it is an NPU kernel performance claim -- those come from
+  hardware traces or static instruction counts (CLAUDE.md rule 1).

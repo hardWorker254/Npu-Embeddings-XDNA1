@@ -1,0 +1,124 @@
+=== symbol table (section sizes, hex bytes) ===
+C:/Users/vegar/AppData/Local/Temp/claude/C--Users-vegar-Documents-GitHub-NpuEmbeddings/a0672a5d-77f9-447c-a309-d51b903b0596/scratchpad/t10_exp2/build/sm.prj/softmax_bf16.o:	file format elf32-aie
+00000000 l    df *ABS*	00000000 softmax_bf16.cc
+000005f0 l       .text._Z12softmax_implILb0EEvP8bfloat16S1_i	00000000 .LBB1_9
+000000e0 l       .text._Z12softmax_implILb0EEvP8bfloat16S1_i	00000000 .LBB1_2
+00000180 l       .text._Z12softmax_implILb0EEvP8bfloat16S1_i	00000000 .LBB1_3
+000001c0 l       .text._Z12softmax_implILb0EEvP8bfloat16S1_i	00000000 .L_LEnd2
+000002e0 l       .text._Z12softmax_implILb0EEvP8bfloat16S1_i	00000000 .LBB1_5
+00000440 l       .text._Z12softmax_implILb0EEvP8bfloat16S1_i	00000000 .L_LEnd1
+000004f0 l       .text._Z12softmax_implILb0EEvP8bfloat16S1_i	00000000 .LBB1_7
+000005c0 l       .text._Z12softmax_implILb0EEvP8bfloat16S1_i	00000000 .L_LEnd0
+00000e50 l       .text._Z12softmax_implILb1EEvP8bfloat16S1_i	00000000 .LBB3_9
+00000280 l       .text._Z12softmax_implILb1EEvP8bfloat16S1_i	00000000 .LBB3_2
+00000320 l       .text._Z12softmax_implILb1EEvP8bfloat16S1_i	00000000 .LBB3_3
+00000360 l       .text._Z12softmax_implILb1EEvP8bfloat16S1_i	00000000 .L_LEnd5
+00000480 l       .text._Z12softmax_implILb1EEvP8bfloat16S1_i	00000000 .LBB3_5
+00000ca0 l       .text._Z12softmax_implILb1EEvP8bfloat16S1_i	00000000 .L_LEnd4
+00000d50 l       .text._Z12softmax_implILb1EEvP8bfloat16S1_i	00000000 .LBB3_7
+00000e20 l       .text._Z12softmax_implILb1EEvP8bfloat16S1_i	00000000 .L_LEnd3
+00002ad0 l       .text._Z16softmax_il4_implP8bfloat16S0_i	00000000 .LBB4_9
+000002a0 l       .text._Z16softmax_il4_implP8bfloat16S0_i	00000000 .LBB4_2
+000003d0 l       .text._Z16softmax_il4_implP8bfloat16S0_i	00000000 .LBB4_3
+00000490 l       .text._Z16softmax_il4_implP8bfloat16S0_i	00000000 .L_LEnd8
+00000790 l       .text._Z16softmax_il4_implP8bfloat16S0_i	00000000 .LBB4_5
+00002620 l       .text._Z16softmax_il4_implP8bfloat16S0_i	00000000 .L_LEnd7
+000027d0 l       .text._Z16softmax_il4_implP8bfloat16S0_i	00000000 .LBB4_7
+00002aa0 l       .text._Z16softmax_il4_implP8bfloat16S0_i	00000000 .L_LEnd6
+00000000 g     F .text.softmax_bf16	00000020 softmax_bf16
+00000000  w    F .text._Z12softmax_implILb0EEvP8bfloat16S1_i	00000610 _Z12softmax_implILb0EEvP8bfloat16S1_i
+00000000 g     F .text.softmax_poly_bf16	00000020 softmax_poly_bf16
+00000000  w    F .text._Z12softmax_implILb1EEvP8bfloat16S1_i	00000e70 _Z12softmax_implILb1EEvP8bfloat16S1_i
+00000000 g     F .text._Z16softmax_il4_implP8bfloat16S0_i	00002b10 _Z16softmax_il4_implP8bfloat16S0_i
+00000000 g     F .text.softmax_poly_il4_bf16	00000020 softmax_poly_il4_bf16
+
+=== instruction-mnemonic histogram: softmax_impl<false> (aie::exp2 path) ===
+     73 nop
+     26 vmov
+     22 vmul.f
+     20 vconv.bf16.fp32
+     16 vadd.f
+     15 nopa
+     14 vlda
+     11 mova
+      9 movxm
+      8 vsel.32
+      8 vlt.bf16
+      7 vmsc.f
+      5 vshuffle
+      5 vldb
+      5 movs
+      4 vshift
+      4 vbcst.32
+      4 lshl
+      4 add
+      3 vsub.f
+      3 vst
+      3 vmax_lt.bf16
+      3 vbcst.16
+      3 mov
+      3 add.nc
+      2 paddxm
+      2 padda
+      2 jnz
+      2 event
+      1 vextract.32
+      1 vexp2
+      1 nopx
+      1 inv
+      1 ge
+  total instructions: 291
+
+=== instruction-mnemonic histogram: softmax_impl<true> (exp2_poly path) ===
+    212 nop
+     98 vmul.f
+     82 vadd.f
+     66 vlda
+     57 vconv.bf16.fp32
+     41 vst
+     35 vmov
+     31 vmsc.f
+     16 movxm
+     12 nopa
+     10 mova
+     10 mov
+      9 vsel.32
+      8 vlt.bf16
+      7 vsub.f
+      7 vshuffle
+      6 vbcst.32
+      5 vsrs.2x
+      5 vldb
+      5 add
+      4 vshift
+      4 vbcst.16
+      4 movs
+      3 vups.4x
+      3 vups.2x
+      3 vmax_lt.bf16
+      3 lshl
+      3 add.nc
+      2 vsub
+      2 paddxm
+      2 padda
+      2 jnz
+      2 event
+      1 vneg
+      1 vextract.32
+      1 vextbcst.32
+      1 nopx
+      1 inv
+      1 ge
+  total instructions: 765
+
+=== the single vexp2 hardware instruction, in context (aie::exp2 path) ===
+216-     416:      	vsel.32	 x7, x7, x10, r16
+217-     41a:      	vmov	bmhh4, x7
+218-     41e:      	nop	
+219:     420:      	vexp2	 wl4, bmhh4
+220-     424:      	nop	
+221-     426:      	vmul.f	dm0, x4, x2, r4
+222-		...
+
+=== confirms no call/branch-and-link anywhere in the aie::exp2 path (it is fully inlined, not a library call) ===
+  (none found)

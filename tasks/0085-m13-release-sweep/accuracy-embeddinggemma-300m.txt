@@ -1,0 +1,14 @@
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model embeddinggemma-300m --artifacts artifacts_gemma --embed C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0074-m13-gemma-on-npu\corpus.txt C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0085-m13-release-sweep\accuracy-embeddinggemma-300m.f32 --threads 24 --pipeline 4
+NpuEmbeddings C++ runtime -- EmbeddingGemma (arch=1)
+  model      C:\Users\vegar\Documents\GitHub\NpuEmbeddings\models\embeddinggemma-300m.npue
+  hidden     768, tokenizer 262144 tokens
+  path       NPU -- 4 GEMMs/layer x 24 layers = 96 dispatches, ONE xclbin, one hw_context
+  designs    C:\Users\vegar\Documents\GitHub\NpuEmbeddings/runtime/artifacts_gemma  (16 streams, 4 batch tiers)
+  qkv        N=1536  (q[0,768) k[768,1024) v[1024,1280), 256 zero-padded cols)
+  staged     212.3 MB of tiled bf16 weights on the device
+  host       RMSNorm x97, RoPE, GeGLU, MQA attention (2.3% of MACs)
+  input      13 texts, seq=64, prefix='document' -> title: none | text: 
+  pipeline   4 concurrent lanes, one NPU mutex, 6 host threads per lane
+  embedded   13 texts in 0.25 s  ->  52.7 seq/s (wall clock, end-to-end -- NOT an NPU kernel claim, CLAUDE.md rule 1)
+  breakdown  npu 99 ms (in 3, dispatch 92, out 4) | conv 8 | bias 21 | norm 15 | attn 54 | rope 2 | geglu 6 | tok 0  [96 dispatches]
+  wrote      C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0085-m13-release-sweep\accuracy-embeddinggemma-300m.f32  [13, 768] fp32

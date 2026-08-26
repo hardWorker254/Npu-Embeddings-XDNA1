@@ -1,0 +1,28 @@
+﻿python.exe : 
+At line:2 char:1
++ & ".\.venv-ref\Scripts\python.exe" tools\verify_embed_e2e.py --model  ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 199/199 [00:00<00:00, 6575.28it/s]
+end-to-end: 13 texts, seq 64, artifacts artifacts_base
+    #        1-cos   text
+   12    2.613e-05   'The quick brown fox jumps over the lazy dog while the ca'
+    5    1.231e-05   'Blåbærsyltetøy smaker godt på en skive brød.'
+    0    1.210e-05   'A man is playing a guitar on stage.'
+    3    1.149e-05   'The stock market closed lower on Tuesday.'
+    9    1.104e-05   ''
+   10    1.104e-05   '   '
+    6    1.100e-05   '机器学习模型可以生成句子向量。'
+    2    1.085e-05   'A woman is slicing an onion in the kitchen.'
+
+  worst 1-cos 2.613e-05   (tolerance 2e-03)
+  pairwise-similarity error over 78 pairs:
+    mean 4.686e-04   p99 1.153e-03   max 1.180e-03
+    bound implied by the worst 1-cos: 1.446e-02
+  top-10 neighbour overlap: 1.0000
+
+wrote tasks\0094-t32-golden-gate-rows\verify_embed_e2e_bgebase.json
+PASS -- text in, vector out, matches the reference

@@ -1,0 +1,69 @@
+{
+  "kind": "hardware measurement",
+  "what": "interleaved wall-clock throughput, NPU vs torch vs ONNX Runtime",
+  "machine_state": {
+    "power_line": "Online",
+    "battery": "NoSystemBattery",
+    "power_plan": "Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)"
+  },
+  "model": "all-MiniLM-L6-v2",
+  "batch": 128,
+  "seq_len": 64,
+  "pooling": "mean",
+  "rounds": 8,
+  "config": {
+    "torch_threads": 12,
+    "ort_intra_op": 12,
+    "ort_version": "1.24.4",
+    "npu_threads": 24,
+    "npu_lanes": 4,
+    "npu_artifacts": "artifacts_b128il"
+  },
+  "seq_per_s": {
+    "torch": [
+      707.6925629554321,
+      769.7396115509666,
+      790.5787716049078,
+      786.5446784701675,
+      777.3391075809379,
+      776.890894736138,
+      767.1611859577459,
+      748.7959302097381
+    ],
+    "onnxruntime": [
+      309.04385451007516,
+      303.21536202921965,
+      302.8477626891541,
+      310.37157538719464,
+      297.56010016653903,
+      284.9655514660902,
+      290.11332323423915,
+      300.48909295104653
+    ],
+    "npu": [
+      996.8,
+      996.0,
+      995.4,
+      994.7,
+      995.9,
+      996.7,
+      996.6,
+      995.8
+    ]
+  },
+  "means": {
+    "torch": 765.5928428832542,
+    "onnxruntime": 299.8258278041948,
+    "npu": 995.9875
+  },
+  "steady_means": {
+    "torch": 767.54677962114,
+    "onnxruntime": 293.2820169544787,
+    "npu": 996.25
+  },
+  "steady_rounds": 4,
+  "prefix": "",
+  "ort_error": null,
+  "strongest_cpu": "torch",
+  "npu_over_strongest_cpu": 1.2979664907092017
+}

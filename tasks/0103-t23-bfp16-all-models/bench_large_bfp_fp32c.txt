@@ -1,0 +1,34 @@
+﻿NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-large-en-v1.5: 294 tensors, 731.57 MB, checkpoint 45e1954914e29bd7
+  shape      BAAI/bge-large-en-v1.5: 24 layers, hidden 1024, 16 heads x 64, ffn 4096, CLS pooling
+  designs    ONE xclbin, 4 streams (1 batch tiers), one hw_context
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 24 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 24 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 49 fewer NPU dispatches
+  bo-align   last data buffer aligned to 65536 B
+  weights    603.98 MB staged on the device once, not per call
+  npu        exclusive -- 7 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 encodes of 128 sequences at seq 64
+    wall  3406.98 ms   ->      37.6 seq/s
+    cpu   2400.00 ms   ->      0.70 cores busy
+
+    NPU path (copy+sync+dispatch)  1629.87 ms   47.8%   96 dispatches
+      bf16 convert (both ways)      198.66 ms    5.8%
+      sync to device                 27.44 ms    0.8%
+      dispatch + wait              1010.81 ms   29.7%    10529 us each
+        submit (build + start)        6.10 ms    0.2%       64 us each
+        wait (hardware)            1004.01 ms   29.5%    10458 us each
+      sync from device               13.56 ms    0.4%
+      read out + bias               379.39 ms   11.1%
+    host attention (QK^T, A.V)    1305.85 ms   38.3%   (qk 671.2  av 634.6)
+    host gelu                      115.77 ms    3.4%
+    host softmax                    67.60 ms    2.0%
+    host layernorm                 102.24 ms    3.0%
+    everything else                185.66 ms    5.4%   (residual adds, pooling, embedding lookup)
+
+    per design      calls   MACs/call    wait us/call
+    gemm_rtp           96           0         10458

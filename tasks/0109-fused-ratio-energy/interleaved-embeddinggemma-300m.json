@@ -1,0 +1,58 @@
+{
+  "kind": "hardware measurement",
+  "what": "interleaved wall-clock throughput, NPU vs torch vs ONNX Runtime",
+  "machine_state": {
+    "power_line": "Online",
+    "battery": "NoSystemBattery",
+    "power_plan": "Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)"
+  },
+  "model": "embeddinggemma-300m",
+  "batch": 128,
+  "seq_len": 64,
+  "pooling": "mean",
+  "rounds": 8,
+  "config": {
+    "torch_threads": 12,
+    "ort_intra_op": 12,
+    "ort_version": "1.24.4",
+    "npu_threads": 24,
+    "npu_lanes": 4,
+    "npu_artifacts": "artifacts_gemma_bfp16"
+  },
+  "seq_per_s": {
+    "torch": [
+      79.35137688450781,
+      82.98433450440382,
+      74.6320131568341,
+      80.48521011720962,
+      79.73031222014464,
+      81.3381704970343,
+      75.40814807191084,
+      80.40356559649481
+    ],
+    "onnxruntime": [],
+    "npu": [
+      109.7,
+      108.1,
+      111.7,
+      110.3,
+      108.9,
+      110.8,
+      110.9,
+      110.4
+    ]
+  },
+  "means": {
+    "torch": 79.29164138106749,
+    "npu": 110.1
+  },
+  "steady_means": {
+    "torch": 79.22004909639615,
+    "npu": 110.25
+  },
+  "steady_rounds": 4,
+  "prefix": "title: none | text: ",
+  "ort_error": "RuntimeError: invalid unordered_map<K, T> key",
+  "strongest_cpu": "torch",
+  "npu_over_strongest_cpu": 1.39169315416412
+}

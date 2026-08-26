@@ -29,6 +29,7 @@
 #include "npue_pack.hpp"
 
 #include "gemma_tokenizer_gen.hpp"
+#include "json_min.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -56,6 +57,19 @@ struct Tensor {
   std::vector<int64_t> shape;
   const uint8_t *data = nullptr;
   size_t bytes = 0;
+  // Set only when the source dtype was F16 or BF16 and this tensor was
+  // widened to fp32 at read time (0076). A shared_ptr so `data` survives the
+  // copies and moves a std::map does: the vector object is heap-allocated, so
+  // its `data()` is stable for as long as any Tensor holds a reference.
+  //
+  // WHY WIDEN AT ALL. Every one of the six built-in checkpoints happens to
+  // ship F32 safetensors, so the packer only ever needed to read F32. That is
+  // a property of those six, not of HuggingFace: the first finetune `add`
+  // reached (TaylorAI/bge-micro-v2) ships F16, and refusing it would have
+  // made `add` a demo rather than a feature. Widening is exact -- every F16
+  // and BF16 value is representable in fp32 -- and it happens once, offline,
+  // on a path that then bf16-rounds anyway.
+  std::shared_ptr<std::vector<float>> owned;
   const float *f32() const { return reinterpret_cast<const float *>(data); }
   int64_t rows() const { return shape.size() > 1 ? shape[0] : 1; }
   int64_t cols() const { return shape.empty() ? 0 : shape.back(); }
@@ -137,6 +151,58 @@ std::map<std::string, Tensor> read_safetensors(const std::vector<uint8_t> &buf) 
     if (t.dtype == "F32" && t.bytes != static_cast<size_t>(t.count()) * 4)
       throw std::runtime_error("safetensors: " + name + " size disagrees with "
                                "its shape");
+
+    // Widen F16/BF16 to fp32 here, once, so every consumer below sees F32 and
+    // none of them has to know. Both conversions are EXACT (fp32 has more
+    // exponent range and more mantissa than either), so this cannot be the
+    // source of any error measured downstream.
+    if (t.dtype == "F16" || t.dtype == "BF16") {
+      const size_t n = static_cast<size_t>(t.count());
+      if (t.bytes != n * 2)
+        throw std::runtime_error("safetensors: " + name + " size disagrees "
+                                 "with its shape");
+      t.owned = std::make_shared<std::vector<float>>(n);
+      const uint16_t *src = reinterpret_cast<const uint16_t *>(t.data);
+      float *dst = t.owned->data();
+      if (t.dtype == "BF16") {
+        // bf16 IS the top half of an fp32: shift, done. No rounding, no
+        // special cases -- NaN and Inf patterns come across unchanged.
+        for (size_t i = 0; i < n; ++i) {
+          const uint32_t bits = static_cast<uint32_t>(src[i]) << 16;
+          std::memcpy(&dst[i], &bits, 4);
+        }
+      } else {
+        // IEEE half -> float. Subnormals and the Inf/NaN exponent both need
+        // their own arm; getting either wrong is silent, so both are here
+        // rather than approximated by the fast path.
+        for (size_t i = 0; i < n; ++i) {
+          const uint16_t h = src[i];
+          const uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
+          uint32_t exp = (h >> 10) & 0x1Fu;
+          uint32_t man = h & 0x3FFu;
+          uint32_t bits;
+          if (exp == 0) {
+            if (man == 0) {
+              bits = sign;                       // +-0
+            } else {
+              // Subnormal half: normalise it into a normal float.
+              int shift = 0;
+              while (!(man & 0x400u)) { man <<= 1; ++shift; }
+              man &= 0x3FFu;
+              bits = sign | ((127 - 15 - shift + 1) << 23) | (man << 13);
+            }
+          } else if (exp == 0x1F) {
+            bits = sign | 0x7F800000u | (man << 13);   // Inf / NaN
+          } else {
+            bits = sign | ((exp + (127 - 15)) << 23) | (man << 13);
+          }
+          std::memcpy(&dst[i], &bits, 4);
+        }
+      }
+      t.data = reinterpret_cast<const uint8_t *>(dst);
+      t.bytes = n * 4;
+      t.dtype = "F32";
+    }
     out.emplace(name, t);
   }
   return out;
@@ -415,6 +481,47 @@ static void add_gemm_b_host(Writer &w, const std::string &name,
         {K, N});
 }
 
+// Fuse several [out, in] checkpoint tensors along N into ONE [K, N] operand
+// and ZERO-PAD the tail to `n_padded`. Mirror of tools/pack_npue.py's
+// pack_gemma() qkv assembly (tasks/0074).
+//
+// The padding is the whole reason this model reaches the array. MQA gives K
+// and V a width of 256, which caps the legal `tile_n` at 16 across the whole
+// design; padding the fused operand to a multiple of `tile_n * n_aie_cols`
+// removes the cap. Zero columns of B produce exactly-zero columns of C, so the
+// host slices Q/K/V off the front by offset and ignores the tail -- exact, not
+// approximate. The zeros are written by the value-initialised vector below,
+// which matters: an uninitialised tail would tile whatever was on the heap.
+static void add_gemm_b_concat_pad(Writer &w, const std::string &name,
+                                  const std::vector<const Tensor *> &parts,
+                                  int64_t n_padded, int64_t tk, int64_t tn,
+                                  const std::string &layout_json,
+                                  const std::string &layout_hash) {
+  if (parts.empty()) throw std::runtime_error(name + ": no parts to fuse");
+  const int64_t K = parts[0]->cols();
+  int64_t used = 0;
+  for (const Tensor *t : parts) {
+    if (t->cols() != K)
+      throw std::runtime_error(name + ": fused parts disagree on the `in` dim");
+    used += t->rows();
+  }
+  if (n_padded < used)
+    throw std::runtime_error(name + ": padded N is narrower than its parts");
+  std::vector<float> m(static_cast<size_t>(K) * n_padded, 0.0f);
+  int64_t base = 0;
+  for (const Tensor *t : parts) {
+    const int64_t Np = t->rows();
+    const float *s = t->f32();
+    for (int64_t r = 0; r < K; ++r)
+      for (int64_t c = 0; c < Np; ++c)
+        m[r * n_padded + base + c] = s[c * K + r];    // transpose to [K, N]
+    base += Np;
+  }
+  const auto tiled = tile_b(m.data(), K, n_padded, tk, tn);
+  w.add(name, tiled.data(), tiled.size() * 2, "BF16", "gemm_b", {K, n_padded},
+        layout_json, layout_hash);
+}
+
 Layout gemm_b_layout(int64_t tile_k, int64_t tile_n, int64_t mac_s,
                      int64_t mac_t) {
   const std::string k = std::to_string(tile_k), n = std::to_string(tile_n);
@@ -505,6 +612,13 @@ void prepare_model(const std::string &safetensors, const std::string &vocab,
      << ",\"activation\":\"gelu_erf_exact\""
      << ",\"tile_k\":" << tile_k << ",\"tile_n\":" << tile_n
      << ",\"mac_s\":" << kMacS << ",\"mac_t\":" << kMacT
+     // The operand datapath (tasks/0078). This C++ packer only produces bf16
+     // -- int8 needs a SmoothQuant calibration pass that runs the numpy
+     // oracle, which is build-time Python by design (CLAUDE.md rule 5) -- but
+     // it must still WRITE the key, in the same position tools/pack_npue.py
+     // writes it, or the two packers stop being byte-identical and
+     // tools/verify_pack_parity.py fails for a reason that is not a bug.
+     << ",\"a_dtype\":\"bf16\""
      << ",\"fusions\":{\"qkv_fused\":true,\"transposed_to_kn\":true,"
         "\"qk_scale_folded_into_q\":true,\"gemm_operands_bf16\":true,"
         "\"biases_and_layernorm_fp32\":true,"
@@ -616,7 +730,8 @@ void prepare_model(const std::string &safetensors, const std::string &vocab,
 // here ever becomes a DMA descriptor.
 void prepare_model_gemma(const std::string &model_dir, const std::string &out,
                          const std::string &source_repo,
-                         void (*log)(const std::string &)) {
+                         void (*log)(const std::string &), int64_t tile_k,
+                         int64_t tile_n, bool host_only) {
   const auto st_buf = slurp(model_dir + "/model.safetensors");
   const auto src = read_safetensors(st_buf);
   Sha256 sh;
@@ -747,9 +862,110 @@ void prepare_model_gemma(const std::string &model_dir, const std::string &out,
   cj += ",\"activation\":\"gelu_pytorch_tanh\"";
   cj += ",\"attention_bias\":false,\"dense_bias\":false";
   cj += ",\"not_implemented\":[\"sliding-window mask (exact for "
-        "seq_len<=512, see reference/encoder_gemma.py's file header)\"]}";
+        "seq_len<=512, see reference/encoder_gemma.py's file header)\"]";
+
+  // The task-prefix table (0075). See pack_gemma()'s comment for WHY it is in
+  // the container at all when gemma_tokenizer.bin already carries it: the MTEB
+  // harness reads it from here and applies it to both sides, so a prefix
+  // mismatch cannot masquerade as a datapath difference.
+  //
+  // SORTED BY KEY, matching Python. json_min.hpp stores objects in an
+  // unordered_map and says so in its own header, so source order is not
+  // available to this side at all -- sorting is what makes the two packers
+  // byte-identical rather than accidentally-agreeing.
+  {
+    const auto cst_buf = slurp(model_dir + "/config_sentence_transformers.json");
+    const std::string cst_txt(reinterpret_cast<const char *>(cst_buf.data()),
+                              cst_buf.size());
+    const npue::json::Value cst = npue::json::parse(cst_txt);
+    if (!cst.is_object() || !cst.as_object().count("prompts"))
+      throw std::runtime_error(
+          model_dir + "/config_sentence_transformers.json has no 'prompts' "
+          "table -- refusing to pack without this model's own prefixes rather "
+          "than inventing them");
+    const auto &pr = cst.at("prompts").as_object();
+    std::vector<std::string> keys;
+    keys.reserve(pr.size());
+    for (const auto &kv : pr) keys.push_back(kv.first);
+    std::sort(keys.begin(), keys.end());
+    // Python's json.dumps escapes " \ and the C0 controls. None of these
+    // prefixes contains any of them today; escaping anyway means a future
+    // checkpoint that does cannot silently produce two different files.
+    auto esc = [](const std::string &s) {
+      std::string o;
+      for (char c : s) {
+        if (c == '"' || c == '\\') { o += '\\'; o += c; }
+        else if (c == '\n') o += "\\n";
+        else if (c == '\r') o += "\\r";
+        else if (c == '\t') o += "\\t";
+        else o += c;
+      }
+      return o;
+    };
+    cj += ",\"prompts\":{";
+    for (size_t i = 0; i < keys.size(); ++i) {
+      if (i) cj += ",";
+      cj += "\"" + esc(keys[i]) + "\":\"" +
+            esc(pr.at(keys[i]).as_string()) + "\"";
+    }
+    cj += "}";
+    if (!pr.count("document"))
+      throw std::runtime_error("this checkpoint's prompts table has no "
+                               "'document' row");
+    cj += ",\"prompt_default\":\"document\"";
+  }
+
+  // tasks/0074. Key ORDER below mirrors tools/pack_npue.py's insertion order
+  // exactly (gemm_layout, then the update() block), because json.dumps
+  // preserves it and tools/verify_pack_parity.py compares the two containers
+  // byte for byte.
+  const int64_t kv_w = kv_heads * head_dim;
+  const int64_t qkv_used = hidden + 2 * kv_w;
+  const int64_t gran = tile_n * 8;             // n_aie_cols = 8
+  const int64_t qkv_n = ((qkv_used + gran - 1) / gran) * gran;
+  const Layout glay = gemm_b_layout(tile_k, tile_n);
+
+  cj += ",\"gemm_layout\":\"";
+  cj += host_only ? "host" : "pretiled_bf16";
+  cj += "\"";
+  if (!host_only) {
+    cj += ",\"tile_k\":" + std::to_string(tile_k);
+    cj += ",\"tile_n\":" + std::to_string(tile_n);
+    cj += ",\"mac_s\":8,\"mac_t\":8";
+    cj += ",\"gated_ffn\":true";
+    cj += ",\"geglu_halves\":\"gate|up\"";
+    cj += ",\"qkv_n\":" + std::to_string(qkv_n);
+    cj += ",\"qkv_blocks\":{\"q\":[0," + std::to_string(hidden) + "]";
+    cj += ",\"k\":[" + std::to_string(hidden) + "," +
+          std::to_string(hidden + kv_w) + "]";
+    cj += ",\"v\":[" + std::to_string(hidden + kv_w) + "," +
+          std::to_string(qkv_used) + "]";
+    cj += ",\"pad\":[" + std::to_string(qkv_used) + "," +
+          std::to_string(qkv_n) + "]}";
+    cj += ",\"fusions\":{\"qkv_fused\":true"
+          ",\"qkv_zero_padded_to_tile\":true"
+          ",\"transposed_to_kn\":true"
+          ",\"qk_scale_folded_into_q\":false"
+          ",\"qk_scale_folded_into_q_note\":\"ILLEGAL for this architecture: "
+          "q_norm (RMSNorm) runs after q_proj and is scale-invariant, so a "
+          "fold into Wq would be annihilated and attention would run unscaled "
+          "with no shape error. The scale stays on the scores.\""
+          ",\"gemm_operands_bf16\":true"
+          ",\"norms_embeddings_dense_fp32\":true"
+          ",\"gated_ffn_fused_gate_up\":true"
+          ",\"biases_zero_filled\":true}";
+  }
+  cj += "}";
 
   Writer w;
+  // Zero biases, one per fused operand width. Gemma has no biases anywhere;
+  // the runtime's GEMM epilogue adds one unconditionally, so zero-filling is
+  // exact and keeps this arch on the same dispatch path as every other model
+  // (same reasoning as pack_nomic's).
+  auto add_zero_bias = [&](const std::string &name, int64_t n) {
+    const std::vector<float> z(static_cast<size_t>(n), 0.0f);
+    w.add(name, z.data(), z.size() * sizeof(float), "F32", "bias", {n});
+  };
   auto add_f32 = [&](const std::string &name, const Tensor &t,
                      const char *role, const std::vector<int64_t> &shape) {
     w.add(name, t.data, static_cast<size_t>(t.count()) * 4, "F32", role,
@@ -810,9 +1026,18 @@ void prepare_model_gemma(const std::string &model_dir, const std::string &out,
     const std::string sa = p + "self_attn.";
     const std::string tag = "layer." + std::to_string(i) + ".";
 
-    add_gemm_b_host(w, tag + "q_proj", get(sa + "q_proj.weight"));
-    add_gemm_b_host(w, tag + "k_proj", get(sa + "k_proj.weight"));
-    add_gemm_b_host(w, tag + "v_proj", get(sa + "v_proj.weight"));
+    if (host_only) {
+      add_gemm_b_host(w, tag + "q_proj", get(sa + "q_proj.weight"));
+      add_gemm_b_host(w, tag + "k_proj", get(sa + "k_proj.weight"));
+      add_gemm_b_host(w, tag + "v_proj", get(sa + "v_proj.weight"));
+    } else {
+      add_gemm_b_concat_pad(w, tag + "qkv",
+                            {&get(sa + "q_proj.weight"),
+                             &get(sa + "k_proj.weight"),
+                             &get(sa + "v_proj.weight")},
+                            qkv_n, tile_k, tile_n, glay.json, glay.hash);
+      add_zero_bias(tag + "qkv.bias", qkv_n);
+    }
     {
       const Tensor &qn = get(sa + "q_norm.weight");
       add_f32(tag + "q_norm.weight", qn, "layernorm", qn.shape);
@@ -821,7 +1046,13 @@ void prepare_model_gemma(const std::string &model_dir, const std::string &out,
       const Tensor &kn = get(sa + "k_norm.weight");
       add_f32(tag + "k_norm.weight", kn, "layernorm", kn.shape);
     }
-    add_gemm_b_host(w, tag + "o_proj", get(sa + "o_proj.weight"));
+    if (host_only) {
+      add_gemm_b_host(w, tag + "o_proj", get(sa + "o_proj.weight"));
+    } else {
+      add_gemm_b(w, tag + "attn_out", get(sa + "o_proj.weight"), tile_k,
+                 tile_n, glay.json, glay.hash);
+      add_zero_bias(tag + "attn_out.bias", hidden);
+    }
 
     for (const char *ln : {"input_layernorm", "post_attention_layernorm",
                            "pre_feedforward_layernorm",
@@ -831,9 +1062,21 @@ void prepare_model_gemma(const std::string &model_dir, const std::string &out,
     }
 
     const std::string mp = p + "mlp.";
-    add_gemm_b_host(w, tag + "gate_proj", get(mp + "gate_proj.weight"));
-    add_gemm_b_host(w, tag + "up_proj", get(mp + "up_proj.weight"));
-    add_gemm_b_host(w, tag + "down_proj", get(mp + "down_proj.weight"));
+    if (host_only) {
+      add_gemm_b_host(w, tag + "gate_proj", get(mp + "gate_proj.weight"));
+      add_gemm_b_host(w, tag + "up_proj", get(mp + "up_proj.weight"));
+      add_gemm_b_host(w, tag + "down_proj", get(mp + "down_proj.weight"));
+    } else {
+      // config["geglu_halves"] == "gate|up": the FIRST half gets the GELU.
+      add_gemm_b_concat_pad(w, tag + "ffn_up",
+                            {&get(mp + "gate_proj.weight"),
+                             &get(mp + "up_proj.weight")},
+                            2 * inter, tile_k, tile_n, glay.json, glay.hash);
+      add_zero_bias(tag + "ffn_up.bias", 2 * inter);
+      add_gemm_b(w, tag + "ffn_down", get(mp + "down_proj.weight"), tile_k,
+                 tile_n, glay.json, glay.hash);
+      add_zero_bias(tag + "ffn_down.bias", hidden);
+    }
   }
 
   add_gemm_b_host(w, "dense2.weight", d2w);

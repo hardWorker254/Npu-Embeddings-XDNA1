@@ -1,0 +1,9 @@
+﻿  b128  qkv         [8192, 1024, 3072] -> a84fcc8f09887c5078719205
+  b128  attn_out    [8192, 1024, 1024] -> c20293f5a0984c3b181d2bb6
+  b128  ffn_up      [8192, 1024, 4096] -> f630b3419190edaa1e11f79f
+  b128  ffn_down    [8192, 4096, 1024] -> 3a8dd4520558f1bd34d738e5
+  identity qkv@b128 vs attn_out@b128  74 differing bytes  OK
+  identity qkv@b128 vs ffn_up@b128  76 differing bytes  OK
+  identity qkv@b128 vs ffn_down@b128  71 differing bytes  OK
+
+  wrote runtime\artifacts_int8_large\gemm_rtp -- ONE xclbin, 4 streams (4 shapes x 1 batch tiers)

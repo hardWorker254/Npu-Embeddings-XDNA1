@@ -1,0 +1,82 @@
+[
+  {
+    "dtype": "bf16",
+    "shape": "qkv",
+    "container": "models\\bge-base-en-v1.5.npue",
+    "tensor": "layer.0.qkv",
+    "file": "bf16_qkv.bin",
+    "nbytes": 16384,
+    "sha256": "a2cc2d8842d88d83332d2e4c3e2a1b716cf677410eaeb1afd0a3a21e2e196a7e",
+    "zero_byte_fraction": 0.0028076171875
+  },
+  {
+    "dtype": "bf16",
+    "shape": "attn_out",
+    "container": "models\\bge-base-en-v1.5.npue",
+    "tensor": "layer.0.attn_out",
+    "file": "bf16_attn_out.bin",
+    "nbytes": 16384,
+    "sha256": "c750ca0091e53bca1be580c188eab165c821ae683d6c72b347a006ad0653d240",
+    "zero_byte_fraction": 0.0030517578125
+  },
+  {
+    "dtype": "bf16",
+    "shape": "ffn_up",
+    "container": "models\\bge-base-en-v1.5.npue",
+    "tensor": "layer.0.ffn_up",
+    "file": "bf16_ffn_up.bin",
+    "nbytes": 16384,
+    "sha256": "50d6707b705a34f5f054411daea5fada6312116ae60a514066162aabd62c793f",
+    "zero_byte_fraction": 0.0023193359375
+  },
+  {
+    "dtype": "bf16",
+    "shape": "ffn_down",
+    "container": "models\\bge-base-en-v1.5.npue",
+    "tensor": "layer.0.ffn_down",
+    "file": "bf16_ffn_down.bin",
+    "nbytes": 16384,
+    "sha256": "a5cd44e720871d4286183591b06bedb2c67009ea608eb701f210af4bd1701bf9",
+    "zero_byte_fraction": 0.0028076171875
+  },
+  {
+    "dtype": "int8",
+    "shape": "qkv",
+    "container": "models\\bge-base-en-v1.5.int8.npue",
+    "tensor": "layer.0.qkv",
+    "file": "int8_qkv.bin",
+    "nbytes": 16384,
+    "sha256": "183d1ba3028e7b98a916b3f7a4fcfe08e322ce3c730d5e05181ede901b2f02ae",
+    "zero_byte_fraction": 0.0098876953125
+  },
+  {
+    "dtype": "int8",
+    "shape": "attn_out",
+    "container": "models\\bge-base-en-v1.5.int8.npue",
+    "tensor": "layer.0.attn_out",
+    "file": "int8_attn_out.bin",
+    "nbytes": 16384,
+    "sha256": "10e06c454ab8386b61cb2d7a49021619657342c5c6166450e011b9c6d3827eeb",
+    "zero_byte_fraction": 0.02313232421875
+  },
+  {
+    "dtype": "int8",
+    "shape": "ffn_up",
+    "container": "models\\bge-base-en-v1.5.int8.npue",
+    "tensor": "layer.0.ffn_up",
+    "file": "int8_ffn_up.bin",
+    "nbytes": 16384,
+    "sha256": "90fcb380c016a2c277b35a8055f2d6e50391a3a1833b9b08c6d2720a7aa21a71",
+    "zero_byte_fraction": 0.0120849609375
+  },
+  {
+    "dtype": "int8",
+    "shape": "ffn_down",
+    "container": "models\\bge-base-en-v1.5.int8.npue",
+    "tensor": "layer.0.ffn_down",
+    "file": "int8_ffn_down.bin",
+    "nbytes": 16384,
+    "sha256": "3ef19d7ccc4d790e49649032634f720f987e2ca33c9ad0f8f79fcc911a3943e6",
+    "zero_byte_fraction": 0.03131103515625
+  }
+]

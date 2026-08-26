@@ -71,6 +71,15 @@ def main() -> int:
     ap.add_argument("--model", default="all-MiniLM-L6-v2",
                     help="container under models/, without .npue -- both "
                          "sides use it, so the comparison stays like for like")
+    # The CPU side loads a sentence-transformers DIRECTORY, the NPU side loads
+    # a .npue CONTAINER, and with int8 those stopped sharing a name: the
+    # container is `<model>.int8` while the checkpoint directory is still
+    # `<model>` (tasks/0078). Defaulting to --model keeps every existing
+    # invocation identical.
+    ap.add_argument("--cpu-model", default=None,
+                    help="checkpoint directory for the CPU side, when it "
+                         "differs from the container name (e.g. an int8 "
+                         "container packed from the same checkpoint)")
     ap.add_argument("--artifacts", default="artifacts_b128il")
     ap.add_argument("--threads", type=int, default=24)
     ap.add_argument("--pipeline", type=int, default=2)
@@ -95,7 +104,7 @@ def main() -> int:
             # transformers/sentence-transformers. This is BUILD-TIME reference
             # code in .venv-ref, never the shipped runtime, which is the same
             # boundary the Gemma goldens already sit on.
-            m = SentenceTransformer(str(REPO / "models" / args.model),
+            m = SentenceTransformer(str(REPO / "models" / (args.cpu_model or args.model)),
                                     device="cpu", trust_remote_code=True)
             # MUST match the NPU design's sequence length or the comparison
             # hands the CPU strictly more information.
@@ -130,7 +139,19 @@ def main() -> int:
             def encode_matched(sentences=None, *a, **kw):
                 if sentences is None:
                     sentences = kw.pop("sentences")
-                if prefix:
+                # DO NOT DOUBLE-PREFIX (0075). mteb chooses a prompt from the
+                # model's own prompts table by task type and passes it as
+                # `prompt=` / `prompt_name=`; sentence-transformers then
+                # prepends it. Prepending ours as well produced
+                #   "title: none | text: task: sentence similarity | query: X"
+                # on the CPU side against "title: none | text: X" on the NPU
+                # side -- two different strings, and the M8 delta measured
+                # THAT rather than the datapath (-1.88 mean, while the two
+                # sides' embeddings agreed to 1-cos 8.4e-06 on the same
+                # texts). When mteb has chosen one, it wins on both sides:
+                # NpuEncoder.encode() performs the same lookup against the
+                # container's copy of the same table.
+                if prefix and not (kw.get("prompt") or kw.get("prompt_name")):
                     sentences = [prefix + str(t) for t in sentences]
                 v = np.asarray(inner(sentences, *a, **kw), dtype=np.float32)
                 n = np.linalg.norm(v, axis=-1, keepdims=True)
@@ -141,7 +162,8 @@ def main() -> int:
         sys.path.insert(0, str(HERE))
         from npu_encoder import NpuEncoder
         return NpuEncoder(artifacts=args.artifacts, threads=args.threads,
-                          pipeline=args.pipeline, model=args.model)
+                          pipeline=args.pipeline, model=args.model,
+                          cpu_model=args.cpu_model)
 
     # Read the prefix once, from the container, so both sides agree by
     # construction rather than by two literals that can drift.

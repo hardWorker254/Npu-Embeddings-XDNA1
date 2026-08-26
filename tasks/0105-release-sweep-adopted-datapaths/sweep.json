@@ -1,0 +1,100 @@
+{
+    "cpu_mean_percent":  1.8,
+    "cpu_contenders":  [
+                           "BackgroundDownload ~1.14 core(s)",
+                           "clion64 ~0.2 core(s)"
+                       ],
+    "threads":  24,
+    "what":  "whole-catalogue release benchmark sweep, one session",
+    "power":  "no battery device reported (desktop, or the class is empty)",
+    "when":  "2026-08-24T15:54:36",
+    "rounds":  8,
+    "bench":  5,
+    "kind":  "hardware measurement",
+    "stages_this_run":  [
+                            "energy"
+                        ],
+    "cpu_quiet":  false,
+    "rows":  [
+                 {
+                     "model":  "all-MiniLM-L6-v2",
+                     "artifacts":  "artifacts_minilm_bfp16",
+                     "npu":  true,
+                     "dtype":  "bf16",
+                     "datapath":  "bfp16",
+                     "datapath_reported":  "bfp16-emulated MMAC, C as bf16",
+                     "gate":  "pass",
+                     "accuracy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\accuracy-all-MiniLM-L6-v2.txt",
+                     "throughput_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\throughput-all-MiniLM-L6-v2.txt",
+                     "interleaved_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\interleaved-all-MiniLM-L6-v2.txt",
+                     "energy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\energy-all-MiniLM-L6-v2.txt"
+                 },
+                 {
+                     "model":  "bge-small-en-v1.5",
+                     "artifacts":  "artifacts_small_bf16",
+                     "npu":  true,
+                     "dtype":  "bf16",
+                     "datapath":  "bf16",
+                     "datapath_reported":  "bf16 MMAC, C as fp32",
+                     "gate":  "pass",
+                     "accuracy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\accuracy-bge-small-en-v1.5.txt",
+                     "throughput_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\throughput-bge-small-en-v1.5.txt",
+                     "interleaved_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\interleaved-bge-small-en-v1.5.txt",
+                     "energy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\energy-bge-small-en-v1.5.txt"
+                 },
+                 {
+                     "model":  "bge-base-en-v1.5",
+                     "artifacts":  "artifacts_base_bfp16",
+                     "npu":  true,
+                     "dtype":  "bf16",
+                     "datapath":  "bfp16",
+                     "datapath_reported":  "bfp16-emulated MMAC, C as bf16",
+                     "gate":  "pass",
+                     "accuracy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\accuracy-bge-base-en-v1.5.txt",
+                     "throughput_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\throughput-bge-base-en-v1.5.txt",
+                     "interleaved_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\interleaved-bge-base-en-v1.5.txt",
+                     "energy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\energy-bge-base-en-v1.5.txt"
+                 },
+                 {
+                     "model":  "bge-large-en-v1.5",
+                     "artifacts":  "artifacts_large_bfp16",
+                     "npu":  true,
+                     "dtype":  "bf16",
+                     "datapath":  "bfp16",
+                     "datapath_reported":  "bfp16-emulated MMAC, C as bf16",
+                     "gate":  "pass",
+                     "accuracy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\accuracy-bge-large-en-v1.5.txt",
+                     "throughput_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\throughput-bge-large-en-v1.5.txt",
+                     "interleaved_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\interleaved-bge-large-en-v1.5.txt",
+                     "energy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\energy-bge-large-en-v1.5.txt"
+                 },
+                 {
+                     "model":  "nomic-embed-text-v1.5",
+                     "artifacts":  "artifacts_nomic_bfp16",
+                     "npu":  true,
+                     "dtype":  "bf16",
+                     "datapath":  "bfp16",
+                     "datapath_reported":  "bfp16-emulated MMAC, C as bf16",
+                     "gate":  "pass",
+                     "accuracy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\accuracy-nomic-embed-text-v1.5.txt",
+                     "throughput_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\throughput-nomic-embed-text-v1.5.txt",
+                     "interleaved_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\interleaved-nomic-embed-text-v1.5.txt",
+                     "energy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\energy-nomic-embed-text-v1.5.txt"
+                 },
+                 {
+                     "model":  "embeddinggemma-300m",
+                     "artifacts":  "artifacts_gemma_bfp16",
+                     "npu":  true,
+                     "dtype":  "bf16",
+                     "datapath":  "bfp16",
+                     "datapath_reported":  "bfp16-emulated MMAC, C as bf16",
+                     "gate":  "pass",
+                     "accuracy_pass":  true,
+                     "accuracy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\accuracy-embeddinggemma-300m.txt",
+                     "throughput_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\throughput-embeddinggemma-300m.txt",
+                     "interleaved_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\interleaved-embeddinggemma-300m.txt",
+                     "energy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0105-release-sweep-adopted-datapaths\\energy-embeddinggemma-300m.txt"
+                 }
+             ],
+    "lanes":  4
+}

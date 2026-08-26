@@ -92,8 +92,22 @@ def main() -> int:
     with Reader(str(REPO / "models" / f"{args.model}.npue")) as _c:
         _cfg = _c.config
     prefix = (_cfg.get("prompts") or {}).get(_cfg.get("prompt_default"), "")
+    # arch=1's runtime applies the prefix ITSELF, inside its own C++ tokenizer
+    # (`--prefix <name>`), so the exe must be handed the RAW text or it would
+    # be prefixed twice -- which would lengthen only the NPU side's sequences
+    # and make the throughput comparison measure the double prefix (0075).
+    is_gemma = _cfg.get("arch") == "gemma3_mqa_rope_geglu"
+    # `prompt_default` is ADVISORY metadata (tasks/0118): the runtime stopped
+    # applying it, so this is the harness choosing WHICH prompt to exercise --
+    # which is the role the field kept. None for a BERT container, and the flag
+    # is then omitted entirely rather than passed empty: `--prefix ""` on a
+    # model with no prompts table is a refusal, not a no-op, and this line used
+    # to send exactly that.
+    prompt_name = _cfg.get("prompt_default") if _cfg.get("prompts") else None
+    raw_sents = list(sents)
     if prefix:
-        print(f"  task prefix (all three sides): {prefix!r}")
+        print(f"  task prefix (all three sides): {prefix!r}"
+              + ("  [NPU side applies it in-process]" if is_gemma else ""))
         sents = [prefix + s for s in sents]
 
     # -- torch ---------------------------------------------------------------
@@ -153,6 +167,33 @@ def main() -> int:
     exe = REPO / "runtime" / "build" / "npuembed.exe"
 
     def run_npu():
+        # arch=1 has no --bench mode: it measures by encoding a real corpus,
+        # which is the same work the other two sides do on the same texts.
+        # --guard-contention gives it the refusal --bench already applies
+        # (tasks/0044) -- a foreign Active hw_context makes a ratio
+        # CONFIDENTLY wrong rather than merely noisy, because it hits one side.
+        if is_gemma:
+            import tempfile
+            with tempfile.TemporaryDirectory(prefix="cmp3_") as td:
+                txt = Path(td) / "in.txt"
+                txt.write_text(
+                    "\n".join(t.replace("\n", " ") for t in raw_sents) + "\n",
+                    encoding="utf-8", newline="\n")
+                r = subprocess.run(
+                    [str(exe), "..", "--model", args.model,
+                     "--artifacts", args.artifacts,
+                     "--threads", str(args.threads),
+                     "--pipeline", str(args.pipeline),
+                     *(["--prefix", prompt_name] if prompt_name else []),
+                     "--guard-contention", "--embed", str(txt)],
+                    cwd=str(REPO / "runtime"), capture_output=True, text=True)
+            if r.returncode:
+                raise SystemExit(f"npuembed failed:\n{r.stdout[-800:]}\n"
+                                 f"{r.stderr[-400:]}")
+            for line in r.stdout.splitlines():
+                if "seq/s" in line:
+                    return float(line.split("->")[1].split("seq/s")[0])
+            raise SystemExit("no seq/s line in npuembed output")
         r = subprocess.run(
             [str(exe), "..", "--model", args.model,
              "--artifacts", args.artifacts, "--threads", str(args.threads),

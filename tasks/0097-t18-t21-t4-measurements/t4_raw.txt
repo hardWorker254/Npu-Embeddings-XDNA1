@@ -1,0 +1,107 @@
+T4 raw command output -- 2026-08-23 (finishing tasks/0043)
+Env: cd C:\dev\mlir-aie ; . .\iron_env.ps1 ; cd C:\Users\vegar\Documents\GitHub\NpuEmbeddings
+
+All four artifact sets from 0043's own export commands already existed on disk
+(runtime/artifacts_large, artifacts_large_m32, artifacts_large_m16c8, artifacts_large_m16c4),
+as did models/bge-large-n16.npue -- nothing had to be rebuilt, only measured.
+
+design.json tile/cols confirmed to match 0043's plan exactly:
+  A artifacts_large:      tile m=64 k=64 n=32 cols=8  (production)
+  B artifacts_large_m32:  tile m=32 k=64 n=16 cols=8  (mid)
+  C artifacts_large_m16c8: tile m=16 k=64 n=16 cols=8  (small tile, full width)
+  D artifacts_large_m16c4: tile m=16 k=64 n=16 cols=4  (small tile, half width -- the
+                                                          only geometry that can also
+                                                          express attention, per 0043)
+
+=== A: .\runtime\build\npuembed.exe . --model bge-large-en-v1.5 --artifacts artifacts_large --probe-streams ===
+run1: qkv 18879  attn_out 6817  ffn_up 25073  ffn_down 25044   sum=75813
+run2: qkv 18799  attn_out 6769  ffn_up 25094  ffn_down 25032   sum=75694
+mean sum: 75753.5 us
+
+=== B: .\runtime\build\npuembed.exe . --model bge-large-n16 --artifacts artifacts_large_m32 --probe-streams ===
+run1: qkv 19998  attn_out 7315  ffn_up 26436  ffn_down 26364   sum=80113
+
+=== C: .\runtime\build\npuembed.exe . --model bge-large-n16 --artifacts artifacts_large_m16c8 --probe-streams ===
+run1: qkv 24680  attn_out 8583  ffn_up 31935  ffn_down 32442   sum=97640
+
+=== D: .\runtime\build\npuembed.exe . --model bge-large-n16 --artifacts artifacts_large_m16c4 --probe-streams ===
+run1: qkv 42103  attn_out 14981  ffn_up 55619  ffn_down 55879   sum=168582
+run2: qkv 42069  attn_out 14975  ffn_up 55770  ffn_down 56334   sum=169148
+mean sum: 168865 us
+
+All in us, M=8192 (batch 128, seq 64), bf16 A/B, fp32 C (pre-dates --c-bf16/--int8).
+
+=== ratios ===
+A -> B (m64->m32, same n=16... note NOT a clean single-variable isolation, n also
+        changed 32->16 and k stayed 64; recorded for completeness):
+  80113 / 75753.5 = 1.058x
+
+A -> C (tile-size penalty ALONE, cols fixed at 8): 97640 / 75753.5 = 1.289x
+C -> D (column-count penalty ALONE, tile fixed at m16,k64,n16): 168865 / 97640 = 1.729x
+A -> D (compounded, the unified candidate's real cost): 168865 / 75753.5 = 2.229x
+  check: 1.289 * 1.729 = 2.228  (matches A->D to 3 sig figs -- the two penalties are
+  independent, confirming 0043's own framing of why C exists)
+
+GMAC/ms (mean of 4 shapes, array efficiency):
+  A: (1.37+1.27+1.37+1.37)/4 = 1.345 GMAC/ms
+  D: (0.61+0.57+0.62+0.61)/4 = 0.6025 GMAC/ms  -- 44.8% of A's rate
+
+=== correctness spot-check (plain validate run, no --bench/--probe) ===
+.\runtime\build\npuembed.exe . --model bge-large-en-v1.5 --artifacts artifacts_large
+  embedding rel_fro vs HF golden           3.763e-03
+  worst 1 - cos vs HuggingFace             8.432e-06
+  PASS -- tolerance 2e-03 on 1-cos, no Python in this process
+  (exactly the documented production number -- confirms set A still encodes correctly)
+
+.\runtime\build\npuembed.exe . --model bge-large-n16 --artifacts artifacts_large_m16c4
+  embedding rel_fro vs HF golden           3.763e-03
+  worst 1 - cos vs HuggingFace             8.432e-06
+  PASS -- tolerance 2e-03 on 1-cos, no Python in this process
+  (identical numbers to set A -- confirms set D, the smallest/slowest tile, computes the
+  SAME arithmetic; only access order changed)
+
+Sets B and C were not independently re-verified for correctness this session (time
+budget; A and D bracket both cost axes and both pass, and only the tile geometry changed,
+not the arithmetic).
+
+=== note 0007 SS1.1 reopening, checked against 0090's finding -- CORRECTED after first pass ===
+First pass of this writeup got the direction backwards; corrected here.
+
+note 0007 SS1.1 proposes: pad attention's real N=64 per-column slice (8 wide at cols=8)
+up to 16 in the MEM TILE via `pad_dimensions`, so the CORE still receives a properly
+16-wide buffer (satisfying the microkernel's n%16==0) even though only 8 columns of it
+are real data. That would make n=16,cols=8 legal for attention (the padded half is
+multiplied by zero and discarded), instead of 0043's derived cols<=4. note 0007's own
+text already cites the exact restriction from `AIEDialect.cpp`'s `DMABDOp::verify()`:
+"Padding is only supported by memtile dma bds" -- i.e. §1.1's proposal was ALREADY
+mem-tile-scoped by construction, not a shim-level trick.
+
+Checked what tasks/0090 (T5, DMA compression) actually verified: it grepped the AIE2P
+vendor register tables (`xaie2pgbl_reginit.c`) for `.Compression`, and found mem-tile and
+compute-tile DMA modules AVAILABLE, shim DMA module UNAVAILABLE. It did NOT grep or quote
+a `.Padding` field anywhere in its TASK.md or its saved artifact
+(`tasks/0090-t5-dma-compression/artifacts/aie2p_shim_no_compression.txt` has no
+"Padding" line) -- 0090 answered a compression question, not a padding one. The prompt
+for this task characterised 0090 as having found `.Padding = XAIE_FEATURE_UNAVAILABLE`
+at the shim; that specific field was not in what 0090 actually checked, and this write-up
+does not repeat that claim as verified.
+
+What 0090 DOES support, correctly read: the general pattern that mem-tile and compute-tile
+DMA carry extra hardware features the shim DMA lacks. §1.1's mechanism lives entirely at
+the mem tile (where B already flows L3 -> mem tile -> cores in the whole-array design), so
+0090's finding is CONSISTENT WITH, not a refutation of, §1.1's mechanism being physically
+available. **§1.1's reopening of 0043 is not closed by anything measured this session.**
+
+What THIS session's C vs D measurement prices, for whenever §1.1 is actually built: if
+padding lets attention's own GEMM run at cols=8 (matching production width) instead of
+being capped at cols=4, the unified geometry the PROJECTIONS would have to share is C's
+(m16,k64,n16,cols8) rather than D's (m16,k64,n16,cols4) -- because the column halving is
+exactly the cost padding is meant to remove. That is a 1.289x tax on the projections
+(A->C), not 2.229x (A->D). At a 30-40% array share of the encode (0081's bge-large
+figure / 0051's MiniLM range), 1.289x costs roughly +8.7% to +11.6% of an encode's worth
+of array time to buy back ~2-5% of host attention work (CLAUDE.md's F3 figure) --
+smaller than D's clearly-negative trade, but still net negative on the numbers in hand,
+and unbuilt: the padding mechanism itself, the strided output destride 0007 flags, and
+attention's own achievable GEMM efficiency at n=16 have none been measured. The honest
+status is "narrower gap than previously assumed, still not demonstrated to pay, worth a
+real build before either CLAUDE.md sentence changes."

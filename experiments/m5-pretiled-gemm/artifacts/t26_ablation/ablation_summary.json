@@ -1,0 +1,10 @@
+{
+  "note": "Aggregated from cold_{0..4}.json, warm_{0..4}.json, bf16c_{0..4}.json, plain_check_{0..4}.json in this dir.",
+  "shape": {"M": 256, "K": 384, "N": 192, "tile": [64,64,48], "cols": 4},
+  "cold_rel_fro_mean": 0.00944211,
+  "warm_rel_fro_mean": 0.00944211,
+  "plain_check_rel_fro_mean": 0.00944211,
+  "bf16c_rel_fro_mean": 0.00959035,
+  "cold_vs_warm": "bit-identical per seed (verified to full float64 precision, see per-seed json)",
+  "bf16c_vs_cold_ratio": 1.0157
+}

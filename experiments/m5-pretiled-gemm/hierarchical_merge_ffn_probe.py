@@ -63,6 +63,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -87,7 +88,33 @@ from npue import tile_b, to_bf16_bits                    # noqa: E402
 CACHE = Path.home() / ".npu" / "cache"
 
 TM, TK, TN = 64, 64, 48       # one MiniLM-shaped ffn_up tile per producer
-N_DOWN = 16                    # reduced-scale ffn_down output width (see docstring)
+# ffn_down's output width. 16 is 0062's reduced scale, chosen so one output row
+# is exactly one 16-lane fp32 vector. 48 is PRODUCTION's own tile width and is
+# the widest that fits the relay's L1 (tasks/0083's streaming arithmetic:
+# 24,576 + 18,432 + 12,288 + 6,144 = 61,440 of 64,512; N=64 needs 73,728).
+N_DOWN = int(os.environ.get("NPUE_N_DOWN", "16"))
+assert N_DOWN in (16, 48), "only 16 and 48 have kernel entry points"
+# At N_DOWN=48 an fp32 output does not fit the relay's L1 -- see the compiler's
+# own memory map quoted beside copy_relay_kernel below.
+# Overridable so the two changes -- WIDTH and NARROWING -- can be tested
+# apart. Changing both at once and getting a hang tells you nothing about
+# which one caused it.
+BF16_COPY = os.environ.get("NPUE_BF16_COPY", "0") == "1"
+assert not (BF16_COPY and N_DOWN != 16), (
+    "the genuinely-bf16-typed hop-matmul entry point (tasks/0092) only "
+    "exists at N_DOWN=16; add ..._64x48x48_bf16acc before using this combo")
+NARROW_OUT = (BF16_COPY or
+              os.environ.get("NPUE_NARROW_OUT",
+                             "1" if N_DOWN == 48 else "0") == "1")
+# tasks/0092: bisection ladder rung 1 -- bypass ALL upstream compute (no acc
+# read, no weight buffer touched) and write a known constant pattern
+# (element i = i) straight into the bf16 output. Isolates "does the bf16
+# core->mem-tile->shim forward() drain work AT ALL" from "does the relay's
+# own compute hang it". Only meaningful with NARROW_OUT (a bf16 Y_out).
+CONST_PATTERN = os.environ.get("NPUE_CONST_PATTERN", "0") == "1"
+assert not (CONST_PATTERN and not BF16_COPY), (
+    "NPUE_CONST_PATTERN only replaces the BF16_COPY output kernel (both "
+    "sides already bf16-typed end to end); set NPUE_BF16_COPY=1 too")
 GROUP = 2                      # producer columns joined per merge mem tile
 N_HOPS = 2                     # merge groups == relay input channels (core: 2 in / 2 out)
 PRODUCER_COLS = [0, 1, 2, 3]
@@ -101,10 +128,25 @@ Y_SIZE = TM * N_DOWN           # 1024
 
 
 def markers_for():
-    return [f"aie.runtime_sequence(%arg0: memref<{TM * TK}xbf16>, "
-            f"%arg1: memref<{len(PRODUCER_COLS) * TK * TN}xbf16>, "
-            f"%arg2: memref<{Y_SIZE}xf32>)",
-            "ffn_down_hop_matmul_g2_64x48x16"]
+    """Identify the FAMILY, not the instance.
+
+    THE FIFTH INSTANCE of the marker-specificity fail-open (tasks/0030, 0053,
+    0054, 0083 have the others). Keying the marker on N_DOWN means sweeping
+    16 -> 48 never matches the PREVIOUS build, `@iron.jit` decides it is a cache
+    hit (it keys on the decorated function, and N_DOWN is read where the
+    decorator cannot see it), and the new run silently executes the old binary.
+
+    It announced itself here only because the host-side element count
+    disagreed -- `Tensor argument 'Y' has 3072 elements but the kernel was
+    compiled for 1024` -- which is luck, not a guard. A sweep whose shapes
+    happened to agree would have reported N=16's result under N=48's label.
+
+    So the marker names the kernel FAMILY and every width is purged.
+    """
+    return ["aie.runtime_sequence(%arg0: memref<"
+            f"{TM * TK}xbf16>, "
+            f"%arg1: memref<{len(PRODUCER_COLS) * TK * TN}xbf16>, ",
+            "ffn_down_hop_matmul_g2_64x48x"]
 
 
 def purge():
@@ -167,23 +209,69 @@ def _build(dev):
     # ffn_down_copy_out.cc) -- see their headers.
     kdir = HERE.parent / "m5-eltwise" / "kernels"
     zero_relay_kernel = ExternalFunction(
-        "zero_f32_1024", source_file=str(kdir / "ffn_down_zero.cc"),
-        arg_types=[np.ndarray[(Y_SIZE,), np.dtype[np.float32]]],
+        (f"zero_bf16_{TM * N_DOWN}" if BF16_COPY
+         else f"zero_f32_{TM * N_DOWN}"),
+        source_file=str(kdir / "ffn_down_zero.cc"),
+        arg_types=[np.ndarray[(Y_SIZE,),
+                   np.dtype[bfloat16 if BF16_COPY else np.float32]]],
         include_dirs=_inc,
     )
+    # tasks/0092: BF16_COPY used to call the SAME `..._64x48x{N_DOWN}` symbol
+    # (float* acc) while declaring acc_buf bf16 on the MLIR side -- IRON's
+    # arg_types shapes only the func.call declaration, not the linked object
+    # (kernel.py: external_func(..., inputs=self._arg_types) never touches
+    # the .o), so that call was silently writing 4096 B of float stores
+    # through a pointer to a 2048 B bf16 Buffer (confirmed: llvm-objdump on
+    # the cached .o shows a 0x40-stride vst per row, 64 rows). Real bug,
+    # objdump-confirmed, but it is NOT the same test as "does a bf16 output
+    # ObjectFifo hang" -- so BF16_COPY now calls the genuinely bf16-typed
+    # twin (`..._bf16acc`), matching the buffer it is actually given.
     hop_matmul_kernel = ExternalFunction(
-        "ffn_down_hop_matmul_g2_64x48x16",
+        (f"ffn_down_hop_matmul_g2_64x48x{N_DOWN}_bf16acc" if BF16_COPY
+         else f"ffn_down_hop_matmul_g2_64x48x{N_DOWN}"),
         source_file=str(kdir / "ffn_down_hop_matmul_g2.cc"),
         arg_types=[np.ndarray[(GROUP * TM * TN,), np.dtype[bfloat16]],
                    np.ndarray[(GROUP * TN * N_DOWN,), np.dtype[bfloat16]],
-                   np.ndarray[(Y_SIZE,), np.dtype[np.float32]]],
+                   np.ndarray[(Y_SIZE,), np.dtype[bfloat16 if BF16_COPY else np.float32]]],
         include_dirs=_inc,
     )
-    copy_relay_kernel = ExternalFunction(
-        "copy_f32_1024", source_file=str(kdir / "ffn_down_copy_out.cc"),
-        arg_types=[np.ndarray[(Y_SIZE,), np.dtype[np.float32]]] * 2,
-        include_dirs=_inc,
-    )
+    # AT N_DOWN=48 THE OUTPUT MUST BE NARROWED, AND THAT IS NOT A CHOICE.
+    # The compiler's own map for the relay tile at fp32 output:
+    #   stack 2,048 + Y_out 12,288 + two hops 24,576 + acc 12,288
+    #   + w_hop0/1 18,432 = 69,632 of 65,536  -> allocation failed
+    # tasks/0083's streaming-relay budget said 61,440 and was optimistic by
+    # exactly 8,192: it assumed a bf16 output (6,144, not 12,288) and forgot
+    # the 2,048-byte stack that CLAUDE.md trap 3 says makes the limit 63 KB.
+    # Narrowing the output to bf16 -- the same move tasks/0080 made on the
+    # GEMM's C, for the same reason -- brings it to 63,488 with 2,048 spare.
+    if CONST_PATTERN:
+        copy_relay_kernel = ExternalFunction(
+            f"ffn_down_const_pattern_{Y_SIZE}_bf16",
+            source_file=str(kdir / "probe_copy.cc"),
+            arg_types=[np.ndarray[(Y_SIZE,), np.dtype[bfloat16]]] * 2,
+            include_dirs=_inc,
+        )
+    elif BF16_COPY:
+        copy_relay_kernel = ExternalFunction(
+            f"probe_copy_{Y_SIZE}_bf16",
+            source_file=str(kdir / "probe_copy.cc"),
+            arg_types=[np.ndarray[(Y_SIZE,), np.dtype[bfloat16]]] * 2,
+            include_dirs=_inc,
+        )
+    elif NARROW_OUT:
+        copy_relay_kernel = ExternalFunction(
+            f"narrow_{Y_SIZE}_f32_bf16",
+            source_file=str(kdir / "narrow_f32_bf16.cc"),
+            arg_types=[np.ndarray[(Y_SIZE,), np.dtype[np.float32]],
+                       np.ndarray[(Y_SIZE,), np.dtype[bfloat16]]],
+            include_dirs=_inc,
+        )
+    else:
+        copy_relay_kernel = ExternalFunction(
+            f"copy_f32_{Y_SIZE}", source_file=str(kdir / "ffn_down_copy_out.cc"),
+            arg_types=[np.ndarray[(Y_SIZE,), np.dtype[np.float32]]] * 2,
+            include_dirs=_inc,
+        )
 
     A_l1_ty = np.ndarray[(TM, TK), np.dtype[bfloat16]]
     B_l1_ty = np.ndarray[(TK, TN), np.dtype[bfloat16]]
@@ -192,7 +280,21 @@ def _build(dev):
 
     A_ty = np.ndarray[(TM * TK,), np.dtype[bfloat16]]
     B_ty = np.ndarray[(len(PRODUCER_COLS) * TK * TN,), np.dtype[bfloat16]]
-    Y_ty = np.ndarray[(Y_SIZE,), np.dtype[np.float32]]
+    # tasks/0092 (coordinator-directed BD diff): THIS WAS HARDCODED fp32
+    # regardless of NARROW_OUT. The runtime_sequence's outer host-facing `Y`
+    # argument is what the shim's aiex.dma_configure_task_for/aie.dma_bd pair
+    # is generated FROM -- input_with_addresses.mlir for the (real,
+    # non-BF16_COPY) bf16-output hang showed exactly this: Y_out/Y_pipe's
+    # internal ObjectFifo buffers correctly bf16, but the shim-side sequence
+    # still declared `%arg2 : memref<1024xf32>` and issued a `len = 1024`
+    # dma_bd against it -- i.e. the shim DMA was configured to move 4096 B
+    # (1024 x f32) while `main()` allocates the host buffer as 1024 x bf16 =
+    # 2048 B (`Y = iron.zeros(Y_SIZE, dtype=(bfloat16 if NARROW_OUT else
+    # np.float32), ...)`) and the mem-tile side of the SAME transfer is
+    # correctly bf16-sized. A 2x length mismatch on one end of a DMA that
+    # compiles clean and never completes is exactly the "transfers forever,
+    # no diagnostic" signature the coordinator's BD-diff was looking for.
+    Y_ty = np.ndarray[(Y_SIZE,), np.dtype[bfloat16 if NARROW_OUT else np.float32]]
 
     # --- per-column A/B feed, one shim + mem tile per producer column,
     # exactly like cross_column_join_probe.py. Columns 0 and 2 (DEST_COLS)
@@ -248,11 +350,31 @@ def _build(dev):
         for g in range(N_HOPS)
     ]
 
-    acc_buf = Buffer(np.ndarray[(Y_SIZE,), np.dtype[np.float32]], name="ffn_down_acc")
+    acc_buf = Buffer(np.ndarray[(Y_SIZE,),
+                     np.dtype[bfloat16 if BF16_COPY else np.float32]],
+                     name="ffn_down_acc")
 
-    Y_out = ObjectFifo(np.ndarray[(Y_SIZE,), np.dtype[np.float32]], name="Y_out", depth=1)
-    Y_pipe = Y_out.cons().forward(obj_type=np.ndarray[(Y_SIZE,), np.dtype[np.float32]],
-                                  name="Y_pipe", depth=2)
+    Y_elem = bfloat16 if NARROW_OUT else np.float32
+    # tasks/0092: was depth=(2 if NARROW_OUT else 1). This probe's own
+    # `sequence()` drains exactly ONE Y tile per invocation (no loop over
+    # multiple output tiles to pipeline against), so the second buffer
+    # bought nothing here -- and at N_DOWN=48 it is the entire reason the
+    # design overflows L1: the compiler's own map (0092) totals 70,912 of
+    # 65,536 with depth=2, 64,768 (768 B spare) with depth=1. 0087 section 2's
+    # 63,488-fits arithmetic silently assumed single-buffered Y_out and never
+    # noticed NARROW_OUT was doubling it.
+    Y_out = ObjectFifo(np.ndarray[(Y_SIZE,), np.dtype[Y_elem]], name="Y_out",
+                       depth=1)
+    # tasks/0092 bisection rung 2: NPUE_Y_MEM_COL picks the mem tile the
+    # Y_out->Y_pipe forward hops through. Default (-1) is the compiler's own
+    # choice, which lands on mem_tile_0_1 -- the SAME mem tile col0's A/B
+    # feed AND the C_mem_g0 merge-join destination already use (triple duty).
+    # An explicit column not already in DEST_COLS (e.g. 1 or 3) tests whether
+    # that contention, not the forward() primitive itself, is the hang.
+    y_mem_col = int(os.environ.get("NPUE_Y_MEM_COL", "-1"))
+    y_fwd_kwargs = {} if y_mem_col < 0 else {"tile": Tile(y_mem_col, 1)}
+    Y_pipe = Y_out.cons().forward(obj_type=np.ndarray[(Y_SIZE,), np.dtype[Y_elem]],
+                                  name="Y_pipe", depth=2, **y_fwd_kwargs)
 
     def gemm_gelu_core_fn(in_a, in_b, out_c, acc, zero, matmul, gelu_narrow):
         a = in_a.acquire(1)
@@ -291,7 +413,13 @@ def _build(dev):
         [group_mems[0].cons(), group_mems[1].cons(),
          weight_bufs[0], weight_bufs[1], acc_buf, Y_out.prod(),
          zero_relay_kernel, hop_matmul_kernel, copy_relay_kernel],
-        tile=Tile(0, 4), stack_size=0x800)
+        # 0xD00 when the relay narrows its output. narrow_f32_bf16.cc's own
+        # header says gemm_pretiled runs it at 0xD00 and that "if this ever
+        # hangs or corrupts, the stack is the first suspect (traps 5b/0031)".
+        # At 0x800 this design compiled and hung with no diagnostic
+        # (ERT_CMD_STATE_TIMEOUT) -- isolated to the narrowing, not the width,
+        # by hanging at N_DOWN=16 too where the fp32 output passes.
+        tile=Tile(0, 4), stack_size=(0xD00 if NARROW_OUT else 0x800))
 
     a_full_tap = TensorTiler2D.simple_tiler((TM, TK))[0]
     b_full_taps = TensorTiler2D.simple_tiler(
@@ -359,7 +487,8 @@ def main() -> int:
 
     A = iron.zeros((TM, TK), dtype=bfloat16, device="npu")
     B = iron.zeros((len(PRODUCER_COLS) * TK, TN), dtype=bfloat16, device="npu")
-    Y = iron.zeros(Y_SIZE, dtype=np.float32, device="npu")
+    Y = iron.zeros(Y_SIZE, dtype=(bfloat16 if NARROW_OUT else np.float32),
+                   device="npu")
 
     A[:] = a.astype(bfloat16)
     b_tiled = np.concatenate(
@@ -371,6 +500,28 @@ def main() -> int:
 
     hierarchical_merge_ffn(A, B, Y)
 
+    if CONST_PATTERN:
+        # tasks/0092 bisection rung 1: the kernel ignores `acc` entirely and
+        # writes element i = i, i in 0..1023 -- no upstream compute is on the
+        # path to the output fifo at all. Check against THAT pattern, not the
+        # GEMM reference.
+        got_pattern = Y.numpy().reshape(-1).astype(np.float64)
+        want_pattern = np.arange(Y_SIZE, dtype=bfloat16).astype(np.float64)
+        ok = bool(np.array_equal(got_pattern, want_pattern))
+        print("CONST_PATTERN bisection rung: bf16 core->mem-tile->shim "
+              "forward() drain, NO upstream compute on the path:")
+        print("PASS -- constant pattern arrived intact" if ok else
+              f"FAIL -- pattern mismatch, first diff at "
+              f"{int(np.argmax(got_pattern != want_pattern)) if not ok else -1}")
+        result = dict(TM=TM, TK=TK, TN=TN, N_DOWN=N_DOWN, const_pattern=True,
+                      correctness_pass=ok)
+        if args.out:
+            Path(args.out).write_text(json.dumps(result, indent=2), encoding="utf-8")
+            print(f"wrote {args.out}")
+        return 0 if ok else 1
+
+    # bf16 out at N_DOWN=48 -- one extra rounding, on top of the two the
+    # 3e-2 tolerance was already set for.
     got = Y.numpy().reshape(TM, N_DOWN).astype(np.float64)
     result = dict(TM=TM, TK=TK, TN=TN, N_DOWN=N_DOWN, group=GROUP, n_hops=N_HOPS)
     finite = np.isfinite(got).all()

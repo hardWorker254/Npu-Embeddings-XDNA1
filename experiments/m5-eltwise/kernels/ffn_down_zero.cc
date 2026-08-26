@@ -33,4 +33,24 @@ void zero_f32_1024(float *restrict acc) {
   }
 }
 
+// (64, 48) fp32 = 3072 elements, for the production-width relay (tasks/0087).
+void zero_f32_3072(float *restrict acc) {
+  auto ot = aie::begin_restrict_vector<16>(acc);
+  const aie::vector<float, 16> z = aie::broadcast<float, 16>(0.0f);
+  for (int i = 0; i < 3072; i += 16) {
+    *ot++ = z;
+  }
+}
+
+// bf16 accumulator, for tasks/0087's dtype-vs-kernel hang discriminator only.
+// Accumulating in bf16 is numerically wrong (trap 2) and this is never used by
+// a design that computes anything -- it exists to isolate a hang.
+void zero_bf16_1024(bfloat16 *restrict acc) {
+  auto ot = aie::begin_restrict_vector<16>(acc);
+  const aie::vector<bfloat16, 16> z = aie::broadcast<bfloat16, 16>((bfloat16)0.0f);
+  for (int i = 0; i < 1024; i += 16) {
+    *ot++ = z;
+  }
+}
+
 } // extern "C"

@@ -176,6 +176,27 @@ inline std::string json_field_string(const std::string &s,
   return json_string(s, i);
 }
 
+// ABSENT AND EMPTY ARE DIFFERENT for `prompt_name` (tasks/0118), and
+// json_field_string() above cannot tell them apart -- it returns the fallback
+// for both. A missing `prompt_name` on a model that has task prompts is a
+// refusal; `"prompt_name": ""` is an explicit request for no prefix at all.
+// Collapsing the two would reintroduce exactly the silent default this task
+// removes.
+//
+// `Other` is its own answer rather than being folded into `Absent`: a `null`
+// or numeric prompt_name is a MALFORMED request, and reporting it as "you did
+// not send one" would send the caller looking in the wrong place.
+enum class FieldKind { Absent, String, Other };
+
+inline FieldKind json_field_kind(const std::string &s, const std::string &key,
+                                 std::string &out) {
+  size_t i = find_value(s, key);          // json_string() advances it
+  if (i == std::string::npos) return FieldKind::Absent;
+  if (s[i] != '"') return FieldKind::Other;
+  out = json_string(s, i);
+  return FieldKind::String;
+}
+
 inline std::string json_escape(const std::string &s) {
   std::string o;
   o.reserve(s.size() + 8);

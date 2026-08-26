@@ -44,15 +44,53 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Version,
-    # All four design sets, so every catalogue model reports `ready` rather
-    # than `no design` out of the box. They are ~600 KB of gemm_rtp each and
+    # Five design sets, so every catalogue model reports `ready` rather than
+    # `no design` out of the box. They are ~600 KB of gemm_rtp each and
     # compress well, so shipping the lot costs almost nothing and removes the
     # commonest first-run confusion: a model the table offers and the runtime
-    # then refuses. artifacts_nomic is separate from artifacts_base despite
-    # both serving hidden 768 -- nomic's gated ffn_up is N=6144 (tasks/0069).
-    [string[]]$Artifacts = @("artifacts_b128il", "artifacts_base",
-                             "artifacts_large", "artifacts_nomic"),
-    [string]$OutDir = "dist"
+    # then refuses. artifacts_nomic_bfp16 is separate from artifacts_base_bfp16
+    # despite both serving hidden 768 -- nomic's gated ffn_up is N=6144
+    # (tasks/0069).
+    #
+    # THE bfp16 ADOPTION (tasks/0104, T23). Per-model MTEB gate verdicts
+    # (tasks/0101, 0103, `--sides cpu,npu` real gate runs) moved five of six
+    # models onto the bfp16-emulated MMAC + bf16-C datapath -- MiniLM,
+    # bge-base, bge-large, nomic, and (differential gate only) EmbeddingGemma
+    # all PASS; bge-small FAILS at -0.5010 against the -0.5 line and stays on
+    # the ORIGINAL plain-bf16 set. bge-small and MiniLM share hidden-384
+    # geometry, so they now need TWO directories rather than one:
+    # artifacts_small_bf16 (plain bf16, bge-small's) and artifacts_minilm_bfp16.
+    #
+    # bge-small ships artifacts_small_bf16 rather than the older
+    # artifacts_b128il even though the two are the same design: b128il predates
+    # the `emulate_bfp16` field, so it cannot state its own datapath and the
+    # runtime reports it as UNRECORDED. Same geometry, same accuracy
+    # (rel_fro 3.789e-03, 1-cos 8.348e-06, verified), and pick_artifacts()
+    # breaks a tie in favour of the set that records what it is.
+    # Each design.json now records its own datapath
+    # (`emulate_bfp16`) and the runtime's catalogue records which datapath
+    # each model was ADOPTED for (CatalogEntry::datapath) -- a model can no
+    # longer be silently served the datapath it did NOT clear the gate for
+    # (runtime/src/main.cpp's design_fits()/pick_artifacts()).
+    #
+    # EmbeddingGemma was NOT in this list until 2026-08-26, and the reason was
+    # specific: arch=1 had no --serve/HTTP path, so a `serve` release had
+    # nothing to do with its design set. tasks/0115 built that path (T34's last
+    # unbuilt item) -- one shared serve_http() for every architecture, gated on
+    # the endpoint being bit-identical to arch=1's own --embed over base64 --
+    # so the exclusion no longer has a reason and gemma joins the set. It costs
+    # 645 KB, the same order as every other design set here.
+    [string[]]$Artifacts = @("artifacts_small_bf16", "artifacts_minilm_bfp16",
+                             "artifacts_base_bfp16", "artifacts_large_bfp16",
+                             "artifacts_nomic_bfp16", "artifacts_gemma_bfp16"),
+    [string]$OutDir = "dist",
+    # THE SWEEP THIS RELEASE SHIPS, NAMED RATHER THAN GUESSED (tasks/0085).
+    # This was hardcoded to tasks\0073-m13-release-benchmarks, so a release cut
+    # after a NEWER sweep would have shipped the older numbers -- silently, and
+    # while passing its own freshness check below, because that check reads
+    # whichever file it was pointed at. "Newest wins" is not the fix either
+    # (trap 7c); naming it is.
+    [string]$SweepDir = "tasks\0085-m13-release-sweep"
 )
 
 $ErrorActionPreference = "Stop"
@@ -89,13 +127,18 @@ $sets = foreach ($a in $Artifacts) {
         $inter = $ks[-1]
         $gated = $false
     }
+    # THE DATAPATH (tasks/0104, T23). $null on a pre-0104 set means "the
+    # field did not exist yet", which IS plain bf16 -- every set exported
+    # before this field existed is.
+    $bfp16 = ($null -ne $json.emulate_bfp16) -and [bool]$json.emulate_bfp16
     [pscustomobject]@{ name = $a; dir = $d; hidden = $hidden
-                       intermediate = $inter; gated_ffn = $gated }
+                       intermediate = $inter; gated_ffn = $gated
+                       emulate_bfp16 = $bfp16 }
 }
 
 # The benchmark sweep, which a release must carry. Checked BEFORE any staging
 # work, so the refusal costs nothing and cannot be half-done.
-$sweepPath = Join-Path $REPO "tasks\0073-m13-release-benchmarks\sweep.json"
+$sweepPath = Join-Path $REPO (Join-Path $SweepDir "sweep.json")
 if (-not (Test-Path $sweepPath)) {
     throw @"
 missing $sweepPath -- a release ships freshly measured benchmarks for the WHOLE
@@ -115,7 +158,7 @@ if ($sweepAge -gt 7) {
     Write-Warning "you have changed since. Re-run tools\release_benchmark.ps1."
 }
 $benchmarks = [ordered]@{
-    source = "tasks/0073-m13-release-benchmarks/sweep.json"
+    source = ($SweepDir -replace '\\', '/') + "/sweep.json"
     measured_utc = $sweep.when
     machine_power = $sweep.power
     lanes = $sweep.lanes; threads = $sweep.threads
@@ -193,7 +236,8 @@ $manifest = [ordered]@{
     # which is which.
     designs = @($sets | ForEach-Object {
         [ordered]@{ set = $_.name; hidden = $_.hidden
-                    intermediate = $_.intermediate; gated_ffn = $_.gated_ffn }
+                    intermediate = $_.intermediate; gated_ffn = $_.gated_ffn
+                    emulate_bfp16 = $_.emulate_bfp16 }
     })
     built_utc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
     # READ FROM THE SWEEP, NOT FROM MEMORY.

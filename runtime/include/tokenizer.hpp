@@ -33,6 +33,18 @@ struct Encoded {
   std::vector<int32_t> attention_mask;   // 1 for real tokens, 0 for padding
   std::vector<int32_t> token_type_ids;   // all zero for single sequences
   int32_t n_tokens = 0;                  // before padding, including [CLS]/[SEP]
+
+  // WHAT THE TEXT ACTUALLY WAS, as opposed to what survived.
+  //
+  // `n_tokens` is capped at `max_len` by construction, so on a truncated input
+  // it reads EXACTLY as an input that happened to fit -- which is why nothing
+  // downstream could ever tell the two apart, and why `usage.prompt_tokens`
+  // could only ever report the cut count. These two fields are the signal that
+  // was missing: `n_tokens_full` is what `n_tokens` would have been with
+  // unlimited room, and it is the number to put in an error message, because
+  // it tells the caller how much they need rather than how much they lost.
+  int32_t n_tokens_full = 0;
+  bool truncated = false;
 };
 
 class Tokenizer {

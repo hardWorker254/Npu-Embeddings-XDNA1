@@ -1,0 +1,18 @@
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model embeddinggemma-300m.int8 --artifacts artifacts_int8c_gemma --embed C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0074-m13-gemma-on-npu\corpus_520.txt --threads 24 --pipeline 4 --guard-contention
+NpuEmbeddings C++ runtime -- EmbeddingGemma (arch=1)
+  model      C:\Users\vegar\Documents\GitHub\NpuEmbeddings\models\embeddinggemma-300m.int8.npue
+  npu        exclusive -- 6 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+  hidden     768, tokenizer 262144 tokens
+  path       NPU -- 4 GEMMs/layer x 24 layers = 96 dispatches, ONE xclbin, one hw_context
+  designs    C:\Users\vegar\Documents\GitHub\NpuEmbeddings/runtime/artifacts_int8c_gemma  (4 streams, 1 batch tiers)
+  qkv        N=1536  (q[0,768) k[768,1024) v[1024,1280), 256 zero-padded cols)
+  staged     106.2 MB of tiled int8 weights on the device
+  host       RMSNorm x97, RoPE, GeGLU, MQA attention (2.3% of MACs)
+  input      520 texts, seq=64, prefix='document' -> title: none | text: 
+  pipeline   4 concurrent lanes, one NPU mutex, 6 host threads per lane
+  embedded   520 texts in 3.32 s  ->  156.6 seq/s (wall clock, end-to-end -- NOT an NPU kernel claim, CLAUDE.md rule 1)
+  breakdown  npu 2434 ms (in 817, dispatch 1415, out 202) | conv 609 | bias 1312 | norm 1574 | attn 3084 | rope 381 | geglu 0 | tok 8  [480 dispatches]
+  [0] -0.0161 -0.0042 -0.0055 +0.0204 +0.0115 +0.0506 ...
+  [1] -0.0472 +0.0178 +0.0144 -0.0097 +0.0099 -0.0131 ...
+  [2] +0.0122 +0.0133 +0.0539 -0.0118 -0.0366 -0.0105 ...
+  [3] -0.0816 +0.0146 +0.0154 +0.0312 -0.0503 +0.0792 ...

@@ -1,12 +1,15 @@
 {
   "kind": "verification",
   "task": "0037",
+  "prompt_names": [],
+  "prompt_name_used": null,
   "model": "all-MiniLM-L6-v2-npu",
   "single": {
     "dim": 384,
     "norm": 0.9999999403953552
   },
   "base64_max_diff": 0.0,
+  "separation_margin": 0.4682525098323822,
   "pair_cos": [
     0.7216207981109619,
     0.5563857555389404,
@@ -19,6 +22,10 @@
     "empty list": 400,
     "bad format": 400,
     "token ids": 400
+  },
+  "prompts": {
+    "named": 400,
+    "empty": 400
   },
   "pass": true
 }

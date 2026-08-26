@@ -5,6 +5,26 @@ Everything marked **verified** was checked against the installed toolchain or
 our own hardware today; everything marked **theirs** is someone else's measured
 number, attributed, and not yet reproduced here.*
 
+> **READ THE VERSION CLAIMS AS OF 2026-08-19.** This note repeatedly says the
+> installed toolchain is **mlir-aie 1.3.4** (§"Why this note exists", §3.6, and
+> the availability claims throughout Part 1). That was true when it was written
+> and stopped being true the next day:
+> [`0058`](../../tasks/0058-m11-iron-1.4-migration/TASK.md) moved us to `main`
+> commit `7e00b57955e`, installed as **1.4.2.dev16+g7e00b57**, on 2026-08-20.
+>
+> **The Part 1 feature survey is unaffected** — every feature it verified as
+> present in 1.3.4 is still present. What the version drift *did* invalidate is
+> a claim elsewhere: [T28](../OPEN-THREADS.md#t28) recorded
+> `--aie-objectfifo-liveness` as something upstream had and we did not, and we
+> have had it since that upgrade. Corrected there on 2026-08-23, four days after
+> it stopped being true.
+>
+> §3.6's warning is now **more** relevant, not less: it documents that the
+> rolling `latest-wheels-4` channel can resolve an untagged checkout *back* to
+> 1.3.4. Anyone upgrading should read that sentence before pinning anything, and
+> [note 0009](0009-toolchain-provenance.md) for why the next upgrade needs to
+> stamp its own provenance.
+
 ---
 
 ## Why this note exists

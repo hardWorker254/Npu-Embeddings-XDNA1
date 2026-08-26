@@ -1,0 +1,81 @@
+{
+    "cpu_mean_percent":  6.3,
+    "cpu_contenders":  [
+                           "clion64 ~0.84 core(s)"
+                       ],
+    "threads":  24,
+    "what":  "whole-catalogue release benchmark sweep, one session",
+    "power":  "no battery device reported (desktop, or the class is empty)",
+    "when":  "2026-08-25T14:35:31",
+    "rounds":  8,
+    "bench":  5,
+    "kind":  "hardware measurement",
+    "stages_this_run":  [
+                            "accuracy"
+                        ],
+    "cpu_quiet":  false,
+    "rows":  [
+                 {
+                     "model":  "all-MiniLM-L6-v2",
+                     "artifacts":  "artifacts_minilm_bfp16",
+                     "npu":  true,
+                     "dtype":  "bf16",
+                     "datapath":  "bfp16",
+                     "gate":  "pass",
+                     "accuracy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0108-fuse-epilogue-bfp16\\accuracy_fused\\accuracy-all-MiniLM-L6-v2.txt",
+                     "datapath_reported":  "bfp16-emulated MMAC, C as bf16"
+                 },
+                 {
+                     "model":  "bge-small-en-v1.5",
+                     "artifacts":  "artifacts_small_bf16",
+                     "npu":  true,
+                     "dtype":  "bf16",
+                     "datapath":  "bf16",
+                     "gate":  "pass",
+                     "accuracy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0108-fuse-epilogue-bfp16\\accuracy_fused\\accuracy-bge-small-en-v1.5.txt",
+                     "datapath_reported":  "bf16 MMAC, C as fp32"
+                 },
+                 {
+                     "model":  "bge-base-en-v1.5",
+                     "artifacts":  "artifacts_base_bfp16",
+                     "npu":  true,
+                     "dtype":  "bf16",
+                     "datapath":  "bfp16",
+                     "gate":  "pass",
+                     "accuracy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0108-fuse-epilogue-bfp16\\accuracy_fused\\accuracy-bge-base-en-v1.5.txt",
+                     "datapath_reported":  "bfp16-emulated MMAC, C as bf16"
+                 },
+                 {
+                     "model":  "bge-large-en-v1.5",
+                     "artifacts":  "artifacts_large_bfp16",
+                     "npu":  true,
+                     "dtype":  "bf16",
+                     "datapath":  "bfp16",
+                     "gate":  "pass",
+                     "accuracy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0108-fuse-epilogue-bfp16\\accuracy_fused\\accuracy-bge-large-en-v1.5.txt",
+                     "datapath_reported":  "bfp16-emulated MMAC, C as bf16"
+                 },
+                 {
+                     "model":  "nomic-embed-text-v1.5",
+                     "artifacts":  "artifacts_nomic_bfp16",
+                     "npu":  true,
+                     "dtype":  "bf16",
+                     "datapath":  "bfp16",
+                     "gate":  "pass",
+                     "accuracy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0108-fuse-epilogue-bfp16\\accuracy_fused\\accuracy-nomic-embed-text-v1.5.txt",
+                     "datapath_reported":  "bfp16-emulated MMAC, C as bf16"
+                 },
+                 {
+                     "model":  "embeddinggemma-300m",
+                     "artifacts":  "artifacts_gemma_bfp16",
+                     "npu":  true,
+                     "dtype":  "bf16",
+                     "datapath":  "bfp16",
+                     "gate":  "pass",
+                     "accuracy_pass":  true,
+                     "accuracy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0108-fuse-epilogue-bfp16\\accuracy_fused\\accuracy-embeddinggemma-300m.txt",
+                     "datapath_reported":  "bfp16-emulated MMAC, C as bf16"
+                 }
+             ],
+    "lanes":  4
+}

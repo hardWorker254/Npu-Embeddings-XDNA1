@@ -23,7 +23,9 @@ Why MiniLM first:
   WordPiece with a plain 30522-line vocab. Nothing exotic can go wrong.
 - **No prompt-prefix protocol.** e5 requires `query:`/`passage:` and nomic requires
   `search_query:`/`search_document:`; getting those wrong silently degrades quality.
-  MiniLM needs none.
+  MiniLM needs none. For the models that do need one, the runtime refuses rather
+  than guessing: `--prefix` on `embed`, `"prompt_name"` per request on the
+  endpoint, no default on either (tasks/0118).
 - **Many independent oracles.** 258M downloads, Apache-2.0, with reference
   implementations in PyTorch, ONNX, OpenVINO, Rust/candle, ggml, Go and JS.
 

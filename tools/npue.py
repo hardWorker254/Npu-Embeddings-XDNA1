@@ -35,12 +35,26 @@ MAGIC = b"NPUE"
 VERSION = 1
 
 ARCH_BERT_ABS_GELU_POSTLN = 0
-# EmbeddingGemma-300M (Gemma3): RMSNorm x/rms*(1+w), MQA + RoPE + q_norm/
-# k_norm, GeGLU. Runs entirely on the HOST -- see tasks/0064-m12-embeddinggemma-arch1-integration/TASK.md. GEMM operands for this arch are stored PLAIN
-# (F32, row-major [K,N], no block_panel tiling and no layout_hash) because
-# there is no NPU kernel for this arch yet: nothing here ever goes to a DMA
-# descriptor, so the tile_n/L1-budget/DMA-BD-limit machinery the BERT arch
-# needs is not applicable and was deliberately not built.
+# EmbeddingGemma-300M (Gemma3): RMSNorm x/rms*(1+w), MQA + RoPE (theta is PER
+# LAYER) + q_norm/k_norm between the projection and RoPE, GeGLU, and four
+# RMSNorms per layer rather than BERT's two LayerNorms.
+#
+# RUNS ON THE ARRAY since tasks/0074-m13-gemma-on-npu/TASK.md -- 97.7% of its
+# MACs, on pre-tiled bf16 operands under BERT's tensor names, exactly like
+# arch=2 below. Until then it was host-only, because MQA's 1 KV head at
+# head_dim 256 makes K and V 256 wide and 256 caps the legal tile_n at 16.
+# The fix is ZERO-PADDING the fused Q|K|V from 1280 to 1536 (a multiple of
+# tile_n * n_aie_cols = 384): zero columns of B give exactly-zero columns of
+# C, so it is exact rather than an approximation, and the host slices Q/K/V
+# off the front by offset. See gemma_qkv_blocks() in tools/pack_npue.py.
+#
+# The HOST-only layout still exists and is still packable (--gemma-host-only),
+# but it is now the correctness CONTROL, not the product: it accumulates every
+# GEMM in double precision and is tied to reference/encoder_gemma.py at 1-cos
+# 5.496e-13, which is what the array path is gated against. A container says
+# which of the two it holds in config["gemm_layout"] ("pretiled_bf16" or
+# "host"); the runtime READS that rather than inferring it from the arch,
+# because the same architecture now has both.
 ARCH_GEMMA3_MQA_ROPE_GEGLU = 1
 
 # nomic-embed-text-v1.5 (nomic_bert): RoPE (NeoX-style, theta=1000, applied to
@@ -61,9 +75,10 @@ ARCH_GEMMA3_MQA_ROPE_GEGLU = 1
 # has no biases, and RoPE replaces the absolute position table) and costs far
 # less than threading nullable branches through the hot path for one new arch.
 #
-# Unlike arch=1 (Gemma, HOST-only), this arch's GEMM operands ARE pre-tiled
-# bf16 block_panel -- exactly like BERT -- because nomic's geometry (head_dim
-# 64, every N a multiple of 384, K in {768, 3072}) fits the array.
+# This arch's GEMM operands are pre-tiled bf16 block_panel, exactly like BERT,
+# because nomic's geometry (head_dim 64, every N a multiple of 384, K in
+# {768, 3072}) fits the array without any padding at all. arch=1 now does the
+# same, but only after padding its fused qkv -- see its note above.
 ARCH_NOMIC_ROPE_SWIGLU = 2
 
 FLAG_PRETILED = 1 << 0
@@ -78,6 +93,15 @@ ALIGN = 4096
 # widened on read -- the same convention as reference/safetensors_io.py.
 NP_DTYPE = {"F32": np.dtype("<f4"), "I32": np.dtype("<i4"), "I64": np.dtype("<i8"),
             "U16": np.dtype("<u2"), "BF16": np.dtype("<u2"),
+            # I8 carries a per-output-channel symmetrically quantised GEMM
+            # operand (tasks/0078). The int8 MMAC datapath is a different one
+            # from bf16's -- native (8,8,8) mac_dims, an int32 accumulator
+            # with NO rounding in the reduction -- measured at 5.5-7.7x on
+            # every production shape (tasks/0077). Scales ride alongside as an
+            # F32 "<name>.wscale" tensor; without them the bytes are
+            # meaningless, which is why the runtime refuses a container whose
+            # operand dtype disagrees with the design's `a_dtype`.
+            "I8": np.dtype("<i1"),
             # U8 carries opaque bytes -- the tokenizer vocabulary, so a
             # deployed model is ONE file rather than a file plus a
             # vocab.txt that must not get separated from it.

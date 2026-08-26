@@ -94,7 +94,95 @@ production column count, so `A → C` is the tile-size penalty alone and
 
 ## Results
 
-*(filled in below)*
+**Filled in 2026-08-23** ([`0097`](../0097-t18-t21-t4-measurements/TASK.md)). All four
+artifact sets (`artifacts_large`, `artifacts_large_m32`, `artifacts_large_m16c8`,
+`artifacts_large_m16c4`) and `models/bge-large-n16.npue` already existed on disk from
+this task's own export commands above; nothing had to be rebuilt. `--probe-streams`
+(tasks/0048, not yet written when this task's Results section was left empty) is the
+right instrument: no host work in the loop, so it isolates the array from the host
+`bench` path. Two repeats per set (A and D; B and C got one each, low priority since
+A/D bracket the question), idle array, contention gate green throughout
+(`xrt-smi examine --report aie-partitions` showed no `Active` foreign context on every
+check).
+
+Per-stream `us/disp`, mean of repeats, and the four-shape sum (fp32 C, bf16 A/B — none
+of these predate `--c-bf16` or `--int8`, so this is the plain production bf16 datapath):
+
+| set | m,k,n,cols | qkv | attn_out | ffn_up | ffn_down | **sum** | GMAC/ms (mean) |
+|---|---|---:|---:|---:|---:|---:|---:|
+| **A** (production) | 64,64,32,8 | 18,839 | 6,793 | 25,084 | 25,038 | **75,754** | 1.35 |
+| **B** (mid) | 32,64,16,8 | 19,998 | 7,315 | 26,436 | 26,364 | **80,113** | 1.27 |
+| **C** (small tile, full width) | 16,64,16,8 | 24,680 | 8,583 | 31,935 | 32,442 | **97,640** | 1.05 |
+| **D** (small tile, half width — the unified candidate) | 16,64,16,4 | 42,086 | 14,978 | 55,695 | 56,107 | **168,865** | 0.60 |
+
+All four in µs, M=8192 (batch 128, seq 64), the bge-large projection shapes.
+
+**Correctness spot-check** (not part of the original plan, added because a fast wrong
+design is not a result): plain `.\npuembed.exe . --model <name> --artifacts <set>`
+(no `--bench`, no `--probe`) on set **A** and set **D** both reproduce the documented
+production number exactly — `rel_fro` 3.763e-03, worst `1-cos` 8.432e-06, PASS. Sets B
+and C were not independently re-verified this session (A and D bracket both cost axes
+and both pass, and the tile geometry only changes access order, not arithmetic — but
+this is inference, not measurement, for B and C specifically).
+
+### The two costs, isolated
+
+- **A → C (tile-size penalty alone, cols fixed at 8): 1.289×.** Shrinking the tile from
+  the production (64,64,32) to the unified candidate's (16,64,16) costs 28.9% more array
+  time by itself, before touching column count.
+- **C → D (column-count penalty alone, tile fixed at 16,64,16): 1.729×.** Halving the
+  array from 8 columns to 4 costs another 72.9%.
+- **A → D (the full cost of the only geometry that can also express attention): 2.229×.**
+  Compounding, not additive (1.289 × 1.729 = 2.228, matching to 3 significant figures —
+  the two penalties are independent, as the plan's split experiment intended).
+
+### The verdict CLAUDE.md has been citing without support
+
+CLAUDE.md and `docs/CURRENT_STATUS.md` both currently credit this task with concluding
+that folding attention onto the array is "not worth the fight," but until today that
+conclusion had no measurement behind it in this file — task `0089` flagged the gap this
+session. It is now supported, and the number is sharper than "not worth it": **the only
+geometry that can express attention costs the four projection GEMMs 2.23× their current
+array time**, against the ~2–5% of the encode that attention itself costs on the host
+(CLAUDE.md's own F3 figure, and the `docs/CURRENT_STATUS.md` "~4%" estimate). Even under
+the most generous version of the trade — the array being, say, 40% of a bge-large encode
+(the high end measured for MiniLM in `0051`; bge-large's own int8 figure from `0081` is
+30.4%) — moving projections onto the D geometry would add roughly `0.40 × 1.23 ≈ 0.49`
+of an encode's worth of array time to remove at most 0.05 of an encode's worth of host
+attention. **The trade is unambiguously negative, by roughly an order of magnitude, at
+any plausible array share.** CLAUDE.md's existing wording ("has not found it worth the
+fight") is confirmed rather than refuted, and can now cite this measurement instead of
+standing on the plan's un-measured intuition.
+
+**note 0007 §1.1's `pad_dimensions` idea is not closed by anything measured here.**
+§1.1 proposes padding attention's real 8-wide-per-column N=64 slice to 16 *in the mem
+tile* (`AIEDialect.cpp`'s own verifier already restricts `pad_dimensions` to mem tiles,
+which is exactly where §1.1 proposed to use it), making `n=16, cols=8` legal for
+attention instead of this task's derived `cols<=4`. `tasks/0090` (T5, DMA compression)
+checked the AIE2P vendor register tables, and a follow-up read of the same file settles
+the padding question directly — `.Padding` in `xaie2pgbl_reginit.c`:
+
+| line | DMA module | `.Padding` |
+|---:|---|---|
+| 1667 | `Aie2PMemTileDmaMod` | **`XAIE_FEATURE_AVAILABLE`** |
+| 1905 | `Aie2PTileDmaMod` (compute tile) | `XAIE_FEATURE_UNAVAILABLE` |
+| 2158 | `Aie2PShimDmaMod` | `XAIE_FEATURE_UNAVAILABLE` |
+
+So the hardware has padding **only on the mem tile** — precisely where §1.1 wants to use
+it, and matching what `AIEDialect.cpp`'s verifier already enforces in software. This
+**confirms the mechanism exists in silicon** rather than merely not refuting it.
+(Correcting this task's own first draft, which said 0090 had not checked `.Padding` at
+all: it had — the field sits three lines below the `.Compression` flag 0090 quotes — but
+the shim's `UNAVAILABLE` there is not the relevant tile, which is why it reads as
+irrelevant at first glance.) **If** padding works, the geometry the projections would have to
+share is set **C** here (cols=8), not **D** — a **1.289×** tax rather than **2.229×**,
+since the column halving is exactly what padding is meant to remove. That is a
+meaningfully smaller cost than this task's headline number, and it changes the verdict
+from "clearly negative" to "still probably negative, at 30–40% array share, but close
+enough to be worth an actual build" — the padding mechanism itself remains unbuilt and
+unmeasured. See [`0097`](../0097-t18-t21-t4-measurements/TASK.md) T4 section for the
+full reasoning and the correction of an earlier mischaracterisation of what `0090`
+established.
 
 ---
 

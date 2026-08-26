@@ -89,6 +89,14 @@ std::string json_str(const std::string &t, const std::string &key,
   return t.substr(i, t.find('"', i) - i);
 }
 
+bool json_bool(const std::string &t, const std::string &key, bool fallback) {
+  size_t i = t.find("\"" + key + "\"");
+  if (i == std::string::npos) return fallback;
+  i = t.find(':', i) + 1;
+  while (i < t.size() && (t[i] == ' ' || t[i] == '\n' || t[i] == '\t')) ++i;
+  return t.compare(i, 4, "true") == 0;
+}
+
 std::vector<size_t> json_size_array(const std::string &t,
                                     const std::string &key) {
   std::vector<size_t> out;
@@ -198,7 +206,48 @@ Design::Design(Device &dev, const std::string &dir)
     const std::string cd = json_str(js, "c_dtype", "f32");
     if (cd == "bf16") info_.c_elem_bytes = 2;
     else if (cd == "f32") info_.c_elem_bytes = 4;
+    else if (cd == "i32") info_.c_elem_bytes = 4;
     else throw std::runtime_error(dir + ": unknown c_dtype '" + cd + "'");
+    info_.c_is_int = (cd == "i32");
+    // THE OPERAND DATAPATH (tasks/0078). Absent in every artifact exported
+    // before it, and every one of those is bf16 -- so silence reads as bf16
+    // rather than as a default nobody chose. i8 changes what the host must do
+    // on BOTH sides of the dispatch (quantise A in, dequantise C out), so a
+    // runtime that guessed would move the right number of bytes and compute
+    // nonsense.
+    const std::string ad = json_str(js, "a_dtype", "bf16");
+    if (ad == "bf16") info_.a_elem_bytes = 2;
+    else if (ad == "i8") info_.a_elem_bytes = 1;
+    else throw std::runtime_error(dir + ": unknown a_dtype '" + ad + "'");
+
+    // THE MMAC DATAPATH (tasks/0104, T23). Absent means false -- every
+    // artifact exported before this field existed is plain bf16.
+    info_.emulate_bfp16 = json_bool(js, "emulate_bfp16", false);
+    // Absent != false. See DesignInfo::datapath_recorded -- a pre-0104
+    // set that really is bfp16 has no key, and reporting it as bf16 is a
+    // claim we cannot support.
+    info_.datapath_recorded =
+        js.find("\"emulate_bfp16\"") != std::string::npos;
+  }
+
+  // TOOLCHAIN PROVENANCE (T39, tasks/0106). A SEPARATE file from design.json,
+  // written by the same export step -- absence is normal (every design built
+  // before tasks/0106 has none) and must read as UNRECORDED, not as a parse
+  // failure. Reuses the same dependency-free string readers as design.json
+  // above; the fields inside are as fail-open as the export tool that wrote
+  // them (an unavailable git HEAD is a recorded "unavailable" string, not a
+  // missing key).
+  {
+    std::ifstream tf(dir + "/toolchain.json");
+    if (tf) {
+      std::stringstream tss;
+      tss << tf.rdbuf();
+      const std::string ts = tss.str();
+      info_.mlir_aie_version = json_str(ts, "mlir_aie_version", "unavailable");
+      info_.peano_version = json_str(ts, "peano_version", "unavailable");
+      info_.mlir_aie_git_head = json_str(ts, "mlir_aie_git_head", "unavailable");
+      info_.toolchain_recorded = true;
+    }
   }
 
   info_.buffer_bytes = json_size_array(js, "buffers");

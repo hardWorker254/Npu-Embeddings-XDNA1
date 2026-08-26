@@ -1,0 +1,12 @@
+
+=== dense ramp [-120,0] (N=100000) ===
+  algorithm only (fp64 Horner)      : max 2.010e-08  rms 1.057e-08
+  full bf16 datapath, floor (AIE default) : max 7.109e-03  rms 1.730e-03
+  full bf16 datapath, conv_even           : max 3.702e-03  rms 9.193e-04
+  floor/conv_even max-error ratio         : 1.920x
+
+=== realistic pre-softmax d*log2e (N=100000) ===
+  algorithm only (fp64 Horner)      : max 2.013e-08  rms 1.050e-08
+  full bf16 datapath, floor (AIE default) : max 7.109e-03  rms 2.933e-03
+  full bf16 datapath, conv_even           : max 3.702e-03  rms 1.370e-03
+  floor/conv_even max-error ratio         : 1.920x

@@ -37,6 +37,15 @@ param(
     # only one model to measure. That is also why energy exists for MiniLM and
     # for nothing else.
     [string]$Model = "all-MiniLM-L6-v2",
+    # WHICH MODEL THE CPU ARM LOADS. `$Model` names a .npue container; the CPU
+    # arm loads a HUGGINGFACE checkpoint directory, and for an int8 container
+    # no such directory exists -- `models\all-MiniLM-L6-v2.int8\` is not a
+    # thing. Left to default, every int8 row's CPU run died instantly and the
+    # differential came out at -0.8 to 1.2 J/1000 seq: a number that is not
+    # merely wrong but the wrong SIGN, reported without complaint (tasks/0085).
+    #
+    # Defaulting to $Model keeps every existing caller identical.
+    [string]$CpuModel = "",
     [string]$Artifacts = "artifacts_b128il",
     [int]$Threads = 24,
     # Lanes. The production default moved 2 -> 4 in tasks/0052; this script
@@ -98,30 +107,103 @@ function Run-Pair {
     }
 }
 
+# WHICH ARCHITECTURE, read from the container's own header rather than from a
+# flag or the model's name (0075). arch=1 has no `--bench` mode -- it measures
+# by encoding a real corpus -- so the two NPU commands below differ, and
+# guessing wrong would silently measure nothing (`--bench` is simply ignored by
+# that path, so the process would exit after one demo encode and the
+# differential would be noise).
+#
+# The .npue header is `magic[4] version[4] arch[4] flags[4] ...`, so arch is a
+# little-endian uint32 at byte 8.
+$container = Join-Path $REPO "models\$Model.npue"
+if (-not (Test-Path $container)) { throw "no container at $container" }
+
+# Resolve the CPU arm's checkpoint, and REFUSE rather than measure nothing.
+# The differential method cannot tell "the load ran and used little energy"
+# from "the load died in 0.2 s", so a missing checkpoint has to be caught here
+# or it is reported as a small negative number (tasks/0085).
+if (-not $CpuModel) { $CpuModel = $Model }
+$cpuDir = Join-Path $REPO "models\$CpuModel"
+if (-not (Test-Path $cpuDir)) {
+    throw @"
+no HuggingFace checkpoint at $cpuDir, so the CPU arm cannot run.
+
+`$Model names a .npue CONTAINER; the CPU arm loads a checkpoint DIRECTORY, and
+for a quantised container there is none -- an int8 model's CPU baseline is the
+bf16 model it was quantised from. Pass -CpuModel with that name.
+"@
+}
+$hdr = [byte[]]::new(16)
+$fs = [IO.File]::OpenRead($container)
+try { $null = $fs.Read($hdr, 0, 16) } finally { $fs.Dispose() }
+$arch = [BitConverter]::ToUInt32($hdr, 8)
+$isGemma = ($arch -eq 1)
+Write-Host ("container arch = {0}{1}" -f $arch,
+            $(if ($isGemma) { " (arch=1: --embed corpus, no --bench)" } else { "" })) -ForegroundColor Yellow
+
+# arch=1's NPU side encodes a FILE, so the corpus has to exist before the
+# command string is built. One file per encode-count, each holding
+# encodes*Batch lines, so "an encode" means the same amount of work as it does
+# on the CPU side (energy_cpu_load.py --encodes n --batch B).
+$corpusFor = @{}
+if ($isGemma) {
+    $src = Get-Content (Join-Path $REPO "tasks\0074-m13-gemma-on-npu\corpus.txt")
+    foreach ($n in @($Low, $High, [int]($Low / $Lanes), [int]($High / $Lanes))) {
+        if ($corpusFor.ContainsKey($n)) { continue }
+        $need = $n * $Batch
+        $lines = New-Object System.Collections.Generic.List[string]
+        while ($lines.Count -lt $need) { foreach ($l in $src) { if ($lines.Count -lt $need) { $lines.Add($l) } } }
+        $f = Join-Path $OUT "corpus-$n.txt"
+        # NO -Encoding utf8 on Windows PowerShell 5.1: it writes a BOM, which
+        # becomes part of line 0 and silently changes the first sequence
+        # (tasks/0074 spent a debugging cycle on exactly this).
+        [IO.File]::WriteAllLines($f, $lines, (New-Object Text.UTF8Encoding $false))
+        $corpusFor[$n] = $f
+    }
+}
+
 $results = @()
 
 Write-Host "=== CPU: sentence-transformers, batch $Batch ===" -ForegroundColor Cyan
 $py = Join-Path $REPO ".venv-ref\Scripts\python.exe"
 $results += Run-Pair -Name "cpu-st" -WorkDir $REPO -SeqPerEncode $Batch -CmdFor {
     param($n)
-    "`"$py`" experiments\m8-npu-vs-cpu\energy_cpu_load.py --encodes $n --batch $Batch --model $Model"
+    "`"$py`" experiments\m8-npu-vs-cpu\energy_cpu_load.py --encodes $n --batch $Batch --model $CpuModel"
 }
 
 Write-Host "=== NPU: single lane ===" -ForegroundColor Cyan
 $results += Run-Pair -Name "npu-single" -WorkDir $RUNTIME -SeqPerEncode $Batch -CmdFor {
     param($n)
-    ".\build\npuembed.exe .. --model $Model --artifacts $Artifacts --threads $Threads --bench $n"
+    if ($isGemma) {
+        ".\build\npuembed.exe .. --model $Model --artifacts $Artifacts --threads $Threads --pipeline 1 --embed `"$($corpusFor[$n])`""
+    } else {
+        ".\build\npuembed.exe .. --model $Model --artifacts $Artifacts --threads $Threads --bench $n"
+    }
 }
 
 Write-Host "=== NPU: pipelined, $Lanes lanes ===" -ForegroundColor Cyan
 # --bench N with --pipeline L runs N GROUPS of L encodes, so divide the counts
 # by L to keep the encode totals identical to the other two configurations.
-$script:Low = [int]($Low / $Lanes); $script:High = [int]($High / $Lanes)
-$results += Run-Pair -Name "npu-pipe$Lanes" -WorkDir $RUNTIME -SeqPerEncode ($Lanes * $Batch) -CmdFor {
-    param($n)
-    ".\build\npuembed.exe .. --model $Model --artifacts $Artifacts --threads $Threads --pipeline $Lanes --bench $n"
+#
+# arch=1 is NOT like that: `--embed` encodes one corpus of a fixed size, and
+# lanes only decide how that fixed work is split across concurrent encoders.
+# So its counts stay put -- dividing them would have measured a quarter of the
+# work while labelling it the same, i.e. a 4x energy "win" that is entirely an
+# accounting error.
+if (-not $isGemma) {
+    $script:Low = [int]($Low / $Lanes); $script:High = [int]($High / $Lanes)
 }
-$script:Low = $Low * $Lanes; $script:High = $High * $Lanes
+$results += Run-Pair -Name "npu-pipe$Lanes" -WorkDir $RUNTIME `
+    -SeqPerEncode $(if ($isGemma) { $Batch } else { $Lanes * $Batch }) -CmdFor {
+    param($n)
+    if ($isGemma) {
+        ".\build\npuembed.exe .. --model $Model --artifacts $Artifacts --threads $Threads --pipeline $Lanes --embed `"$($corpusFor[$n])`""
+    } else {
+        ".\build\npuembed.exe .. --model $Model --artifacts $Artifacts --threads $Threads --pipeline $Lanes --bench $n"
+    }
+}
+if (-not $isGemma) { $script:Low = $Low * $Lanes; $script:High = $High * $Lanes }
 
 Write-Host ""
 Write-Host "================ RESULT ================" -ForegroundColor Green

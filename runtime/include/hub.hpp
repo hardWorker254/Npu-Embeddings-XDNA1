@@ -89,7 +89,35 @@ struct CatalogEntry {
   // fetch list and packer, and a future BERT-family gated-FFN model must not
   // inherit any of that by sharing one flag.
   bool gated_ffn = false;
+
+  // Width of the fused qkv GEMM operand, when it is NOT `3 * hidden`. Same
+  // reason `gated_ffn` exists, one field to the left: `list` decides whether a
+  // design serves this model before the container exists, and an MQA/GQA model
+  // fuses to a narrower qkv than an MHA one. EmbeddingGemma-300M has ONE KV
+  // head at head_dim 256, so Q|K|V is 1280 and the packer zero-pads it to 1536
+  // to make the tiling legal at tile_n=48 (tasks/0074). 0 means "3*hidden",
+  // which is every other row here.
+  int64_t qkv_n = 0;
+
+  // Which MMAC datapath this model was ADOPTED for (tasks/0104, T23):
+  // "bf16" (the default) or "bfp16". This is a DEPLOYMENT decision, not a
+  // property of the weights -- the .npue is byte-identical either way, unlike
+  // int8, which needs its own container (`b_layout_hash` differs). It exists
+  // because geometry alone cannot tell a bfp16 design apart from a
+  // plain-bf16 one at the same (hidden, intermediate, qkv_n): bge-small
+  // shares MiniLM's hidden-384 geometry and FAILED the bfp16 MTEB gate
+  // (-0.5010, tasks/0103) where MiniLM passed, so the two must never be
+  // allowed to share a directory or fall to alphabetical sort order.
+  // pick_artifacts()/design_fits() read this and refuse a design.json whose
+  // own "emulate_bfp16" disagrees; an explicit --artifacts always overrides,
+  // same precedent as a mismatched int8 pairing (tasks/0080's own comment).
+  std::string datapath = "bf16";
 };
+
+// True when this row's weights are NOT checksum-verified. Only ever true for
+// a row `add` wrote without a sha256 (tasks/0076). Kept as a method rather
+// than a second bool so it cannot drift from the field it describes.
+inline bool unpinned(const CatalogEntry &e) { return e.sha256.empty() && !e.gated; }
 
 const std::vector<CatalogEntry> &catalog();
 
@@ -98,6 +126,31 @@ const std::vector<CatalogEntry> &catalog();
 const CatalogEntry *find(const std::string &name);
 
 using Log = std::function<void(const std::string &)>;
+
+// --- the user catalogue ----------------------------------------------------
+//
+// `<root>/models/catalog.json` holds rows that `npuembeddings add` wrote. It
+// is MERGED AFTER the built-in table and never replaces it: the six built-in
+// rows carry pins this repository fetched and validated against goldens, and a
+// JSON file that could override them would let an edit silently repoint
+// `bge-base-en-v1.5` at other weights while every table still said "bge-base".
+// `add` refuses to shadow a built-in name for the same reason.
+//
+// One writer (`load_user_catalog`), called once from main() before anything
+// reads `catalog()`. Same discipline as main.cpp's g_* geometry.
+void load_user_catalog(const std::string &root, const Log &log = nullptr);
+
+// Append `e` to the user catalogue and persist it. Throws if the name is
+// already taken by a built-in or by an existing user row.
+void add_to_user_catalog(const std::string &root, const CatalogEntry &e);
+
+// Read a repository's config.json from HuggingFace and fill in the geometry
+// fields of a CatalogEntry, WITHOUT downloading the weights. This is how `add`
+// learns a finetune's shape: derived from the checkpoint's own config, never
+// copied from the model it was finetuned from -- a finetune that changed its
+// FFN width would otherwise be handed a design built for the original.
+CatalogEntry probe_repo(const std::string &repo, const Log &log,
+                        const std::string &token_override = "");
 
 // Fetch one file over HTTPS into `dest`, following redirects (the HuggingFace
 // CDN always redirects). Writes to `dest + ".part"` and renames on success,

@@ -1,0 +1,19 @@
+fp32C matmul+zero object -- grep for rnd/round/crrnd (expect ZERO hits):
+(none found -- confirms no crrnd write anywhere in the compiled matmul/zero object)
+
+bf16C narrow_3072_f32_bf16 object -- grep for crrnd (expect a real write):
+16:      60: e1 00 00 58 0c d8 03 00 00 5b 01 20 00 f0 2c 00      	nopa	;		nopb	;		nops	;		nopx	;		mov	crrnd, #0xc;		nopv	
+44:      60: e1 00 00 58 0c d8 03 00 00 5b 01 20 00 f0 2c 00      	nopa	;		nopb	;		nops	;		nopx	;		mov	crrnd, #0xc;		nopv	
+72:      60: e1 00 00 58 0c d8 03 00 00 5b 01 20 00 f0 2c 00      	nopa	;		nopb	;		nops	;		nopx	;		mov	crrnd, #0xc;		nopv	
+
+matmul object DOES contain the bfp16 quantisation instructions (vconv.bfp16ebs8.fp32), so the emulated-bf16 code path was compiled in; only the crrnd write around it is missing:
+55:     13c: ba 3e 04 a6 02 34 0a 77 a5 a3	vlda.conv.fp32.bf16	 cml2, [p5], #0x40;		vldb	 x8, [p7], m0;		vshuffle	x10, x9, x8, r2
+56:     146: ba 3e 06 e6 02 74 09 71 ad a3	vlda.conv.fp32.bf16	 cmh2, [p5], #0x40;		vldb	 x5, [p1], m0;		vshuffle	x11, x9, x8, r3
+60:     160: 4a 11 f4 22 1d 74 1e 77 a5 c3	vlda.conv.fp32.bf16	 cml2, [p6], #0x40;		vldb	 x9, [p7], #0x40;		vmul.f	dm2, y5, y0, r4
+61:     16a: 3c e8 3b 72 ad c3    	vlda.conv.fp32.bf16	 cmh2, [p6], #0x40;		vldb	 x7, [p1], #0x40
+62:     170: ba 3e 04 a6 02 34 0a 77 a5 a3	vlda.conv.fp32.bf16	 cml2, [p5], #0x40;		vldb	 x8, [p7], m0;		vshuffle	x10, x9, x8, r2
+63:     17a: f6 30 06 e6 02 36 89 e9 12 72 ad a3  	vlda.conv.fp32.bf16	 cmh2, [p5], #0x40;		vldb	 x5, [p1], m0;		vconv.bfp16ebs8.fp32	 ex3, dm2;		vshuffle	x11, x9, x8, r3
+64:     186: 02 30 44 9d 02 c0 26 61      	vconv.bfp16ebs8.fp32	 ex6, dm2;		vshuffle	x10, x7, x5, r2
+66:     196: 18 36 09 0a  	vconv.bfp16ebs8.fp32	 ex4, dm2
+67:     19a: 66 11 f4 22 02 fe 70 ed 3c 7e a5 c3  	vlda.conv.fp32.bf16	 cml2, [p6], #0x40;		vldb	 x9, [p7], #0x40;		add.nc	lc, r1, #-0x4;		vmul.f	dm2, y5, y0, r4
+68:     1a6: 4b 36 49 11 00 78 00 00 00 36 09 e9 3b 72 ad c3      	vlda.conv.fp32.bf16	 cmh2, [p6], #0x40;		vldb	 x7, [p1], #0x40;		vconv.bfp16ebs8.fp32	 ex2, dm2;		movxm	ls, #0x0;		vmac.f	dm1, dm1, ex3, ex6, r5

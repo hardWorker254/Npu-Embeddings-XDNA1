@@ -54,9 +54,17 @@ public:
   // own padding), so batch=1 gives bit-for-bit the same per-text result a
   // batched implementation would, at the cost of not sharing GEMM calls
   // across texts -- an acceptable trade for a correctness-first first cut.
+  //
+  // `index` and `allow_truncation` exist only for the error this throws when
+  // the text does not fit `max_len` (npue::InputTooLong). The policy is an
+  // ARGUMENT rather than a global because this class is a library type that
+  // the CLI, the verify tools and main() all construct independently; a
+  // global read from here would bind it to one of those three. Default is to
+  // refuse, so a caller that has not thought about it gets the safe answer.
   std::vector<float> encode_one(
       const std::string &text, int max_len,
-      const std::string &prefix_name = GemmaTokenizer::default_prefix_name()) const;
+      const std::string &prefix_name = GemmaTokenizer::default_prefix_name(),
+      size_t index = 0, bool allow_truncation = false) const;
 
   GemmaTokenizer tok;
 

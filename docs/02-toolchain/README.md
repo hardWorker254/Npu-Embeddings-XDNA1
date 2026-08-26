@@ -15,14 +15,14 @@ biggest unknown and it is retired.
 
 | Component | Location | Version |
 |---|---|---|
-| mlir-aie (IRON) | `C:\dev\mlir-aie\ironenv\Lib\site-packages\mlir_aie` | 1.3.4 |
+| mlir-aie (IRON) | `C:\dev\mlir-aie\ironenv\Lib\site-packages\mlir_aie` | **1.4.2.dev16+g7e00b57** |
 | **Peano** (llvm-aie) | `C:\dev\mlir-aie\ironenv\Lib\site-packages\llvm-aie` | 21.0.0.2026080301 |
 | XRT SDK | **`C:\Xilinx\XRT`** | 2.21.0 |
 | Python | `C:\dev\mlir-aie\ironenv` (venv on conda `iron`) | **3.13.15** |
 | MSVC | VS Community 2026 (v18), toolset 14.51 | on PATH |
 | cmake / ninja / clang | `C:\Program Files\CMake`, VS-bundled | on PATH |
 | MinGW `make` | `C:\msys64\mingw64\bin\mingw32-make.exe` | GNU Make 4.4.1 |
-| Source checkout | `C:\dev\mlir-aie` | tag v1.3.4, commit `ed23bba` (2026-07-01) |
+| Source checkout | `C:\dev\mlir-aie` | **`main`, commit `7e00b57955e` (2026-08-17)** — `git describe`: `v1.4.1-16-g7e00b57955e` |
 
 **Not installed, by design:** `xchesscc` / Vitis AIE Essentials. It has no native
 Windows distribution. See "Peano only" below.
@@ -268,16 +268,36 @@ Prebuilt helper library (no need to compile it):
 13. **Device mismatch** — building an `aie2` (Phoenix) xclbin and loading it on Strix is
     the likeliest cause of an xclbin/device error. Keep `NPU2=1` / `--dev npu2` consistent.
 
-## Our checkout is stale
+## Our checkout, and how far behind it is
 
-`C:\dev\mlir-aie` is at v1.3.4 (2026-07-01), detached HEAD, with a dirty working tree
-(modified `getting_started` examples, untracked `iron_env.*`, trace JSONs).
+> **This section said "our checkout is stale" and described a v1.3.4 detached
+> HEAD until 2026-08-23. That was fixed on 2026-08-20 by
+> [`0058`](../../tasks/0058-m11-iron-1.4-migration/TASK.md) and this doc was not
+> updated — found by grepping for `1.3.4` after a toolchain question. Corrected
+> rather than deleted, because the stale-doc failure is the point.**
 
-Upstream `main` has since **replaced** `buildHostWinNative.md` §2 — the 2-hour
-"build XRT from source with vcpkg" procedure — with a prebuilt SDK download
-(`xrt_windows_sdk.zip` → `C:\Xilinx\XRT`), and now calls native Windows the
-*recommended* path rather than experimental.
+`C:\dev\mlir-aie` is on **`main`**, commit **`7e00b57955e`** (2026-08-17).
+`git describe` reads `v1.4.1-16-g7e00b57955e` — sixteen commits past the v1.4.1
+tag, which is exactly what the installed wheel's `1.4.2.dev16` encodes. The
+working tree is clean apart from untracked build by-products (`.idea/`,
+generated `aie.mlir` / `input_with_addresses.mlir` / `trace.json` under
+`programming_examples`).
 
-**Our `C:\Xilinx\XRT` already matches the prebuilt-SDK layout**, so we are compatible
-with the modern instructions. **Do not follow the local doc's §2.** Refreshing the
-checkout is worthwhile but is not a blocker.
+**Upstream has tagged `v1.4.2` (2026-08-22), five days after our commit, and we
+are not on it.** Its headline changes are in the subsystem this project leans on
+hardest — *"ObjectFIFOs are now fully dynamic, with simplified lowering and lock
+allocation"*, BD iteration, out-of-order S2MM receive channels, and enhanced DMA
+verification — and it flags possible API churn around `npu.dma_memcpy_nd`.
+Whether to take it is a deliberate decision, not a routine refresh: see
+[`.claude/skills/update-mlir-aie`](../../.claude/skills/update-mlir-aie/SKILL.md)
+for the procedure and
+[note 0009](../../research/notes/0009-toolchain-provenance.md) for why the last
+upgrade needs to be auditable before the next one happens.
+
+The XRT half of this section still stands. Upstream `main` **replaced**
+`buildHostWinNative.md` §2 — the 2-hour "build XRT from source with vcpkg"
+procedure — with a prebuilt SDK download (`xrt_windows_sdk.zip` →
+`C:\Xilinx\XRT`), and now calls native Windows the *recommended* path rather
+than experimental. **Our `C:\Xilinx\XRT` already matches the prebuilt-SDK
+layout**, so we are compatible with the modern instructions. **Do not follow the
+local doc's §2.**

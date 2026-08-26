@@ -54,6 +54,7 @@ sys.path.insert(0, str(REPO / "reference"))
 sys.path.insert(0, str(REPO / "tools"))
 
 from npue import gemm_b_layout, layout_hash                    # noqa: E402
+from toolchain_provenance import write_toolchain_json           # noqa: E402
 
 from gemm_pretiled import pretiled_array      # noqa: E402
 from gelu_kernel import (TILE as GELU_TILE,                    # noqa: E402
@@ -335,6 +336,7 @@ def export_eltwise(out_root, n_cols=1, batch=4, gelu_tile=1024,
                     source_cache_dir=src.name, **extra)
         (dst / "design.json").write_text(json.dumps(meta, indent=2),
                                          encoding="utf-8")
+        write_toolchain_json(dst)   # T39, tasks/0106
         print(f"  {name:<10} {str(extra.get('kind')):>18}  xclbin "
               f"{(dst / 'final.xclbin').stat().st_size / 1024:6.1f} KB  insts "
               f"{meta['insts_bytes'] / 1024:5.1f} KB  "
@@ -461,6 +463,7 @@ def build_one(name, shape, m, k, n, cols, emulate, out_root):
         "kernel": "MLIR_AIE", "source_cache_dir": src.name,
     }
     (dst / "design.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    write_toolchain_json(dst)   # T39, tasks/0106
     print(f"  {name:<10} {str([M, K, N]):>18}  xclbin "
           f"{(dst / 'final.xclbin').stat().st_size / 1024:6.1f} KB  insts "
           f"{meta['insts_bytes'] / 1024:5.1f} KB  {note}")

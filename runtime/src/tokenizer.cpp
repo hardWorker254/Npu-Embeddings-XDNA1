@@ -363,6 +363,10 @@ Encoded Tokenizer::encode(const std::string &text, int max_len) const {
   for (int i = 0; i < take; ++i) e.input_ids.push_back(id_of(toks[i]));
   e.input_ids.push_back(sep_id);
   e.n_tokens = static_cast<int32_t>(e.input_ids.size());
+  // Measured before the cap, so the caller learns the size of the input it
+  // gave rather than the size of the buffer it hit.
+  e.n_tokens_full = static_cast<int32_t>(toks.size()) + 2;   // + [CLS]/[SEP]
+  e.truncated = take < static_cast<int>(toks.size());
 
   e.attention_mask.assign(e.input_ids.size(), 1);
   while (static_cast<int>(e.input_ids.size()) < max_len) {

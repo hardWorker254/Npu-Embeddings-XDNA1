@@ -1,0 +1,23 @@
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\compare_three.py --model bge-large-en-v1.5 --artifacts artifacts_large_bfp16 --rounds 8 --threads 24 --pipeline 4 --out C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0109-fused-ratio-energy\interleaved-bge-large-en-v1.5.json
+Loading weights:   0%|          | 0/391 [00:00<?, ?it/s]Loading weights:  82%|████████▏ | 319/391 [00:00<00:00, 3185.62it/s]Loading weights: 100%|██████████| 391/391 [00:00<00:00, 3503.49it/s]
+model bge-large-en-v1.5, batch 128, seq 64, cls pooling
+  machine: Online / NoSystemBattery / Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
+  torch threads 12, ORT intra_op 12, NPU 24 threads / 4 lanes
+  interleaved, 8 rounds, MEAN reported on every side
+
+  round 1:  torch    34.4   ort    16.8   npu    92.4 seq/s
+  round 2:  torch    34.0   ort    16.2   npu    93.2 seq/s
+  round 3:  torch    35.1   ort    17.5   npu    93.2 seq/s
+  round 4:  torch    35.2   ort    17.6   npu    94.3 seq/s
+  round 5:  torch    34.1   ort    16.9   npu    94.4 seq/s
+  round 6:  torch    35.7   ort    17.5   npu    93.8 seq/s
+  round 7:  torch    35.6   ort    17.6   npu    94.0 seq/s
+  round 8:  torch    34.7   ort    17.6   npu    94.6 seq/s
+
+  torch        all    34.8   steady(last 4)    35.0   range    34.0-   35.7 seq/s
+  onnxruntime  all    17.2   steady(last 4)    17.4   range    16.2-   17.6 seq/s
+  npu          all    93.7   steady(last 4)    94.2   range    92.4-   94.6 seq/s
+
+  strongest CPU baseline: torch at 35.0 seq/s
+  NPU / strongest CPU   : 2.691x  (steady state, both sides)
+wrote tasks\0109-fused-ratio-energy\interleaved-bge-large-en-v1.5.json

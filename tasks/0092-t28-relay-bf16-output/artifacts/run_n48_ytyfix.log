@@ -1,0 +1,76 @@
+﻿  purged 1 cache candidate(s)
+python : Traceback (most recent call last):
+At line:1 char:542
++ ... ARROW_OUT='1'; python -u hierarchical_merge_ffn_probe.py 2>&1 | Tee-O ...
++                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m5-pretiled-gemm\hierarchical_merge_ffn_probe.py", 
+line 544, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m5-pretiled-gemm\hierarchical_merge_ffn_probe.py", 
+line 493, in main
+    hierarchical_merge_ffn(A, B, Y)
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "C:\dev\mlir-aie\ironenv\Lib\site-packages\mlir_aie\python\aie\utils\callabledesign.py", line 358, in __call__
+    kernel = self._compile_and_build_kernel(compilable, cache_key, trace_config)
+  File "C:\dev\mlir-aie\ironenv\Lib\site-packages\mlir_aie\python\aie\utils\callabledesign.py", line 210, in 
+_compile_and_build_kernel
+    xclbin_path, inst_path = compilable.compile()
+                             ~~~~~~~~~~~~~~~~~~^^
+  File "C:\dev\mlir-aie\ironenv\Lib\site-packages\mlir_aie\python\aie\utils\compile\jit\compilabledesign.py", line 
+396, in compile
+    compile_mlir_module(
+    ~~~~~~~~~~~~~~~~~~~^
+        mlir_module=mlir_module,
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<7 lines>...
+        fold_ddr_addr_offset=fold_ddr_addr_offset,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\dev\mlir-aie\ironenv\Lib\site-packages\mlir_aie\python\aie\utils\compile\utils.py", line 534, in 
+compile_mlir_module
+    _run_aiecc(mlir_file, args)
+    ~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\dev\mlir-aie\ironenv\Lib\site-packages\mlir_aie\python\aie\utils\compile\utils.py", line 409, in _run_aiecc
+    raise RuntimeError(
+    ...<2 lines>...
+    )
+RuntimeError: [aiecc] Compilation failed with exit code 1:
+
+(0/37) input.mlir
+(1/37)           
+(1/37) [0/1] placed.mlir
+(2/37)                  
+(2/37) [0/1] traced.mlir
+(3/37)                  
+(3/37) [0/1] input_with_addresses.mlirC:\Users\vegar\.npu\cache\98e911ffd98577474356ec88\aie.mlir:2:3: error: 
+'aie.tile' op allocated buffers exceeded available memory
+
+  aie.device(npu2) {
+  ^
+C:\Users\vegar\.npu\cache\98e911ffd98577474356ec88\aie.mlir:2:3: note: see current operation: %8 = "aie.tile"() <{col 
+= 0 : i32, row = 4 : i32}> {controller_id = #aie.packet_info<pkt_type = 0, pkt_id = 30>} : () -> index
+C:\Users\vegar\.npu\cache\98e911ffd98577474356ec88\aie.mlir:2:3: note: MemoryMap:
+	(stack) 	: 0x0-0xCFF 	(3328 bytes)
+	C_mem_g1_cons_buff_0 	: 0xD00-0x3CFF 	(12288 bytes)
+	C_mem_g0_cons_buff_0 	: 0x3D00-0x6CFF 	(12288 bytes)
+	ffn_down_acc 	: 0x6D00-0x9CFF 	(12288 bytes)
+	w_hop0 	: 0x9D00-0xC0FF 	(9216 bytes)
+	w_hop1 	: 0xC100-0xE4FF 	(9216 bytes)
+	Y_out_buff_0 	: 0xE500-0xFCFF 	(6144 bytes)
+	Y_out_buff_1 	: 0xFD00-0x114FF 	(6144 bytes)
+
+C:\Users\vegar\.npu\cache\98e911ffd98577474356ec88\aie.mlir:2:3: error: 'aie.tile' op Basic sequential allocation 
+failed.
+  aie.device(npu2) {
+  ^
+C:\Users\vegar\.npu\cache\98e911ffd98577474356ec88\aie.mlir:2:3: note: see current operation: %8 = "aie.tile"() <{col 
+= 0 : i32, row = 4 : i32}> {controller_id = #aie.packet_info<pkt_type = 0, pkt_id = 30>} : () -> index
+
+aiecc: edge 'input_with_addresses.mlir' (key 'input.mlir') failed
+aiecc: pipeline failed
+

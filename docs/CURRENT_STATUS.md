@@ -1,15 +1,26 @@
 # CURRENT STATUS
 
-*Last updated: 2026-08-21, after [`tasks/0073`](../tasks/0073-m13-release-benchmarks/TASK.md).*
+*Last updated: 2026-08-25, after porting the host-side epilogue fusion to the
+bf16/bfp16 datapath in [`tasks/0108`](../tasks/0108-fuse-epilogue-bfp16/TASK.md)
+(1.153-1.340x, bit-identical). Before that: the whole-catalogue re-sweep on the
+adopted datapaths in [`tasks/0105`](../tasks/0105-release-sweep-adopted-datapaths/TASK.md).
+Earlier that session: the docs catch-up in
+[`tasks/0100`](../tasks/0100-docs-catch-up/TASK.md) (int8 headline and golden-gate
+fixes verified against [`0079`](../tasks/0079-m13-int8-why-only-1.1x/TASK.md),
+[`0085`](../tasks/0085-m13-release-sweep/TASK.md),
+[`0094`](../tasks/0094-t32-golden-gate-rows/TASK.md)).*
 
 > **Six models, and a second architecture on the array.**
 > [`0068`](../tasks/0068-m13-nomic-spike-and-oracle/TASK.md)–[`0071`](../tasks/0071-m13-nomic-shippable/TASK.md)
 > added **nomic-embed-text-v1.5** (Apache-2.0) as `arch=2`: RoPE instead of
 > absolute positions, a gated SwiGLU FFN instead of GELU, and the first
 > genuinely new architecture that runs **on the NPU** rather than host-only the
-> way `arch=1` (EmbeddingGemma) does. It needs a task prefix — `--prefix`, and
-> the runtime prints which one it applied, because a wrong prefix is a quality
-> regression no `1-cos` gate can see.
+> way `arch=1` (EmbeddingGemma) does. It needs a task prompt, and the
+> runtime prints which one it applied, because a wrong prompt is a quality
+> regression no `1-cos` gate can see. (Since
+> [`0118`](../tasks/0118-prompt-name-per-request/TASK.md) that prompt is a
+> per-request `"prompt_name"` on the endpoint and a required `--prefix` on
+> `embed`; there is no default on either.)
 >
 > Getting there found a **silent correctness bug** in the shipping design
 > generator: above `N = 4096` a design compiled and returned wrong numbers, and
@@ -24,6 +35,206 @@
 > `certutil` digest is the behavioural signature of a dropper and antivirus
 > treated it as one. The flag form below is unchanged and still carries every
 > probe and benchmark.
+>
+> **`serve` now covers every architecture, including EmbeddingGemma**
+> ([`0115`](../tasks/0115-t34-serve-arch1/TASK.md)). arch=1 used to refuse the
+> HTTP endpoint — not because anything about the model was incompatible with
+> one, but because the endpoint was written against the BERT encoder's *type*.
+> The coupling was three members wide (vocabulary size, the prompt whitelist,
+> "embed these texts" -- it was the resolved *prefix text* until
+> [`0118`](../tasks/0118-prompt-name-per-request/TASK.md) moved the choice to
+> per-request), so there is now **one `serve_http()` that every architecture
+> hands those to**, rather than a second implementation that could drift on the
+> OpenAI response shape, the four 400 cases, base64, or `InputTooLong` → 400.
+> Gated on agreeing with arch=1's own `--embed`: **bit-identical over base64**
+> (the float arm's 5.215e-08 is the `%.7g` JSON text form, not an encode
+> difference). The `--cpu` path serves too, under a `<model>-cpu` id — naming a
+> host-only server after the array would be the mislabel the "path HOST-only"
+> line exists to prevent. `artifacts_gemma_bfp16` therefore joins what
+> `tools/make_release.ps1` ships.
+
+> **An int8 datapath now exists alongside bf16, behind a flag**
+> ([`0077`](../tasks/0077-m13-int8-gate/TASK.md)–[`0080`](../tasks/0080-m13-int8-traffic-bound/TASK.md)).
+> The array's MMAC unit takes `(8,8,8)` for int8 against bf16's `(4,8,8)`, and
+> the int32 accumulator is **exact and order-independent** — integer addition
+> associates, so unlike every float path in this project there is no rounding
+> inside the reduction. Traced at **5.5–7.7×** on all four production shapes,
+> bit-exact. It needs **SmoothQuant** (α = 0.5) as container data, because the
+> usual fold into LayerNorm is unavailable: BERT is **post-LN**, so each LN
+> output feeds the residual as well as the GEMM.
+>
+> **Two things it taught that outlast it.** First, **which cost model governs
+> the GEMM depends on the datapath.** Under bf16 it is iteration-bound
+> ([`0048`](../tasks/0048-m9-what-is-the-gemm-time/TASK.md)); under int8 the
+> arithmetic got cheap enough that
+> [`0010`](../tasks/0010-m5-b-reuse-and-cost-model/TASK.md)'s **traffic** model
+> governs again (R² 0.987 against the iteration model's 0.568). So *"bytes are
+> free"* is a bf16 statement, and the levers retired on it — B-reuse, the
+> cascade milestone — are live again for int8. Second, **the accuracy cost of
+> a design can often be measured before the design exists**: `--sim-c-bf16`
+> rounds the accumulator in the host dequantiser exactly as a narrowed-C design
+> would, and predicted `1-cos` 1.161e-03 — the number the built design then
+> measured.
+>
+> (An earlier throughput table lived here. It is superseded by the measured one
+> two blocks below, which was taken in a single session after the host fusions
+> landed — keeping both would invite quoting the stale half.)
+>
+> **All six models now have an int8 container, and five pass the `1-cos`
+> gate** ([`0081`](../tasks/0081-m13-int8-everywhere/TASK.md)):
+>
+> | model | arch | int8 `1-cos` | |
+> |---|---|---:|---|
+> | `all-MiniLM-L6-v2` | 0 | 1.161e-03 | PASS (MTEB mean −0.04) |
+> | `bge-small-en-v1.5` | 0 | 6.385e-04 | PASS |
+> | `bge-base-en-v1.5` | 0 | 1.778e-03 | PASS |
+> | **`bge-large-en-v1.5`** | 0 | **2.968e-03** | **1-cos FAIL, MTEB PASS** |
+> | `nomic-embed-text-v1.5` | 2 | 1.098e-03 | PASS |
+> | `embeddinggemma-300m` | 1 | 1.902e-03 † | PASS |
+>
+> † differential against the bf16 NPU encode; arch=1 has no HuggingFace golden.
+>
+> The error tracks **width** more than depth — bge-small is 12 layers at hidden
+> 384 and lands at 6.4e-04, bge-large is 24 at hidden 1024 and lands 4.6×
+> worse. Wider weight matrices give SmoothQuant more outlier range to move, and
+> moving it costs the activations.
+>
+> **bge-large misses the `1-cos` gate by 1.48× and PASSES MTEB at mean −0.05,
+> worst −0.18** ([`0081`](../tasks/0081-m13-int8-everywhere/TASK.md) §5). That
+> is [`0035`](../tasks/0035-m8-mteb-gate/TASK.md)'s point for the third time:
+> **`1-cos` is a fidelity check on the arithmetic, not a quality gate.** It is
+> still the check that caught every real bug in 0077–0082 — a UTF-8 BOM on one
+> row of 520, a double-applied task prefix, two harness bugs — precisely
+> because it is sensitive to what MTEB averages away. The two measure different
+> things and the project uses both.
+>
+> **Two things to know before using it.** `npuembeddings add` cannot produce an
+> int8 container (the C++ packer is bf16-only; int8 needs the calibration pass
+> that runs the numpy oracle), and nomic and Gemma each needed their **own**
+> calibration oracle — their reference forward passes emit 5 and 7 GEMM call
+> sites per layer against the packer's 4, because the packer fuses `fc11|fc12`
+> and `q|k|v|pad`. An assert refuses rather than letting the factors shift.
+
+> **The host, not the array, is now the encode**
+> ([`0081`](../tasks/0081-m13-int8-everywhere/TASK.md) §3,
+> [`0082`](../tasks/0082-m13-fused-ffn-epilogue/TASK.md)). Measured on
+> bge-large int8: **dispatch is 30.4% of the encode**, so an infinitely fast
+> array caps the whole thing at 1.44×. The other 69.6% is host work and almost
+> all of it is **memory traffic rather than arithmetic** — between two GEMMs
+> the host walked the same tensor four to eight times (dequantise → activate or
+> add-residual → normalise → quantise), each a separate streaming pass over
+> 33.5–134 MB.
+>
+> Both chains are now **fused into one L1-resident pass per row**, and the
+> intermediate tensors are never materialised. Verified **byte-for-byte
+> identical** to the unfused path, and across lane counts — with a
+> `--no-fuse-ffn` flag kept so the two can be A/B'd.
+>
+> **The 30.4% above is an int8, UNFUSED measurement, and both halves of that
+> matter now.** It was taken before the fusion existed and before
+> [`0104`](../tasks/0104-adopt-bfp16-per-model/TASK.md) moved five of six models
+> to bfp16, so **the 1.44× ceiling it implies is not the bound for the shipped
+> configuration** — [`0107`](../tasks/0107-t3-t28-pricing/TASK.md) found the
+> analogous bfp16 bound is *larger* (1.36–1.87×), because emulated MACs are
+> slower than native int8 ones and therefore leave more array time to remove.
+> Quoting 1.44× as "the ceiling" without naming the datapath is the mistake
+> that entry exists to stop.
+>
+> **The fusion was int8-only until 2026-08-25**
+> ([`0108`](../tasks/0108-fuse-epilogue-bfp16/TASK.md)): it was gated on
+> `a_elem_bytes == 1`, so it never fired on the datapath five of six models had
+> just adopted. Ported to bf16/bfp16 it is worth **1.153×–1.340×** end to end,
+> bit-identical again (embedding vectors hash the same fused vs unfused; every
+> model reproduces its recorded `1-cos` to the digit). The measured-first
+> finding worth keeping: the bf16 chain has the **same three-pass structure** as
+> int8's minus the quantisation step, addressable share 17.7–28.3% — so the win
+> is real but smaller than int8's 1.39–1.48×, exactly as the missing step
+> predicts.
+>
+> **The transferable part is why the first attempt was not identical**: a
+> scalar rewrite of the same algebra moved `1-cos` from 1.161e-03 to 1.180e-03,
+> because `_mm256_fmadd_ps` rounds once where `a*b + c` rounds twice. Matching
+> the *algebra* of vectorised float code is not enough; the intrinsics have to
+> match too.
+
+> **THE 0.4.0 NUMBERS, ON THE DATAPATHS THAT ACTUALLY SHIP, FUSED**
+> ([`0108`](../tasks/0108-fuse-epilogue-bfp16/TASK.md) for throughput, after
+> [`0104`](../tasks/0104-adopt-bfp16-per-model/TASK.md)'s adoption and
+> [`0105`](../tasks/0105-release-sweep-adopted-datapaths/TASK.md)'s sweep; int8
+> columns from [`0085`](../tasks/0085-m13-release-sweep/TASK.md)).
+> **Throughput is the fused arm of 0108's A/B — three runs per model, idle
+> machine, one session**, and it supersedes 0105's figures, which were taken on
+> the unfused build. End-to-end wall clock, **not an NPU kernel performance
+> claim** (rule 1).
+>
+> **The `datapath` column is read from the runtime's own status line**, not
+> restated from a harness table — the point of 0104's guard. Every row's
+> reported datapath matched its intended one. Since
+> [`0106`](../tasks/0106-toolchain-provenance/TASK.md) the runtime also prints
+> the **toolchain** that built each design, so a number can be traced to a build.
+>
+> | model | datapath | throughput | fusion ¹ | `1-cos` | NPU/CPU ⁸ | J/1k better ⁸ | MTEB mean / worst ³ | gate ³ |
+> |---|---|---:|---:|---:|---:|---:|---:|---|
+> | `all-MiniLM-L6-v2` | **bfp16** | **1168.8** | 1.265× | 3.406e-04 | 1.885× | 3.10× | +0.12 / −0.07 | PASS |
+> | `bge-small-en-v1.5` | **bf16** | **421.0** | 1.208× | 8.348e-06 | 1.688× | 2.73× | −0.10 / **−0.5010** | **FAIL — why it stays** |
+> | `bge-base-en-v1.5` | **bfp16** | **259.1** | 1.251× | 2.284e-04 | 2.734× | 4.17× | −0.06 / −0.19 | PASS |
+> | **`bge-large-en-v1.5`** | **bfp16** | **75.4** | 1.223× | 2.626e-04 | 2.691× | **4.79×** | +0.13 / −0.01 | PASS |
+> | `nomic-embed-text-v1.5` | **bfp16** | **210.2** | **1.340×** | 1.402e-03 ⁵ | **3.553×** | 4.01× | +0.01 / −0.25 | PASS |
+> | `embeddinggemma-300m` | **bfp16** | **167.1** ⁶ | 1.153× | 2.315e-04 ⁷ | 1.392× | 3.72× | +0.16 / −0.02 | PASS |
+>
+> *(int8 throughput and `1-cos` moved out of this table — they are 0085's
+> unfused figures for a datapath nothing currently ships, and are listed two
+> blocks above.)*
+>
+> ¹ against the same build with `--no-fuse-ffn`, same session — the flag is kept
+> so the two arms stay comparable. ³ from
+> [`0103`](../tasks/0103-t23-bfp16-all-models/TASK.md)'s gate table, the run that
+> decided adoption per model; still valid because 0108 is bit-identical. Gate is
+> `|mean| ≤ 0.5` **and** no task worse than −0.5. ⁵ thinnest margin of the five adopted, still ~1.4×
+> inside the 2e-03 tolerance. ⁶ arch=1 has no `--bench`; corpus-encode harness,
+> and its within-arm spread is **5.2%** against ≤1.1% for the BERT-family rows.
+> ⁷ differential against the host-only path; arch=1 has no HuggingFace golden.
+>
+> ⁸ [`0109`](../tasks/0109-fused-ratio-energy/TASK.md), on the fused build,
+> steady state, `\Energy Meter` RAPL counters per
+> [`0034`](../tasks/0034-m8-energy/TASK.md) and the interleaved protocol
+> [`0040`](../tasks/0040-m9-honest-cpu-baseline/TASK.md) requires — same
+> statistic on both sides, one session. **NPU idle throughout**; the CPU carried
+> light background load (an IDE and a browser, mean 3.7–4.3%), milder than
+> 0105's but present and flagged. Every energy ratio improved over 0105 except
+> nomic (4.38× → 4.01×), which is still a large win.
+>
+> **Array time is unchanged by the fusion — measured, not argued.**
+> [`0109`](../tasks/0109-fused-ratio-energy/TASK.md) re-took `--bench`'s
+> `wait (hardware)` line on the fused build and it moved **−0.1% to +2.2%**
+> against 0105: MiniLM 1,485 µs/dispatch (was 1,486), bge-small 3,025 (3,030),
+> bge-base 4,636 (4,602), bge-large 9,825 (9,734), nomic 6,352 (6,218). The
+> array does the same MMAC work whichever way the host reads its output, which
+> is what this doc previously *argued* and now states as a measurement.
+>
+> **But the balance has inverted, and that is the headline of the fusion.**
+> Array time held while host time fell, so the array's **share** of wall clock
+> rose on every model — bge-large **46.4% → 56.7%**, MiniLM 26.7% → 33.4%,
+> bge-base 36.2% → 46.7% — and with it the array-infinite ceiling: bge-large
+> **1.87× → 2.31×**. So the host lever is largely spent and **the array is once
+> again the larger remaining piece**, which is the opposite of what the block
+> above this table said when it was written.
+>
+> **All rows pass MTEB**, on the datapath each one actually runs — five on
+> bfp16 per [`0103`](../tasks/0103-t23-bfp16-all-models/TASK.md), bge-small on
+> plain bf16, and every int8 container per
+> [`0081`](../tasks/0081-m13-int8-everywhere/TASK.md). 0085's finding that
+> throughput spread is **under 0.6%** on five of six rows still stands and still
+> retires 0082's "~4% run-to-run", which was generalised from one contended
+> reading.
+>
+> **`embeddinggemma-300m` used to lose to torch on the CPU (0.88× in 0085) and
+> now wins at 1.23×.** Read that as the datapath change, not as a reversal of
+> the underlying argument, which is unchanged: arch=1 runs RMSNorm ×97, RoPE and
+> MQA attention on the host and only four GEMMs per layer on the array, so the
+> NPU does a smaller share of the work than in any other model — which is why it
+> has the *lowest* ratio of the six even now. It stays in the table rather than
+> a footnote for that reason.
 
 A single place to answer: **what works, what does not, what was tried and
 failed, where everything lives, and how to build and run it.**
@@ -37,11 +248,15 @@ this file, they are right and this file is old.
 
 ## 1. Where the project is
 
-**Five models run end to end on the NPU, in C++, with no Python in the
-process, all validated against HuggingFace**, plus one (EmbeddingGemma) that
-runs entirely on the host because its geometry does not fit the array. M0-M8
-are done: the tokenizer ships, the MTEB gate passes, and energy is measured.
-M9 made the runtime model-driven; M12 added `arch=1`; M13 added `arch=2`.
+**All six models run end to end on the NPU, in C++, with no Python in the
+process, all validated against HuggingFace.** EmbeddingGemma was the exception
+until [`0074`](../tasks/0074-m13-gemma-on-npu/TASK.md): its MQA geometry really
+does floor `tile_n` at 16, but **zero-padding the fused Q|K|V from 1280 to
+1536** removes the floor exactly (zero columns of B give zero columns of C), so
+it runs at the same `tile (64,64,48)` as everything else and packs to the same
+`layout_hash`. M0-M8 are done: the tokenizer ships, the MTEB gate passes, and
+energy is measured. M9 made the runtime model-driven; M12 added `arch=1`; M13
+added `arch=2` and put `arch=1` on the array.
 
 Throughput below is from the **whole-catalogue sweep**
 ([`0073`](../tasks/0073-m13-release-benchmarks/TASK.md)) — one session, one
@@ -57,10 +272,36 @@ counts and were not comparable to themselves.
 | `bge-base-en-v1.5` | 0 | 768 | 12 | CLS | 4.297e-03 | **211** |
 | `bge-large-en-v1.5` | 0 | 1024 | 24 | CLS | 3.763e-03 | **60.8** |
 | `nomic-embed-text-v1.5` | **2** | 768 | 12 | mean | 6.119e-03 | **166** |
-| `embeddinggemma-300m` | **1** | 768 | 24 | mean | host-only | ~0.13 |
+| `embeddinggemma-300m` | **1** | 768 | 24 | mean | 9.962e-06 `1-cos` † | **~133** ‡ |
+
+† EmbeddingGemma has **no `rel_fro` against HuggingFace** because no golden
+fixture exists for `arch=1`. Its gate is differential: the NPU encode against
+the host-only path, which tasks/0064-0065 tied to `reference/encoder_gemma.py`
+at `1-cos` 5.496e-13. ‡ and its throughput is from tasks/0074, **not** the
+0073 sweep — a separate session and a separate protocol, so it is comparable
+to itself and only loosely to the rows above.
 
 **Interleaved against the CPU**, one session: 1.85× / 1.60× / 2.49× / 2.47× /
 2.26×, and energy 3.65× / 3.00× / 3.33× / 3.28× / 3.75× better per sequence.
+**EmbeddingGemma now has an MTEB score, and it is the best in the project:
+the M8 gate PASSES at mean +0.00, worst task -0.00** (tasks/0075) — against
+MiniLM +0.04, bge-small -0.03 and nomic +0.09. Note that on this model's
+bridge the **C++ tokenizer is under test too**, since the NPU side tokenizes
+in C++ while the CPU side uses HuggingFace; the agreement therefore covers
+both. It still has **no CPU ratio and no energy figure** — both are unblocked
+by the same harness work and simply not yet run.
+
+**A caution that applies to every MTEB number above.** The first arch=1 run
+FAILED at mean -1.88, and the failure was the *harness*: `mteb` injects a
+task-appropriate prompt into a SentenceTransformer, and `run_mteb.py` was
+prepending the container's prefix on top of it, so the two sides encoded
+different strings. Fixed symmetrically. The four BERT models are unaffected
+(their containers carry no prompts table for `mteb` to match), and **nomic's
++0.09 has now been checked and stands**: `mteb` passed `prompt=None` on all
+five gate tasks, because nomic's sentence-transformers config carries only
+`document`/`query`, which `mteb` uses solely for retrieval-style tasks
+([T36](../research/OPEN-THREADS.md#t36)). Adding a Retrieval task to the gate
+would re-open that question.
 The caveats are in [`06-performance.md`](06-performance.md) and they matter:
 the CPU side moves ~24% between sessions, so treat a ratio as indicative to
 about ±20%.
@@ -89,8 +330,23 @@ Geometry, depth, pooling and tile size all come from the `.npue`; none of them
 is a constant in the binary.
 
 ```
-worst 1 - cos vs HuggingFace          1.086e-05        (tolerance 2e-03)
+worst 1 - cos vs HuggingFace          1.086e-05  (all 128 rows, 4 distinct
+                                                   sentences rotated across
+                                                   tile copies)  (tolerance 2e-03)
 ```
+
+**The gate compares every output row, not a sample of four** — fixed in
+[`0094`](../tasks/0094-t32-golden-gate-rows/TASK.md), see §4 bug #5. Before
+that fix it compared only the first 4 rows regardless of batch size (4 of
+128 at batch 128), and even a loop over all rows is not sufficient by
+itself: the 4-sentence golden batch is tiled into every 4-row copy, and a
+**plain** tile repeat makes every copy's content identical, so a bug that
+reads the *wrong* row (rather than corrupting content) is invisible even
+when every row is compared. The fix tiles with a **per-copy rotation**
+(`(k + r) % 4`, applied to the input, mask and expected output alike) so
+every physical row's content is unique — proven necessary, not just
+sufficient, by demonstrating both bug classes separately against known-bad
+artifacts (0094 §"Known-bad verification").
 
 **The product is complete and every claim is measured on hardware.** One
 `.npue` (69 MB, weights + vocabulary) and one `npuembed.exe` take text in and
@@ -214,12 +470,21 @@ residual adds, pooling, L2 normalise.
 | 8-column design + core trace | `Unable to find a legal routing` | Known. Trace at 2 or 4 columns, throughput at 8 |
 | B reuse in L2 | `no space for this BD` | ObjectFifo depth maps 1:1 to mem-tile BDs; ceiling is 6 tiles at 4 cols, 4 at 8, against a slice needing 24–48. Needs a core-side redesign. [`0010`](../tasks/0010-m5-b-reuse-and-cost-model/TASK.md) |
 
-### Unresolved bug
+### A bug this section used to call unresolved — it was diagnosed and fixed in 0030
 
 - **`exp2_poly` works standalone (6.7e-03) but corrupts when composed into
   softmax** — row sums went to zero, output `[0,-120,0,-120,...]`, which is fp32
-  being read as bf16 pairs. Reverted to `aie::exp2<bfloat16>`. Never diagnosed.
-  [`0021`](../tasks/0021-m5-softmax-and-full-model/TASK.md)
+  being read as bf16 pairs. [`0021`](../tasks/0021-m5-softmax-and-full-model/TASK.md)
+  reverted to `aie::exp2<bfloat16>` and left this "never diagnosed" — but
+  [`0030`](../tasks/0030-m7-expert-review-tests/TASK.md) §5a **did** diagnose and
+  fix it, nine tasks later: the cause is the **worker stack** (`0xD00`, the same
+  size the 4-chain GELU independently overran), not the fp32→bf16 narrowing. A
+  2×2 (stack 0xD00/0x2000 × lib/poly) reproduces the corruption at 0xD00 and
+  clears it at 0x2000; `exp2_poly` **is production softmax today**, at
+  NPU-vs-golden 4.278e-03 (`softmax.cc`, `softmax_poly_bf16`). This paragraph was
+  stale for 0072–0094 — the exact failure mode CLAUDE.md rule 3 exists to catch,
+  found while answering [T10](../research/CLOSED-THREADS.md#t10) in
+  [`0095`](../tasks/0095-t6-t10-probes/TASK.md).
 
 ---
 
@@ -243,7 +508,7 @@ optimising the wrong thing.
 | **"The placer will not do 4 or 8 columns"** | **Misattributed.** The failing frame was `ln_array`, not `gelu_array`. GELU runs at 8 columns: 3.87× alone, 1.13× end to end |
 | **Parity at h ≈ 1300–2000** | **Withdrawn.** It assumed CPU time grows 4× per doubling, but the CPU runs the same encoder and has the same 1:3h structure, so its total also grows sub-quadratically |
 
-### Four bugs that "failed open"
+### Five bugs that "failed open"
 
 A recurring class worth its own list: a check that could not tell, and was read
 as "fine".
@@ -261,8 +526,26 @@ as "fine".
    returns `0.0`, so a NaN-producing kernel scored a **perfect 0.000e+00 and
    PASSED**. *A tolerance test whose failure mode is a perfect score is not a
    test.*
+5. **[`0094`](../tasks/0094-t32-golden-gate-rows/TASK.md)** — the golden
+   gate's comparison loop read `for (b = 0; b < kGoldenBatch; ++b)`, where
+   `kGoldenBatch` is the constant 4, regardless of the design's actual batch.
+   At batch 128 it silently compared 4 of 128 output rows and never read
+   the other 124 — **a corruption bug in any row past index 3 was invisible
+   by construction**, no matter how wrong the arithmetic. A SECOND hole sat
+   alongside it (filed as T32, 2026-08-21): the four golden sequences were
+   tiled identically into every copy, so even a loop that checked every row
+   could not distinguish "the right row's data" from "an identical copy of
+   the wrong row's data" — the class of bug 0070's threaded `swiglu_cpu()`
+   race actually shipped, invisibly, until a separate distinct-text e2e tool
+   caught it by accident. Both are fixed: the loop runs over all `batch`
+   rows, and the tiling rotates which of the 4 golden rows lands in each
+   copy, verified against five deliberately reintroduced known-bad
+   artifacts — including one that shows the all-rows fix **alone** does not
+   catch the second bug class (a same-slot row swap across tile copies
+   passes under plain tiling even with every row compared, and is only
+   caught once the rotation is added too).
 
-All four are now fail-closed, and the fixes were verified against
+All five are now fail-closed, and the fixes were verified against
 **known-bad** artifacts, not only good ones.
 
 ---
@@ -362,7 +645,7 @@ gitignored.** Regenerate it; never commit it.
 
 | | |
 |---|---|
-| IRON | `C:\dev\mlir-aie` — mlir-aie 1.3.4, Peano 21.0.0, Python 3.13.15 |
+| IRON | `C:\dev\mlir-aie` — mlir-aie **1.4.2.dev16+g7e00b57**, Peano 21.0.0.2026080301, Python 3.13.15 |
 | XRT | `C:\Xilinx\XRT` (2.21.0) — **not** under Program Files |
 | `xrt-smi` | `C:\Windows\System32\AMD\xrt-smi.exe` (not on PATH) |
 | MSVC | VS Community 2026, toolset 14.51 |
@@ -488,30 +771,57 @@ are rewritten).
 
 ## 9. Next steps, in priority order
 
-0. **The one-xclbin architecture** ([`0029`](../tasks/0029-m7-one-xclbin-probe/TASK.md)):
-   step 0 is confirmed — two instruction streams over one context alternate at
-   alone-cost, so the 49 switches per encode (~60 ms at batch 128) are removable
-   without fusion. Next: RTP-ify the GEMM loop counts so the four shapes share
-   one ELF, unify, then re-measure the width crossover (with switches gone, the
-   8-column designs should win outright).
-1. **`.split()`/`.join()` for LayerNorm and softmax.** GELU proved the pattern —
-   3.87× alone, 1.13× end to end. These two are 95 ms of the 209 ms of eltwise
-   at batch 128. Highest value, lowest risk, and the code to copy already exists
-   in `gelu_kernel.py`.
-2. **Fuse layers.** The only way to *remove* switches rather than amortise them.
-   Correctly priced now: fusing GELU into `ffn_up` saves the movement and one
-   switch (~626 µs per call), **not** the arithmetic.
-3. **M8 / MTEB.** Both bf16 and bfp16 configurations produce embeddings today;
-   the accuracy decision needs the benchmark. bf16 + fp32 accumulate is the safe
-   default at `1-cos` 3.4e-04.
-4. **A wider model.** `docs/04-model` already designed for bge-small as a
-   drop-in weight swap; **bge-large (h = 1024)** is the interesting one, given
-   §5(b). ~~but the stride wall at h ≥ 1536 blocks testing much beyond it.~~
-   *(Superseded: that wall is gone — see the Known walls table. It was fixed in
-   tasks/0030 and the fix was half-wired until [`0068`](../tasks/0068-m13-nomic-spike-and-oracle/TASK.md).)*
-5. **WordPiece tokenizer**, to close the last gap to a standalone product.
-6. **Attention on the array** (`head_dim = 32` → pad to 64 or fold two heads).
-7. **Energy**, which needs external instrumentation.
+The list this section carried through M7–M8 (one-xclbin architecture,
+`.split()`/`.join()` for eltwise, a tokenizer, MTEB, energy) is **all done** —
+see §2 and §"What geometry the array actually wants" in CLAUDE.md. It is
+replaced here with the project's actual current open work, which is
+[`research/OPEN-THREADS.md`](../research/OPEN-THREADS.md) — the authority per
+CLAUDE.md rule 3, not this file. As of this session it holds **9 live
+threads**; the priority order below is this file's own judgement of what to
+chase next, not the register's (the register does not rank).
+
+1. **T28 — true phase fusion / device-resident intermediates (T3
+   converges here).** The biggest unclaimed lever in the project (F1). The
+   hang that blocked it is now fixed and a hierarchical 2-hop merge with a
+   real GELU passes at **production tile width**, bf16 output
+   ([`0092`](../tasks/0092-t28-relay-bf16-output/TASK.md), rel_fro 2.510e-03).
+   What is left is not correctness: whether `kernels.mm()`'s MMAC operand
+   order composes with a join's `dims_to_stream`, scaling past this probe's
+   `K=192` to production's `K=1536` across 8 columns (a core has only 2 input
+   channels, so this needs a third hierarchy tier or a different relay
+   strategy), and building a traceable version so a performance number can
+   exist at all.
+2. **T38 — does mem-tile `pad_dimensions` make attention worth folding onto
+   the array?** Unbuilt. [`0043`](../tasks/0043-m9-attention-geometry/TASK.md)/[`0097`](../tasks/0097-t18-t21-t4-measurements/TASK.md)
+   priced the two brackets: today's naive unified geometry taxes the
+   projections 2.229×, but if padding lets attention run at `cols=8` instead
+   of ≤4, the shared geometry only costs 1.289× — "clearly negative" becomes
+   "probably still negative, close enough to be worth an actual build."
+3. **T26 — why bfp16 + bf16-C measures 6.6× *more* accurate than bfp16 +
+   fp32-C.** [`0098`](../tasks/0098-t26-kernel-source/TASK.md) found a
+   specific, evidenced, **unconfirmed** hypothesis by reading the kernel
+   source: the emulated matmul's own rounding-mode fix-up looks like dead
+   code in the compiled object, so its bfp16 quantisation may run under
+   whatever rounding mode a *prior* kernel left on that core. Two ablations
+   are proposed, neither run — see CLAUDE.md trap 2b's addendum.
+4. **T23 — the bfp16-emulation datapath decision.** Emulated bf16 matmul is
+   2.9× the array's plain-bf16 GEMM time; this is an accuracy-vs-speed
+   decision for a human, not a build task.
+5. **T17 — bigger L1 tiles.** Re-priced down for bf16 by T16, then back up
+   again once int8 changed which cost model governs (0080). Worth revisiting
+   now that int8 is traffic-bound.
+6. **T13 — explain the pre-tiled instability**, re-scoped by
+   [`0093`](../tasks/0093-t11-t12-t13-research/TASK.md).
+7. **T9 — `xrt::runlist`**, priced at 0.9% today; low value, cheap to close
+   if anyone wants a clean sweep of the register.
+8. **T34 — arch=1 (EmbeddingGemma) has two items left** after MTEB passed:
+   see the thread for specifics.
+
+Everything else this session touched (T4, T5, T6, T10, T15, T18, T21, T32)
+is **CLOSED** — see
+[`research/CLOSED-THREADS.md`](../research/CLOSED-THREADS.md) for how, per
+CLAUDE.md rule 3b, because the refuted hypotheses along the way are the part
+worth keeping.
 
 ---
 

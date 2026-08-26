@@ -64,6 +64,66 @@ struct DesignInfo {
   // every one of those IS fp32, so 4 is the correct reading of silence rather
   // than a default papering over a missing value.
   size_t c_elem_bytes = 4;
+
+  // Element size of the A/B operands: 2 for bf16, 1 for int8 (tasks/0078).
+  // READ from design.json's `a_dtype`, never assumed -- an int8 design needs
+  // the host to quantise A on the way in and dequantise C on the way out, and
+  // a bf16 runtime pointed at one would transfer plausible bytes and compute
+  // nothing meaningful.
+  size_t a_elem_bytes = 2;
+  // True when C leaves the core as int32 rather than fp32/bf16, i.e. the
+  // int8 datapath, whose accumulator carries no scale at all until the host
+  // applies one.
+  bool c_is_int = false;
+
+  // True when this design's MMAC was built with
+  // emulate_bf16_mmul_with_bfp16 (tasks/0104, T23). This changes MMAC
+  // precision, not operand storage or B's tiling, so a_elem_bytes,
+  // c_elem_bytes and b_layout_hash are IDENTICAL between a bfp16 design and
+  // a plain-bf16 one at the same geometry -- this is the only field that
+  // tells them apart. READ from design.json's "emulate_bfp16", never
+  // assumed.
+  bool emulate_bfp16 = false;
+
+  // ABSENT IS NOT THE SAME AS FALSE, and conflating them printed a lie the
+  // first time this shipped: a pre-0104 directory that really was built
+  // `--emulate-bfp16` has no such key, so it was reported as plain bf16
+  // while running the emulated datapath -- caught by its `1-cos` reading
+  // 3.397e-04 where plain bf16 gives 1.086e-05.
+  //
+  // Selection still treats absent as bf16, deliberately: every design set
+  // this project has ever shipped predates the field, and refusing them
+  // would break bge-small, whose plain-bf16 `artifacts_b128il` is exactly
+  // such a directory. But REPORTING must distinguish the two, so an
+  // unrecorded datapath reads as unknown rather than as a claim. Re-export a
+  // set to give it the key.
+  bool datapath_recorded = false;
+
+  // WHICH TOOLCHAIN BUILT THIS DESIGN (T39, tasks/0106). Read from a
+  // toolchain.json the export tools write NEXT TO design.json -- not a key
+  // inside design.json itself, so an older parser reading design.json still
+  // works unchanged. tasks/0102's audit found kernel config hash `333c4d33`
+  // names TWO different instruction streams (0 `crrnd` instructions before
+  // the mlir-aie 1.3.4 -> 1.4.2 upgrade, 3 after) with nothing in the build
+  // path able to tell them apart; this is what tells them apart from here on.
+  //
+  // "unavailable" (not "") is what a field reads when the export machine
+  // could read the toolchain.json file but a specific value inside it
+  // couldn't be established -- e.g. C:\dev\mlir-aie was not a git checkout,
+  // or `git` itself was unavailable, at export time. The export must not
+  // fail over provenance; a missing value is recorded as missing, not
+  // guessed at and not a build error.
+  std::string mlir_aie_version = "unavailable";
+  std::string peano_version = "unavailable";
+  std::string mlir_aie_git_head = "unavailable";
+
+  // False when this design's directory has no toolchain.json at all --
+  // i.e. it was exported before tasks/0106. Same ABSENT-IS-NOT-A-VALUE
+  // discipline as datapath_recorded just above: an unrecorded toolchain
+  // reads as UNRECORDED, never silently as "unavailable" (which claims the
+  // export tried and failed) or omitted (which claims nobody thought to
+  // ask).
+  bool toolchain_recorded = false;
 };
 
 class Device {

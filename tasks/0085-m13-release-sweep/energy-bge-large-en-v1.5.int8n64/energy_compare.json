@@ -1,0 +1,53 @@
+﻿{
+    "kind":  "hardware measurement",
+    "task":  "0034",
+    "method":  "differential: E(high) - E(low) over encode counts, package RAPL",
+    "meter":  "RAPL_Package0_PKG",
+    "energy_unit_j":  3.6E-09,
+    "batch":  128,
+    "threads":  24,
+    "artifacts":  "artifacts_int8c_large_n64",
+    "low_encodes":  20,
+    "high_encodes":  60,
+    "results":  [
+                    {
+                        "name":  "cpu-st",
+                        "low_encodes":  20,
+                        "high_encodes":  60,
+                        "seq_per_encode":  128,
+                        "delta_joules":  8293.54635,
+                        "delta_seconds":  141.998,
+                        "j_per_encode":  207.33865875,
+                        "j_per_1000_seq":  1619.833271484375,
+                        "watts_during":  58.406078606740948,
+                        "seq_per_s":  36.05684587106861,
+                        "idle_w":  3.9809491512764339
+                    },
+                    {
+                        "name":  "npu-single",
+                        "low_encodes":  20,
+                        "high_encodes":  60,
+                        "seq_per_encode":  128,
+                        "delta_joules":  1327.2574200012002,
+                        "delta_seconds":  42.072999999999993,
+                        "j_per_encode":  33.181435500030005,
+                        "j_per_1000_seq":  259.22996484398442,
+                        "watts_during":  31.546536258436536,
+                        "seq_per_s":  121.69324745085925,
+                        "idle_w":  4.433460553706011
+                    },
+                    {
+                        "name":  "npu-pipe4",
+                        "low_encodes":  5,
+                        "high_encodes":  15,
+                        "seq_per_encode":  512,
+                        "delta_joules":  1469.7809399988,
+                        "delta_seconds":  34.622,
+                        "j_per_encode":  146.97809399988,
+                        "j_per_1000_seq":  287.06658984351566,
+                        "watts_during":  42.452225174709724,
+                        "seq_per_s":  147.88284905551384,
+                        "idle_w":  4.6336022709147251
+                    }
+                ]
+}

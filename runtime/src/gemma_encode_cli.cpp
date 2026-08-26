@@ -61,7 +61,11 @@ int main(int argc, char **argv) {
 
     const auto t0 = std::chrono::steady_clock::now();
     for (size_t i = 0; i < texts.size(); ++i) {
-      const auto v = enc.encode_one(texts[i], max_len, prefix);
+      // This standalone CLI is a verification harness -- it has no
+      // --allow-truncation and should not get one. Anything that does not fit
+      // max_len here is a broken test input, and quietly measuring a prefix of
+      // it is exactly the failure the harness exists to catch.
+      const auto v = enc.encode_one(texts[i], max_len, prefix, i, false);
       of.write(reinterpret_cast<const char *>(v.data()),
               static_cast<std::streamsize>(v.size() * sizeof(float)));
       std::printf("  [%zu] \"%.60s\"  first6: %.4f %.4f %.4f %.4f %.4f %.4f\n",

@@ -1,0 +1,132 @@
+{
+  "kind": "hardware measurement",
+  "task": "0035",
+  "model": "bge-large-en-v1.5",
+  "prefix": "",
+  "sides_run": [
+    "cpu",
+    "npu"
+  ],
+  "seq_len": 64,
+  "tasks": [
+    "STSBenchmark",
+    "SICK-R",
+    "STS12",
+    "Banking77Classification",
+    "TwentyNewsgroupsClustering"
+  ],
+  "artifacts": "artifacts_large_bfp_cbf16",
+  "pipeline": 2,
+  "note": "seq 64 truncation on BOTH sides; absolute scores are below published seq-256 numbers by construction. The claim is the delta.",
+  "per_side": {
+    "cpu": {
+      "STSBenchmark": {
+        "scores": {
+          "test": 0.8751905819261547
+        },
+        "main": 0.8751905819261547,
+        "seconds": 51.968969199981075
+      },
+      "SICK-R": {
+        "scores": {
+          "test": 0.8168368662337498
+        },
+        "main": 0.8168368662337498,
+        "seconds": 274.6423311000108
+      },
+      "STS12": {
+        "scores": {
+          "test": 0.7904889453588496
+        },
+        "main": 0.7904889453588496,
+        "seconds": 124.32619150000392
+      },
+      "Banking77Classification": {
+        "scores": {
+          "test": 0.848181818181818
+        },
+        "main": 0.848181818181818,
+        "seconds": 149.5273119000194
+      },
+      "TwentyNewsgroupsClustering": {
+        "scores": {
+          "test": 0.5109624285401425
+        },
+        "main": 0.5109624285401425,
+        "seconds": 940.7144501000002
+      }
+    },
+    "npu": {
+      "STSBenchmark": {
+        "scores": {
+          "test": 0.8752687090677804
+        },
+        "main": 0.8752687090677804,
+        "seconds": 48.66904420001083
+      },
+      "SICK-R": {
+        "scores": {
+          "test": 0.8170484880710968
+        },
+        "main": 0.8170484880710968,
+        "seconds": 329.60651650000364
+      },
+      "STS12": {
+        "scores": {
+          "test": 0.7904113052223862
+        },
+        "main": 0.7904113052223862,
+        "seconds": 107.07501359999878
+      },
+      "Banking77Classification": {
+        "scores": {
+          "test": 0.8481493506493505
+        },
+        "main": 0.8481493506493505,
+        "seconds": 144.5493186999811
+      },
+      "TwentyNewsgroupsClustering": {
+        "scores": {
+          "test": 0.5171621077624113
+        },
+        "main": 0.5171621077624113,
+        "seconds": 994.1976715000055
+      }
+    }
+  },
+  "gate": {
+    "rows": [
+      {
+        "task": "STSBenchmark",
+        "cpu": 0.8751905819261547,
+        "npu": 0.8752687090677804,
+        "delta_points": 0.007812714162569456
+      },
+      {
+        "task": "SICK-R",
+        "cpu": 0.8168368662337498,
+        "npu": 0.8170484880710968,
+        "delta_points": 0.02116218373469092
+      },
+      {
+        "task": "STS12",
+        "cpu": 0.7904889453588496,
+        "npu": 0.7904113052223862,
+        "delta_points": -0.007764013646338608
+      },
+      {
+        "task": "Banking77Classification",
+        "cpu": 0.848181818181818,
+        "npu": 0.8481493506493505,
+        "delta_points": -0.003246753246755052
+      },
+      {
+        "task": "TwentyNewsgroupsClustering",
+        "cpu": 0.5109624285401425,
+        "npu": 0.5171621077624113,
+        "delta_points": 0.6199679222268828
+      }
+    ],
+    "pass": true
+  }
+}

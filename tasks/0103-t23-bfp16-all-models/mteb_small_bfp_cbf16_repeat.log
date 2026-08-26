@@ -1,0 +1,87 @@
+
+=== CPU ===
+Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]Loading weights: 100%|##########| 199/199 [00:00<00:00, 16129.13it/s]
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\run_mteb.py:186: DeprecationWarning: MTEB is deprecated and will be removed in future versions. Please use the `mteb.evaluate` function instead.
+  ev = mteb.MTEB(tasks=tasks)
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\mteb\models\model_meta.py:918: FutureWarning: The `get_sentence_embedding_dimension` method has been renamed to `get_embedding_dimension`.
+  embedding_dimensions = model.get_sentence_embedding_dimension()
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\mteb\models\model_meta.py:880: FutureWarning: The `get_sentence_embedding_dimension` method has been renamed to `get_embedding_dimension`.
+  embed_dim=model.get_sentence_embedding_dimension(),
+The task 'STSBenchmark' is superseded by 'STSBenchmark.v2'. We recommend using the newer version of the task unless you are running a specific benchmark. See `get_task('STSBenchmark.v2').metadata.description` to get a description of the task and changes.
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\mteb\deprecated_evaluator.py:456: UserWarning: The task 'STSBenchmark' is superseded by 'STSBenchmark.v2'. We recommend using the newer version of the task unless you are running a specific benchmark. See `get_task('STSBenchmark.v2').metadata.description` to get a description of the task and changes.
+  task.check_if_dataset_is_superseded()
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+  STSBenchmark                     0.8586   (7.3 s)
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\run_mteb.py:186: DeprecationWarning: MTEB is deprecated and will be removed in future versions. Please use the `mteb.evaluate` function instead.
+  ev = mteb.MTEB(tasks=tasks)
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\mteb\models\model_meta.py:918: FutureWarning: The `get_sentence_embedding_dimension` method has been renamed to `get_embedding_dimension`.
+  embedding_dimensions = model.get_sentence_embedding_dimension()
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\mteb\models\model_meta.py:880: FutureWarning: The `get_sentence_embedding_dimension` method has been renamed to `get_embedding_dimension`.
+  embed_dim=model.get_sentence_embedding_dimension(),
+  SICK-R                           0.7941   (30.9 s)
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\run_mteb.py:186: DeprecationWarning: MTEB is deprecated and will be removed in future versions. Please use the `mteb.evaluate` function instead.
+  ev = mteb.MTEB(tasks=tasks)
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\mteb\models\model_meta.py:918: FutureWarning: The `get_sentence_embedding_dimension` method has been renamed to `get_embedding_dimension`.
+  embedding_dimensions = model.get_sentence_embedding_dimension()
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\mteb\models\model_meta.py:880: FutureWarning: The `get_sentence_embedding_dimension` method has been renamed to `get_embedding_dimension`.
+  embed_dim=model.get_sentence_embedding_dimension(),
+  STS12                            0.7744   (14.3 s)
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\run_mteb.py:186: DeprecationWarning: MTEB is deprecated and will be removed in future versions. Please use the `mteb.evaluate` function instead.
+  ev = mteb.MTEB(tasks=tasks)
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\mteb\models\model_meta.py:918: FutureWarning: The `get_sentence_embedding_dimension` method has been renamed to `get_embedding_dimension`.
+  embedding_dimensions = model.get_sentence_embedding_dimension()
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\mteb\models\model_meta.py:880: FutureWarning: The `get_sentence_embedding_dimension` method has been renamed to `get_embedding_dimension`.
+  embed_dim=model.get_sentence_embedding_dimension(),
+The task 'Banking77Classification' is superseded by 'Banking77Classification.v2'. We recommend using the newer version of the task unless you are running a specific benchmark. See `get_task('Banking77Classification.v2').metadata.description` to get a description of the task and changes.
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\mteb\deprecated_evaluator.py:456: UserWarning: The task 'Banking77Classification' is superseded by 'Banking77Classification.v2'. We recommend using the newer version of the task unless you are running a specific benchmark. See `get_task('Banking77Classification.v2').metadata.description` to get a description of the task and changes.
+  task.check_if_dataset_is_superseded()
+  Banking77Classification          0.8174   (25.7 s)
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\run_mteb.py:186: DeprecationWarning: MTEB is deprecated and will be removed in future versions. Please use the `mteb.evaluate` function instead.
+  ev = mteb.MTEB(tasks=tasks)
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\mteb\models\model_meta.py:918: FutureWarning: The `get_sentence_embedding_dimension` method has been renamed to `get_embedding_dimension`.
+  embedding_dimensions = model.get_sentence_embedding_dimension()
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\mteb\models\model_meta.py:880: FutureWarning: The `get_sentence_embedding_dimension` method has been renamed to `get_embedding_dimension`.
+  embed_dim=model.get_sentence_embedding_dimension(),
+The task 'TwentyNewsgroupsClustering' is superseded by 'TwentyNewsgroupsClustering.v2'. We recommend using the newer version of the task unless you are running a specific benchmark. See `get_task('TwentyNewsgroupsClustering.v2').metadata.description` to get a description of the task and changes.
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\mteb\deprecated_evaluator.py:456: UserWarning: The task 'TwentyNewsgroupsClustering' is superseded by 'TwentyNewsgroupsClustering.v2'. We recommend using the newer version of the task unless you are running a specific benchmark. See `get_task('TwentyNewsgroupsClustering.v2').metadata.description` to get a description of the task and changes.
+  task.check_if_dataset_is_superseded()
+  TwentyNewsgroupsClustering       0.4863   (105.6 s)
+
+=== NPU ===
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\run_mteb.py:186: DeprecationWarning: MTEB is deprecated and will be removed in future versions. Please use the `mteb.evaluate` function instead.
+  ev = mteb.MTEB(tasks=tasks)
+The task 'STSBenchmark' is superseded by 'STSBenchmark.v2'. We recommend using the newer version of the task unless you are running a specific benchmark. See `get_task('STSBenchmark.v2').metadata.description` to get a description of the task and changes.
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\mteb\deprecated_evaluator.py:456: UserWarning: The task 'STSBenchmark' is superseded by 'STSBenchmark.v2'. We recommend using the newer version of the task unless you are running a specific benchmark. See `get_task('STSBenchmark.v2').metadata.description` to get a description of the task and changes.
+  task.check_if_dataset_is_superseded()
+  STSBenchmark                     0.8593   (8.8 s)
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\run_mteb.py:186: DeprecationWarning: MTEB is deprecated and will be removed in future versions. Please use the `mteb.evaluate` function instead.
+  ev = mteb.MTEB(tasks=tasks)
+  SICK-R                           0.7941   (74.2 s)
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\run_mteb.py:186: DeprecationWarning: MTEB is deprecated and will be removed in future versions. Please use the `mteb.evaluate` function instead.
+  ev = mteb.MTEB(tasks=tasks)
+  STS12                            0.7741   (17.0 s)
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\run_mteb.py:186: DeprecationWarning: MTEB is deprecated and will be removed in future versions. Please use the `mteb.evaluate` function instead.
+  ev = mteb.MTEB(tasks=tasks)
+The task 'Banking77Classification' is superseded by 'Banking77Classification.v2'. We recommend using the newer version of the task unless you are running a specific benchmark. See `get_task('Banking77Classification.v2').metadata.description` to get a description of the task and changes.
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\mteb\deprecated_evaluator.py:456: UserWarning: The task 'Banking77Classification' is superseded by 'Banking77Classification.v2'. We recommend using the newer version of the task unless you are running a specific benchmark. See `get_task('Banking77Classification.v2').metadata.description` to get a description of the task and changes.
+  task.check_if_dataset_is_superseded()
+  Banking77Classification          0.8170   (29.5 s)
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\run_mteb.py:186: DeprecationWarning: MTEB is deprecated and will be removed in future versions. Please use the `mteb.evaluate` function instead.
+  ev = mteb.MTEB(tasks=tasks)
+The task 'TwentyNewsgroupsClustering' is superseded by 'TwentyNewsgroupsClustering.v2'. We recommend using the newer version of the task unless you are running a specific benchmark. See `get_task('TwentyNewsgroupsClustering.v2').metadata.description` to get a description of the task and changes.
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\mteb\deprecated_evaluator.py:456: UserWarning: The task 'TwentyNewsgroupsClustering' is superseded by 'TwentyNewsgroupsClustering.v2'. We recommend using the newer version of the task unless you are running a specific benchmark. See `get_task('TwentyNewsgroupsClustering.v2').metadata.description` to get a description of the task and changes.
+  task.check_if_dataset_is_superseded()
+  TwentyNewsgroupsClustering       0.4812   (155.8 s)
+
+================ M8 GATE ================
+  task                                  CPU      NPU    delta
+  STSBenchmark                        85.86    85.93    +0.07
+  SICK-R                              79.41    79.41    -0.00
+  STS12                               77.44    77.41    -0.04
+  Banking77Classification             81.74    81.70    -0.04
+  TwentyNewsgroupsClustering          48.63    48.12    -0.50
+  MEAN                                                  -0.10
+  worst single task: -0.50 points
+
+FAIL -- gate is |mean| <= 0.5 points AND no task worse than -0.5
+wrote tasks\0103-t23-bfp16-all-models\mteb_small_bfp_cbf16_repeat.json

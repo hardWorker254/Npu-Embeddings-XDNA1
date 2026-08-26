@@ -1,0 +1,80 @@
+{
+    "cpu_mean_percent":  4.3,
+    "cpu_contenders":  [
+                           "clion64 ~0.7 core(s)"
+                       ],
+    "threads":  24,
+    "what":  "whole-catalogue release benchmark sweep, one session",
+    "power":  "no battery device reported (desktop, or the class is empty)",
+    "when":  "2026-08-25T15:17:33",
+    "rounds":  8,
+    "bench":  5,
+    "kind":  "hardware measurement",
+    "stages_this_run":  [
+                            "energy"
+                        ],
+    "cpu_quiet":  false,
+    "rows":  [
+                 {
+                     "model":  "all-MiniLM-L6-v2",
+                     "artifacts":  "artifacts_minilm_bfp16",
+                     "npu":  true,
+                     "dtype":  "bf16",
+                     "datapath":  "bfp16",
+                     "gate":  "pass",
+                     "interleaved_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0109-fused-ratio-energy\\interleaved-all-MiniLM-L6-v2.txt",
+                     "energy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0109-fused-ratio-energy\\energy-all-MiniLM-L6-v2.txt"
+                 },
+                 {
+                     "model":  "bge-small-en-v1.5",
+                     "artifacts":  "artifacts_small_bf16",
+                     "npu":  true,
+                     "dtype":  "bf16",
+                     "datapath":  "bf16",
+                     "gate":  "pass",
+                     "interleaved_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0109-fused-ratio-energy\\interleaved-bge-small-en-v1.5.txt",
+                     "energy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0109-fused-ratio-energy\\energy-bge-small-en-v1.5.txt"
+                 },
+                 {
+                     "model":  "bge-base-en-v1.5",
+                     "artifacts":  "artifacts_base_bfp16",
+                     "npu":  true,
+                     "dtype":  "bf16",
+                     "datapath":  "bfp16",
+                     "gate":  "pass",
+                     "interleaved_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0109-fused-ratio-energy\\interleaved-bge-base-en-v1.5.txt",
+                     "energy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0109-fused-ratio-energy\\energy-bge-base-en-v1.5.txt"
+                 },
+                 {
+                     "model":  "bge-large-en-v1.5",
+                     "artifacts":  "artifacts_large_bfp16",
+                     "npu":  true,
+                     "dtype":  "bf16",
+                     "datapath":  "bfp16",
+                     "gate":  "pass",
+                     "interleaved_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0109-fused-ratio-energy\\interleaved-bge-large-en-v1.5.txt",
+                     "energy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0109-fused-ratio-energy\\energy-bge-large-en-v1.5.txt"
+                 },
+                 {
+                     "model":  "nomic-embed-text-v1.5",
+                     "artifacts":  "artifacts_nomic_bfp16",
+                     "npu":  true,
+                     "dtype":  "bf16",
+                     "datapath":  "bfp16",
+                     "gate":  "pass",
+                     "interleaved_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0109-fused-ratio-energy\\interleaved-nomic-embed-text-v1.5.txt",
+                     "energy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0109-fused-ratio-energy\\energy-nomic-embed-text-v1.5.txt"
+                 },
+                 {
+                     "model":  "embeddinggemma-300m",
+                     "artifacts":  "artifacts_gemma_bfp16",
+                     "npu":  true,
+                     "dtype":  "bf16",
+                     "datapath":  "bfp16",
+                     "gate":  "pass",
+                     "interleaved_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0109-fused-ratio-energy\\interleaved-embeddinggemma-300m.txt",
+                     "energy_log":  "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0109-fused-ratio-energy\\energy-embeddinggemma-300m.txt"
+                 }
+             ],
+    "lanes":  4
+}

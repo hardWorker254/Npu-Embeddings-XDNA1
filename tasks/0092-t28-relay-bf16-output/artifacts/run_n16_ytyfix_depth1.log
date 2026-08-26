@@ -1,0 +1,5 @@
+﻿  purged 0 cache candidate(s)
+hierarchical 2-hop merge: 4 GEMM+GELU producer cols -> 2 merge mem tiles (each ALSO local A/B feed) -> 1 relay ffn_down-shaped matmul, k-block (per-hop) acquire/release, NO C tensor for either GEMM stage in the design's own I/O signature:
+  rel_fro   2.306e-03
+  worst abs 1.337e-03
+PASS -- tolerance 3e-2 rel_fro (two chained bf16 narrows plus a non-MMAC second matmul)

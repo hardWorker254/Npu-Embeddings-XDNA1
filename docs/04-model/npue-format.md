@@ -61,7 +61,10 @@ struct FileHeader {           // exactly 64 bytes at offset 0
   char     magic[4];          // "NPUE"
   uint32_t version;           // 1
   uint32_t arch;              // 0 = BERT_ABS_GELU_POSTLN
-                               // 1 = GEMMA3_MQA_ROPE_GEGLU (host-only, M12)
+                               // 1 = GEMMA3_MQA_ROPE_GEGLU (M12; on the
+                               //     array since M13/tasks/0074 -- the
+                               //     on-disk form is in config.gemm_layout,
+                               //     not in this field)
                                // 2 = NOMIC_ROPE_SWIGLU (M13, see below)
   uint32_t flags;             // bit0 = pre-tiled
   uint64_t json_offset;       // 64
@@ -96,9 +99,9 @@ packers in `tools/pack_npue.py`:
 
 | role | meaning |
 |---|---|
-| `gemm_b` | a pre-tiled `block_panel` GEMM operand (`layout`/`layout_hash` present) — the DMA reads it straight into the array. arch 0 and arch 2 only. |
-| `gemm_b_host` | a GEMM operand stored PLAIN — F32, row-major `[K,N]`, `layout=None` — for an arch with no NPU kernel yet. arch 1 (Gemma) only; every one of its GEMMs runs on the host. |
-| `bias` | fp32, per-op. For arch 2 these are ZERO-FILLED placeholders (see below), not real biases. |
+| `gemm_b` | a pre-tiled `block_panel` GEMM operand (`layout`/`layout_hash` present) — the DMA reads it straight into the array. **Every arch uses this today**; arch 1 joined in tasks/0074. |
+| `gemm_b_host` | a GEMM operand stored PLAIN — F32, row-major `[K,N]`, `layout=None` — for a GEMM that runs on the host. Used by arch 1 for its two post-pool Dense heads (which run once per *sequence*, so an NPU dispatch would cost more than it saves), and for **every** GEMM in a `--gemma-host-only` container, which is now the correctness control rather than the product. |
+| `bias` | fp32, per-op. For arch 1 and arch 2 these are ZERO-FILLED placeholders (see below), not real biases — neither model has any. |
 | `layernorm` | fp32 γ/β (or just γ for RMSNorm, arch 1). |
 | `embedding` | gathered, never multiplied, so never tiled. For arch 2, `embeddings.position` is a ZERO-FILLED placeholder (RoPE replaces it). |
 | `tokenizer` | opaque `U8` bytes — `vocab.txt` (arch 0/2, WordPiece) or the generated Gemma table (arch 1) — riding in the same file so deployment is one file, not a file plus a sidecar the tokenizer must not be separated from. |
@@ -196,8 +199,8 @@ bearing for byte parity with the C++ mirror), `layer.i.{qkv,attn_out,
 ffn_up,ffn_down}` (+ `.bias` each) and `layer.i.{ln1,ln2}.{weight,bias}`. That
 means `Encoder::stage_all()` and the whole NPU dispatch path work
 **unchanged** — a new arch, zero new runtime code for weight loading. GEMM
-operands are pre-tiled `block_panel` bf16 exactly like arch 0 (unlike arch 1
-Gemma, which is host-only): nomic's geometry (head_dim 64, every `N` a
+operands are pre-tiled `block_panel` bf16 exactly like arch 0: nomic's
+geometry (head_dim 64, every `N` a
 multiple of 384, `K ∈ {768, 3072}`) fits the array, and packing it at the
 project's default `(tile_k, tile_n) = (64, 48)` reproduces the **exact same
 `layout_hash`** (`94266693ea31aa67…`) as MiniLM/bge-small/bge-base — the
@@ -247,6 +250,14 @@ Departures from arch 0, and how each is represented:
   `rope(scale·q)` against `scale·rope(q)` through the actual NeoX-style RoPE
   this arch uses — and measured **`rel_fro = 0.0`** (exact, not merely
   within fp32 round-off).
+- **`"prompt_default"` is ADVISORY as of tasks/0118.** The runtime used to
+  fall back to it when no prefix was named; it no longer does, because a
+  silently-applied default is how the wrong prompt ships and a wrongly-prompted
+  vector is indistinguishable from a right one downstream. The key stays, and
+  `set_model_shape()` still refuses a container whose `prompt_default` is not a
+  key of its own `prompts` table — but nothing *applies* it. Its remaining role
+  is harnesses choosing which prompt to exercise
+  (`tools/verify_embed_e2e.py`, `experiments/m8-npu-vs-cpu/compare_three.py`).
 - **The prefix/prompt table is this project's own choice, not the
   checkpoint's.** `config_sentence_transformers.json` for this checkpoint
   carries no `prompts` dict at all, so the container's `"prompts"` /
@@ -277,6 +288,90 @@ a live discriminating control, the RoPE-fold proof, and the config facts.
 Goldens comparison (`reference/encoder_nomic.py` + `goldens_nomic/`) is a
 separate, later task; the verifier is structured so that check can be added
 without touching what is already here.
+
+## `arch = 1` — `gemma3_mqa_rope_geglu` (M12, put on the array in M13)
+
+EmbeddingGemma-300M. RMSNorm `x/rms*(1+w)` (**not** the Llama-style
+`x/rms*w` — the weight is stored zero-centred and missing the `1 +` produces a
+plausible wrong answer), MQA with `num_key_value_heads = 1`, RoPE whose base
+frequency is **per layer**, `q_norm`/`k_norm` applied per head between the
+projection and RoPE, a GeGLU FFN, and **four** RMSNorms per layer against
+BERT's two LayerNorms.
+
+Like arch 2, it emits **BERT's tensor names and roles** for the four per-layer
+GEMM operands, so the packer, the layout-hash check and the whole NPU dispatch
+path work unchanged. The tensors whose *placement* differs from BERT keep their
+Gemma names (`q_norm`, `k_norm`, `input_layernorm`,
+`post_attention_layernorm`, `pre_feedforward_layernorm`,
+`post_feedforward_layernorm`, `embed_tokens.weight`, `norm.weight`,
+`dense2/3.weight`), because renaming those would make two different
+architectures look alike in the one file a reader checks.
+
+### Two containers, one arch — `gemm_layout`
+
+This is the only arch with two legitimate on-disk forms, so the container says
+which it is and **the runtime reads it rather than inferring it**:
+
+| `config["gemm_layout"]` | operands | what runs |
+|---|---|---|
+| `"pretiled_bf16"` (default) | tiled bf16 `gemm_b` under BERT names | `GemmaNpuEncoder` — 4 GEMMs/layer on the array |
+| `"host"` (`--gemma-host-only`) | plain F32 row-major `gemm_b_host` | `npue::GemmaEncoder` — every GEMM on the CPU |
+
+The host form is kept deliberately. It accumulates every GEMM in double
+precision and is tied to `reference/encoder_gemma.py` at `1-cos` 5.496e-13, so
+it is the **discriminating control** the array path is gated against
+(`tools/verify_gemma_npu_encode.py`), not dead code.
+
+### The padded `qkv`, and why `3 * hidden` is not the width
+
+MQA gives K and V a width of `num_key_value_heads * head_dim` = **256**, and
+256 caps the largest legal `tile_n` at 16 across the whole design — a ~3×
+iteration tax by [T1](../../research/OPEN-THREADS.md#t1)'s cost model. Since
+`B` is pre-tiled offline anyway, the packer **appends zero columns**:
+
+```
+qkv B = [ Wq (768) | Wk (256) | Wv (256) | 0 (256) ]     K = 768, N = 1536
+```
+
+`N = 1536` is a multiple of `tile_n * n_aie_cols = 384`, so the model runs at
+the project's default `(tile_k, tile_n) = (64, 48)` and reproduces the **same
+`layout_hash`** (`94266693ea31aa67…`) as MiniLM/bge-small/bge-base/nomic.
+`C = A·B` with zero columns of `B` gives exactly-zero columns of `C`, so this
+is **exact**, not an approximation — the host slices Q/K/V off the front by
+offset and ignores the tail. Cost: 4.4% of GEMM iterations, against the ~3× it
+removes. Trailing rather than interior padding, so every offset keeps its
+natural value.
+
+Three keys carry what cannot be derived, and the runtime asserts all three:
+
+- **`qkv_n`** — the operand's real width. It is `3 * hidden` for every MHA
+  model and **1536, not 2304**, here. `design_fits()` used to derive it, which
+  would have made the runtime reject this model's own correct design.
+  `design.json` and `hub.cpp`'s catalogue row carry it too, because `list` has
+  to answer "does a design serve this model" before the container exists.
+- **`qkv_blocks`** — `{q, k, v, pad}` as explicit `[start, end)` pairs.
+- **`geglu_halves`** — `"gate|up"`. `ffn_up` is `[gate | up]` fused along `N`
+  (`N = 2 * intermediate`), so the array still sees four GEMMs per layer rather
+  than five, and the host computes `gelu_tanh(lo) * hi`. Read, never assumed:
+  the sibling architecture measured its swapped variant at `rel_fro` 4.022e+00.
+
+Biases are **zero-filled** for every fused operand — Gemma has none anywhere
+(`attention_bias: false`, both Dense heads `bias: false`) — because the GEMM
+epilogue adds one unconditionally, and a zero bias is exact and cheaper than a
+nullable branch in the hot path. Same reasoning as arch 2's.
+
+### The fold that is illegal here
+
+Every other model in this project folds `1/√head_dim` into the packed Q block.
+**For arch 1 that fold is annihilated**: `q_norm` is an RMSNorm applied to `q`
+*after* the projection, and RMSNorm is scale-invariant — `(s·q)/rms(s·q) =
+q/rms(q)` exactly. The scale would vanish with no shape error to notice it, and
+attention would run unscaled. The container therefore records
+`fusions.qk_scale_folded_into_q: false` **with a note saying it is illegal
+rather than merely skipped**, and the scale is applied at its reference
+position, on the attention scores.
+
+Full detail: [`tasks/0074`](../../tasks/0074-m13-gemma-on-npu/TASK.md).
 
 ## Verification (the M4 gate, arch = 0)
 

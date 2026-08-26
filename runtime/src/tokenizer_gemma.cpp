@@ -372,6 +372,10 @@ GemmaEncoded GemmaTokenizer::encode(const std::string &text, int max_len,
   for (int i = 0; i < take; ++i) e.input_ids.push_back(body[i]);
   e.input_ids.push_back(eos_id);
   e.n_tokens = static_cast<int32_t>(e.input_ids.size());
+  // `body` is the prefix AND the text, so this counts what actually competed
+  // for the sequence budget.
+  e.n_tokens_full = static_cast<int32_t>(body.size()) + 2;   // + <bos>/<eos>
+  e.truncated = take < static_cast<int>(body.size());
 
   e.attention_mask.assign(e.input_ids.size(), 1);
   while (static_cast<int>(e.input_ids.size()) < max_len) {

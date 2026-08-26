@@ -60,16 +60,25 @@ void prepare_model(const std::string &safetensors, const std::string &vocab,
                    void (*log)(const std::string &) = nullptr);
 
 // arch=1 (EmbeddingGemma / Gemma3 MQA+RoPE+GeGLU) mirror of
-// tools/pack_npue.py's pack_gemma(). Every GEMM operand is stored PLAIN --
-// F32, row-major [K,N], no block_panel tiling, no layout_hash -- because
-// there is no NPU kernel for this arch yet (tasks/0064). `model_dir` must
-// hold model.safetensors, config.json, 2_Dense/model.safetensors,
+// tools/pack_npue.py's pack_gemma(). `model_dir` must hold
+// model.safetensors, config.json, 2_Dense/model.safetensors,
 // 3_Dense/model.safetensors and (optionally) gemma_tokenizer.bin.
 // `source_repo` is resolved by the caller exactly as for the BERT path
 // (CHECKPOINT.json or --source-repo), so both packers agree on it.
+//
+// tasks/0074: the four per-layer GEMM operands are now PRE-TILED bf16 under
+// BERT's tensor names, with Q|K|V fused and zero-padded to a legal tile width,
+// so the array runs 97.7% of this model's MACs. `host_only` restores what
+// tasks/0064-0065 shipped -- plain F32 row-major operands for the CPU-only
+// npue::GemmaEncoder -- which is now the correctness CONTROL rather than the
+// product. Both packers must keep producing byte-identical output for BOTH
+// modes (tools/verify_pack_parity.py); tasks/0065 established that property
+// and it is not allowed to lapse.
 void prepare_model_gemma(const std::string &model_dir, const std::string &out,
                          const std::string &source_repo,
-                         void (*log)(const std::string &) = nullptr);
+                         void (*log)(const std::string &) = nullptr,
+                         int64_t tile_k = 64, int64_t tile_n = 48,
+                         bool host_only = false);
 
 // arch=2 (nomic-embed-text-v1.5 / RoPE + gated SwiGLU) mirror of
 // tools/pack_npue.py's pack_nomic() (tasks/0069, tasks/0070, tasks/0071).

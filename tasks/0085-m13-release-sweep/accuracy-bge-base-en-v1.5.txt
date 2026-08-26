@@ -1,0 +1,18 @@
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model bge-base-en-v1.5 --artifacts artifacts_base --threads 16
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-base-en-v1.5: 150 tensors, 265.26 MB, checkpoint c7c1988aae201f80
+  shape      BAAI/bge-base-en-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, CLS pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 131072 B
+  weights    169.87 MB staged on the device once, not per call
+
+  embedding rel_fro vs HF golden           4.297e-03
+  worst 1 - cos vs HuggingFace             1.353e-05
+
+PASS -- tolerance 2e-03 on 1-cos, no Python in this process

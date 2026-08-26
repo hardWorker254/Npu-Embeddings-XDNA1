@@ -1,0 +1,36 @@
+
+Models (root ../tasks/0104-adopt-bfp16-per-model/guard_test_root)
+
+  model                state     layers hidden  pooling      size  notes
+  all-MiniLM-L6-v2     ready          6    384     mean     69 MB  smallest and fastest; head_dim 32 keeps attention off the array
+  bge-small-en-v1.5    no design     12    384      cls     90 MB  MiniLM's width at twice the depth; +2.99 MTEB points
+  bge-base-en-v1.5     no design     12    768      cls    265 MB  best geometric fit for this NPU: head_dim 64 and every N a multiple of 384
+  bge-large-en-v1.5    no design     24   1024      cls    732 MB  highest quality; N=1024 forces tile_n 32, and 24 layers cost dispatches
+  embeddinggemma-300m  no design     24    768     mean   1047 MB  MQA+RoPE+GeGLU on the array (4 GEMMs/layer); gated, needs HF_TOKEN
+  nomic-embed-text-v1.5 no design     12    768     mean    322 MB  RoPE + gated SwiGLU (arch=2); same array designs as bge-base; needs --prefix (search_document / search_query / clustering / classification)
+  bge-micro-v2         no design      3    384     mean     58 MB  added locally from TaylorAI/bge-micro-v2
+
+  Locally packed (not in the catalogue):
+  all-MiniLM-L6-v2.int8 no design      6    384     mean     59 MB  sentence-transformers/all-MiniLM-L6-v2
+  all-MiniLM-L6-v2.int8n64 no design      6    384     mean     59 MB  sentence-transformers/all-MiniLM-L6-v2
+  bge-base-en-v1.5.int8 no design     12    768      cls    181 MB  BAAI/bge-base-en-v1.5
+  bge-large-en-v1.5.int8 no design     24   1024      cls    431 MB  BAAI/bge-large-en-v1.5
+  bge-large-en-v1.5.int8n64 no design     24   1024      cls    431 MB  BAAI/bge-large-en-v1.5
+  bge-large-n16        no design     24   1024      cls    732 MB  BAAI/bge-large-en-v1.5
+  bge-small-en-v1.5.int8 no design     12    384      cls     70 MB  BAAI/bge-small-en-v1.5
+  embeddinggemma-300m.cpp_test cpu           24    768 mean_include_prompt   1240 MB  unsloth/embeddinggemma-300m
+  embeddinggemma-300m.int8 no design     24    768 mean_include_prompt    942 MB  unsloth/embeddinggemma-300m
+  nomic-embed-text-v1.5.int8 no design     12    768     mean    210 MB  nomic-ai/nomic-embed-text-v1.5
+
+  ready      installed, with a matching NPU design -- `serve` runs it
+  available  not downloaded yet -- `serve` fetches and verifies it
+  cpu        installed, but this CONTAINER holds row-major host-side
+             GEMM operands, so it runs entirely on the CPU. Repack it
+             (the pre-tiled NPU layout is the default) to use the array
+  no design  installed, but no design set for this geometry is present
+  no encoder installed, and a design may match, but this build has no
+             forward pass for the architecture -- it will refuse rather
+             than return embeddings for the wrong model
+
+  npuembeddings serve <model>
+

@@ -1,0 +1,53 @@
+﻿{
+    "kind":  "hardware measurement",
+    "task":  "0034",
+    "method":  "differential: E(high) - E(low) over encode counts, package RAPL",
+    "meter":  "RAPL_Package0_PKG",
+    "energy_unit_j":  3.6E-09,
+    "batch":  128,
+    "threads":  24,
+    "artifacts":  "artifacts_b128il",
+    "low_encodes":  20,
+    "high_encodes":  60,
+    "results":  [
+                    {
+                        "name":  "cpu-st",
+                        "low_encodes":  20,
+                        "high_encodes":  60,
+                        "seq_per_encode":  128,
+                        "delta_joules":  742.0131749988,
+                        "delta_seconds":  12.729000000000001,
+                        "j_per_encode":  18.550329374969998,
+                        "j_per_1000_seq":  144.92444824195312,
+                        "watts_during":  58.293123968795655,
+                        "seq_per_s":  402.23112577578752,
+                        "idle_w":  4.07327888826938
+                    },
+                    {
+                        "name":  "npu-single",
+                        "low_encodes":  20,
+                        "high_encodes":  60,
+                        "seq_per_encode":  128,
+                        "delta_joules":  361.5983249976,
+                        "delta_seconds":  14.522999999999998,
+                        "j_per_encode":  9.03995812494,
+                        "j_per_1000_seq":  70.624672851093749,
+                        "watts_during":  24.898321627597607,
+                        "seq_per_s":  352.54424017076366,
+                        "idle_w":  3.92535566346509
+                    },
+                    {
+                        "name":  "npu-pipe4",
+                        "low_encodes":  5,
+                        "high_encodes":  15,
+                        "seq_per_encode":  512,
+                        "delta_joules":  339.81919499880007,
+                        "delta_seconds":  10.166,
+                        "j_per_encode":  33.981919499880007,
+                        "j_per_1000_seq":  66.370936523203142,
+                        "watts_during":  33.427030788786155,
+                        "seq_per_s":  503.63958292347036,
+                        "idle_w":  4.1512341364234127
+                    }
+                ]
+}

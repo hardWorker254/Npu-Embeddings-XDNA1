@@ -50,7 +50,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from corpus_nomic import SENTENCES, SEQ_LEN     # noqa: E402
+from corpus_nomic import SENTENCES, SEQ_LEN as DEFAULT_SEQ_LEN  # noqa: E402
 from encoder_nomic import PROMPTS               # noqa: E402
 from safetensors_io import save, load           # noqa: E402
 
@@ -105,7 +105,26 @@ def main():
     ap.add_argument("--taps", action="store_true",
                     help="also write the full intermediate dump (large, gitignored)")
     ap.add_argument("--force", action="store_true")
+    # T41 (tasks/0116). The sequence length used to be a module constant in
+    # corpus*.py with no flag, so every measurement at another seq needed an
+    # edit-and-restore of the reference oracle -- tasks/0112 and 0113 each did
+    # exactly that, by hand, to measure seq 256 and 512. Same class as the
+    # `SEQ = 64` tasks/0110 removed from tools/export_gemm_rtp.py, one layer
+    # further out. The constant remains, as the DEFAULT, so an invocation
+    # without --seq is byte-identical to before.
+    ap.add_argument("--seq", type=int, default=DEFAULT_SEQ_LEN,
+                    help=f"sequence length to pad the corpus to "
+                         f"(default {DEFAULT_SEQ_LEN}). It is part of the "
+                         f"golden FILENAME (_s<seq>_), so goldens at "
+                         f"different lengths coexist rather than overwrite "
+                         f"each other; the .npue container must carry at "
+                         f"least this many positions, and the design must be "
+                         f"exported with a matching --seq.")
     args = ap.parse_args()
+    # Deliberately shadowing the imported name: every use below is inside this
+    # function, so binding it once here reaches all of them and no call site
+    # has to change. The module constant stays the default (see --seq above).
+    SEQ_LEN = args.seq
 
     import torch
     import transformers
@@ -137,7 +156,7 @@ def main():
         if n >= SEQ_LEN:
             raise SystemExit(
                 f"\nFAIL -- sentence {i} used all {SEQ_LEN} slots; it may have "
-                f"been silently truncated. Raise SEQ_LEN in corpus_nomic.py.")
+                f"been silently truncated. Pass a larger --seq.")
 
     # -- Oracle 1: NATIVE transformers.models.nomic_bert (no trust_remote_code) --
     model = AutoModel.from_pretrained(str(model_dir)).eval()

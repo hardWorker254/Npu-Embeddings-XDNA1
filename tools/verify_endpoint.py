@@ -61,6 +61,14 @@ def main() -> int:
     ap.add_argument("--model", default="all-MiniLM-L6-v2")
     ap.add_argument("--port", type=int, default=8420)
     ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--artifacts", default="artifacts_b128il",
+                    help="design set for the --embed cross-check in step 6. "
+                         "Was hardcoded, which limited this harness to "
+                         "hidden 384.")
+    ap.add_argument("--prompt-name", default=None,
+                    help="task prompt to exercise (tasks/0118). Default: the "
+                         "first name /health advertises, or none at all for a "
+                         "model with no prompts table.")
     ap.add_argument("--out", default=str(REPO / "tasks" / "0037-m9-tiers-endpoint"
                                          / "verify_endpoint.json"))
     args = ap.parse_args()
@@ -72,6 +80,30 @@ def main() -> int:
     results = {}
     ok = True
 
+    # WHICH TASK PROMPTS THIS MODEL HAS, read from the server rather than
+    # assumed (tasks/0118). A model with a prompts table now REFUSES a request
+    # that names none, so every create() below has to carry one -- which is why
+    # this happens before the first call rather than in the prompts section.
+    # Reading it from /health is also the check that /health advertises it at
+    # all: a client that could not discover the names would have to provoke a
+    # 400 to learn them.
+    import urllib.error
+    import urllib.request
+    with urllib.request.urlopen(f"http://{args.host}:{args.port}/health") as _h:
+        health = json.loads(_h.read().decode())
+    names = health.get("prompt_names") or []
+    prompt = args.prompt_name or (names[0] if names else None)
+    if prompt is not None and prompt not in names:
+        raise SystemExit(f"--prompt-name {prompt!r} is not one this server "
+                         f"offers: {names}")
+    # `extra_body` is how the official client sends a non-standard field, so
+    # using it here is itself part of the compatibility claim.
+    EXTRA = {"extra_body": {"prompt_name": prompt}} if prompt is not None else {}
+    print(f"  /health prompts          -> {names if names else 'none'}"
+          + (f", exercising {prompt!r}" if prompt else ""))
+    results["prompt_names"] = names
+    results["prompt_name_used"] = prompt
+
     # 1. models
     models = client.models.list()
     model_id = models.data[0].id
@@ -79,7 +111,7 @@ def main() -> int:
     results["model"] = model_id
 
     # 2. a single string, the simplest call an app makes
-    r = client.embeddings.create(model=model_id, input="hello world")
+    r = client.embeddings.create(model=model_id, input="hello world", **EXTRA)
     v = np.asarray(r.data[0].embedding, dtype=np.float32)
     print(f"  single string            -> dim {v.size}, "
           f"norm {np.linalg.norm(v):.6f}, tokens {r.usage.prompt_tokens}")
@@ -90,7 +122,7 @@ def main() -> int:
     # 3. a batch, and the ORDER must be preserved -- an endpoint that
     #    reorders under batching is silently catastrophic for a client.
     texts = [t for p in PAIRS for t in p] + list(UNRELATED)
-    r = client.embeddings.create(model=model_id, input=texts)
+    r = client.embeddings.create(model=model_id, input=texts, **EXTRA)
     idx = [d.index for d in r.data]
     emb = np.stack([np.asarray(d.embedding, dtype=np.float32) for d in r.data])
     print(f"  batch of {len(texts):<3}            -> indices ordered: "
@@ -104,7 +136,7 @@ def main() -> int:
     #    EXPLICITLY returns the raw string by design, so decode it here and
     #    check it is the same numbers.
     import base64 as b64mod
-    r64 = client.embeddings.create(model=model_id, input=texts,
+    r64 = client.embeddings.create(model=model_id, input=texts, **EXTRA,
                                    encoding_format="base64")
     emb64 = np.stack([np.frombuffer(b64mod.b64decode(d.embedding),
                                     dtype=np.float32) for d in r64.data])
@@ -150,7 +182,10 @@ def main() -> int:
         run = subprocess.run(
             [str(REPO / "runtime" / "build" / "npuembed.exe"), "..",
              "--model", args.model,
-             "--artifacts", "artifacts_b128il", "--threads", "24",
+             "--artifacts", args.artifacts, "--threads", "24",
+             # The same prompt the endpoint used, or this compares two
+             # different questions and reports the difference as a bug.
+             *(["--prefix", prompt] if prompt is not None else []),
              "--embed", str(d / "in.txt"), str(d / "out.f32")],
             cwd=str(REPO / "runtime"), capture_output=True, text=True)
         if run.returncode != 0:
@@ -169,18 +204,19 @@ def main() -> int:
             results["vs_embed_max_diff"] = dmax
 
     # 7. errors must be errors
-    import urllib.error
-    import urllib.request
 
-    def post(payload):
+    def post_full(payload):
         req = urllib.request.Request(
             f"{base}/embeddings", data=json.dumps(payload).encode(),
             headers={"Content-Type": "application/json"}, method="POST")
         try:
             with urllib.request.urlopen(req) as resp:
-                return resp.status
+                return resp.status, resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
-            return e.code
+            return e.code, e.read().decode("utf-8", "replace")
+
+    def post(payload):
+        return post_full(payload)[0]
 
     codes = {"no input": post({"model": model_id}),
              "empty list": post({"model": model_id, "input": []}),
@@ -192,6 +228,58 @@ def main() -> int:
         print(f"    {k:<12} -> HTTP {v}")
         ok &= v >= 400
     results["error_codes"] = codes
+
+    # 8. TASK PROMPTS, PER REQUEST (tasks/0118). This endpoint had no prefix
+    #    coverage at all until now, on a runtime where a wrong prefix is the
+    #    one error nothing downstream can see: the vector comes back correctly
+    #    shaped, correctly normed and deterministic either way.
+    print("  task prompts:")
+    if not names:
+        # A model with no table must REFUSE the field rather than ignore it --
+        # the same refusal resolve_prefix() gives --prefix on the CLI, so the
+        # two cannot drift. "" is refused too, for the same reason: the field
+        # is meaningless here, and a client sweeping one config across the
+        # whole catalogue SHOULD break rather than quietly get BERT vectors.
+        c_named = post({"model": model_id, "input": "x",
+                        "prompt_name": "search_query"})
+        c_empty = post({"model": model_id, "input": "x", "prompt_name": ""})
+        print(f"    no table  -> named HTTP {c_named}, empty HTTP {c_empty}")
+        ok &= c_named >= 400 and c_empty >= 400
+        results["prompts"] = {"named": c_named, "empty": c_empty}
+    else:
+        missing_code, missing_body = post_full({"model": model_id, "input": "x"})
+        unknown = post({"model": model_id, "input": "x",
+                        "prompt_name": "definitely-not-a-prompt"})
+        nulled = post({"model": model_id, "input": "x", "prompt_name": None})
+        # The 400 must LIST what this model really offers. Without that the
+        # caller has no way to recover from it except by reading our source.
+        lists = all(n in missing_body for n in names)
+        print(f"    missing   -> HTTP {missing_code}, lists all "
+              f"{len(names)} names: {lists}")
+        print(f"    unknown   -> HTTP {unknown}    null -> HTTP {nulled}")
+        ok &= (missing_code >= 400 and unknown >= 400 and nulled >= 400
+               and lists)
+        results["prompts"] = {"missing": missing_code, "unknown": unknown,
+                              "null": nulled, "error_lists_names": lists}
+
+        # THE ONE CHECK THAT PROVES THE FEATURE. Everything above proves a
+        # refusal; this proves that two prompts in ONE process really produce
+        # two different embeddings, which is the whole reason the choice moved
+        # off the command line.
+        if len(names) >= 2:
+            q = "what is the AMD XDNA2 NPU?"
+            a, b = names[0], names[1]
+            va, vb = (np.asarray(client.embeddings.create(
+                          model=model_id, input=q,
+                          extra_body={"prompt_name": n}).data[0].embedding,
+                      dtype=np.float32) for n in (a, b))
+            differ = not np.array_equal(va, vb)
+            cos_ab = float(va @ vb)
+            print(f"    {a!r} vs {b!r} in ONE session -> "
+                  f"differ {differ}, cos {cos_ab:+.4f}")
+            ok &= differ
+            results["prompts"].update({"a": a, "b": b, "differ": differ,
+                                       "cos_a_b": cos_ab})
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

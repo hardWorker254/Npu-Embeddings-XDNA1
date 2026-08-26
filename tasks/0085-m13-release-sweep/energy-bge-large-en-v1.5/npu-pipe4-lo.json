@@ -1,0 +1,23 @@
+﻿{
+    "kind":  "hardware measurement",
+    "label":  "npu-pipe4-5",
+    "command":  ".\\build\\npuembed.exe .. --model bge-large-en-v1.5 --artifacts artifacts_large --threads 24 --pipeline 4 --bench 5",
+    "meter":  "RAPL_Package0_PKG",
+    "energy_unit_j":  3.6E-09,
+    "repeats":  1,
+    "idle_before_w":  3.9151273170567311,
+    "idle_after_w":  3.9523525004682529,
+    "idle_w":  3.933739908762492,
+    "idle_drift":  0.00946305151710765,
+    "runs":  [
+                 {
+                     "joules":  1799.3825399988,
+                     "seconds":  51.977,
+                     "watts":  34.61882255610751
+                 }
+             ],
+    "mean_watts":  34.61882255610751,
+    "mean_joules":  1799.3825399988,
+    "best_joules":  1799.3825399988,
+    "marginal_j":  1594.9185407610519
+}

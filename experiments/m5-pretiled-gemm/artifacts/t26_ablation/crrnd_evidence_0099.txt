@@ -1,0 +1,17 @@
+=== poison design matmul_bf16_f32_333c4d33.o: crrnd occurrences (grep -n crrnd) ===
+12:      36: ba 78 b0 cf ca 20 01 00 13 30	mova	r19, #0x180;		movx	r18, #0x6;		mov	r22, crrnd
+14:      4c: 76 58 0c d8 4b 50 81 15 c1 07 38 00  	mova	r24, #0x1;		st	 r8, [sp, #-64];		movx	r21, #0x2;		mov	crrnd, #0xc
+142:     37c: f8 20 bb 1f  	mov	crrnd, r22
+
+=== bf16c design matmul_bf16_f32_333c4d33.o: crrnd occurrences ===
+12:      36: ba 78 b0 cf ca 20 01 00 13 30	mova	r19, #0x180;		movx	r18, #0x6;		mov	r22, crrnd
+14:      4c: 76 58 0c d8 4b 50 81 15 c1 07 38 00  	mova	r24, #0x1;		st	 r8, [sp, #-64];		movx	r21, #0x2;		mov	crrnd, #0xc
+142:     37c: f8 20 bb 1f  	mov	crrnd, r22
+
+=== 0053/0098's ORIGINAL checked-in artifact (2026-08-20 build), same kernel filename: crrnd occurrences ===
+(none -- 0 hits, confirmed)
+
+=== rebuild3 (3rd independent purge+rebuild today): crrnd occurrences ===
+12:      36: ba 78 b0 cf ca 20 01 00 13 30	mova	r19, #0x180;		movx	r18, #0x6;		mov	r22, crrnd
+14:      4c: 76 58 0c d8 4b 50 81 15 c1 07 38 00  	mova	r24, #0x1;		st	 r8, [sp, #-64];		movx	r21, #0x2;		mov	crrnd, #0xc
+142:     37c: f8 20 bb 1f  	mov	crrnd, r22

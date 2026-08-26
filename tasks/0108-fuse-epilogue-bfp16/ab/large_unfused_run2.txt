@@ -1,0 +1,36 @@
+﻿NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-large-en-v1.5: 294 tensors, 731.57 MB, checkpoint 45e1954914e29bd7
+  shape      BAAI/bge-large-en-v1.5: 24 layers, hidden 1024, 16 heads x 64, ffn 4096, CLS pooling
+  designs    ONE xclbin, 4 streams (1 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 24 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 24 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 49 fewer NPU dispatches
+  bo-align   last data buffer aligned to 262144 B
+  weights    603.98 MB staged on the device once, not per call
+  npu        exclusive -- 1 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  3 encodes of 128 sequences at seq 64
+    wall  2073.08 ms   ->      61.7 seq/s
+    cpu  11479.17 ms   ->      5.54 cores busy
+
+    NPU path (copy+sync+dispatch)  1538.63 ms   74.2%   96 dispatches
+      bf16 convert (both ways)      180.14 ms    8.7%
+      sync to device                 26.72 ms    1.3%
+      dispatch + wait               970.66 ms   46.8%    10111 us each
+        submit (build + start)        8.94 ms    0.4%       93 us each
+        wait (hardware)             960.24 ms   46.3%    10003 us each
+      sync from device               15.89 ms    0.8%
+      read out + bias               345.22 ms   16.7%
+    host attention (QK^T, A.V)     198.49 ms    9.6%   (qk 108.3  av 90.2)
+    host gelu                      103.15 ms    5.0%
+    host softmax                    21.00 ms    1.0%
+    host layernorm                  37.15 ms    1.8%
+    everything else                174.65 ms    8.4%   (residual adds, pooling, embedding lookup)
+
+    per design      calls   MACs/call    wait us/call
+    gemm_rtp           96           0         10003

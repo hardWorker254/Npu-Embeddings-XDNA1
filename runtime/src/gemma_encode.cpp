@@ -110,8 +110,15 @@ GemmaEncoder::GemmaEncoder(File &model) : model_(model) {
 
 std::vector<float> GemmaEncoder::encode_one(const std::string &text,
                                             int max_len,
-                                            const std::string &prefix_name) const {
+                                            const std::string &prefix_name,
+                                            size_t index,
+                                            bool allow_truncation) const {
   const GemmaEncoded en = tok.encode(text, max_len, prefix_name);
+  // Note this counts the task prefix too -- it is prepended before
+  // tokenization and spends the same budget, so a caller that sized its text
+  // against max_len alone can legitimately land here.
+  if (en.truncated && !allow_truncation)
+    throw InputTooLong(index, en.n_tokens_full, max_len);
   const int64_t S = max_len;
   const int64_t H = heads_, KVH = kv_heads_, hd = head_dim_;
   const bool kv_heads_is_one = (KVH == 1);

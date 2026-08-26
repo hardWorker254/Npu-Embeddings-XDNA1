@@ -105,6 +105,252 @@ def add_gemm_b(w, name, mat, tile_k, tile_n, fold=None):
     return w.add(name, flat, "BF16", "gemm_b", [K, N], layout=layout)
 
 
+def _n_layers(model_dir):
+    cfg = json.loads((Path(model_dir) / "config.json").read_text(encoding="utf-8"))
+    return cfg["num_hidden_layers"]
+
+
+def calibrate_smoothing(model_dir, alpha=0.5, n_texts=128, max_len=64,
+                        corpus_path=None, arch="bert"):
+    """SmoothQuant factors for every NPU GEMM, from a calibration corpus.
+
+    Returns {(layer, op): s} where `s` is a per-INPUT-channel vector and the
+    identity being exploited is
+
+        X @ W  ==  (X / s) @ (diag(s) W)          for any positive s
+
+    with `s_j = max_i|X[i,j]|^alpha / max_n|W[j,n]|^(1-alpha)`. Dividing the
+    activation moves range out of the operand that cannot absorb it (per-token
+    scaling is shared by every channel of a row, so one outlier channel sets
+    the step size for all of them) into the weights, where each column already
+    has its own scale.
+
+    **WHY NOT FOLD IT INTO LAYERNORM.** SmoothQuant's own deployment story is
+    to fold `1/s` into the preceding LayerNorm's gamma/beta, which is free.
+    That works for PRE-LN decoder architectures. BERT is POST-LN: `ln1`'s
+    output feeds `ffn_up` *and* the residual added before `ln2`, so scaling
+    gamma/beta scales the residual too and silently changes the model
+    (tasks/0078 section 4a -- this was written down wrongly first). The factor
+    therefore ships as data and the runtime applies it inside the quantisation
+    pass, which already reads every element of A to take its row maximum. One
+    extra multiply on values already in registers.
+
+    Calibration is BUILD-TIME Python (CLAUDE.md rule 5 allows that; the shipped
+    runtime stays C++). It runs the numpy oracle -- the same
+    `reference/encoder.py` the goldens come from -- so the statistics describe
+    exactly the tensors the array will see.
+
+    KEYED BY CALL SITE, NOT BY SHAPE. All six layers' `qkv` are [384,1152]; a
+    shape-keyed maximum collapses them into one and dividing an early layer by
+    a late layer's outlier range drove the embedding to nonsense (measured at
+    1-cos 0.39-0.52 before this was found, tasks/0078 section 4b).
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(REPO / "reference"))
+    # THE ORACLE MUST MATCH THE ARCHITECTURE, or the statistics describe a
+    # model the array will never see (tasks/0081). arch=2 has RoPE instead of
+    # absolute positions and a gated SwiGLU whose ffn_up is 2*intermediate
+    # wide; running it through BERT's forward pass would produce plausible
+    # factors for the wrong activations -- exactly the failure mode the
+    # "geometry from the checkpoint" note below already guards for depth.
+    if arch == "nomic":
+        from encoder_nomic import load_reference, fp32_gemm       # noqa: E402
+    elif arch == "gemma":
+        from encoder_gemma import load_reference, fp32_gemm        # noqa: E402
+    else:
+        from encoder import load_reference, fp32_gemm             # noqa: E402
+    from transformers import AutoTokenizer                       # noqa: E402
+
+    corpus_path = corpus_path or (REPO / "tasks" / "0074-m13-gemma-on-npu"
+                                  / "corpus_520.txt")
+    texts = [t for t in pathlib_read_lines(corpus_path) if t][:n_texts]
+    if len(texts) < 8:
+        raise SystemExit(f"{corpus_path}: only {len(texts)} calibration texts")
+    tok = AutoTokenizer.from_pretrained(str(model_dir))
+    enc = tok(texts, padding="max_length", truncation=True,
+              max_length=max_len, return_tensors="np")
+
+    # The four projection GEMMs, and ONLY those: attention's QK^T and A.V run
+    # on the host in fp32, and `batched_gemm` hands them to the same callback
+    # as 2-D slices, so an ndim test does not separate them. Their widest
+    # operand dimension is `seq` (64) or `head_dim`; every projection's
+    # narrowest is `hidden`.
+    on_npu = lambda b: min(b.shape) >= 128
+    # THE ORACLE'S GEMM COUNT IS NOT THE PACKER'S, AND THE DIFFERENCE IS FUSION.
+    #
+    # Each oracle runs the model as the checkpoint stores it; this packer
+    # CONCATENATES operands along N so the array sees four GEMMs per layer
+    # whatever the architecture. So the two disagree, differently per arch:
+    #
+    #   arch 0 (BERT)   4 sites -> 4    qkv already fused upstream
+    #   arch 2 (nomic)  5 sites -> 4    fc11 (up) + fc12 (gate) -> ffn_up
+    #   arch 1 (Gemma)  7 sites -> 4    q+k+v(+pad) -> qkv, gate+up -> ffn_up
+    #
+    # Left unhandled the keys shift and every factor from that point on lands
+    # on the NEXT tensor -- it packs cleanly and is wrong from layer 0, the
+    # same class of bug as tasks/0078 4b's 400x blowup, which was caught only
+    # because the number was too implausible to accept. Hence the assert below.
+    #
+    # Merging is exact: the members of a fused group all consume the SAME
+    # activation, so `amax` is identical across them, and the fused operand's
+    # per-input-channel weight maximum is the elementwise max of the members'.
+    # Taking a max also makes the result independent of visit order.
+    if arch == "gemma":
+        OPS = ["qkv", "qkv.k", "qkv.v", "attn_out",
+               "ffn_up", "ffn_up.up", "ffn_down"]
+    elif arch == "nomic":
+        OPS = ["qkv", "attn_out", "ffn_up", "ffn_up.gate", "ffn_down"]
+    else:
+        OPS = ["qkv", "attn_out", "ffn_up", "ffn_down"]
+    MERGE = {o: o.split(".")[0] for o in OPS if "." in o}
+
+    n_sites = len(OPS) * _n_layers(model_dir)
+    amax, wmax, ctr = {}, {}, [0]
+    def collect(a, b):
+        if not on_npu(b):
+            return fp32_gemm(a, b)
+        site = ctr[0]; ctr[0] += 1
+        # Anything past the layer stack is a POST-POOL head -- Gemma's dense2
+        # and dense3, which the packer deliberately keeps on the host because
+        # they run once per sequence rather than once per token (tasks/0074
+        # sec 4, ~1% of array time against two more dispatches of fixed cost).
+        # They are wide enough to pass the on_npu filter, so they must be
+        # excluded by POSITION; they are last in encode order.
+        if site >= n_sites:
+            return fp32_gemm(a, b)
+        key = (site // len(OPS), OPS[site % len(OPS)])
+        amax[key] = np.maximum(amax.get(key, 0.0), np.abs(a).max(0))
+        wmax[key] = np.abs(b).max(1)
+        return fp32_gemm(a, b)
+
+    # GEOMETRY FROM THE CHECKPOINT, not from load_reference's defaults, which
+    # are MiniLM's (6 layers, 12 heads). A 24-layer model calibrated as a
+    # 6-layer one produces factors for a third of its GEMMs and silently
+    # nothing for the rest -- the kind of wrong that packs cleanly.
+    _cfg = json.loads((Path(model_dir) / "config.json").read_text(encoding="utf-8"))
+    if arch in ("nomic", "gemma"):
+        # Both read their own geometry from config.json and take no
+        # token_type_ids -- neither architecture has a token-type embedding.
+        ref = load_reference(str(model_dir))
+        ref.gemm = collect
+        ref.encode(enc["input_ids"], enc["attention_mask"])
+    else:
+        ref = load_reference(str(model_dir),
+                             num_layers=_cfg["num_hidden_layers"],
+                             num_heads=_cfg["num_attention_heads"],
+                             eps=_cfg.get("layer_norm_eps", 1e-12))
+        ref.gemm = collect
+        ref.encode(enc["input_ids"], enc["attention_mask"],
+                   np.zeros_like(enc["input_ids"]))
+
+    # The call-site counter above assumes exactly four NPU GEMMs per layer in
+    # (qkv, attn_out, ffn_up, ffn_down) order. If the oracle disagrees, the
+    # keys are shifted and every factor lands on the wrong tensor -- packing
+    # cleanly, as tasks/0078 4b's 400x blowup did. Assert instead of trusting.
+    if ctr[0] < n_sites:
+        raise SystemExit(
+            f"calibration saw {ctr[0]} NPU GEMM call sites, expected at least "
+            f"{n_sites} ({len(OPS)} x {_cfg['num_hidden_layers']} layers) -- "
+            f"the oracle's GEMM order does not match this packer's")
+
+    # Fold each fused group's members back into the operand the array receives.
+    for i in range(_cfg["num_hidden_layers"]):
+        for member, target in MERGE.items():
+            if (i, member) not in wmax:
+                continue
+            wmax[(i, target)] = np.maximum(wmax[(i, target)],
+                                           wmax.pop((i, member)))
+            amax[(i, target)] = np.maximum(amax[(i, target)],
+                                           amax.pop((i, member)))
+
+    out = {}
+    for key, aj in amax.items():
+        wj = wmax[key]
+        s = (np.maximum(aj, 1e-8) ** alpha) / (np.maximum(wj, 1e-8) ** (1 - alpha))
+        out[key] = np.where(s > 0, s, 1.0).astype(np.float32)
+    print(f"  calibrated on {len(texts)} texts, {ctr[0]} GEMM call sites, "
+          f"alpha={alpha}")
+    return out
+
+
+def pathlib_read_lines(p):
+    return Path(p).read_text(encoding="utf-8").split("\n")
+
+
+def add_gemm_b_int8(w, name, mat, tile_k, tile_n, fold=None, asmooth=None):
+    """Stage a [K,N] GEMM operand as INT8, per-output-channel symmetric.
+
+    THE SCHEME, and why this one (tasks/0078).
+
+        s[j]     = max_k |W[k,j]| / 127          one scale per output column
+        Wq[k,j]  = round(W[k,j] / s[j])          clipped to [-127, 127]
+
+    and at runtime, with A quantised per ROW (per token) by the same rule,
+
+        Y[i,j] = int32_dot(Aq[i,:], Wq[:,j]) * sa[i] * s[j] + bias[j]
+
+    so dequantisation is a rank-1 outer-product scaling of the int32 result --
+    one multiply per output element, folded into the pass that already reads C
+    and adds the bias.
+
+    **Per CHANNEL, not per tensor.** 2209.13325 documents the +-50-100 outlier
+    dimensions in post-LN BERT that make per-tensor quantisation lose real
+    accuracy; a per-column scale costs N floats per operand and removes the
+    coupling between an outlier column and every other column. Per-ROW
+    activation scales do the same job on the other operand, which is why this
+    scheme needs no calibration set at all -- both scales are computed from the
+    data in front of it.
+
+    -127 not -128: the symmetric range is kept symmetric so that negating a
+    weight cannot saturate differently from negating its opposite. It costs one
+    representable value and removes an asymmetry that is invisible until it is
+    not.
+
+    THE ACCUMULATOR IS EXACT. int8 x int8 -> int32 has no rounding anywhere in
+    the reduction (2608.13756's "integer alibi"), so every bit of error in this
+    path is in the two roundings above and in the scale multiply -- NOT in the
+    K-reduction, unlike bf16. Overflow is the one thing that would break that,
+    and it is asserted rather than assumed.
+    """
+    mat = np.ascontiguousarray(mat, dtype=np.float32)
+    if fold is not None:
+        mat = mat * fold
+    if asmooth is not None:
+        # The weight half of the SmoothQuant identity: X @ W == (X/s) @ (sW).
+        # Applied BEFORE quantisation so the columns being measured are the
+        # ones the array will multiply.
+        asmooth = np.ascontiguousarray(asmooth, dtype=np.float32)
+        if asmooth.shape != (mat.shape[0],):
+            raise SystemExit(f"{name}: asmooth is {asmooth.shape}, expected "
+                             f"{(mat.shape[0],)} (one per INPUT channel)")
+        mat = mat * asmooth[:, None]
+    K, N = mat.shape
+    if K * 127 * 127 >= 2 ** 31:
+        raise SystemExit(f"{name}: K={K} could overflow the int32 accumulator "
+                         f"({K} * 127^2 >= 2^31); refusing to pack a container "
+                         f"whose arithmetic is not provably exact")
+    scale = np.abs(mat).max(axis=0) / 127.0          # [N]
+    # A genuinely all-zero column would divide by zero. Keep its scale at 1 so
+    # the column stays exactly zero rather than becoming NaN.
+    scale = np.where(scale > 0, scale, np.float32(1.0)).astype(np.float32)
+    q = np.rint(mat / scale[None, :]).clip(-127, 127).astype(np.int8)
+
+    layout = gemm_b_layout(tile_k, tile_n, MAC_S, MAC_T, dtype="I8")
+    flat = tile_b(q, tile_k, tile_n, MAC_S, MAC_T)
+    w.add(name, flat, "I8", "gemm_b", [K, N], layout=layout)
+    w.add(name + ".wscale", scale, "F32", "quant_scale", [N])
+    # Ships even when it is all ones, so the runtime has ONE code path and
+    # cannot be handed a container whose smoothing it silently skips.
+    w.add(name + ".asmooth",
+          np.ones(K, np.float32) if asmooth is None else asmooth,
+          "F32", "quant_smooth", [K])
+    # Report what the quantisation actually cost on THESE weights, so a bad
+    # tensor is visible at pack time rather than at MTEB time.
+    deq = q.astype(np.float32) * scale[None, :]
+    den = float(np.linalg.norm(mat))
+    return float(np.linalg.norm(deq - mat) / den) if den else 0.0
+
+
 def add_gemm_b_host(w, name, mat):
     """Stage a [K,N] GEMM operand PLAIN: F32, row-major, no tiling.
 
@@ -124,7 +370,45 @@ def add_gemm_b_host(w, name, mat):
     return w.add(name, mat.reshape(-1), "F32", "gemm_b_host", [K, N])
 
 
-def pack_gemma(model_dir, out, source_repo_override=None):
+def gemma_qkv_blocks(hidden, head_dim, kv_heads, tile_n, n_cols=8):
+    """Where Q, K and V sit inside the padded fused qkv operand, and how wide it is.
+
+    THE GEOMETRIC TRICK THIS MODEL NEEDED (tasks/0074). MQA gives
+    `num_key_value_heads = 1`, so K and V are each `head_dim` = 256 wide, and
+    256 caps `gcd(N / n_cols)` at 32 across the whole N-set no matter how the
+    packer fuses (tasks/0055 checked all four fusion strategies and found the
+    same floor in every one). At 8 columns that forces `tile_n` down to 16 or
+    32 where every other model this project ships runs at 48, and the cost is
+    ~3x the GEMM iterations, per T1's own model.
+
+    Zero-padding the fused operand's N axis removes the floor outright:
+    `C = A @ B` with zero columns of B gives exactly-zero columns of C, so the
+    host slices Q/K/V off the front and ignores the tail. EXACT -- there is no
+    accuracy question to answer, unlike every other lever on this path.
+
+    Padding goes at the END, not between the blocks: Q, K and V keep their
+    natural contiguous offsets, so nothing downstream has to know the padding
+    exists except the code that sizes the buffer.
+
+    Returned as DATA and written into the container, because the runtime must
+    not derive it. `design_fits()` derived qkv's width as `3 * hidden` -- true
+    of BERT and nomic, false here (1536, not 2304) -- which is thread T31's
+    fail-open one field to the left.
+    """
+    q_w = hidden                       # num_heads * head_dim
+    kv_w = kv_heads * head_dim
+    used = q_w + 2 * kv_w
+    gran = tile_n * n_cols             # the design's `N % (n * n_aie_cols) == 0`
+    padded = ((used + gran - 1) // gran) * gran
+    return {
+        "n": padded, "used": used, "pad": padded - used,
+        "q": [0, q_w], "k": [q_w, q_w + kv_w], "v": [q_w + kv_w, used],
+    }
+
+
+def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
+               tile_n=None, host_only=False,
+               int8=False, smooth_alpha=0.5, smooth_texts=128):
     """Pack an EmbeddingGemma-300M-shaped checkpoint (arch=1).
 
     Deliberately NOT the BERT path above, reused only via helpers (Writer,
@@ -137,6 +421,42 @@ def pack_gemma(model_dir, out, source_repo_override=None):
     Every architectural fact below is read from reference/encoder_gemma.py
     (tasks/0055, validated 1-cos 1.065e-07 against real HuggingFace) rather
     than re-derived.
+
+    TWO MODES (tasks/0074).
+
+    `host_only=True` reproduces exactly what tasks/0064-0065 shipped: every
+    GEMM operand PLAIN (F32, row-major, untiled), for the CPU-only
+    `GemmaEncoder`. Kept because that path is verified to 1-cos 5.496e-13 and
+    is now this model's discriminating CONTROL, not dead code.
+
+    The default emits the four per-layer GEMM operands PRE-TILED in bf16 under
+    BERT's tensor names (`layer.i.qkv` / `.attn_out` / `.ffn_up` / `.ffn_down`,
+    each with a zero `.bias`), so the NPU dispatch path -- staging, the layout
+    hash check, `Design::stage`, `Encoder::gemm`'s bias add -- works on this
+    container unchanged. Same trick and same reason as `pack_nomic` above, with
+    two Gemma-specific twists:
+
+      * `qkv` is Q|K|V fused AND zero-padded to a legal N -- see
+        gemma_qkv_blocks().
+      * `ffn_up` is gate|up fused along N (GeGLU), so the array sees four GEMMs
+        per layer rather than five. `config["geglu_halves"]` pins the order;
+        the runtime asserts it instead of trusting this constant, exactly as
+        `swiglu_halves` does for nomic (tasks/0068 Q2 measured the swapped
+        variant at rel_fro 4.022e+00).
+
+    Everything the host still computes -- the four RMSNorms per layer,
+    q_norm/k_norm, the embedding table, the final norm and the two post-pool
+    Dense heads -- stays F32 and keeps its GEMMA names, because those are the
+    tensors whose *placement* differs from BERT and renaming them would make
+    two different architectures look alike in the one file a reader checks.
+
+    THE FOLD THAT MUST NOT HAPPEN. Every other model here folds
+    1/sqrt(head_dim) into the packed Q block. For Gemma that fold is silently
+    ANNIHILATED: `q_norm` is an RMSNorm applied to q after the projection, and
+    RMSNorm is scale-invariant -- (s*q)/rms(s*q) == q/rms(q), exactly. The
+    scale would vanish with no shape error to notice it. It is therefore
+    applied at its reference position (on the attention scores) and asserted
+    NOT folded in the container's `fusions` block.
     """
     model_dir = Path(model_dir)
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
@@ -153,9 +473,39 @@ def pack_gemma(model_dir, out, source_repo_override=None):
     inter = cfg["intermediate_size"]
     swp = cfg.get("_sliding_window_pattern", 6)
 
-    print(f"packing {model_dir.name} -> {Path(out).name}  (arch=gemma3, HOST-only GEMMs)")
+    tile_k = DEFAULT_TILE_K if tile_k is None else tile_k
+    tile_n = DEFAULT_TILE_N if tile_n is None else tile_n
+    qkv = gemma_qkv_blocks(hidden, head_dim, kv_heads, tile_n)
+
+    # ASSERT the geometry the design will demand, here, where the operand is
+    # built -- not in the exporter, where a failure costs a compile, and not at
+    # dispatch, where it costs a wrong answer. These are gemm_pretiled.py's own
+    # `_build_design` assertions (lines 126-129) restated over THIS model's
+    # shapes. `hidden` (attn_out N, ffn_down N), 2*inter (ffn_up N) and the
+    # padded qkv N must every one of them tile across the columns.
+    if not host_only:
+        for nm, K, N in (("qkv", hidden, qkv["n"]),
+                         ("attn_out", hidden, hidden),
+                         ("ffn_up", hidden, 2 * inter),
+                         ("ffn_down", inter, hidden)):
+            if K % tile_k:
+                raise SystemExit(f"{nm}: K={K} does not divide by tile_k={tile_k}")
+            if N % (tile_n * 8):
+                raise SystemExit(
+                    f"{nm}: N={N} does not tile across 8 columns at "
+                    f"tile_n={tile_n} (needs a multiple of {tile_n * 8}) -- "
+                    f"this is the constraint gemma_qkv_blocks() pads qkv to "
+                    f"meet, and it does not hold for this shape")
+
+    mode = "HOST-only GEMMs" if host_only else f"NPU, tile ({tile_k}, {tile_n})"
+    print(f"packing {model_dir.name} -> {Path(out).name}  (arch=gemma3, {mode})")
     print(f"  hidden={hidden} heads={heads} kv_heads={kv_heads} head_dim={head_dim} "
           f"layers={L} inter={inter}")
+    if not host_only:
+        print(f"  qkv fused+padded: N={qkv['n']} "
+              f"(q{qkv['q']} k{qkv['k']} v{qkv['v']}, {qkv['pad']} zero cols) "
+              f"-- {qkv['pad'] / qkv['n'] * 100:.1f}% of that one GEMM")
+        print(f"  ffn_up fused: N={2 * inter} (gate|up), ffn_down K={inter}")
 
     source_repo = source_repo_override
     if not source_repo:
@@ -168,6 +518,7 @@ def pack_gemma(model_dir, out, source_repo_override=None):
 
     config = {
         "arch": "gemma3_mqa_rope_geglu",
+        "a_dtype": "i8" if (int8 and not host_only) else "bf16",
         "model_type": cfg["model_type"],
         "source_repo": source_repo,
         "source_sha256": src_sha,
@@ -197,6 +548,83 @@ def pack_gemma(model_dir, out, source_repo_override=None):
         ],
     }
 
+    # THE TASK-PREFIX TABLE, and why it has to be in the container (0075).
+    #
+    # EmbeddingGemma's prefixes already ride inside gemma_tokenizer.bin, which
+    # is what the runtime tokenizes with -- so for ordinary encoding this table
+    # is redundant. It is here for the MEASUREMENT harness:
+    # experiments/m8-npu-vs-cpu/run_mteb.py reads the prefix ONCE from the
+    # container and applies it to BOTH sides, so the two agree by construction
+    # rather than by two literals that can drift. Without it the NPU side would
+    # apply its own default inside the exe while the sentence-transformers side
+    # applied nothing, and the measured MTEB delta would be the prefix rather
+    # than the datapath -- which is the one thing that comparison exists to
+    # rule out.
+    #
+    # Read verbatim from the checkpoint's own config_sentence_transformers
+    # .json, but SORTED BY KEY. json_min.hpp (the C++ mirror's parser) is
+    # explicit that it does not preserve object key order -- it stores objects
+    # in an unordered_map because tokenizer.json's 262k-entry vocab makes
+    # anything else expensive -- so a source-order emission could not be
+    # mirrored byte for byte. Order is not semantic in a JSON object; content
+    # is, and the content is verbatim.
+    cst_path = model_dir / "config_sentence_transformers.json"
+    if not cst_path.exists():
+        raise SystemExit(f"{cst_path} not found -- it carries this model's own "
+                         f"task-prefix table; refusing to pack without it "
+                         f"rather than inventing prefixes")
+    cst = json.loads(cst_path.read_text(encoding="utf-8"))
+    prompts = cst.get("prompts") or {}
+    if not prompts:
+        raise SystemExit(f"{cst_path} has no 'prompts' table")
+    config["prompts"] = {k: prompts[k] for k in sorted(prompts)}
+    # THIS PROJECT'S choice, not the checkpoint's: its own
+    # `default_prompt_name` is null (sentence-transformers applies no prefix
+    # unless one is named). "document" is the same default tasks/0061 picked
+    # for the tokenizer table, and the two must agree.
+    config["prompt_default"] = "document"
+    if "document" not in config["prompts"]:
+        raise SystemExit("this checkpoint's prompts table has no 'document' "
+                         "row -- the project default would name a key that "
+                         "does not exist")
+
+    # What the NPU path needs to know and must never re-derive (tasks/0074).
+    # `gemm_layout` is the discriminator: "host" containers carry plain F32
+    # operands, "pretiled_bf16" ones carry tiled bf16 under BERT names. A
+    # runtime that guessed would read the right number of bytes in the wrong
+    # order -- tasks/0022's rel_fro 1.186, "a buffer-size check catches a wrong
+    # size, never a wrong layout".
+    config["gemm_layout"] = "host" if host_only else "pretiled_bf16"
+    if not host_only:
+        config.update({
+            "tile_k": tile_k, "tile_n": tile_n,
+            "mac_s": MAC_S, "mac_t": MAC_T,
+            "gated_ffn": True,
+            "geglu_halves": "gate|up",
+            # qkv's width is DATA. It is 1536 here and 3*hidden nowhere.
+            "qkv_n": qkv["n"],
+            "qkv_blocks": {"q": qkv["q"], "k": qkv["k"], "v": qkv["v"],
+                           "pad": [qkv["used"], qkv["n"]]},
+            "fusions": {
+                "qkv_fused": True,
+                "qkv_zero_padded_to_tile": True,
+                "transposed_to_kn": True,
+                # Stated as FALSE on purpose -- see this function's docstring.
+                # q_norm is scale-invariant, so this fold is not merely
+                # skipped, it is illegal.
+                "qk_scale_folded_into_q": False,
+                "qk_scale_folded_into_q_note":
+                    "ILLEGAL for this architecture: q_norm (RMSNorm) runs "
+                    "after q_proj and is scale-invariant, so a fold into Wq "
+                    "would be annihilated and attention would run unscaled "
+                    "with no shape error. The scale stays on the scores.",
+                "gemm_operands_bf16": True,
+                "norms_embeddings_dense_fp32": True,
+                "gated_ffn_fused_gate_up": True,
+                "biases_zero_filled": True,
+            },
+        })
+
     w = Writer(config, arch=ARCH_GEMMA3_MQA_ROPE_GEGLU)
 
     w.add("embed_tokens.weight", src["embed_tokens.weight"],
@@ -213,22 +641,72 @@ def pack_gemma(model_dir, out, source_repo_override=None):
               f"tools/gen_gemma_tokenizer_table.py) -- .npue will have no "
               f"tokenizer table")
 
+    # ONE emitter for the four per-layer operands, as in the BERT and nomic
+    # paths. Gemma's calibration runs reference/encoder_gemma.py -- arch=1 is
+    # RMSNorm x4, MQA and GeGLU, and BERT's forward pass would describe
+    # activations the array never sees (tasks/0081).
+    #
+    # NOTE the padded qkv: gemma_qkv_blocks() appends genuinely all-zero
+    # columns to reach a legal tile_n, and add_gemm_b_int8 keeps their scale at
+    # 1 rather than dividing by zero -- so a padded column stays exactly zero
+    # through quantisation, which is what the host slicing by offset assumes.
+    smooth = (calibrate_smoothing(model_dir, alpha=smooth_alpha,
+                                  n_texts=smooth_texts, arch="gemma")
+              if int8 and not host_only and smooth_alpha > 0 else {})
+    qerr = []
+
+    def emit(name, mat, layer, op):
+        if not int8 or host_only:
+            add_gemm_b(w, name, mat, tile_k, tile_n)
+            return
+        qerr.append((name, add_gemm_b_int8(w, name, mat, tile_k, tile_n,
+                                           asmooth=smooth.get((layer, op)))))
+    n_tiled = 0
     for i in range(L):
         p = f"layers.{i}."
         sa = p + "self_attn."
 
-        add_gemm_b_host(w, f"layer.{i}.q_proj",
-                         np.ascontiguousarray(src[sa + "q_proj.weight"].T))
-        add_gemm_b_host(w, f"layer.{i}.k_proj",
-                         np.ascontiguousarray(src[sa + "k_proj.weight"].T))
-        add_gemm_b_host(w, f"layer.{i}.v_proj",
-                         np.ascontiguousarray(src[sa + "v_proj.weight"].T))
+        if host_only:
+            add_gemm_b_host(w, f"layer.{i}.q_proj",
+                             np.ascontiguousarray(src[sa + "q_proj.weight"].T))
+            add_gemm_b_host(w, f"layer.{i}.k_proj",
+                             np.ascontiguousarray(src[sa + "k_proj.weight"].T))
+            add_gemm_b_host(w, f"layer.{i}.v_proj",
+                             np.ascontiguousarray(src[sa + "v_proj.weight"].T))
+        else:
+            # [Wq (768) | Wk (256) | Wv (256) | zeros (256)] -> [768, 1536].
+            # np.zeros, so the padding is EXACTLY zero rather than whatever
+            # an uninitialised allocation held: C's padded columns are then
+            # exactly zero and the host can slice by offset without masking.
+            wq = np.ascontiguousarray(src[sa + "q_proj.weight"].T)
+            wk = np.ascontiguousarray(src[sa + "k_proj.weight"].T)
+            wv = np.ascontiguousarray(src[sa + "v_proj.weight"].T)
+            pad = np.zeros((hidden, qkv["pad"]), dtype=np.float32)
+            fused = np.concatenate([wq, wk, wv, pad], axis=1)
+            if fused.shape != (hidden, qkv["n"]):
+                raise SystemExit(f"fused qkv is {fused.shape}, expected "
+                                 f"{(hidden, qkv['n'])}")
+            emit(f"layer.{i}.qkv", fused, i, "qkv")
+            w.add(f"layer.{i}.qkv.bias",
+                  np.zeros(qkv["n"], dtype=np.float32), "F32", "bias",
+                  [qkv["n"]])
+            n_tiled += 1
+
         w.add(f"layer.{i}.q_norm.weight", src[sa + "q_norm.weight"],
               "F32", "layernorm", [head_dim])
         w.add(f"layer.{i}.k_norm.weight", src[sa + "k_norm.weight"],
               "F32", "layernorm", [head_dim])
-        add_gemm_b_host(w, f"layer.{i}.o_proj",
-                         np.ascontiguousarray(src[sa + "o_proj.weight"].T))
+
+        if host_only:
+            add_gemm_b_host(w, f"layer.{i}.o_proj",
+                             np.ascontiguousarray(src[sa + "o_proj.weight"].T))
+        else:
+            emit(f"layer.{i}.attn_out",
+                 np.ascontiguousarray(src[sa + "o_proj.weight"].T),
+                 i, "attn_out")
+            w.add(f"layer.{i}.attn_out.bias",
+                  np.zeros(hidden, dtype=np.float32), "F32", "bias", [hidden])
+            n_tiled += 1
 
         w.add(f"layer.{i}.input_layernorm.weight",
               src[p + "input_layernorm.weight"], "F32", "layernorm", [hidden])
@@ -240,27 +718,70 @@ def pack_gemma(model_dir, out, source_repo_override=None):
               src[p + "post_feedforward_layernorm.weight"], "F32", "layernorm", [hidden])
 
         mp = p + "mlp."
-        add_gemm_b_host(w, f"layer.{i}.gate_proj",
-                         np.ascontiguousarray(src[mp + "gate_proj.weight"].T))
-        add_gemm_b_host(w, f"layer.{i}.up_proj",
-                         np.ascontiguousarray(src[mp + "up_proj.weight"].T))
-        add_gemm_b_host(w, f"layer.{i}.down_proj",
-                         np.ascontiguousarray(src[mp + "down_proj.weight"].T))
+        if host_only:
+            add_gemm_b_host(w, f"layer.{i}.gate_proj",
+                             np.ascontiguousarray(src[mp + "gate_proj.weight"].T))
+            add_gemm_b_host(w, f"layer.{i}.up_proj",
+                             np.ascontiguousarray(src[mp + "up_proj.weight"].T))
+            add_gemm_b_host(w, f"layer.{i}.down_proj",
+                             np.ascontiguousarray(src[mp + "down_proj.weight"].T))
+        else:
+            # config["geglu_halves"] == "gate|up": lo = cols [0, inter) gets
+            # the GELU, hi = cols [inter, 2*inter) does not. ONE GEMM.
+            gate = np.ascontiguousarray(src[mp + "gate_proj.weight"].T)
+            up = np.ascontiguousarray(src[mp + "up_proj.weight"].T)
+            emit(f"layer.{i}.ffn_up",
+                 np.concatenate([gate, up], axis=1), i, "ffn_up")
+            w.add(f"layer.{i}.ffn_up.bias",
+                  np.zeros(2 * inter, dtype=np.float32), "F32", "bias",
+                  [2 * inter])
+            emit(f"layer.{i}.ffn_down",
+                 np.ascontiguousarray(src[mp + "down_proj.weight"].T),
+                 i, "ffn_down")
+            w.add(f"layer.{i}.ffn_down.bias",
+                  np.zeros(hidden, dtype=np.float32), "F32", "bias", [hidden])
+            n_tiled += 2
 
+    # The two post-pool Dense heads stay on the HOST in both modes. They run
+    # once per SEQUENCE rather than once per token -- 604 MFLOP per batch-128
+    # encode against ~700 ms of modelled array time, ~1% (tasks/0074 sec 4) --
+    # so two more dispatches would cost more fixed overhead than they save.
     add_gemm_b_host(w, "dense2.weight", np.ascontiguousarray(d2["linear.weight"].T))
     add_gemm_b_host(w, "dense3.weight", np.ascontiguousarray(d3["linear.weight"].T))
 
     info = w.write(out)
     total = Path(out).stat().st_size
-    print(f"\n  tensors    : {len(w.entries)}")
+    if not host_only:
+        print(f"\n  {'operand':<14} {'[K,N]':>12} {'k-blocks':>9} {'n-blocks':>9} "
+              f"{'iters/core':>11}")
+        # iters/core is T1/0048's own quantity restated per shape at the
+        # production tier, so the packer prints the number the cost model
+        # consumes rather than one a reader has to re-derive:
+        #   (K/k) * (M/(m*rows)) * (N/(n*cols)),  M = 128*64, m = 64, rows = 4
+        for nm, K, N in (("qkv", hidden, qkv["n"]),
+                         ("attn_out", hidden, hidden),
+                         ("ffn_up", hidden, 2 * inter),
+                         ("ffn_down", inter, hidden)):
+            kb, nb = K // tile_k, N // tile_n
+            iters = (K // tile_k) * (8192 // (64 * 4)) * (N // (tile_n * 8))
+            flag = "" if max(kb, nb) < 1024 else "  <-- OVER 1023"
+            print(f"  {nm:<14} {str([K, N]):>12} {kb:>9} {nb:>9} "
+                  f"{iters:>11}{flag}")
+    print(f"\n  tensors    : {len(w.entries)}"
+          + ("" if host_only else f"  ({n_tiled} pre-tiled GEMM operands)"))
     print(f"  json       : {info['json_length']} B at {info['json_offset']}")
     print(f"  data       : {info['data_length']/1e6:.2f} MB at {info['data_offset']}")
     print(f"  file       : {total/1e6:.2f} MB")
     print(f"  source     : {src_sha[:16]}...")
+    if not host_only:
+        print(f"  layout_hash: "
+              f"{layout_hash(gemm_b_layout(tile_k, tile_n, MAC_S, MAC_T, dtype='I8' if (int8 and not host_only) else 'BF16'))[:16]}..."
+              f"{'  (i8 operands)' if (int8 and not host_only) else ''}")
     return 0
 
 
-def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale):
+def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
+               int8=False, smooth_alpha=0.5, smooth_texts=128):
     """Pack a nomic-embed-text-v1.5-shaped checkpoint (arch=2).
 
     Emits the SAME tensor names and the SAME emission order as the BERT
@@ -377,6 +898,7 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale):
 
     config = {
         "arch": "nomic_bert_rope_swiglu",
+        "a_dtype": "i8" if int8 else "bf16",
         "model_type": cfg["model_type"],
         "source_repo": json.loads(
             (model_dir / "CHECKPOINT.json").read_text(encoding="utf-8"))["repo_id"],
@@ -464,6 +986,23 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale):
     w.add("embeddings.ln.bias", src["emb_ln.bias"],
           "F32", "layernorm", [hidden])
 
+    # ONE emitter for the four per-layer operands, exactly as the BERT path
+    # (tasks/0078) -- so bf16 and int8 differ in one place rather than four.
+    # The calibration oracle is nomic's OWN: arch=2 has RoPE instead of
+    # absolute positions and a gated SwiGLU whose ffn_up is 2*intermediate
+    # wide, so BERT's forward pass would describe activations the array never
+    # sees (tasks/0081).
+    smooth = (calibrate_smoothing(model_dir, alpha=smooth_alpha,
+                                  n_texts=smooth_texts, arch="nomic")
+              if int8 and smooth_alpha > 0 else {})
+    qerr = []
+
+    def emit(name, mat, layer, op):
+        if not int8:
+            add_gemm_b(w, name, mat, tile_k, tile_n)
+            return
+        qerr.append((name, add_gemm_b_int8(w, name, mat, tile_k, tile_n,
+                                           asmooth=smooth.get((layer, op)))))
     n_tiled = 0
     for i in range(L):
         p = f"encoder.layers.{i}."   # plural upstream, unlike BERT's "layer."
@@ -478,14 +1017,14 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale):
             # tools/verify_npue_nomic.py check E. No qkv bias exists to fold.
             qkv = qkv.copy()
             qkv[:, :hidden] *= scale
-        add_gemm_b(w, f"layer.{i}.qkv", qkv, tile_k, tile_n)
+        emit(f"layer.{i}.qkv", qkv, i, "qkv")
         w.add(f"layer.{i}.qkv.bias", np.zeros(3 * hidden, dtype=np.float32),
               "F32", "bias", [3 * hidden])
         n_tiled += 1
 
-        add_gemm_b(w, f"layer.{i}.attn_out",
-                   np.ascontiguousarray(src[attn + "out_proj.weight"].T),
-                   tile_k, tile_n)
+        emit(f"layer.{i}.attn_out",
+             np.ascontiguousarray(src[attn + "out_proj.weight"].T),
+             i, "attn_out")
         w.add(f"layer.{i}.attn_out.bias", np.zeros(hidden, dtype=np.float32),
               "F32", "bias", [hidden])
         w.add(f"layer.{i}.ln1.weight", src[p + "norm1.weight"],
@@ -503,13 +1042,13 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale):
         up = np.ascontiguousarray(src[mp + "fc11.weight"].T)         # [768,3072]
         gate = np.ascontiguousarray(src[mp + "fc12.weight"].T)       # [768,3072]
         ffn_up = np.concatenate([up, gate], axis=1)                  # [768,6144]
-        add_gemm_b(w, f"layer.{i}.ffn_up", ffn_up, tile_k, tile_n)
+        emit(f"layer.{i}.ffn_up", ffn_up, i, "ffn_up")
         w.add(f"layer.{i}.ffn_up.bias", np.zeros(2 * inter, dtype=np.float32),
               "F32", "bias", [2 * inter])
 
-        add_gemm_b(w, f"layer.{i}.ffn_down",
-                   np.ascontiguousarray(src[mp + "fc2.weight"].T),
-                   tile_k, tile_n)
+        emit(f"layer.{i}.ffn_down",
+             np.ascontiguousarray(src[mp + "fc2.weight"].T),
+             i, "ffn_down")
         w.add(f"layer.{i}.ffn_down.bias", np.zeros(hidden, dtype=np.float32),
               "F32", "bias", [hidden])
         w.add(f"layer.{i}.ln2.weight", src[p + "norm2.weight"],
@@ -536,8 +1075,12 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale):
     print(f"  data       : {info['data_length']/1e6:.2f} MB at {info['data_offset']}")
     print(f"  file       : {total/1e6:.2f} MB")
     print(f"  source     : {src_sha[:16]}...")
+    # The dtype is part of the layout, so printing the bf16 hash over int8
+    # tensors reports the intention rather than the value -- the same shape as
+    # tasks/0042's `tile (64, 32)` and 0078's banner, both of which cost time.
     print(f"  layout_hash: "
-          f"{layout_hash(gemm_b_layout(tile_k, tile_n, MAC_S, MAC_T))[:16]}...")
+          f"{layout_hash(gemm_b_layout(tile_k, tile_n, MAC_S, MAC_T, dtype='I8' if int8 else 'BF16'))[:16]}..."
+          f"{'  (i8 operands)' if int8 else ''}")
     return 0
 
 
@@ -551,6 +1094,29 @@ def main():
                     help="pre-slice position embeddings to this (MiniLM: 256)")
     ap.add_argument("--no-fold-scale", action="store_true",
                     help="do NOT fold 1/sqrt(head_dim) into Q")
+    # THE DATAPATH FLAG (tasks/0077, 0078). bf16 stays the default. int8 needs
+    # a matching design set (tools/export_gemm_rtp.py --int8); the container's
+    # and the design's b_layout_hash differ between the two, so a mismatched
+    # pair is refused by the check that already exists.
+    ap.add_argument("--int8", action="store_true",
+                    help="quantise the four per-layer GEMM operands to int8, "
+                         "per output channel, with SmoothQuant. Measured at "
+                         "1-cos 1.166e-03 against a 2e-03 gate (tasks/0078) "
+                         "and 5.5-7.7x the bf16 datapath (tasks/0077).")
+    ap.add_argument("--smooth-alpha", type=float, default=0.5,
+                    help="SmoothQuant alpha. 0 disables smoothing, which "
+                         "FAILS the gate at 2.864e-03; 0.4 also fails at "
+                         "2.356e-03; 0.5 is the measured minimum. Only "
+                         "meaningful with --int8.")
+    ap.add_argument("--smooth-texts", type=int, default=128,
+                    help="calibration corpus size for --int8. More is not "
+                         "obviously better: the factors are per-channel "
+                         "maxima, so a wider corpus finds larger outliers.")
+    ap.add_argument("--gemma-host-only", action="store_true",
+                    help="arch=1 only: emit PLAIN F32 row-major GEMM operands "
+                         "for the CPU-only GemmaEncoder, as tasks/0064-0065 "
+                         "shipped. The default is now the pre-tiled bf16 NPU "
+                         "container (tasks/0074); this rebuilds the control.")
     args = ap.parse_args()
 
     model_dir = Path(args.model_dir)
@@ -566,7 +1132,10 @@ def main():
         out = args.out
         if out == str(REPO / "models" / "all-MiniLM-L6-v2.npue"):
             out = str(model_dir.parent / (model_dir.name + ".npue"))
-        return pack_gemma(model_dir, out)
+        return pack_gemma(model_dir, out, tile_k=args.tile_k,
+                          tile_n=args.tile_n, host_only=args.gemma_host_only,
+                          int8=args.int8, smooth_alpha=args.smooth_alpha,
+                          smooth_texts=args.smooth_texts)
 
     # arch=2 branch (tasks/0069-m13-nomic-arch2-container): nomic_bert is
     # RoPE + gated SwiGLU rather than BERT's absolute-position + GELU, so it
@@ -578,7 +1147,9 @@ def main():
         if out == str(REPO / "models" / "all-MiniLM-L6-v2.npue"):
             out = str(model_dir.parent / (model_dir.name + ".npue"))
         return pack_nomic(model_dir, out, args.tile_k, args.tile_n,
-                          args.max_seq, not args.no_fold_scale)
+                          args.max_seq, not args.no_fold_scale,
+                          int8=args.int8, smooth_alpha=args.smooth_alpha,
+                          smooth_texts=args.smooth_texts)
 
     src, _ = load(model_dir / "model.safetensors")
     src_sha = sha256(model_dir / "model.safetensors")
@@ -608,6 +1179,10 @@ def main():
         "pooling": read_pooling(model_dir), "l2_normalize": True,
         "activation": "gelu_erf_exact",
         "tile_k": tk, "tile_n": tn, "mac_s": MAC_S, "mac_t": MAC_T,
+        # The operand datapath. Absent in every container packed before
+        # tasks/0078, and every one of those is bf16 -- so the runtime reads
+        # silence as "bf16" rather than defaulting blindly.
+        "a_dtype": "i8" if args.int8 else "bf16",
         "fusions": {
             "qkv_fused": True,
             "transposed_to_kn": True,
@@ -649,6 +1224,17 @@ def main():
     w.add("embeddings.ln.bias", src["embeddings.LayerNorm.bias"],
           "F32", "layernorm", [hidden])
 
+    # ONE emitter for the four per-layer operands, so bf16 and int8 differ in
+    # exactly one place rather than in four (tasks/0078).
+    smooth = calibrate_smoothing(model_dir, alpha=args.smooth_alpha, n_texts=args.smooth_texts)         if args.int8 and args.smooth_alpha > 0 else {}
+    qerr = []
+    def emit(name, mat, layer, op):
+        if not args.int8:
+            add_gemm_b(w, name, mat, tk, tn)
+            return
+        qerr.append((name, add_gemm_b_int8(w, name, mat, tk, tn,
+                                           asmooth=smooth.get((layer, op)))))
+
     n_tiled = 0
     for i in range(L):
         p = f"encoder.layer.{i}."
@@ -669,13 +1255,13 @@ def main():
             qkv_b = qkv_b.copy()
             qkv_b[:hidden] *= scale
 
-        add_gemm_b(w, f"layer.{i}.qkv", qkv, tk, tn)
+        emit(f"layer.{i}.qkv", qkv, i, "qkv")
         w.add(f"layer.{i}.qkv.bias", qkv_b, "F32", "bias", [3 * hidden])
         n_tiled += 1
 
         ao = p + "attention.output."
-        add_gemm_b(w, f"layer.{i}.attn_out",
-                   np.ascontiguousarray(src[ao + "dense.weight"].T), tk, tn)
+        emit(f"layer.{i}.attn_out",
+             np.ascontiguousarray(src[ao + "dense.weight"].T), i, "attn_out")
         w.add(f"layer.{i}.attn_out.bias", src[ao + "dense.bias"],
               "F32", "bias", [hidden])
         w.add(f"layer.{i}.ln1.weight", src[ao + "LayerNorm.weight"],
@@ -684,12 +1270,12 @@ def main():
               "F32", "layernorm", [hidden])
         n_tiled += 1
 
-        add_gemm_b(w, f"layer.{i}.ffn_up",
-                   np.ascontiguousarray(src[p + "intermediate.dense.weight"].T), tk, tn)
+        emit(f"layer.{i}.ffn_up",
+             np.ascontiguousarray(src[p + "intermediate.dense.weight"].T), i, "ffn_up")
         w.add(f"layer.{i}.ffn_up.bias", src[p + "intermediate.dense.bias"],
               "F32", "bias", [cfg["intermediate_size"]])
-        add_gemm_b(w, f"layer.{i}.ffn_down",
-                   np.ascontiguousarray(src[p + "output.dense.weight"].T), tk, tn)
+        emit(f"layer.{i}.ffn_down",
+             np.ascontiguousarray(src[p + "output.dense.weight"].T), i, "ffn_down")
         w.add(f"layer.{i}.ffn_down.bias", src[p + "output.dense.bias"],
               "F32", "bias", [hidden])
         w.add(f"layer.{i}.ln2.weight", src[p + "output.LayerNorm.weight"],
@@ -698,6 +1284,13 @@ def main():
               "F32", "layernorm", [hidden])
         n_tiled += 2
 
+    if args.int8 and qerr:
+        # SAY WHAT THE QUANTISATION COST, per tensor, at pack time. A bad
+        # tensor is then visible here rather than as a puzzling MTEB delta.
+        worst = max(qerr, key=lambda t: t[1])
+        mean = sum(e for _, e in qerr) / len(qerr)
+        print(f"\n  int8: {len(qerr)} operands, weight rel_fro mean "
+              f"{mean:.3e}, worst {worst[1]:.3e} ({worst[0]})")
     info = w.write(args.out)
 
     # What the DMA will actually see, per distinct GEMM shape. The 1023 limit is
@@ -723,8 +1316,13 @@ def main():
     print(f"  data       : {info['data_length']/1e6:.2f} MB at {info['data_offset']}")
     print(f"  file       : {total/1e6:.2f} MB")
     print(f"  source     : {src_sha[:16]}...")
+    # REPORT THE VALUE, NOT THE INTENTION. This printed the bf16 hash while the
+    # tensors carried the I8 one -- the same fail-open shape as tasks/0042's
+    # "tile (64, 32)" banner over a tile-48 pack. Build the descriptor the same
+    # way the emitter does.
     print(f"  layout_hash: "
-          f"{layout_hash(gemm_b_layout(tk, tn, MAC_S, MAC_T))[:16]}...")
+          f"{layout_hash(gemm_b_layout(tk, tn, MAC_S, MAC_T, dtype='I8' if args.int8 else 'BF16'))[:16]}..."
+          f"  ({'i8' if args.int8 else 'bf16'} operands)")
     return 0
 
 

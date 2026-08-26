@@ -1,0 +1,35 @@
+﻿NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-large-en-v1.5: 294 tensors, 731.57 MB, checkpoint 45e1954914e29bd7
+  shape      BAAI/bge-large-en-v1.5: 24 layers, hidden 1024, 16 heads x 64, ffn 4096, CLS pooling
+  designs    ONE xclbin, 4 streams (1 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 24 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 24 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 49 fewer NPU dispatches
+  bo-align   last data buffer aligned to 65536 B
+  weights    603.98 MB staged on the device once, not per call
+  npu        exclusive -- 3 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  3 encodes of 128 sequences at seq 64
+    wall  1664.69 ms   ->      76.9 seq/s
+    cpu   8166.67 ms   ->      4.91 cores busy
+
+    NPU path (copy+sync+dispatch)  1281.36 ms   77.0%   96 dispatches
+      bf16 convert (both ways)       24.22 ms    1.5%
+      sync to device                 40.60 ms    2.4%
+      dispatch + wait               952.23 ms   57.2%     9919 us each
+        submit (build + start)        7.83 ms    0.5%       82 us each
+        wait (hardware)             943.25 ms   56.7%     9825 us each
+      sync from device               16.28 ms    1.0%
+      read out + bias               248.03 ms   14.9%
+    host attention (QK^T, A.V)     196.46 ms   11.8%   (qk 109.4  av 87.1)
+    host softmax                    18.71 ms    1.1%
+    host layernorm                 162.72 ms    9.8%
+    everything else                  5.45 ms    0.3%   (residual adds, pooling, embedding lookup)
+
+    per design      calls   MACs/call    wait us/call
+    gemm_rtp           96           0          9825

@@ -1,0 +1,23 @@
+﻿{
+    "kind":  "hardware measurement",
+    "label":  "npu-single-60",
+    "command":  ".\\build\\npuembed.exe .. --model all-MiniLM-L6-v2 --artifacts artifacts_minilm_bfp16 --threads 24 --bench 60",
+    "meter":  "RAPL_Package0_PKG",
+    "energy_unit_j":  3.6E-09,
+    "repeats":  1,
+    "idle_before_w":  8.7405760712868812,
+    "idle_after_w":  4.9821496785469064,
+    "idle_w":  6.8613628749168942,
+    "idle_drift":  0.54776674273848214,
+    "runs":  [
+                 {
+                     "joules":  240.25779,
+                     "seconds":  9.686,
+                     "watts":  24.804644848234567
+                 }
+             ],
+    "mean_watts":  24.804644848234567,
+    "mean_joules":  240.25779,
+    "best_joules":  240.25779,
+    "marginal_j":  173.79862919355497
+}

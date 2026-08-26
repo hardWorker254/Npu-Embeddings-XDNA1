@@ -9,6 +9,17 @@ Conceptually: *"FastFlowLM, but only embeddings."*
 > **Where the project stands today** — what works, what does not, what was
 > tried and failed, where code lives, and how to build it end to end:
 > [`CURRENT_STATUS.md`](CURRENT_STATUS.md).
+>
+> **What was believed on the way there** — [`history.md`](history.md), the
+> dated update blocks that used to sit in `CLAUDE.md`, moved verbatim. This is
+> where the *refuted* claims live, each with the measurement that killed it:
+> the bandwidth cost model, the "missing 4,500 cycles", B-reuse, the
+> pre-tiling win, the parity-width projection. Read it as history — where it
+> disagrees with `CURRENT_STATUS.md` about today, the status document wins.
+>
+> **What is still open** — [`../research/OPEN-THREADS.md`](../research/OPEN-THREADS.md),
+> which is the authority on that question and the only place a thread is
+> closed.
 
 ## Why
 

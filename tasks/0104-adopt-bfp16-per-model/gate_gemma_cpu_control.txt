@@ -1,0 +1,8 @@
+﻿NpuEmbeddings C++ runtime -- EmbeddingGemma (arch=1)
+  model      .\models\embeddinggemma-300m.cpp_test.npue
+  hidden     768, tokenizer 262144 tokens
+  path       HOST-only (container holds row-major F32 operands)
+  NOTE: every op runs on the CPU. Any seq/s below is host-only and is NOT an NPU performance claim (CLAUDE.md rule 1).
+  input      13 texts, max_len=64, prefix='document' -> title: none | text: 
+  embedded   13 texts in 65.43 s  ->  0.20 seq/s (host-only)
+  wrote      tasks\0104-adopt-bfp16-per-model\out_gemma_cpu.f32  [13, 768] fp32

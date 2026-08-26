@@ -28,6 +28,16 @@
 // Every operation below is a native vector op: abs, min, max, mul, add. No
 // division, no elementary-function library. research/notes/0001 forbids scalar
 // float in a kernel body (1,617x measured), and nothing here is scalar.
+//
+// tasks/0091 (register T7/T8): the bf16<->fp32 widen/narrow used to go through
+// `aie::mul(v, 1.0f).to_vector<T>()`, which tasks/0045 measured as an
+// EMULATED fp32 multiply -- real instructions for a value-preserving cast.
+// Fixed here with `accum<accfloat,16>::from_vector`/`to_vector<T>()`, which
+// rides the native widen-on-load / narrow-on-store instructions instead (0
+// `vmul.f`/`vadd.f` in isolated probes). T8 added `gelu_poly_impl_deg7`: one
+// fewer Horner step than the shipped degree-8, refit (not truncated) on the
+// same Chebyshev nodes, kept as a separate entry point rather than a default
+// change -- see the function's own comment for the accuracy numbers.
 
 #include "aie_kernel_utils.h"
 #include <aie_api/aie.hpp>
@@ -56,8 +66,6 @@ void gelu_poly_impl(bfloat16 *restrict input_vector,
   auto it_in = aie::begin_restrict_vector<16>((bfloat16 *)input_vector);
   auto it_out = aie::begin_restrict_vector<16>((bfloat16 *)output_vector);
 
-  const aie::vector<bfloat16, 16> vone_bf =
-      aie::broadcast<bfloat16, 16>((bfloat16)1.0f);
   const aie::vector<float, 16> vzero = aie::broadcast<float, 16>(0.0f);
   const aie::vector<float, 16> vR = aie::broadcast<float, 16>(GELU_R);
   const aie::vector<float, 16> k0 = aie::broadcast<float, 16>(GELU_C0);
@@ -84,7 +92,6 @@ void gelu_poly_impl(bfloat16 *restrict input_vector,
   //
   // Numerics are UNCHANGED: each chain performs the same operations in the same
   // order on its own data, so the result is bit-identical to one chain.
-  const aie::vector<float, 16> vone_f = aie::broadcast<float, 16>(1.0f);
 
 #define GELU_HORNER(K)                                                        \
   p0 = aie::add(aie::mul(p0, u0).to_vector<float>(), K);                       \
@@ -95,12 +102,25 @@ void gelu_poly_impl(bfloat16 *restrict input_vector,
   AIE_PREPARE_FOR_PIPELINING
   AIE_LOOP_MIN_ITERATION_COUNT(4)
   for (int i = 0; i < vector_size; i += 64) {
-    // Widen bf16 -> fp32. vector::to_vector<T>() does not exist; the AIE API
-    // exposes it on accumulators, so multiply by 1.0, which is exact.
-    aie::vector<float, 16> x0 = aie::mul(*it_in++, vone_bf).to_vector<float>();
-    aie::vector<float, 16> x1 = aie::mul(*it_in++, vone_bf).to_vector<float>();
-    aie::vector<float, 16> x2 = aie::mul(*it_in++, vone_bf).to_vector<float>();
-    aie::vector<float, 16> x3 = aie::mul(*it_in++, vone_bf).to_vector<float>();
+    // Widen bf16 -> fp32 via accum::from_vector, NOT the multiply-by-1.0f
+    // idiom the comment here used to recommend (tasks/0045, tasks/0091 T7).
+    // The multiply form is emulated on aie2p -- 0091 measured it at 4
+    // `vmul.f` for 64 elements with zero real arithmetic, isolated in
+    // scratchpad probes (widen_probe.cc) compiled the same way as this file.
+    // `accum<accfloat,16>::from_vector` on a bf16 vector compiles to
+    // `vlda.conv.fp32.bf16` -- a load-with-conversion, 0 vmul.f/vadd.f --
+    // because the AIE API's UPSHIFT path (aie_api/detail/aie2p/accum.hpp)
+    // recognises bf16 -> accfloat as a native widen, not a value-changing
+    // multiply.
+    aie::accum<accfloat, 16> ax0, ax1, ax2, ax3;
+    ax0.from_vector(*it_in++);
+    ax1.from_vector(*it_in++);
+    ax2.from_vector(*it_in++);
+    ax3.from_vector(*it_in++);
+    aie::vector<float, 16> x0 = ax0.to_vector<float>();
+    aie::vector<float, 16> x1 = ax1.to_vector<float>();
+    aie::vector<float, 16> x2 = ax2.to_vector<float>();
+    aie::vector<float, 16> x3 = ax3.to_vector<float>();
 
     aie::vector<float, 16> u0 = aie::min(aie::abs(x0), vR);
     aie::vector<float, 16> u1 = aie::min(aie::abs(x1), vR);
@@ -118,14 +138,19 @@ void gelu_poly_impl(bfloat16 *restrict input_vector,
     GELU_HORNER(k7)
     GELU_HORNER(k8)
 
-    *it_out++ = aie::mul(aie::add(aie::max(x0, vzero), p0), vone_f)
-                    .to_vector<bfloat16>();
-    *it_out++ = aie::mul(aie::add(aie::max(x1, vzero), p1), vone_f)
-                    .to_vector<bfloat16>();
-    *it_out++ = aie::mul(aie::add(aie::max(x2, vzero), p2), vone_f)
-                    .to_vector<bfloat16>();
-    *it_out++ = aie::mul(aie::add(aie::max(x3, vzero), p3), vone_f)
-                    .to_vector<bfloat16>();
+    // Narrow fp32 -> bf16 via accum::from_vector (tasks/0045's finding,
+    // applied here per tasks/0091 T7 -- this file was 0045's own "worth
+    // following up separately" note). `to_vector<bfloat16>()` on an
+    // accfloat accumulator rides the store's `vst.conv.bf16.fp32`, free.
+    aie::accum<accfloat, 16> ao0, ao1, ao2, ao3;
+    ao0.from_vector(aie::add(aie::max(x0, vzero), p0));
+    ao1.from_vector(aie::add(aie::max(x1, vzero), p1));
+    ao2.from_vector(aie::add(aie::max(x2, vzero), p2));
+    ao3.from_vector(aie::add(aie::max(x3, vzero), p3));
+    *it_out++ = ao0.to_vector<bfloat16>();
+    *it_out++ = ao1.to_vector<bfloat16>();
+    *it_out++ = ao2.to_vector<bfloat16>();
+    *it_out++ = ao3.to_vector<bfloat16>();
   }
 #undef GELU_HORNER
 
@@ -142,8 +167,6 @@ void gelu_poly_impl_deg2(bfloat16 *restrict input_vector,
   auto it_in = aie::begin_restrict_vector<16>((bfloat16 *)input_vector);
   auto it_out = aie::begin_restrict_vector<16>((bfloat16 *)output_vector);
 
-  const aie::vector<bfloat16, 16> vone_bf =
-      aie::broadcast<bfloat16, 16>((bfloat16)1.0f);
   const aie::vector<float, 16> vzero = aie::broadcast<float, 16>(0.0f);
   const aie::vector<float, 16> vR = aie::broadcast<float, 16>(GELU_R);
   const aie::vector<float, 16> k0 = aie::broadcast<float, 16>(GELU_C0);
@@ -170,7 +193,6 @@ void gelu_poly_impl_deg2(bfloat16 *restrict input_vector,
   //
   // Numerics are UNCHANGED: each chain performs the same operations in the same
   // order on its own data, so the result is bit-identical to one chain.
-  const aie::vector<float, 16> vone_f = aie::broadcast<float, 16>(1.0f);
 
 #define GELU_HORNER(K)                                                        \
   p0 = aie::add(aie::mul(p0, u0).to_vector<float>(), K);                       \
@@ -181,12 +203,25 @@ void gelu_poly_impl_deg2(bfloat16 *restrict input_vector,
   AIE_PREPARE_FOR_PIPELINING
   AIE_LOOP_MIN_ITERATION_COUNT(4)
   for (int i = 0; i < vector_size; i += 64) {
-    // Widen bf16 -> fp32. vector::to_vector<T>() does not exist; the AIE API
-    // exposes it on accumulators, so multiply by 1.0, which is exact.
-    aie::vector<float, 16> x0 = aie::mul(*it_in++, vone_bf).to_vector<float>();
-    aie::vector<float, 16> x1 = aie::mul(*it_in++, vone_bf).to_vector<float>();
-    aie::vector<float, 16> x2 = aie::mul(*it_in++, vone_bf).to_vector<float>();
-    aie::vector<float, 16> x3 = aie::mul(*it_in++, vone_bf).to_vector<float>();
+    // Widen bf16 -> fp32 via accum::from_vector, NOT the multiply-by-1.0f
+    // idiom the comment here used to recommend (tasks/0045, tasks/0091 T7).
+    // The multiply form is emulated on aie2p -- 0091 measured it at 4
+    // `vmul.f` for 64 elements with zero real arithmetic, isolated in
+    // scratchpad probes (widen_probe.cc) compiled the same way as this file.
+    // `accum<accfloat,16>::from_vector` on a bf16 vector compiles to
+    // `vlda.conv.fp32.bf16` -- a load-with-conversion, 0 vmul.f/vadd.f --
+    // because the AIE API's UPSHIFT path (aie_api/detail/aie2p/accum.hpp)
+    // recognises bf16 -> accfloat as a native widen, not a value-changing
+    // multiply.
+    aie::accum<accfloat, 16> ax0, ax1, ax2, ax3;
+    ax0.from_vector(*it_in++);
+    ax1.from_vector(*it_in++);
+    ax2.from_vector(*it_in++);
+    ax3.from_vector(*it_in++);
+    aie::vector<float, 16> x0 = ax0.to_vector<float>();
+    aie::vector<float, 16> x1 = ax1.to_vector<float>();
+    aie::vector<float, 16> x2 = ax2.to_vector<float>();
+    aie::vector<float, 16> x3 = ax3.to_vector<float>();
 
     aie::vector<float, 16> u0 = aie::min(aie::abs(x0), vR);
     aie::vector<float, 16> u1 = aie::min(aie::abs(x1), vR);
@@ -198,16 +233,124 @@ void gelu_poly_impl_deg2(bfloat16 *restrict input_vector,
     GELU_HORNER(k1)
     GELU_HORNER(k2)
 
-    *it_out++ = aie::mul(aie::add(aie::max(x0, vzero), p0), vone_f)
-                    .to_vector<bfloat16>();
-    *it_out++ = aie::mul(aie::add(aie::max(x1, vzero), p1), vone_f)
-                    .to_vector<bfloat16>();
-    *it_out++ = aie::mul(aie::add(aie::max(x2, vzero), p2), vone_f)
-                    .to_vector<bfloat16>();
-    *it_out++ = aie::mul(aie::add(aie::max(x3, vzero), p3), vone_f)
-                    .to_vector<bfloat16>();
+    // Narrow fp32 -> bf16 via accum::from_vector (tasks/0045's finding,
+    // applied here per tasks/0091 T7 -- this file was 0045's own "worth
+    // following up separately" note). `to_vector<bfloat16>()` on an
+    // accfloat accumulator rides the store's `vst.conv.bf16.fp32`, free.
+    aie::accum<accfloat, 16> ao0, ao1, ao2, ao3;
+    ao0.from_vector(aie::add(aie::max(x0, vzero), p0));
+    ao1.from_vector(aie::add(aie::max(x1, vzero), p1));
+    ao2.from_vector(aie::add(aie::max(x2, vzero), p2));
+    ao3.from_vector(aie::add(aie::max(x3, vzero), p3));
+    *it_out++ = ao0.to_vector<bfloat16>();
+    *it_out++ = ao1.to_vector<bfloat16>();
+    *it_out++ = ao2.to_vector<bfloat16>();
+    *it_out++ = ao3.to_vector<bfloat16>();
   }
 #undef GELU_HORNER
+
+  event1();
+  return;
+}
+
+// tasks/0091 T8: degree 7, one Horner step fewer than the shipped degree-8
+// above. NOT the degree-8 fit with its top term dropped -- a fresh
+// least-squares refit at degree 7 on the SAME Chebyshev nodes
+// (design_gelu_poly.py's own fit(), R=4), because truncating an existing
+// fit's leading term is not the best degree-7 polynomial on this range.
+//
+// Correctness check (research/notes/0007 SS3.2 reproduced numerically in
+// tasks/0091, numpy only, real L0.ffn_up activations, full pipeline
+// including the bf16 output round -- the SAME `rel_fro` metric the header
+// above quotes 2.494e-03 for degree 8):
+//
+//   degree 7:  rel_fro = 2.503e-03  (1.016x the bf16 floor of 2.465e-03)
+//   degree 8:  rel_fro = 2.494e-03  (1.012x the bf16 floor)  <- matches the
+//                                      header's own number exactly
+//
+// Note 0007's table (7.324e-03 / 5.913e-04 / 3.613e-04 / "4.2x inside the
+// floor") is NOT this quantity -- it is smaller and does not appear to
+// include the bf16 output rounding step, so it understates how close
+// degree 7 already sits to degree 8 once the real pipeline is measured.
+// See tasks/0091/TASK.md for the full reproduction and the two numbers'
+// reconciliation attempt. The DIRECTION 0007 argued for still holds --
+// degree 7 costs a negligible 0.36% relative increase in end-to-end error
+// over degree 8, both comfortably usable -- so this is kept as a real,
+// selectable variant rather than a replacement for the shipped degree-8.
+#define GELU7_C0 6.6050728574e-04f
+#define GELU7_C1 -1.0183994033e-02f
+#define GELU7_C2 5.9113368317e-02f
+#define GELU7_C3 -1.4454213211e-01f
+#define GELU7_C4 4.9818454839e-02f
+#define GELU7_C5 3.8568485542e-01f
+#define GELU7_C6 -4.9917106742e-01f
+#define GELU7_C7 1.4610463161e-05f
+
+void gelu_poly_impl_deg7(bfloat16 *restrict input_vector,
+                         bfloat16 *restrict output_vector,
+                         const int32_t vector_size) {
+  event0();
+
+  auto it_in = aie::begin_restrict_vector<16>((bfloat16 *)input_vector);
+  auto it_out = aie::begin_restrict_vector<16>((bfloat16 *)output_vector);
+
+  const aie::vector<float, 16> vzero = aie::broadcast<float, 16>(0.0f);
+  const aie::vector<float, 16> vR = aie::broadcast<float, 16>(GELU_R);
+  const aie::vector<float, 16> k0 = aie::broadcast<float, 16>(GELU7_C0);
+  const aie::vector<float, 16> k1 = aie::broadcast<float, 16>(GELU7_C1);
+  const aie::vector<float, 16> k2 = aie::broadcast<float, 16>(GELU7_C2);
+  const aie::vector<float, 16> k3 = aie::broadcast<float, 16>(GELU7_C3);
+  const aie::vector<float, 16> k4 = aie::broadcast<float, 16>(GELU7_C4);
+  const aie::vector<float, 16> k5 = aie::broadcast<float, 16>(GELU7_C5);
+  const aie::vector<float, 16> k6 = aie::broadcast<float, 16>(GELU7_C6);
+  const aie::vector<float, 16> k7 = aie::broadcast<float, 16>(GELU7_C7);
+
+#define GELU7_HORNER(K)                                                      \
+  p0 = aie::add(aie::mul(p0, u0).to_vector<float>(), K);                     \
+  p1 = aie::add(aie::mul(p1, u1).to_vector<float>(), K);                     \
+  p2 = aie::add(aie::mul(p2, u2).to_vector<float>(), K);                     \
+  p3 = aie::add(aie::mul(p3, u3).to_vector<float>(), K);
+
+  AIE_PREPARE_FOR_PIPELINING
+  AIE_LOOP_MIN_ITERATION_COUNT(4)
+  for (int i = 0; i < vector_size; i += 64) {
+    aie::accum<accfloat, 16> ax0, ax1, ax2, ax3;
+    ax0.from_vector(*it_in++);
+    ax1.from_vector(*it_in++);
+    ax2.from_vector(*it_in++);
+    ax3.from_vector(*it_in++);
+    aie::vector<float, 16> x0 = ax0.to_vector<float>();
+    aie::vector<float, 16> x1 = ax1.to_vector<float>();
+    aie::vector<float, 16> x2 = ax2.to_vector<float>();
+    aie::vector<float, 16> x3 = ax3.to_vector<float>();
+
+    aie::vector<float, 16> u0 = aie::min(aie::abs(x0), vR);
+    aie::vector<float, 16> u1 = aie::min(aie::abs(x1), vR);
+    aie::vector<float, 16> u2 = aie::min(aie::abs(x2), vR);
+    aie::vector<float, 16> u3 = aie::min(aie::abs(x3), vR);
+
+    // SEVEN Horner steps: k0 is the leading coefficient, k1..k7 fold in below
+    // -- one fewer than the shipped degree-8's k1..k8.
+    aie::vector<float, 16> p0 = k0, p1 = k0, p2 = k0, p3 = k0;
+    GELU7_HORNER(k1)
+    GELU7_HORNER(k2)
+    GELU7_HORNER(k3)
+    GELU7_HORNER(k4)
+    GELU7_HORNER(k5)
+    GELU7_HORNER(k6)
+    GELU7_HORNER(k7)
+
+    aie::accum<accfloat, 16> ao0, ao1, ao2, ao3;
+    ao0.from_vector(aie::add(aie::max(x0, vzero), p0));
+    ao1.from_vector(aie::add(aie::max(x1, vzero), p1));
+    ao2.from_vector(aie::add(aie::max(x2, vzero), p2));
+    ao3.from_vector(aie::add(aie::max(x3, vzero), p3));
+    *it_out++ = ao0.to_vector<bfloat16>();
+    *it_out++ = ao1.to_vector<bfloat16>();
+    *it_out++ = ao2.to_vector<bfloat16>();
+    *it_out++ = ao3.to_vector<bfloat16>();
+  }
+#undef GELU7_HORNER
 
   event1();
   return;
@@ -232,7 +375,6 @@ void gelu_poly_f32_epilogue(float *restrict inout, const int32_t n) {
   auto ot = aie::begin_restrict_vector<16>(inout);
   const aie::vector<float, 16> vzero = aie::broadcast<float, 16>(0.0f);
   const aie::vector<float, 16> vR = aie::broadcast<float, 16>(GELU_R);
-  const aie::vector<float, 16> vone_f = aie::broadcast<float, 16>(1.0f);
   const aie::vector<float, 16> c0 = aie::broadcast<float, 16>(GELU_C0);
   const aie::vector<float, 16> c1 = aie::broadcast<float, 16>(GELU_C1);
   const aie::vector<float, 16> c2 = aie::broadcast<float, 16>(GELU_C2);
@@ -265,14 +407,16 @@ void gelu_poly_f32_epilogue(float *restrict inout, const int32_t n) {
     GELU_EPI_STEP(c6)
     GELU_EPI_STEP(c7)
     GELU_EPI_STEP(c8)
-    *ot++ = aie::mul(aie::add(aie::max(x0, vzero), p0), vone_f)
-                .to_vector<float>();
-    *ot++ = aie::mul(aie::add(aie::max(x1, vzero), p1), vone_f)
-                .to_vector<float>();
-    *ot++ = aie::mul(aie::add(aie::max(x2, vzero), p2), vone_f)
-                .to_vector<float>();
-    *ot++ = aie::mul(aie::add(aie::max(x3, vzero), p3), vone_f)
-                .to_vector<float>();
+    // fp32 in, fp32 out: the result of aie::add() below is ALREADY
+    // aie::vector<float,16> -- no conversion of any kind is needed. The
+    // multiply-by-1.0f-then-to_vector<float>() this replaced (tasks/0091 T7)
+    // was not even doing a widen or a narrow; it routed a same-type value
+    // through the emulated fp32 multiply for no reason, so this is a plain
+    // deletion, not a from_vector/to_vector substitution.
+    *ot++ = aie::add(aie::max(x0, vzero), p0);
+    *ot++ = aie::add(aie::max(x1, vzero), p1);
+    *ot++ = aie::add(aie::max(x2, vzero), p2);
+    *ot++ = aie::add(aie::max(x3, vzero), p3);
   }
 #undef GELU_EPI_STEP
 }
@@ -311,6 +455,15 @@ void gelu_poly_bf16_4k(bfloat16 *restrict input, bfloat16 *restrict output) {
 //                               shortening the polynomial buys nothing
 void gelu_probe_deg2_bf16(bfloat16 *restrict input, bfloat16 *restrict output) {
   gelu_poly_impl_deg2(input, output, 1024);
+}
+
+// tasks/0091 T8: NUMERICALLY CORRECT (unlike the deg2 probe above) --
+// degree 7, refit, see gelu_poly_impl_deg7's own comment for the accuracy
+// evidence. Not wired into any design; a real degree-7 entry point for
+// whoever picks up eltwise-on-array next, per note 0007's own "worth taking
+// when eltwise next runs on the array" verdict.
+void gelu_poly_deg7_bf16(bfloat16 *restrict input, bfloat16 *restrict output) {
+  gelu_poly_impl_deg7(input, output, 1024);
 }
 
 void gelu_epilogue_3072_f32(float *restrict inout) {

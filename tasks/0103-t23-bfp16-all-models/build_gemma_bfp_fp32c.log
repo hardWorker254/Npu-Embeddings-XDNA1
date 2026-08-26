@@ -1,0 +1,49 @@
+﻿  qkv@b4: purged 1 cache candidate(s)
+  b4    qkv           [256, 768, 1536] -> 002d8bd1e3acd04c8c94912e
+  attn_out@b4: purged 1 cache candidate(s)
+  b4    attn_out       [256, 768, 768] -> c12ebc8a88c8e3bdf817da9c
+  ffn_up@b4: purged 1 cache candidate(s)
+  b4    ffn_up        [256, 768, 2304] -> 031bc0d6ebec330538115eb7
+  ffn_down@b4: purged 1 cache candidate(s)
+  b4    ffn_down      [256, 1152, 768] -> 669a71cc6b227bcee024b922
+  qkv@b16: purged 1 cache candidate(s)
+  b16   qkv          [1024, 768, 1536] -> e48c03cf79baf48aafd2a6e9
+  attn_out@b16: purged 1 cache candidate(s)
+  b16   attn_out      [1024, 768, 768] -> 65976648fa02e81af86f7721
+  ffn_up@b16: purged 1 cache candidate(s)
+  b16   ffn_up       [1024, 768, 2304] -> 3047df35d3dd185caf810fdb
+  ffn_down@b16: purged 1 cache candidate(s)
+  b16   ffn_down     [1024, 1152, 768] -> 3047fdb4e6ba23f67afe4de7
+  qkv@b32: purged 1 cache candidate(s)
+  b32   qkv          [2048, 768, 1536] -> f6f9dff84eec2a18b7d4a76c
+  attn_out@b32: purged 1 cache candidate(s)
+  b32   attn_out      [2048, 768, 768] -> 4996f7fec6c5b175f289c3f9
+  ffn_up@b32: purged 1 cache candidate(s)
+  b32   ffn_up       [2048, 768, 2304] -> 3d9341562cd418d46c82203d
+  ffn_down@b32: purged 1 cache candidate(s)
+  b32   ffn_down     [2048, 1152, 768] -> d3b2a0e2d4183d11b40c6e01
+  qkv@b128: purged 1 cache candidate(s)
+  b128  qkv          [8192, 768, 1536] -> 610757f6e0914ab90907aa62
+  attn_out@b128: purged 1 cache candidate(s)
+  b128  attn_out      [8192, 768, 768] -> f39b112024522603dc90bd1b
+  ffn_up@b128: purged 1 cache candidate(s)
+  b128  ffn_up       [8192, 768, 2304] -> 51fcc067a8101a40313fa600
+  ffn_down@b128: purged 1 cache candidate(s)
+  b128  ffn_down     [8192, 1152, 768] -> 3af23d89d4deae8615636170
+  identity qkv@b128 vs qkv@b4    70 differing bytes  OK
+  identity qkv@b128 vs attn_out@b4    76 differing bytes  OK
+  identity qkv@b128 vs ffn_up@b4    72 differing bytes  OK
+  identity qkv@b128 vs ffn_down@b4    70 differing bytes  OK
+  identity qkv@b128 vs qkv@b16   73 differing bytes  OK
+  identity qkv@b128 vs attn_out@b16   71 differing bytes  OK
+  identity qkv@b128 vs ffn_up@b16   74 differing bytes  OK
+  identity qkv@b128 vs ffn_down@b16   73 differing bytes  OK
+  identity qkv@b128 vs qkv@b32   72 differing bytes  OK
+  identity qkv@b128 vs attn_out@b32   71 differing bytes  OK
+  identity qkv@b128 vs ffn_up@b32   77 differing bytes  OK
+  identity qkv@b128 vs ffn_down@b32   72 differing bytes  OK
+  identity qkv@b128 vs attn_out@b128  72 differing bytes  OK
+  identity qkv@b128 vs ffn_up@b128  72 differing bytes  OK
+  identity qkv@b128 vs ffn_down@b128  75 differing bytes  OK
+
+  wrote runtime\artifacts_gemma_bfp_fp32c\gemm_rtp -- ONE xclbin, 16 streams (4 shapes x 4 batch tiers)

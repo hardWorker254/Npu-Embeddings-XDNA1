@@ -1,0 +1,916 @@
+﻿skipping stages: mteb, energy
+power: no battery device reported (desktop, or the class is empty)
+cpu: 2.3% mean over the sampling window
+
+############ all-MiniLM-L6-v2 ############
+-- accuracy (golden check)
+    (previous log kept as accuracy-all-MiniLM-L6-v2.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model all-MiniLM-L6-v2 --artifacts artifacts_minilm_bfp16 --threads 16
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      all-MiniLM-L6-v2: 78 tensors, 69.00 MB, checkpoint 53aa51172d142c89
+  shape      sentence-transformers/all-MiniLM-L6-v2: 6 layers, hidden 384, 12 heads x 32, ffn 1536, mean pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 6 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 6 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 13 fewer NPU dispatches
+  bo-align   last data buffer aligned to 65536 B
+  weights    21.23 MB staged on the device once, not per call
+
+  embedding rel_fro vs HF golden           2.430e-02
+  worst 1 - cos vs HuggingFace             3.406e-04  (all 128 rows, 4 distinct sentences rotated across tile copies)
+
+PASS -- tolerance 2e-03 on 1-cos, no Python in this process
+-- throughput (4 lanes, contention guard ON)
+    (previous log kept as throughput-all-MiniLM-L6-v2.run1.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model all-MiniLM-L6-v2 --artifacts artifacts_minilm_bfp16 --threads 24 
+--pipeline 4 --bench 5
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      all-MiniLM-L6-v2: 78 tensors, 69.00 MB, checkpoint 53aa51172d142c89
+  shape      sentence-transformers/all-MiniLM-L6-v2: 6 layers, hidden 384, 12 heads x 32, ffn 1536, mean pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 6 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 6 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 13 fewer NPU dispatches
+  bo-align   last data buffer aligned to 65536 B
+  weights    21.23 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 8 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall   352.28 ms   ->    1453.4 seq/s
+    cpu   3062.50 ms   ->      8.69 cores busy
+    NPU dispatch+wait (serialized)   214.99 ms   61.0%   96 dispatches/group
+    p1 host work                  226.30 ms   64.2%   (conv 8.5  bias 95.1  attn 77.4  elt 45.3)
+    p2 host work                  231.07 ms   65.6%   (conv 7.9  bias 98.4  attn 79.4  elt 45.4)
+    p3 host work                  231.10 ms   65.6%   (conv 7.9  bias 96.5  attn 77.3  elt 49.3)
+    p4 host work                  230.68 ms   65.5%   (conv 8.4  bias 96.5  attn 76.6  elt 49.1)
+    (previous log kept as throughput-all-MiniLM-L6-v2.run2.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model all-MiniLM-L6-v2 --artifacts artifacts_minilm_bfp16 --threads 24 
+--pipeline 4 --bench 5
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      all-MiniLM-L6-v2: 78 tensors, 69.00 MB, checkpoint 53aa51172d142c89
+  shape      sentence-transformers/all-MiniLM-L6-v2: 6 layers, hidden 384, 12 heads x 32, ffn 1536, mean pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 6 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 6 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 13 fewer NPU dispatches
+  bo-align   last data buffer aligned to 65536 B
+  weights    21.23 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 8 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall   351.76 ms   ->    1455.5 seq/s
+    cpu   3021.88 ms   ->      8.59 cores busy
+    NPU dispatch+wait (serialized)   213.85 ms   60.8%   96 dispatches/group
+    p1 host work                  226.89 ms   64.5%   (conv 8.8  bias 96.2  attn 77.4  elt 44.5)
+    p2 host work                  220.00 ms   62.5%   (conv 7.6  bias 92.2  attn 75.6  elt 44.6)
+    p3 host work                  221.68 ms   63.0%   (conv 7.8  bias 93.0  attn 74.3  elt 46.6)
+    p4 host work                  220.15 ms   62.6%   (conv 7.7  bias 93.7  attn 72.6  elt 46.2)
+    (previous log kept as throughput-all-MiniLM-L6-v2.run3.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model all-MiniLM-L6-v2 --artifacts artifacts_minilm_bfp16 --threads 24 
+--pipeline 4 --bench 5
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      all-MiniLM-L6-v2: 78 tensors, 69.00 MB, checkpoint 53aa51172d142c89
+  shape      sentence-transformers/all-MiniLM-L6-v2: 6 layers, hidden 384, 12 heads x 32, ffn 1536, mean pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 6 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 6 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 13 fewer NPU dispatches
+  bo-align   last data buffer aligned to 65536 B
+  weights    21.23 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 8 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall   351.72 ms   ->    1455.7 seq/s
+    cpu   3234.38 ms   ->      9.20 cores busy
+    NPU dispatch+wait (serialized)   214.31 ms   60.9%   96 dispatches/group
+    p1 host work                  223.26 ms   63.5%   (conv 8.6  bias 93.6  attn 73.7  elt 47.4)
+    p2 host work                  228.91 ms   65.1%   (conv 8.6  bias 97.3  attn 75.9  elt 47.1)
+    p3 host work                  224.85 ms   63.9%   (conv 8.1  bias 95.2  attn 75.1  elt 46.5)
+    p4 host work                  219.50 ms   62.4%   (conv 8.2  bias 95.5  attn 71.2  elt 44.6)
+-- interleaved CPU ratio (8 rounds)
+    (previous log kept as interleaved-all-MiniLM-L6-v2.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\compare_three.py --model all-MiniLM-L6-v2 
+--artifacts artifacts_minilm_bfp16 --rounds 8 --threads 24 --pipeline 4 --out 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0119-release-sweep-040\interleaved-all-MiniLM-L6-v2.json
+
+Loading weights:   0%|          | 0/103 [00:00<?, ?it/s]
+Loading weights: 100%|â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆ| 103/103 [00:00<00:00, 19086.08it/s]
+model all-MiniLM-L6-v2, batch 128, seq 64, mean pooling
+  machine: Online / NoSystemBattery / Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
+  torch threads 12, ORT intra_op 12, NPU 24 threads / 4 lanes
+  interleaved, 8 rounds, MEAN reported on every side
+
+  round 1:  torch   723.1   ort   292.6   npu  1459.2 seq/s
+  round 2:  torch   781.9   ort   312.3   npu  1461.5 seq/s
+  round 3:  torch   768.4   ort   317.3   npu  1458.9 seq/s
+  round 4:  torch   793.2   ort   322.4   npu  1461.9 seq/s
+  round 5:  torch   789.5   ort   322.4   npu  1460.1 seq/s
+  round 6:  torch   767.5   ort   305.5   npu  1456.8 seq/s
+  round 7:  torch   777.9   ort   309.5   npu  1457.4 seq/s
+  round 8:  torch   776.8   ort   309.1   npu  1463.2 seq/s
+
+  torch        all   772.3   steady(last 4)   777.9   range   723.1-  793.2 seq/s
+  onnxruntime  all   311.4   steady(last 4)   311.6   range   292.6-  322.4 seq/s
+  npu          all  1459.9   steady(last 4)  1459.4   range  1456.8- 1463.2 seq/s
+
+  strongest CPU baseline: torch at 777.9 seq/s
+  NPU / strongest CPU   : 1.876x  (steady state, both sides)
+wrote tasks\0119-release-sweep-040\interleaved-all-MiniLM-L6-v2.json
+
+############ bge-small-en-v1.5 ############
+-- accuracy (golden check)
+    (previous log kept as accuracy-bge-small-en-v1.5.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model bge-small-en-v1.5 --artifacts artifacts_small_bf16 --threads 16
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-small-en-v1.5: 150 tensors, 90.48 MB, checkpoint 3c9f31665447c891
+  shape      BAAI/bge-small-en-v1.5: 12 layers, hidden 384, 12 heads x 32, ffn 1536, CLS pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bf16 MMAC, C as fp32
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 32768 B
+  weights    42.47 MB staged on the device once, not per call
+
+  embedding rel_fro vs HF golden           3.789e-03
+  worst 1 - cos vs HuggingFace             8.348e-06  (all 128 rows, 4 distinct sentences rotated across tile copies)
+
+PASS -- tolerance 2e-03 on 1-cos, no Python in this process
+-- throughput (4 lanes, contention guard ON)
+    (previous log kept as throughput-bge-small-en-v1.5.run1.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model bge-small-en-v1.5 --artifacts artifacts_small_bf16 --threads 24 
+--pipeline 4 --bench 5
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-small-en-v1.5: 150 tensors, 90.48 MB, checkpoint 3c9f31665447c891
+  shape      BAAI/bge-small-en-v1.5: 12 layers, hidden 384, 12 heads x 32, ffn 1536, CLS pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bf16 MMAC, C as fp32
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 32768 B
+  weights    42.47 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 8 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall   814.24 ms   ->     628.8 seq/s
+    cpu   5046.88 ms   ->      6.20 cores busy
+    NPU dispatch+wait (serialized)   655.89 ms   80.6%   192 dispatches/group
+    p1 host work                  343.79 ms   42.2%   (conv 13.3  bias 144.9  attn 110.4  elt 75.2)
+    p2 host work                  342.16 ms   42.0%   (conv 13.0  bias 144.0  attn 110.4  elt 74.7)
+    p3 host work                  338.39 ms   41.6%   (conv 12.6  bias 138.4  attn 109.6  elt 77.8)
+    p4 host work                  342.48 ms   42.1%   (conv 14.3  bias 144.2  attn 105.5  elt 78.4)
+    (previous log kept as throughput-bge-small-en-v1.5.run2.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model bge-small-en-v1.5 --artifacts artifacts_small_bf16 --threads 24 
+--pipeline 4 --bench 5
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-small-en-v1.5: 150 tensors, 90.48 MB, checkpoint 3c9f31665447c891
+  shape      BAAI/bge-small-en-v1.5: 12 layers, hidden 384, 12 heads x 32, ffn 1536, CLS pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bf16 MMAC, C as fp32
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 32768 B
+  weights    42.47 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 8 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall   811.94 ms   ->     630.6 seq/s
+    cpu   4981.25 ms   ->      6.13 cores busy
+    NPU dispatch+wait (serialized)   654.98 ms   80.7%   192 dispatches/group
+    p1 host work                  341.37 ms   42.0%   (conv 12.0  bias 142.8  attn 108.9  elt 77.7)
+    p2 host work                  338.56 ms   41.7%   (conv 12.7  bias 142.1  attn 104.7  elt 79.0)
+    p3 host work                  351.39 ms   43.3%   (conv 13.2  bias 149.2  attn 112.1  elt 76.8)
+    p4 host work                  345.64 ms   42.6%   (conv 12.9  bias 146.3  attn 107.3  elt 79.1)
+    (previous log kept as throughput-bge-small-en-v1.5.run3.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model bge-small-en-v1.5 --artifacts artifacts_small_bf16 --threads 24 
+--pipeline 4 --bench 5
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-small-en-v1.5: 150 tensors, 90.48 MB, checkpoint 3c9f31665447c891
+  shape      BAAI/bge-small-en-v1.5: 12 layers, hidden 384, 12 heads x 32, ffn 1536, CLS pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bf16 MMAC, C as fp32
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 32768 B
+  weights    42.47 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 8 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall   812.58 ms   ->     630.1 seq/s
+    cpu   4778.12 ms   ->      5.88 cores busy
+    NPU dispatch+wait (serialized)   653.02 ms   80.4%   192 dispatches/group
+    p1 host work                  345.15 ms   42.5%   (conv 13.5  bias 145.2  attn 108.6  elt 77.9)
+    p2 host work                  345.73 ms   42.5%   (conv 13.1  bias 147.4  attn 107.9  elt 77.4)
+    p3 host work                  348.69 ms   42.9%   (conv 12.7  bias 145.8  attn 111.5  elt 78.6)
+    p4 host work                  337.04 ms   41.5%   (conv 11.8  bias 139.1  attn 108.8  elt 77.4)
+-- interleaved CPU ratio (8 rounds)
+    (previous log kept as interleaved-bge-small-en-v1.5.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\compare_three.py --model bge-small-en-v1.5 
+--artifacts artifacts_small_bf16 --rounds 8 --threads 24 --pipeline 4 --out 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0119-release-sweep-040\interleaved-bge-small-en-v1.5.json
+
+Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]
+Loading weights: 100%|â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆ| 199/199 [00:00<00:00, 23929.66it/s]
+model bge-small-en-v1.5, batch 128, seq 64, cls pooling
+  machine: Online / NoSystemBattery / Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
+  torch threads 12, ORT intra_op 12, NPU 24 threads / 4 lanes
+  interleaved, 8 rounds, MEAN reported on every side
+
+  round 1:  torch   402.4   ort   163.1   npu   628.5 seq/s
+  round 2:  torch   404.2   ort   171.4   npu   631.1 seq/s
+  round 3:  torch   410.3   ort   172.2   npu   627.0 seq/s
+  round 4:  torch   406.5   ort   172.8   npu   629.5 seq/s
+  round 5:  torch   402.1   ort   174.4   npu   631.4 seq/s
+  round 6:  torch   409.3   ort   170.5   npu   630.3 seq/s
+  round 7:  torch   402.6   ort   174.3   npu   629.7 seq/s
+  round 8:  torch   400.6   ort   173.0   npu   629.6 seq/s
+
+  torch        all   404.7   steady(last 4)   403.7   range   400.6-  410.3 seq/s
+  onnxruntime  all   171.5   steady(last 4)   173.1   range   163.1-  174.4 seq/s
+  npu          all   629.6   steady(last 4)   630.2   range   627.0-  631.4 seq/s
+
+  strongest CPU baseline: torch at 403.7 seq/s
+  NPU / strongest CPU   : 1.561x  (steady state, both sides)
+wrote tasks\0119-release-sweep-040\interleaved-bge-small-en-v1.5.json
+
+############ bge-base-en-v1.5 ############
+-- accuracy (golden check)
+    (previous log kept as accuracy-bge-base-en-v1.5.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model bge-base-en-v1.5 --artifacts artifacts_base_bfp16 --threads 16
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-base-en-v1.5: 150 tensors, 265.26 MB, checkpoint c7c1988aae201f80
+  shape      BAAI/bge-base-en-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, CLS pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 131072 B
+  weights    169.87 MB staged on the device once, not per call
+
+  embedding rel_fro vs HF golden           1.941e-02
+  worst 1 - cos vs HuggingFace             2.284e-04  (all 128 rows, 4 distinct sentences rotated across tile copies)
+
+PASS -- tolerance 2e-03 on 1-cos, no Python in this process
+-- throughput (4 lanes, contention guard ON)
+    (previous log kept as throughput-bge-base-en-v1.5.run1.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model bge-base-en-v1.5 --artifacts artifacts_base_bfp16 --threads 24 
+--pipeline 4 --bench 5
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-base-en-v1.5: 150 tensors, 265.26 MB, checkpoint c7c1988aae201f80
+  shape      BAAI/bge-base-en-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, CLS pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 131072 B
+  weights    169.87 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 8 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall  1576.12 ms   ->     324.8 seq/s
+    cpu  12831.25 ms   ->      8.14 cores busy
+    NPU dispatch+wait (serialized)  1235.80 ms   78.4%   192 dispatches/group
+    p1 host work                  987.90 ms   62.7%   (conv 36.6  bias 528.3  attn 232.4  elt 190.6)
+    p2 host work                  979.23 ms   62.1%   (conv 35.6  bias 525.6  attn 232.6  elt 185.5)
+    p3 host work                  988.09 ms   62.7%   (conv 35.2  bias 529.1  attn 233.8  elt 190.0)
+    p4 host work                  987.12 ms   62.6%   (conv 36.6  bias 530.3  attn 233.7  elt 186.6)
+    (previous log kept as throughput-bge-base-en-v1.5.run2.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model bge-base-en-v1.5 --artifacts artifacts_base_bfp16 --threads 24 
+--pipeline 4 --bench 5
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-base-en-v1.5: 150 tensors, 265.26 MB, checkpoint c7c1988aae201f80
+  shape      BAAI/bge-base-en-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, CLS pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 65536 B
+  weights    169.87 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 8 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall  1578.49 ms   ->     324.4 seq/s
+    cpu  12665.62 ms   ->      8.02 cores busy
+    NPU dispatch+wait (serialized)  1231.93 ms   78.0%   192 dispatches/group
+    p1 host work                  973.26 ms   61.7%   (conv 35.7  bias 502.6  attn 246.7  elt 188.2)
+    p2 host work                  968.42 ms   61.4%   (conv 34.3  bias 506.4  attn 240.8  elt 187.0)
+    p3 host work                  994.51 ms   63.0%   (conv 34.9  bias 530.1  attn 242.5  elt 187.0)
+    p4 host work                  966.50 ms   61.2%   (conv 34.1  bias 510.5  attn 234.6  elt 187.3)
+    (previous log kept as throughput-bge-base-en-v1.5.run3.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model bge-base-en-v1.5 --artifacts artifacts_base_bfp16 --threads 24 
+--pipeline 4 --bench 5
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-base-en-v1.5: 150 tensors, 265.26 MB, checkpoint c7c1988aae201f80
+  shape      BAAI/bge-base-en-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, CLS pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 65536 B
+  weights    169.87 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 8 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall  1577.05 ms   ->     324.7 seq/s
+    cpu  12200.00 ms   ->      7.74 cores busy
+    NPU dispatch+wait (serialized)  1231.45 ms   78.1%   192 dispatches/group
+    p1 host work                  966.71 ms   61.3%   (conv 35.4  bias 515.6  attn 227.7  elt 187.9)
+    p2 host work                  965.68 ms   61.2%   (conv 37.9  bias 508.7  attn 231.8  elt 187.4)
+    p3 host work                  981.54 ms   62.2%   (conv 38.7  bias 521.8  attn 235.5  elt 185.6)
+    p4 host work                  973.49 ms   61.7%   (conv 36.3  bias 514.3  attn 235.6  elt 187.2)
+-- interleaved CPU ratio (8 rounds)
+    (previous log kept as interleaved-bge-base-en-v1.5.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\compare_three.py --model bge-base-en-v1.5 
+--artifacts artifacts_base_bfp16 --rounds 8 --threads 24 --pipeline 4 --out 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0119-release-sweep-040\interleaved-bge-base-en-v1.5.json
+
+Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]
+Loading weights: 100%|â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆ| 199/199 [00:00<00:00, 18165.06it/s]
+model bge-base-en-v1.5, batch 128, seq 64, cls pooling
+  machine: Online / NoSystemBattery / Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
+  torch threads 12, ORT intra_op 12, NPU 24 threads / 4 lanes
+  interleaved, 8 rounds, MEAN reported on every side
+
+  round 1:  torch   118.9   ort    60.1   npu   323.5 seq/s
+  round 2:  torch   123.4   ort    61.3   npu   323.4 seq/s
+  round 3:  torch   122.3   ort    60.5   npu   323.2 seq/s
+  round 4:  torch   124.1   ort    61.7   npu   323.4 seq/s
+  round 5:  torch   120.8   ort    60.7   npu   324.1 seq/s
+  round 6:  torch   119.4   ort    61.2   npu   323.9 seq/s
+  round 7:  torch   122.5   ort    60.4   npu   323.6 seq/s
+  round 8:  torch   114.8   ort    57.0   npu   324.3 seq/s
+
+  torch        all   120.8   steady(last 4)   119.4   range   114.8-  124.1 seq/s
+  onnxruntime  all    60.4   steady(last 4)    59.8   range    57.0-   61.7 seq/s
+  npu          all   323.7   steady(last 4)   324.0   range   323.2-  324.3 seq/s
+
+  strongest CPU baseline: torch at 119.4 seq/s
+  NPU / strongest CPU   : 2.714x  (steady state, both sides)
+wrote tasks\0119-release-sweep-040\interleaved-bge-base-en-v1.5.json
+
+############ bge-large-en-v1.5 ############
+-- accuracy (golden check)
+    (previous log kept as accuracy-bge-large-en-v1.5.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model bge-large-en-v1.5 --artifacts artifacts_large_bfp16 --threads 16
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-large-en-v1.5: 294 tensors, 731.57 MB, checkpoint 45e1954914e29bd7
+  shape      BAAI/bge-large-en-v1.5: 24 layers, hidden 1024, 16 heads x 64, ffn 4096, CLS pooling
+  designs    ONE xclbin, 4 streams (1 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 24 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 24 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 49 fewer NPU dispatches
+  bo-align   last data buffer aligned to 2097152 B (>= 2 MB)
+  weights    603.98 MB staged on the device once, not per call
+
+  embedding rel_fro vs HF golden           1.973e-02
+  worst 1 - cos vs HuggingFace             2.626e-04  (all 128 rows, 4 distinct sentences rotated across tile copies)
+
+PASS -- tolerance 2e-03 on 1-cos, no Python in this process
+-- throughput (4 lanes, contention guard ON)
+    (previous log kept as throughput-bge-large-en-v1.5.run1.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model bge-large-en-v1.5 --artifacts artifacts_large_bfp16 --threads 24 
+--pipeline 4 --bench 5
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-large-en-v1.5: 294 tensors, 731.57 MB, checkpoint 45e1954914e29bd7
+  shape      BAAI/bge-large-en-v1.5: 24 layers, hidden 1024, 16 heads x 64, ffn 4096, CLS pooling
+  designs    ONE xclbin, 4 streams (1 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 24 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 24 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 49 fewer NPU dispatches
+  bo-align   last data buffer aligned to 65536 B
+  weights    603.98 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 8 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall  5405.45 ms   ->      94.7 seq/s
+    cpu  50184.38 ms   ->      9.28 cores busy
+    NPU dispatch+wait (serialized)  4716.15 ms   87.2%   384 dispatches/group
+    p1 host work                 3577.76 ms   66.2%   (conv 130.1  bias 1721.4  attn 1113.2  elt 613.0)
+    p2 host work                 3596.56 ms   66.5%   (conv 126.1  bias 1728.6  attn 1123.0  elt 618.9)
+    p3 host work                 3596.97 ms   66.5%   (conv 121.1  bias 1726.5  attn 1125.4  elt 624.0)
+    p4 host work                 3605.86 ms   66.7%   (conv 125.3  bias 1725.5  attn 1139.8  elt 615.2)
+    (previous log kept as throughput-bge-large-en-v1.5.run2.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model bge-large-en-v1.5 --artifacts artifacts_large_bfp16 --threads 24 
+--pipeline 4 --bench 5
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-large-en-v1.5: 294 tensors, 731.57 MB, checkpoint 45e1954914e29bd7
+  shape      BAAI/bge-large-en-v1.5: 24 layers, hidden 1024, 16 heads x 64, ffn 4096, CLS pooling
+  designs    ONE xclbin, 4 streams (1 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 24 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 24 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 49 fewer NPU dispatches
+  bo-align   last data buffer aligned to 65536 B
+  weights    603.98 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 8 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall  5406.33 ms   ->      94.7 seq/s
+    cpu  50218.75 ms   ->      9.29 cores busy
+    NPU dispatch+wait (serialized)  4714.65 ms   87.2%   384 dispatches/group
+    p1 host work                 3573.22 ms   66.1%   (conv 125.4  bias 1675.1  attn 1148.2  elt 624.6)
+    p2 host work                 3598.52 ms   66.6%   (conv 116.7  bias 1744.0  attn 1121.2  elt 616.6)
+    p3 host work                 3565.61 ms   66.0%   (conv 123.9  bias 1694.9  attn 1135.9  elt 610.9)
+    p4 host work                 3557.47 ms   65.8%   (conv 122.1  bias 1684.8  attn 1122.9  elt 627.7)
+    (previous log kept as throughput-bge-large-en-v1.5.run3.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model bge-large-en-v1.5 --artifacts artifacts_large_bfp16 --threads 24 
+--pipeline 4 --bench 5
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-large-en-v1.5: 294 tensors, 731.57 MB, checkpoint 45e1954914e29bd7
+  shape      BAAI/bge-large-en-v1.5: 24 layers, hidden 1024, 16 heads x 64, ffn 4096, CLS pooling
+  designs    ONE xclbin, 4 streams (1 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 24 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 24 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 49 fewer NPU dispatches
+  bo-align   last data buffer aligned to 65536 B
+  weights    603.98 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 8 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall  5386.11 ms   ->      95.1 seq/s
+    cpu  50534.38 ms   ->      9.38 cores busy
+    NPU dispatch+wait (serialized)  4715.52 ms   87.5%   384 dispatches/group
+    p1 host work                 3581.17 ms   66.5%   (conv 119.2  bias 1700.5  attn 1135.9  elt 625.6)
+    p2 host work                 3604.32 ms   66.9%   (conv 128.4  bias 1710.5  attn 1132.2  elt 633.1)
+    p3 host work                 3612.15 ms   67.1%   (conv 129.3  bias 1732.5  attn 1134.8  elt 615.6)
+    p4 host work                 3603.66 ms   66.9%   (conv 122.4  bias 1704.6  attn 1136.5  elt 640.2)
+-- interleaved CPU ratio (8 rounds)
+    (previous log kept as interleaved-bge-large-en-v1.5.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\compare_three.py --model bge-large-en-v1.5 
+--artifacts artifacts_large_bfp16 --rounds 8 --threads 24 --pipeline 4 --out 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0119-release-sweep-040\interleaved-bge-large-en-v1.5.json
+
+Loading weights:   0%|          | 0/391 [00:00<?, ?it/s]
+Loading weights: 100%|â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆ| 391/391 [00:00<00:00, 19928.22it/s]
+model bge-large-en-v1.5, batch 128, seq 64, cls pooling
+  machine: Online / NoSystemBattery / Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
+  torch threads 12, ORT intra_op 12, NPU 24 threads / 4 lanes
+  interleaved, 8 rounds, MEAN reported on every side
+
+  round 1:  torch    35.8   ort    18.3   npu    94.8 seq/s
+  round 2:  torch    36.0   ort    18.5   npu    95.1 seq/s
+  round 3:  torch    35.9   ort    18.2   npu    94.9 seq/s
+  round 4:  torch    36.0   ort    18.2   npu    95.0 seq/s
+  round 5:  torch    35.8   ort    17.5   npu    94.8 seq/s
+  round 6:  torch    35.9   ort    18.3   npu    94.8 seq/s
+  round 7:  torch    36.1   ort    18.5   npu    94.9 seq/s
+  round 8:  torch    36.0   ort    18.3   npu    94.8 seq/s
+
+  torch        all    35.9   steady(last 4)    36.0   range    35.8-   36.1 seq/s
+  onnxruntime  all    18.2   steady(last 4)    18.1   range    17.5-   18.5 seq/s
+  npu          all    94.9   steady(last 4)    94.8   range    94.8-   95.1 seq/s
+
+  strongest CPU baseline: torch at 36.0 seq/s
+  NPU / strongest CPU   : 2.637x  (steady state, both sides)
+wrote tasks\0119-release-sweep-040\interleaved-bge-large-en-v1.5.json
+
+############ nomic-embed-text-v1.5 ############
+-- accuracy (golden check)
+    (previous log kept as accuracy-nomic-embed-text-v1.5.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model nomic-embed-text-v1.5 --artifacts artifacts_nomic_bfp16 
+--threads 16
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      nomic-embed-text-v1.5: 150 tensors, 322.05 MB, checkpoint 9e7d262b1fe5ea35
+  shape      nomic-ai/nomic-embed-text-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, mean pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 2097152 B (>= 2 MB)
+  weights    226.49 MB staged on the device once, not per call
+
+  embedding rel_fro vs HF golden           4.845e-02
+  worst 1 - cos vs HuggingFace             1.402e-03  (all 128 rows, 4 distinct sentences rotated across tile copies)
+
+PASS -- tolerance 2e-03 on 1-cos, no Python in this process
+-- throughput (4 lanes, contention guard ON)
+    (previous log kept as throughput-nomic-embed-text-v1.5.run1.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model nomic-embed-text-v1.5 --artifacts artifacts_nomic_bfp16 
+--threads 24 --pipeline 4 --bench 5
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      nomic-embed-text-v1.5: 150 tensors, 322.05 MB, checkpoint 9e7d262b1fe5ea35
+  shape      nomic-ai/nomic-embed-text-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, mean pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 65536 B
+  weights    226.49 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 8 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall  1954.33 ms   ->     262.0 seq/s
+    cpu  14321.88 ms   ->      7.33 cores busy
+    NPU dispatch+wait (serialized)  1617.57 ms   82.8%   192 dispatches/group
+    p1 host work                  950.71 ms   48.6%   (conv 35.5  bias 506.4  attn 221.2  elt 187.6)
+    p2 host work                  961.60 ms   49.2%   (conv 38.5  bias 521.6  attn 219.1  elt 182.4)
+    p3 host work                  957.11 ms   49.0%   (conv 35.2  bias 516.3  attn 218.2  elt 187.5)
+    p4 host work                  942.00 ms   48.2%   (conv 36.8  bias 510.4  attn 215.2  elt 179.5)
+    (previous log kept as throughput-nomic-embed-text-v1.5.run2.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model nomic-embed-text-v1.5 --artifacts artifacts_nomic_bfp16 
+--threads 24 --pipeline 4 --bench 5
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      nomic-embed-text-v1.5: 150 tensors, 322.05 MB, checkpoint 9e7d262b1fe5ea35
+  shape      nomic-ai/nomic-embed-text-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, mean pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 65536 B
+  weights    226.49 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 8 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall  1956.38 ms   ->     261.7 seq/s
+    cpu  14637.50 ms   ->      7.48 cores busy
+    NPU dispatch+wait (serialized)  1614.90 ms   82.5%   192 dispatches/group
+    p1 host work                  937.46 ms   47.9%   (conv 38.9  bias 499.2  attn 214.0  elt 185.3)
+    p2 host work                  946.73 ms   48.4%   (conv 39.1  bias 509.0  attn 214.7  elt 183.9)
+    p3 host work                  952.97 ms   48.7%   (conv 36.0  bias 509.8  attn 219.3  elt 187.9)
+    p4 host work                  958.51 ms   49.0%   (conv 36.2  bias 515.1  attn 223.3  elt 183.9)
+    (previous log kept as throughput-nomic-embed-text-v1.5.run3.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model nomic-embed-text-v1.5 --artifacts artifacts_nomic_bfp16 
+--threads 24 --pipeline 4 --bench 5
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      nomic-embed-text-v1.5: 150 tensors, 322.05 MB, checkpoint 9e7d262b1fe5ea35
+  shape      nomic-ai/nomic-embed-text-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, mean pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 2097152 B (>= 2 MB)
+  weights    226.49 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 8 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall  1953.51 ms   ->     262.1 seq/s
+    cpu  14540.62 ms   ->      7.44 cores busy
+    NPU dispatch+wait (serialized)  1614.87 ms   82.7%   192 dispatches/group
+    p1 host work                  950.22 ms   48.6%   (conv 36.7  bias 502.4  attn 221.6  elt 189.6)
+    p2 host work                  942.37 ms   48.2%   (conv 36.7  bias 503.3  attn 212.2  elt 190.2)
+    p3 host work                  969.04 ms   49.6%   (conv 34.6  bias 533.0  attn 214.8  elt 186.6)
+    p4 host work                  951.32 ms   48.7%   (conv 37.2  bias 516.7  attn 219.4  elt 177.9)
+-- interleaved CPU ratio (8 rounds)
+    (previous log kept as interleaved-nomic-embed-text-v1.5.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\compare_three.py --model nomic-embed-text-v1.5 
+--artifacts artifacts_nomic_bfp16 --rounds 8 --threads 24 --pipeline 4 --out 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0119-release-sweep-040\interleaved-nomic-embed-text-v1.5.json
+  task prefix (all three sides): 'search_document: '
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits 
+and faster downloads.
+<All keys matched successfully>
+model nomic-embed-text-v1.5, batch 128, seq 64, mean pooling
+  machine: Online / NoSystemBattery / Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
+  torch threads 12, ORT intra_op 12, NPU 24 threads / 4 lanes
+  interleaved, 8 rounds, MEAN reported on every side
+
+[transformers] Detected the usage of `get_extended_attention_mask`: This function is deprecated and will be removed in 
+v5.12.0. Please use the new API in `transformers.masking_utils`
+  round 1:  torch    74.2   ort    45.5   npu   259.5 seq/s
+  round 2:  torch    75.3   ort    45.9   npu   259.5 seq/s
+  round 3:  torch    75.6   ort    45.4   npu   259.1 seq/s
+  round 4:  torch    75.4   ort    45.7   npu   259.1 seq/s
+  round 5:  torch    75.4   ort    46.1   npu   258.9 seq/s
+  round 6:  torch    74.8   ort    45.9   npu   258.2 seq/s
+  round 7:  torch    75.2   ort    45.8   npu   258.9 seq/s
+  round 8:  torch    74.9   ort    45.7   npu   259.5 seq/s
+
+  torch        all    75.1   steady(last 4)    75.1   range    74.2-   75.6 seq/s
+  onnxruntime  all    45.7   steady(last 4)    45.9   range    45.4-   46.1 seq/s
+  npu          all   259.1   steady(last 4)   258.9   range   258.2-  259.5 seq/s
+
+  strongest CPU baseline: torch at 75.1 seq/s
+  NPU / strongest CPU   : 3.449x  (steady state, both sides)
+wrote tasks\0119-release-sweep-040\interleaved-nomic-embed-text-v1.5.json
+
+############ embeddinggemma-300m ############
+-- accuracy (golden check)
+    (previous log kept as accuracy-embeddinggemma-300m.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model embeddinggemma-300m --artifacts artifacts_gemma_bfp16 --embed 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0074-m13-gemma-on-npu\corpus.txt 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0119-release-sweep-040\accuracy-embeddinggemma-300m.f32 --threads 
+24 --pipeline 4 --prefix document
+NpuEmbeddings C++ runtime -- EmbeddingGemma (arch=1)
+  model      C:\Users\vegar\Documents\GitHub\NpuEmbeddings\models\embeddinggemma-300m.npue
+  hidden     768, tokenizer 262144 tokens
+  path       NPU -- 4 GEMMs/layer x 24 layers = 96 dispatches, ONE xclbin, one hw_context
+  designs    C:\Users\vegar\Documents\GitHub\NpuEmbeddings/runtime/artifacts_gemma_bfp16  (16 streams, 4 batch tiers)
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  qkv        N=1536  (q[0,768) k[768,1024) v[1024,1280), 256 zero-padded cols)
+  staged     212.3 MB of tiled bf16 weights on the device
+  host       RMSNorm x97, RoPE, GeGLU, MQA attention (2.3% of MACs)
+  input      13 texts, seq=64, prefix='document' -> title: none | text: 
+  pipeline   4 concurrent lanes, one NPU mutex, 6 host threads per lane
+  embedded   13 texts in 0.17 s  ->  78.5 seq/s (wall clock, end-to-end -- NOT an NPU kernel claim, CLAUDE.md rule 1)
+  breakdown  npu 56 ms (in 3, dispatch 50, out 3) | conv 5 | bias 19 | norm 14 | attn 53 | rope 2 | geglu 0 | tok 0  
+[96 dispatches]
+  wrote      
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0119-release-sweep-040\accuracy-embeddinggemma-300m.f32  [13, 768] 
+fp32
+    (previous log kept as accuracy-embeddinggemma-300m.gate.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tools\verify_gemma_npu_encode.py --npu 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0119-release-sweep-040\accuracy-embeddinggemma-300m.f32 --cpu 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0074-m13-gemma-on-npu\out_cpu.f32
+  rows            13
+  1-cos  mean     1.749e-04
+  1-cos  worst    2.315e-04  (row 0)
+  gate            2.0e-03
+  nearest-is-self 13/13
+  closest off-diagonal pair  cos 0.3884 (margin 0.6116 -- a corpus that cannot separate its own rows cannot detect a 
+routing bug)
+
+  PASS
+-- throughput (4 lanes, contention guard ON)
+    (previous log kept as throughput-embeddinggemma-300m.run1.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model embeddinggemma-300m --artifacts artifacts_gemma_bfp16 --embed 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0074-m13-gemma-on-npu\corpus_520.txt --threads 24 --pipeline 4 
+--guard-contention --prefix document
+NpuEmbeddings C++ runtime -- EmbeddingGemma (arch=1)
+  model      C:\Users\vegar\Documents\GitHub\NpuEmbeddings\models\embeddinggemma-300m.npue
+  npu        exclusive -- 7 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+  hidden     768, tokenizer 262144 tokens
+  path       NPU -- 4 GEMMs/layer x 24 layers = 96 dispatches, ONE xclbin, one hw_context
+  designs    C:\Users\vegar\Documents\GitHub\NpuEmbeddings/runtime/artifacts_gemma_bfp16  (16 streams, 4 batch tiers)
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  qkv        N=1536  (q[0,768) k[768,1024) v[1024,1280), 256 zero-padded cols)
+  staged     212.3 MB of tiled bf16 weights on the device
+  host       RMSNorm x97, RoPE, GeGLU, MQA attention (2.3% of MACs)
+  input      520 texts, seq=64, prefix='document' -> title: none | text: 
+  pipeline   4 concurrent lanes, one NPU mutex, 6 host threads per lane
+  embedded   520 texts in 2.86 s  ->  181.5 seq/s (wall clock, end-to-end -- NOT an NPU kernel claim, CLAUDE.md rule 1)
+  breakdown  npu 3167 ms (in 1250, dispatch 1701, out 216) | conv 721 | bias 1356 | norm 1693 | attn 2759 | rope 438 | 
+geglu 0 | tok 8  [480 dispatches]
+  [0] -0.0153 -0.0062 -0.0007 +0.0219 +0.0116 +0.0541 ...
+  [1] -0.0467 +0.0185 +0.0152 -0.0109 +0.0116 -0.0125 ...
+  [2] +0.0105 +0.0117 +0.0540 -0.0115 -0.0331 -0.0077 ...
+  [3] -0.0811 +0.0129 +0.0153 +0.0331 -0.0478 +0.0802 ...
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model embeddinggemma-300m --artifacts artifacts_gemma_bfp16 --embed 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0074-m13-gemma-on-npu\corpus_520.txt --threads 24 --pipeline 4 
+--guard-contention --prefix document
+NpuEmbeddings C++ runtime -- EmbeddingGemma (arch=1)
+  model      C:\Users\vegar\Documents\GitHub\NpuEmbeddings\models\embeddinggemma-300m.npue
+  npu        exclusive -- 7 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+  hidden     768, tokenizer 262144 tokens
+  path       NPU -- 4 GEMMs/layer x 24 layers = 96 dispatches, ONE xclbin, one hw_context
+  designs    C:\Users\vegar\Documents\GitHub\NpuEmbeddings/runtime/artifacts_gemma_bfp16  (16 streams, 4 batch tiers)
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  qkv        N=1536  (q[0,768) k[768,1024) v[1024,1280), 256 zero-padded cols)
+  staged     212.3 MB of tiled bf16 weights on the device
+  host       RMSNorm x97, RoPE, GeGLU, MQA attention (2.3% of MACs)
+  input      520 texts, seq=64, prefix='document' -> title: none | text: 
+  pipeline   4 concurrent lanes, one NPU mutex, 6 host threads per lane
+  embedded   520 texts in 2.91 s  ->  178.9 seq/s (wall clock, end-to-end -- NOT an NPU kernel claim, CLAUDE.md rule 1)
+  breakdown  npu 3346 ms (in 1459, dispatch 1683, out 205) | conv 726 | bias 1352 | norm 1632 | attn 2778 | rope 404 | 
+geglu 0 | tok 10  [480 dispatches]
+  [0] -0.0153 -0.0062 -0.0007 +0.0219 +0.0116 +0.0541 ...
+  [1] -0.0467 +0.0185 +0.0152 -0.0109 +0.0116 -0.0125 ...
+  [2] +0.0105 +0.0117 +0.0540 -0.0115 -0.0331 -0.0077 ...
+  [3] -0.0811 +0.0129 +0.0153 +0.0331 -0.0478 +0.0802 ...
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model embeddinggemma-300m --artifacts artifacts_gemma_bfp16 --embed 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0074-m13-gemma-on-npu\corpus_520.txt --threads 24 --pipeline 4 
+--guard-contention --prefix document
+NpuEmbeddings C++ runtime -- EmbeddingGemma (arch=1)
+  model      C:\Users\vegar\Documents\GitHub\NpuEmbeddings\models\embeddinggemma-300m.npue
+  npu        exclusive -- 7 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+  hidden     768, tokenizer 262144 tokens
+  path       NPU -- 4 GEMMs/layer x 24 layers = 96 dispatches, ONE xclbin, one hw_context
+  designs    C:\Users\vegar\Documents\GitHub\NpuEmbeddings/runtime/artifacts_gemma_bfp16  (16 streams, 4 batch tiers)
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 
+7e00b57955e108fe9d8e9419f5828a0c7e650858
+  qkv        N=1536  (q[0,768) k[768,1024) v[1024,1280), 256 zero-padded cols)
+  staged     212.3 MB of tiled bf16 weights on the device
+  host       RMSNorm x97, RoPE, GeGLU, MQA attention (2.3% of MACs)
+  input      520 texts, seq=64, prefix='document' -> title: none | text: 
+  pipeline   4 concurrent lanes, one NPU mutex, 6 host threads per lane
+  embedded   520 texts in 2.90 s  ->  179.2 seq/s (wall clock, end-to-end -- NOT an NPU kernel claim, CLAUDE.md rule 1)
+  breakdown  npu 3377 ms (in 1486, dispatch 1691, out 200) | conv 717 | bias 1305 | norm 1652 | attn 2808 | rope 407 | 
+geglu 0 | tok 9  [480 dispatches]
+  [0] -0.0153 -0.0062 -0.0007 +0.0219 +0.0116 +0.0541 ...
+  [1] -0.0467 +0.0185 +0.0152 -0.0109 +0.0116 -0.0125 ...
+  [2] +0.0105 +0.0117 +0.0540 -0.0115 -0.0331 -0.0077 ...
+  [3] -0.0811 +0.0129 +0.0153 +0.0331 -0.0478 +0.0802 ...
+-- interleaved CPU ratio (8 rounds)
+    (previous log kept as interleaved-embeddinggemma-300m.run1.txt)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\compare_three.py --model embeddinggemma-300m 
+--artifacts artifacts_gemma_bfp16 --rounds 8 --threads 24 --pipeline 4 --out 
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0119-release-sweep-040\interleaved-embeddinggemma-300m.json
+  task prefix (all three sides): 'title: none | text: '  [NPU side applies it in-process]
+
+Loading weights:   0%|          | 0/314 [00:00<?, ?it/s]
+Loading weights: 100%|â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆ| 314/314 [00:00<00:00, 20668.73it/s]
+
+Loading weights:   0%|          | 0/314 [00:00<?, ?it/s]
+Loading weights: 100%|â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆ| 314/314 [00:00<00:00, 9676.72it/s]
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\transformers\cache_utils.py:215: 
+TracerWarning: torch.tensor results are registered as constants in the trace. You can safely ignore this warning if 
+you use this function to create tensors out of constant variables that would be the same every time you call this 
+function. In any other case, this might cause the trace to be incorrect.
+  self._sliding_window_tensor = torch.tensor(self.sliding_window, dtype=torch.long)
+C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Lib\site-packages\transformers\masking_utils.py:212: 
+TracerWarning: Converting a tensor to a Python boolean might cause the trace to be incorrect. We can't record the data 
+flow of Python values, so this value will be treated as a constant in the future. This means that the trace might not 
+generalize to other inputs!
+  if (padding_length := kv_length + kv_offset - attention_mask.shape[-1]) > 0:
+  ONNX Runtime side UNAVAILABLE for embeddinggemma-300m: RuntimeError: invalid unordered_map<K, T> key
+  -> the CPU baseline for this model is torch alone, and the ratio below says so.
+model embeddinggemma-300m, batch 128, seq 64, mean pooling
+  machine: Online / NoSystemBattery / Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
+  torch threads 12, ORT intra_op 12, NPU 24 threads / 4 lanes
+  interleaved, 8 rounds, MEAN reported on every side
+
+  round 1:  torch    86.0   ort      --   npu   106.1 seq/s
+  round 2:  torch    84.5   ort      --   npu   106.8 seq/s
+  round 3:  torch    85.5   ort      --   npu   106.7 seq/s
+  round 4:  torch    83.3   ort      --   npu   107.3 seq/s
+  round 5:  torch    84.9   ort      --   npu   106.8 seq/s
+  round 6:  torch    84.2   ort      --   npu   111.0 seq/s
+  round 7:  torch    79.6   ort      --   npu   107.3 seq/s
+  round 8:  torch    82.5   ort      --   npu   106.6 seq/s
+
+  torch        all    83.8   steady(last 4)    82.8   range    79.6-   86.0 seq/s
+  npu          all   107.3   steady(last 4)   107.9   range   106.1-  111.0 seq/s
+
+  ONNX Runtime NOT measured for this model (RuntimeError: invalid unordered_map<K, T> key) -- the baseline below is 
+torch alone, which tasks/0040 measured as the stronger of the two anyway.
+  strongest CPU baseline: torch at 82.8 seq/s
+  NPU / strongest CPU   : 1.303x  (steady state, both sides)
+wrote tasks\0119-release-sweep-040\interleaved-embeddinggemma-300m.json
+
+================ SWEEP DONE ================
+  logs and per-model artifacts: tasks\0119-release-sweep-040
+  index: C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0119-release-sweep-040\sweep.json
+
+  Every figure above is end-to-end throughput or a host-side cost.
+  NONE of it is an NPU kernel performance claim -- those come from
+  hardware traces or static instruction counts (CLAUDE.md rule 1).

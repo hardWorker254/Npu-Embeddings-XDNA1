@@ -104,7 +104,11 @@ def main() -> int:
     # 4). tasks/0071 wired `--prefix` into `npuembed --embed` itself, so the
     # RUNTIME side now applies its own prefix -- this harness hands it the
     # RAW texts plus `--prefix <name>` and lets it do the prepending, the
-    # same as any real caller would. The REFERENCE side (sentence-
+    # same as any real caller would. As of tasks/0118 the flag is REQUIRED
+    # rather than defaulted, so passing it is no longer optional politeness:
+    # omitting it on a prompts-model makes the runtime refuse. `prompt_default`
+    # below is read as ADVISORY metadata -- the harness choosing which prompt
+    # to exercise -- which is the only role that field kept. The REFERENCE side (sentence-
     # transformers) has no such flag, so it still needs the prefix prepended
     # here, by hand, same as before. If the two sides ever disagreed about
     # WHAT the prefix text is, this comparison would still pass with both

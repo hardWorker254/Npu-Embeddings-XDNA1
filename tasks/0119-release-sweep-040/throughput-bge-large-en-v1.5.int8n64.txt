@@ -1,0 +1,82 @@
+
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model bge-large-en-v1.5.int8n64 --artifacts artifacts_int8c_large_n64 --threads 24 --pipeline 4 --bench 5
+  fixtures   bge-large-en-v1.5 (matched by checkpoint sha, not by name)
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-large-en-v1.5.int8n64: 486 tensors, 431.16 MB, checkpoint 45e1954914e29bd7
+  shape      BAAI/bge-large-en-v1.5: 24 layers, hidden 1024, 16 heads x 64, ffn 4096, CLS pooling
+  designs    ONE xclbin, 4 streams (1 batch tiers), one hw_context
+  datapath   UNRECORDED (design predates tasks/0104), C as bf16
+  toolchain  UNRECORDED (design predates tasks/0106)
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 24 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 24 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 49 fewer NPU dispatches
+  bo-align   last data buffer aligned to 65536 B
+  weights    301.99 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 8 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall  3478.25 ms   ->     147.2 seq/s
+    cpu  45218.75 ms   ->     13.00 cores busy
+    NPU dispatch+wait (serialized)  2300.03 ms   66.1%   384 dispatches/group
+    p1 host work                 2385.45 ms   68.6%   (conv 84.9  bias 721.1  attn 1060.9  elt 518.5)
+    p2 host work                 2377.47 ms   68.4%   (conv 88.2  bias 709.6  attn 1052.1  elt 527.5)
+    p3 host work                 2366.41 ms   68.0%   (conv 80.1  bias 704.9  attn 1047.2  elt 534.1)
+    p4 host work                 2398.20 ms   68.9%   (conv 82.7  bias 688.3  attn 1106.6  elt 520.6)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model bge-large-en-v1.5.int8n64 --artifacts artifacts_int8c_large_n64 --threads 24 --pipeline 4 --bench 5
+  fixtures   bge-large-en-v1.5 (matched by checkpoint sha, not by name)
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-large-en-v1.5.int8n64: 486 tensors, 431.16 MB, checkpoint 45e1954914e29bd7
+  shape      BAAI/bge-large-en-v1.5: 24 layers, hidden 1024, 16 heads x 64, ffn 4096, CLS pooling
+  designs    ONE xclbin, 4 streams (1 batch tiers), one hw_context
+  datapath   UNRECORDED (design predates tasks/0104), C as bf16
+  toolchain  UNRECORDED (design predates tasks/0106)
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 24 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 24 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 49 fewer NPU dispatches
+  bo-align   last data buffer aligned to 65536 B
+  weights    301.99 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 8 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall  3486.34 ms   ->     146.9 seq/s
+    cpu  45756.25 ms   ->     13.12 cores busy
+    NPU dispatch+wait (serialized)  2300.86 ms   66.0%   384 dispatches/group
+    p1 host work                 2421.44 ms   69.5%   (conv 87.6  bias 715.0  attn 1093.3  elt 525.5)
+    p2 host work                 2393.91 ms   68.7%   (conv 82.0  bias 711.2  attn 1071.3  elt 529.5)
+    p3 host work                 2370.16 ms   68.0%   (conv 91.1  bias 717.5  attn 1049.1  elt 512.3)
+    p4 host work                 2372.47 ms   68.1%   (conv 82.6  bias 701.3  attn 1064.2  elt 524.3)
+--- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembed.exe" C:\Users\vegar\Documents\GitHub\NpuEmbeddings --model bge-large-en-v1.5.int8n64 --artifacts artifacts_int8c_large_n64 --threads 24 --pipeline 4 --bench 5
+  fixtures   bge-large-en-v1.5 (matched by checkpoint sha, not by name)
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-large-en-v1.5.int8n64: 486 tensors, 431.16 MB, checkpoint 45e1954914e29bd7
+  shape      BAAI/bge-large-en-v1.5: 24 layers, hidden 1024, 16 heads x 64, ffn 4096, CLS pooling
+  designs    ONE xclbin, 4 streams (1 batch tiers), one hw_context
+  datapath   UNRECORDED (design predates tasks/0104), C as bf16
+  toolchain  UNRECORDED (design predates tasks/0106)
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 24 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 24 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 49 fewer NPU dispatches
+  bo-align   last data buffer aligned to 131072 B
+  weights    301.99 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
+  npu        exclusive -- 8 hw_context(s), none Active but ours (C:\Windows\System32\AMD\xrt-smi.exe)
+
+  5 pipelined groups of 4 x 128 sequences at seq 64
+    wall  3476.59 ms   ->     147.3 seq/s
+    cpu  46159.38 ms   ->     13.28 cores busy
+    NPU dispatch+wait (serialized)  2301.95 ms   66.2%   384 dispatches/group
+    p1 host work                 2406.16 ms   69.2%   (conv 85.9  bias 711.1  attn 1073.3  elt 535.8)
+    p2 host work                 2385.02 ms   68.6%   (conv 86.5  bias 713.9  attn 1062.6  elt 522.0)
+    p3 host work                 2422.00 ms   69.7%   (conv 92.4  bias 724.6  attn 1084.3  elt 520.7)
+    p4 host work                 2417.27 ms   69.5%   (conv 88.0  bias 730.9  attn 1083.2  elt 515.2)

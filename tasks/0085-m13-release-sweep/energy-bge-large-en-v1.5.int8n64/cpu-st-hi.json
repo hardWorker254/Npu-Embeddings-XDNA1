@@ -1,0 +1,23 @@
+﻿{
+    "kind":  "hardware measurement",
+    "label":  "cpu-st-60",
+    "command":  "\"C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\.venv-ref\\Scripts\\python.exe\" experiments\\m8-npu-vs-cpu\\energy_cpu_load.py --encodes 60 --batch 128 --model bge-large-en-v1.5",
+    "meter":  "RAPL_Package0_PKG",
+    "energy_unit_j":  3.6E-09,
+    "repeats":  1,
+    "idle_before_w":  4.0296234008611549,
+    "idle_after_w":  3.9858905390414376,
+    "idle_w":  4.0077569699512967,
+    "idle_drift":  0.010912054335532401,
+    "runs":  [
+                 {
+                     "joules":  12819.7642200012,
+                     "seconds":  223.269,
+                     "watts":  57.418469290412908
+                 }
+             ],
+    "mean_watts":  57.418469290412908,
+    "mean_joules":  12819.7642200012,
+    "best_joules":  12819.7642200012,
+    "marginal_j":  11924.956329077144
+}
