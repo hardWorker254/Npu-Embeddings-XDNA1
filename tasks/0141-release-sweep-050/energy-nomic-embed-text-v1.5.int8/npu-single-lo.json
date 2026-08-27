@@ -1,0 +1,23 @@
+﻿{
+    "kind":  "hardware measurement",
+    "label":  "npu-single-20",
+    "command":  ".\\build\\npuembed.exe .. --model nomic-embed-text-v1.5.int8 --artifacts artifacts_int8c_nomic --threads 24 --bench 20",
+    "meter":  "RAPL_Package0_PKG",
+    "energy_unit_j":  3.6E-09,
+    "repeats":  1,
+    "idle_before_w":  4.2282512176095919,
+    "idle_after_w":  4.2471749577928968,
+    "idle_w":  4.2377130877012448,
+    "idle_drift":  0.0044655548385816061,
+    "runs":  [
+                 {
+                     "joules":  311.534775,
+                     "seconds":  11.41,
+                     "watts":  27.303661262050834
+                 }
+             ],
+    "mean_watts":  27.303661262050834,
+    "mean_joules":  311.534775,
+    "best_joules":  311.534775,
+    "marginal_j":  263.18246866932884
+}

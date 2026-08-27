@@ -40,7 +40,8 @@ sys.path.insert(0, str(REPO / "reference"))
 # (its docstring records two copies drifting apart). The import was never added
 # here, so pack_npue.py has not run since that refactor -- the shipped .npue
 # predates it and nothing repacked. Found while adding the vocabulary, 0036.
-from npue import (ARCH_GEMMA3_MQA_ROPE_GEGLU, ARCH_NOMIC_ROPE_SWIGLU, Writer,  # noqa: E402
+from npue import (ARCH_GEMMA3_MQA_ROPE_GEGLU, ARCH_GTE_NEW_ROPE_GEGLU,  # noqa: E402
+                  ARCH_NOMIC_ROPE_SWIGLU, Writer,
                   gemm_b_layout, layout_hash, tile_b, to_bf16_bits)
 from safetensors_io import load                              # noqa: E402
 
@@ -1084,6 +1085,270 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
     return 0
 
 
+def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False):
+    """Pack a gte-multilingual-base-shaped checkpoint (arch=3, model_type
+    "new" -- the NewModel trust_remote_code implementation).
+
+    Emits the SAME tensor names and the SAME emission order as arch=0/2, so
+    Encoder::stage_all() and the whole NPU dispatch path work unchanged.
+    Every architectural fact asserted below was settled in tasks/0134 by a
+    per-layer probe against the repaired fp32 reference (relfro 1e-06 on all
+    12 layers, negative controls on the wrong-theta and wrong-half readings)
+    -- this function only implements that already-settled architecture and
+    asserts the config facts it depends on, so a checkpoint that silently
+    changed underneath it refuses to pack rather than packing wrong.
+
+    Departures from the nomic (arch=2) shape it otherwise mirrors:
+      * REAL biases on qkv / attn_out / ffn_down (nomic zero-fills all
+        three). ffn_up (up_gate_proj) is genuinely bias-free -- zero-filled.
+        Folding 1/sqrt(head_dim) into the Q block must therefore scale the
+        Q THIRD OF THE BIAS as well: (xW + b)*s == x(Ws) + (bs), and RoPE is
+        linear, so this stays exact.
+      * the gated FFN arrives ALREADY FUSED upstream: up_gate_proj is one
+        [2*inter, hidden] matrix, up rows first, gate rows second -- the
+        same [lo|hi] order the runtime's `lo * act(hi)` expects, so no
+        concatenation happens here at all. Activation is exact-erf GELU
+        (not SiLU) -- recorded in config["activation"], which arch=3's
+        runtime reads as DATA rather than hardcoding (tasks/0134 plan).
+      * RoPE frequencies are carried as data: config["rope_inv_freq"] holds
+        the 32 float32 values inv_freq_i = (theta*factor)^(-i/32) /
+        factor^(1/32), duplicated from reference/encoder_gte.py's
+        gte_inv_freq() (arch files stand alone -- same choice as
+        encoder_nomic.py's copied primitives). A single rope_theta CANNOT
+        express this model (0134); rope_theta/rope_scaling are kept as
+        provenance only.
+      * tokenizer is the XLMRTOK1 Unigram blob (T52, tasks/0127), stored
+        whole as "tokenizer.xlmr_table" at the same interleaved position
+        arch=0/2 store their vocab.txt -- load-bearing for byte parity with
+        the future C++ mirror.
+      * embeddings.word is 250,048 x 768 F32 (768 MB): the same
+        deliberately-F32 gather as every other arch (pack_nomic's note).
+        Rows 250,002..250,047 are padding, unreachable from the tokenizer.
+    """
+    model_dir = Path(model_dir)
+    cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+    if int8:
+        raise SystemExit(
+            "--int8 for arch=3 needs its own calibration oracle "
+            "(calibrate_smoothing has no 'gte' arch) -- not implemented in "
+            "0.5.0; pack bf16 or extend the oracle first")
+
+    raw, _ = load(model_dir / "model.safetensors")
+    src_sha = sha256(model_dir / "model.safetensors")
+    # The checkpoint stores F16; every consumer here wants f32 (the bf16
+    # pre-tiler and the F32 emitters both). Upcast once, losslessly.
+    src = {}
+    for k, v in raw.items():
+        kk = k[4:] if k.startswith("new.") else k       # strip 'new.'
+        src[kk] = v.astype(np.float32) if v.dtype == np.float16 else v
+
+    L = cfg["num_hidden_layers"]
+    H = cfg["num_attention_heads"]
+    hidden = cfg["hidden_size"]
+    head_dim = hidden // H
+    inter = cfg["intermediate_size"]
+    scale = 1.0 / math.sqrt(head_dim)
+
+    # -- fail-closed assertions: every fact 0134's probe settled -----------
+    if cfg["model_type"] != "new":
+        raise SystemExit(f"model_type={cfg['model_type']!r}, expected 'new'")
+    if cfg["hidden_act"] != "gelu":
+        raise SystemExit(f"hidden_act={cfg['hidden_act']!r}, expected 'gelu' "
+                         f"(exact erf -- tasks/0134)")
+    if cfg["position_embedding_type"] != "rope":
+        raise SystemExit(f"position_embedding_type="
+                         f"{cfg['position_embedding_type']!r}, expected 'rope'")
+    theta = cfg["rope_theta"]
+    rs = cfg.get("rope_scaling") or {}
+    if theta != 20000 or rs.get("type") != "ntk" or rs.get("factor") != 8.0 \
+            or rs.get("mixed_b") is not None:
+        raise SystemExit(
+            f"rope_theta={theta}, rope_scaling={rs!r} -- expected 20000 / "
+            f"ntk / 8.0 / mixed_b None. The baked inv_freq below is derived "
+            f"for exactly that configuration (tasks/0134); refusing to pack "
+            f"an unverified RoPE against it")
+    if cfg["type_vocab_size"] != 1:
+        raise SystemExit(f"type_vocab_size={cfg['type_vocab_size']}, expected 1")
+    if cfg.get("layer_norm_type", "layer_norm") != "layer_norm":
+        raise SystemExit(f"layer_norm_type={cfg['layer_norm_type']!r}")
+    if cfg.get("logn_attention_scale"):
+        raise SystemExit("logn_attention_scale is set -- 0134's probe "
+                         "validated the plain 1/sqrt(head_dim) scale only")
+    if not cfg.get("pack_qkv", False):
+        raise SystemExit("pack_qkv is false -- this packer reads the fused "
+                         "qkv_proj tensor")
+    eps = cfg["layer_norm_eps"]
+
+    # The NTK frequency set, float32 exactly as torch computes it --
+    # duplicated from reference/encoder_gte.py::gte_inv_freq() (0134:
+    # verified bit-for-bit against a freshly constructed module).
+    i32 = np.arange(0, head_dim, 2, dtype=np.float32)
+    inv_freq = (np.float32(1.0)
+                / (np.float32(theta * rs["factor"])
+                   ** (i32 / np.float32(head_dim))))
+    inv_freq = inv_freq / (np.float32(rs["factor"])
+                           ** (np.float32(2.0) / np.float32(head_dim)))
+    inv_freq = inv_freq.astype(np.float32)
+
+    tok_blob_path = model_dir / "xlmr_tokenizer.bin"
+    if not tok_blob_path.exists():
+        raise SystemExit(
+            f"{tok_blob_path} not found -- generate it first: "
+            f"python tools/gen_xlmr_tokenizer_table.py (tasks/0127)")
+
+    print(f"packing {model_dir.name} -> {Path(out).name}  (arch=gte_new_rope_geglu)")
+    print(f"  hidden={hidden} heads={H} head_dim={head_dim} layers={L} "
+          f"inter={inter} rope=ntk(20000 x 8.0, 32 baked inv_freq)")
+    print(f"  tile ({tile_k}, {tile_n}), mac (s={MAC_S}, t={MAC_T}), "
+          f"1/sqrt({head_dim}) = {scale:.17g}"
+          f"{' folded into Q (weights AND bias)' if fold_scale else ' NOT folded'}")
+
+    config = {
+        "arch": "gte_new_rope_geglu",
+        "a_dtype": "bf16",
+        "model_type": cfg["model_type"],
+        "source_repo": json.loads(
+            (model_dir / "CHECKPOINT.json").read_text(encoding="utf-8"))["repo_id"],
+        "source_sha256": src_sha,
+        "num_layers": L, "num_heads": H, "hidden": hidden, "head_dim": head_dim,
+        "intermediate": inter,
+        "layer_norm_eps": eps,
+        "vocab_size": cfg["vocab_size"],
+        "max_seq_len": max_seq,
+        "pooling": read_pooling(model_dir), "l2_normalize": True,
+        "l2_normalize_note": "genuinely the checkpoint's own: modules.json "
+                             "lists a 2_Normalize module (unlike nomic, "
+                             "where true records this runtime's behaviour).",
+        "activation": "gelu", "gated_ffn": True,
+        "glu_halves": "up_first|gate_second -- runtime computes "
+                      "lo * gelu(hi), same half order as nomic's "
+                      "fc11_up|fc12_gate with GELU for SiLU",
+        "position_embedding_type": "rope",
+        "rope_theta": theta,
+        "rope_scaling": {"type": "ntk", "factor": rs["factor"]},
+        "rope_inv_freq": [float(x) for x in inv_freq],
+        "rope_note": "rope_inv_freq IS the model -- inv_freq_i = "
+                     "160000^(-i/32) / 8^(1/32), NOT expressible as any "
+                     "single theta (tasks/0134, verified bit-for-bit). "
+                     "rope_theta/rope_scaling above are provenance only; a "
+                     "consumer that derives frequencies from rope_theta "
+                     "alone is wrong by 1.9e-02 relfro at layer 0.",
+        "attention_bias": True,
+        "mlp_bias": "down_only -- up_gate_proj is genuinely bias-free",
+        "tile_k": tile_k, "tile_n": tile_n, "mac_s": MAC_S, "mac_t": MAC_T,
+        "fusions": {
+            "qkv_fused": True,
+            "transposed_to_kn": True,
+            "qk_scale_folded_into_q": fold_scale,
+            "qk_scale_folded_into_q_bias": fold_scale,
+            "gemm_operands_bf16": True,
+            "biases_and_layernorm_fp32": True,
+            "gated_ffn_fused_upstream": True,
+            "position_embeddings_zeroed_rope_instead": True,
+        },
+        "not_implemented": [
+            "int8 datapath (calibrate_smoothing has no 'gte' oracle)",
+            f"vocab rows 250002-{cfg['vocab_size'] - 1} are padding: "
+            f"unreachable from the tokenizer, packed only so vocab_size and "
+            f"the tensor agree",
+            "classifier.weight/classifier.bias (a task head this encoder "
+            "never runs) are deliberately NOT packed",
+        ],
+    }
+
+    w = Writer(config, arch=ARCH_GTE_NEW_ROPE_GEGLU)
+
+    # -- embeddings: SAME order as arch=0/2, including the ln.weight ->
+    # tokenizer -> ln.bias interleaving (load-bearing for byte parity with
+    # the C++ mirror). ----------------------------------------------------
+    w.add("embeddings.word", src["embeddings.word_embeddings.weight"],
+          "F32", "embedding", [cfg["vocab_size"], hidden])
+    w.add("embeddings.position", np.zeros((max_seq, hidden), dtype=np.float32),
+          "F32", "embedding", [max_seq, hidden])
+    w.add("embeddings.token_type", src["embeddings.token_type_embeddings.weight"],
+          "F32", "embedding", [cfg["type_vocab_size"], hidden])
+    w.add("embeddings.ln.weight", src["embeddings.LayerNorm.weight"],
+          "F32", "layernorm", [hidden])
+    tb = np.frombuffer(tok_blob_path.read_bytes(), dtype=np.uint8)
+    w.add("tokenizer.xlmr_table", tb, "U8", "tokenizer", [int(tb.size)])
+    print(f"  tokenizer.xlmr_table  {tb.size / 1e6:.2f} MB (XLMRTOK1, "
+          f"tasks/0127)")
+    w.add("embeddings.ln.bias", src["embeddings.LayerNorm.bias"],
+          "F32", "layernorm", [hidden])
+
+    n_tiled = 0
+    for i in range(L):
+        p = f"encoder.layer.{i}."
+        at = p + "attention."
+
+        qkv = np.ascontiguousarray(src[at + "qkv_proj.weight"].T)    # [768,2304]
+        qkv_b = src[at + "qkv_proj.bias"].copy()                     # [2304]
+        if fold_scale:
+            # RoPE is linear in q, so folding 1/sqrt(head_dim) into the Q
+            # block before the GEMM (and before RoPE) is exact. Unlike
+            # nomic, gte HAS a qkv bias, so its Q third scales too:
+            # (xW + b)*s == x(Ws) + (bs).
+            qkv = qkv.copy()
+            qkv[:, :hidden] *= scale
+            qkv_b[:hidden] *= scale
+        add_gemm_b(w, f"layer.{i}.qkv", qkv, tile_k, tile_n)
+        w.add(f"layer.{i}.qkv.bias", qkv_b, "F32", "bias", [3 * hidden])
+        n_tiled += 1
+
+        add_gemm_b(w, f"layer.{i}.attn_out",
+                   np.ascontiguousarray(src[at + "o_proj.weight"].T),
+                   tile_k, tile_n)
+        w.add(f"layer.{i}.attn_out.bias", src[at + "o_proj.bias"],
+              "F32", "bias", [hidden])
+        w.add(f"layer.{i}.ln1.weight", src[p + "attn_ln.weight"],
+              "F32", "layernorm", [hidden])
+        w.add(f"layer.{i}.ln1.bias", src[p + "attn_ln.bias"],
+              "F32", "layernorm", [hidden])
+        n_tiled += 1
+
+        # up_gate_proj is already the fused [2*inter, hidden] the runtime
+        # wants: transpose to [hidden, 2*inter]; up cols [0, inter), gate
+        # cols [inter, 2*inter) -- the lo/hi order of `lo * act(hi)`.
+        add_gemm_b(w, f"layer.{i}.ffn_up",
+                   np.ascontiguousarray(src[p + "mlp.up_gate_proj.weight"].T),
+                   tile_k, tile_n)
+        w.add(f"layer.{i}.ffn_up.bias", np.zeros(2 * inter, dtype=np.float32),
+              "F32", "bias", [2 * inter])
+
+        add_gemm_b(w, f"layer.{i}.ffn_down",
+                   np.ascontiguousarray(src[p + "mlp.down_proj.weight"].T),
+                   tile_k, tile_n)
+        w.add(f"layer.{i}.ffn_down.bias", src[p + "mlp.down_proj.bias"],
+              "F32", "bias", [hidden])
+        w.add(f"layer.{i}.ln2.weight", src[p + "mlp_ln.weight"],
+              "F32", "layernorm", [hidden])
+        w.add(f"layer.{i}.ln2.bias", src[p + "mlp_ln.bias"],
+              "F32", "layernorm", [hidden])
+        n_tiled += 2
+
+    info = w.write(out)
+
+    print(f"\n  {'operand':<14} {'[K,N]':>12} {'k-blocks':>9} {'n-blocks':>9} "
+          f"{'tiles':>7} {'max BD dim':>11}")
+    shapes = {"qkv": (hidden, 3 * hidden), "attn_out": (hidden, hidden),
+              "ffn_up": (hidden, 2 * inter), "ffn_down": (inter, hidden)}
+    for nm, (K, N) in shapes.items():
+        kb, nb = K // tile_k, N // tile_n
+        flag = "" if max(kb, nb) < 1024 else "  <-- OVER 1023"
+        print(f"  {nm:<14} {str([K, N]):>12} {kb:>9} {nb:>9} {kb*nb:>7} "
+              f"{max(kb, nb):>11}{flag}")
+
+    total = Path(out).stat().st_size
+    print(f"\n  tensors    : {len(w.entries)}  ({n_tiled} pre-tiled GEMM operands)")
+    print(f"  json       : {info['json_length']} B at {info['json_offset']}")
+    print(f"  data       : {info['data_length']/1e6:.2f} MB at {info['data_offset']}")
+    print(f"  file       : {total/1e6:.2f} MB")
+    print(f"  source     : {src_sha[:16]}...")
+    print(f"  layout_hash: "
+          f"{layout_hash(gemm_b_layout(tile_k, tile_n, MAC_S, MAC_T))[:16]}...")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", default=str(REPO / "models" / "all-MiniLM-L6-v2"))
@@ -1150,6 +1415,17 @@ def main():
                           args.max_seq, not args.no_fold_scale,
                           int8=args.int8, smooth_alpha=args.smooth_alpha,
                           smooth_texts=args.smooth_texts)
+
+    # arch=3 branch (0.5.0, tasks/0134/0135): model_type "new" is the
+    # NewModel family (gte-multilingual-base). Same routing rule as the two
+    # branches above: detected from the checkpoint's OWN config.json, never
+    # from the directory name.
+    if cfg.get("model_type") == "new":
+        out = args.out
+        if out == str(REPO / "models" / "all-MiniLM-L6-v2.npue"):
+            out = str(model_dir.parent / (model_dir.name + ".npue"))
+        return pack_gte(model_dir, out, args.tile_k, args.tile_n,
+                        args.max_seq, not args.no_fold_scale, int8=args.int8)
 
     src, _ = load(model_dir / "model.safetensors")
     src_sha = sha256(model_dir / "model.safetensors")

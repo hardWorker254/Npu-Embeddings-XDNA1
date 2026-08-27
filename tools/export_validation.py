@@ -63,8 +63,15 @@ def main() -> int:
     # rather than by directory, so pointing it at the right tree is the only
     # branch needed here.
     is_nomic = (arch == "nomic_bert_rope_swiglu")
-    goldens_root = REPO / "reference" / ("goldens_nomic" if is_nomic else "goldens")
-    make_goldens_hint = "make_goldens_nomic.py" if is_nomic else "make_goldens.py"
+    # arch=3 (gte-multilingual-base, tasks/0134-0138) likewise keeps its own
+    # goldens tree, written by reference/encoder_gte.py + make_goldens_gte.py.
+    is_gte = (arch == "gte_new_rope_geglu")
+    goldens_root = REPO / "reference" / (
+        "goldens_nomic" if is_nomic else
+        "goldens_gte" if is_gte else "goldens")
+    make_goldens_hint = ("make_goldens_nomic.py" if is_nomic else
+                         "make_goldens_gte.py --taps" if is_gte else
+                         "make_goldens.py")
 
     # By checkpoint, not by name -- see tools/npue.py's find_goldens().
     try:
@@ -134,6 +141,12 @@ def main() -> int:
                   "`python reference/make_goldens_nomic.py --taps`")
             return 1
         expected_emb = np.ascontiguousarray(taps["pool.mean_l2normalized"],
+                                            dtype=np.float32)
+    elif is_gte:
+        # gte's boundary golden carries the CLS-pooled, L2-normalized vector
+        # (the Normalize module is genuinely this checkpoint's own --
+        # modules.json), which is exactly what this runtime emits.
+        expected_emb = np.ascontiguousarray(g["hf.pool.cls_norm"],
                                             dtype=np.float32)
     else:
         expected_emb = np.ascontiguousarray(g["hf.out.embedding"], dtype=np.float32)

@@ -35,6 +35,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <functional>
@@ -54,6 +55,7 @@
 #include "npue_pack.hpp"
 #include "http.hpp"
 #include "tokenizer.hpp"
+#include "tokenizer_xlmr.hpp"
 
 // NOMINMAX is defined here rather than on the command line: XRT's own headers
 // define it too, and defining it globally makes every XRT translation unit warn
@@ -133,6 +135,33 @@ std::string g_model_name, g_source_repo;
 // writer, same discipline as every other g_* geometry field above.
 bool g_rope = false, g_gated_ffn = false;
 double g_rope_theta = 0.0;
+// arch=3 (gte-multilingual-base, tasks/0134-0136): the RoPE frequency set IS
+// the model -- inv_freq_i = 160000^(-i/32) / 8^(1/32), which is NOT
+// expressible as any single theta (the NTK correction is a constant factor,
+// not a power law; deriving from rope_theta alone is wrong by 1.9e-02 relfro
+// at layer 0, measured in tasks/0134). Read from the container's
+// "rope_inv_freq" config array; EMPTY for every other arch, in which case
+// g_rope_theta is the source. set_model_shape() is the only writer.
+std::vector<float> g_rope_inv_freq;
+// Which activation the gated FFN applies to its gate half. SiLU used to be
+// hardcoded while the container's "activation" key was write-only (T33's
+// latent key, made load-bearing by tasks/0135): arch=2 says "silu", arch=3
+// says "gelu" -- torch's default EXACT erf GELU, NOT gelu8's polynomial and
+// NOT Gemma's tanh approximation. An unknown value REFUSES at load.
+// set_model_shape() is the only writer; irrelevant when g_gated_ffn is false.
+enum class GatedAct { Silu, GeluErf };
+GatedAct g_gated_act = GatedAct::Silu;
+
+// Exact erf GELU: 0.5*x*(1+erf(x/sqrt(2))), computed in double like the
+// numpy oracle (reference/encoder_gte.py's gelu_exact* both erf in float64)
+// and rounded once at the end. Scalar on purpose: correctness first, and the
+// bfp16 datapath noise (~2e-04) is three decades above the double-vs-float
+// difference this choice removes from the comparison.
+inline float gelu_erf_exact(float x) {
+  const double xd = static_cast<double>(x);
+  return static_cast<float>(
+      0.5 * xd * (1.0 + std::erf(xd * 0.70710678118654752440)));
+}
 
 // nomic's task-prefix table (tasks/0071): name -> literal prefix text, e.g.
 // "search_document" -> "search_document: ". Empty for every container that
@@ -211,7 +240,13 @@ bool encoder_implemented(const std::string &arch) {
          // GemmaNpuEncoder on the array, or the host-only npue::GemmaEncoder
          // when the container is not pre-tiled. Which one runs is decided from
          // the container's `gemm_layout`, in run_gemma_mode() (tasks/0074).
-         arch == "gemma3_mqa_rope_geglu";
+         arch == "gemma3_mqa_rope_geglu" ||
+         // gte-multilingual-base (0.5.0): BERT tensor names ON PURPOSE, so
+         // the packer and the NPU dispatch path serve it unchanged; the
+         // encoder deltas -- RoPE from rope_inv_freq, exact-erf GELU on the
+         // gate half, real biases, XLM-R Unigram tokenizer -- are all
+         // data-driven off the container (tasks/0134-0136).
+         arch == "gte_new_rope_geglu";
 }
 
 bool config_flag(const npue::File &f, const char *key, bool fallback) {
@@ -339,12 +374,86 @@ std::string resolve_model_path(const std::string &root, int argc,
 // The vocabulary lives inside the .npue as of 0036, so a deployed model is
 // ONE file. A model packed before that still works: fall back to the loose
 // vocab.txt and say so, rather than failing on a file that is merely older.
-npue::Tokenizer load_tokenizer(npue::File &model,
-                               const std::string &model_path) {
+// One tokenizer interface for the BERT-family encode path, two tokenizer
+// families behind it (tasks/0136). The facade lives HERE rather than giving
+// XlmrTokenizer a WordPiece-shaped encode(), because the max_len /
+// padding / truncation semantics are this runtime's policy (0110's
+// refuse-on-overflow contract runs on the Encoded fields), not a property
+// of the Unigram algorithm -- tokenizer_xlmr.cpp stays the line-for-line
+// port of its Python reference, diffable function by function. Chosen over
+// branching at the call sites because the encode() calls sit inside
+// EmbedService::chunk() and the --tokenize loop, and a branch at each
+// would be the drift-prone shape encoder_implemented() exists to prevent.
+struct AnyTokenizer {
+  std::unique_ptr<npue::Tokenizer> wordpiece;
+  std::unique_ptr<npue::XlmrTokenizer> xlmr;
+
+  size_t vocab_size() const {
+    return wordpiece ? wordpiece->vocab_size() : xlmr->vocab_size();
+  }
+
+  npue::Encoded encode(const std::string &text, int max_len) const {
+    if (wordpiece) return wordpiece->encode(text, max_len);
+    // XLM-R Unigram. XlmrTokenizer::encode() returns the FULL <s>...</s>
+    // sequence, unpadded and untruncated (its header: an input that does
+    // not fit is the caller's error to raise, not the tokenizer's to
+    // hide). This adds the WordPiece path's exact max_len semantics on
+    // top: truncation keeps <s> + the first (max_len - 2) pieces + </s>,
+    // which is HuggingFace's longest_first truncation under the
+    // "<s> A </s>" post-processor, so --tokenize stays diffable against
+    // AutoTokenizer. n_tokens_full/truncated feed check_truncation()
+    // unchanged -- 0110's refuse-on-overflow applies to arch=3 exactly as
+    // to arch=0/2.
+    std::vector<int32_t> full = xlmr->encode(text);
+    npue::Encoded e;
+    e.n_tokens_full = static_cast<int32_t>(full.size());
+    e.truncated = e.n_tokens_full > max_len;
+    if (e.truncated) {
+      full.resize(static_cast<size_t>(max_len));
+      full.back() = xlmr->eos_id;
+    }
+    e.n_tokens = static_cast<int32_t>(full.size());
+    e.input_ids = std::move(full);
+    e.input_ids.resize(static_cast<size_t>(max_len), xlmr->pad_id);
+    e.attention_mask.assign(static_cast<size_t>(max_len), 0);
+    for (int32_t s = 0; s < e.n_tokens; ++s) e.attention_mask[s] = 1;
+    e.token_type_ids.assign(static_cast<size_t>(max_len), 0);
+    return e;
+  }
+};
+
+AnyTokenizer load_tokenizer(npue::File &model,
+                            const std::string &model_path) {
+  // arch=3: the XLMRTOK1 Unigram blob, stored whole in the container
+  // (tasks/0135) and consumed in place. The ARCH decides, not the absence
+  // of a tokenizer.vocab key -- absence already means something else below.
+  std::string arch;
+  try {
+    arch = model.config_string("arch");
+  } catch (const std::exception &) {
+    // Pre-arch container: WordPiece, like everything else that old.
+  }
+  if (arch == "gte_new_rope_geglu") {
+    auto v = model.raw("tokenizer.xlmr_table");
+    AnyTokenizer t;
+    t.xlmr = std::make_unique<npue::XlmrTokenizer>(
+        npue::XlmrTokenizer::from_table_bytes(
+            reinterpret_cast<const char *>(v.data), v.bytes));
+    // The facade's padding and the sequence template lean on XLM-R's
+    // specials -- check the blob rather than assume it.
+    if (t.xlmr->bos_id != 0 || t.xlmr->eos_id != 2 || t.xlmr->pad_id != 1)
+      throw std::runtime_error(
+          "tokenizer.xlmr_table specials are not XLM-R's <s>=0, </s>=2, "
+          "<pad>=1 -- refusing rather than padding with the wrong id");
+    return t;
+  }
   try {
     auto v = model.raw("tokenizer.vocab");
-    return npue::Tokenizer::from_vocab_bytes(
-        reinterpret_cast<const char *>(v.data), v.bytes);
+    AnyTokenizer t;
+    t.wordpiece = std::make_unique<npue::Tokenizer>(
+        npue::Tokenizer::from_vocab_bytes(
+            reinterpret_cast<const char *>(v.data), v.bytes));
+    return t;
   } catch (const std::exception &) {
     // Pre-0036 container: the loose checkpoint directory beside it, derived
     // from the container's own name rather than assumed to be MiniLM's.
@@ -352,7 +461,10 @@ npue::Tokenizer load_tokenizer(npue::File &model,
         std::filesystem::path(model_path).replace_extension().string() +
         "/vocab.txt";
     std::printf("  tokenizer  .npue has no vocabulary; using %s\n", p.c_str());
-    return npue::Tokenizer::from_vocab_file(p);
+    AnyTokenizer t;
+    t.wordpiece = std::make_unique<npue::Tokenizer>(
+        npue::Tokenizer::from_vocab_file(p));
+    return t;
   }
 }
 
@@ -472,7 +584,15 @@ void set_model_shape(npue::File &m) {
   // in tasks/0070 -- encoder_implemented() is the single source both this
   // refusal and the `list`/`serve` tables read, so they cannot drift.
   const std::string arch = m.config_string("arch");
-  if (arch != "bert_abs_gelu_postln" && arch != "nomic_bert_rope_swiglu")
+  // SINGLE-SOURCED as of tasks/0136: this refusal used to restate the
+  // whitelist as inline string literals while the comment above claimed
+  // encoder_implemented() was "the single source" -- so a new arch could
+  // land in one list and still be refused by the other. It calls the real
+  // list now. The gemma diversion stays as-is: arch=1 IS implemented, but by
+  // run_gemma_mode(), not by this BERT-family path -- a gemma container
+  // reaching here means that diversion was bypassed, and running it through
+  // the setup below would be the exact fail-open this guard exists to stop.
+  if (!encoder_implemented(arch) || arch == "gemma3_mqa_rope_geglu")
     throw std::runtime_error(
         "container architecture '" + arch + "' has no encoder in this build. "
         "The NPU GEMM designs for it may well be present -- the tensor names "
@@ -498,6 +618,8 @@ void set_model_shape(npue::File &m) {
   g_gated_ffn = config_flag(m, "gated_ffn", false);
   g_rope = false;
   g_rope_theta = 0.0;
+  g_rope_inv_freq.clear();
+  g_gated_act = GatedAct::Silu;
   if (arch == "nomic_bert_rope_swiglu") {
     const std::string pet = m.config_string("position_embedding_type");
     if (pet != "rope")
@@ -526,6 +648,84 @@ void set_model_shape(npue::File &m) {
       throw std::runtime_error(
           "nomic_bert_rope_swiglu container has a non-positive rope_theta");
     g_rope = true;
+  }
+
+  // arch=3 (tasks/0136): nomic's shape with three deltas, every one read
+  // from the container rather than assumed -- exact-erf GELU on the gate
+  // half (the "activation" key, below), real biases (the bias slots are
+  // added unconditionally, so nothing here changes), and a RoPE frequency
+  // set that is DATA, because no single theta can express it (tasks/0134).
+  if (arch == "gte_new_rope_geglu") {
+    const std::string pet = m.config_string("position_embedding_type");
+    if (pet != "rope")
+      throw std::runtime_error(
+          "container arch is gte_new_rope_geglu but position_embedding_type "
+          "is '" + pet + "', expected 'rope' -- refusing rather than "
+          "guessing how position is encoded");
+    if (!g_gated_ffn)
+      throw std::runtime_error(
+          "container arch is gte_new_rope_geglu but gated_ffn is not true -- "
+          "refusing rather than running a plain (ungated) FFN over a fused "
+          "up|gate weight");
+    // Same job as arch=2's swiglu_halves assert: pin which half of the fused
+    // ffn_up is the gate. The key is descriptive prose after the marker, so
+    // match the marker prefix, not the whole string.
+    const std::string halves = m.config_string("glu_halves");
+    if (halves.rfind("up_first|gate_second", 0) != 0)
+      throw std::runtime_error(
+          "unrecognised glu_halves ordering '" + halves + "' -- expected it "
+          "to begin 'up_first|gate_second'; refusing rather than guessing "
+          "which half of the fused ffn_up gets the activation");
+    // rope_inv_freq IS the model (tasks/0134): inv_freq_i =
+    // 160000^(-i/32) / 8^(1/32). A container without it REFUSES -- falling
+    // back to deriving from rope_theta is measured wrong by 1.9e-02 relfro
+    // at layer 0, and silently so.
+    std::string raw_freq;
+    try {
+      raw_freq = m.config_string("rope_inv_freq");
+    } catch (const std::exception &) {
+      throw std::runtime_error(
+          "gte_new_rope_geglu container carries no 'rope_inv_freq' -- the "
+          "frequency set is not derivable from rope_theta (wrong by 1.9e-02 "
+          "relfro at layer 0, tasks/0134), so refusing rather than falling "
+          "back. Repack with tools/pack_npue.py");
+    }
+    const npue::json::Value v = npue::json::parse(raw_freq);
+    for (const auto &e : v.as_array())
+      g_rope_inv_freq.push_back(static_cast<float>(e.as_number()));
+    if (static_cast<int64_t>(g_rope_inv_freq.size()) != g_head_dim / 2)
+      throw std::runtime_error(
+          "rope_inv_freq has " + std::to_string(g_rope_inv_freq.size()) +
+          " entries, expected head_dim/2 = " +
+          std::to_string(g_head_dim / 2));
+    g_rope = true;
+  }
+
+  // The gated activation is DATA (tasks/0135 made the write-only key
+  // load-bearing). Missing on an arch=2 container means "silu" -- packed
+  // nomic containers may predate the read -- but an arch=3 container
+  // without it is malformed, and an unknown value refuses on either arch.
+  if (g_gated_ffn && arch != "gemma3_mqa_rope_geglu") {
+    std::string act;
+    try {
+      act = m.config_string("activation");
+    } catch (const std::exception &) {
+      if (arch == "gte_new_rope_geglu")
+        throw std::runtime_error(
+            "gte_new_rope_geglu container carries no 'activation' key -- "
+            "refusing rather than guessing which activation the gate half "
+            "gets");
+      act = "silu";
+    }
+    if (act == "silu")
+      g_gated_act = GatedAct::Silu;
+    else if (act == "gelu")
+      g_gated_act = GatedAct::GeluErf;
+    else
+      throw std::runtime_error(
+          "unknown gated-FFN activation '" + act + "' -- this build "
+          "implements 'silu' (SiLU, arch=2) and 'gelu' (exact erf GELU, "
+          "arch=3); refusing rather than substituting one");
   }
 
   // The task-prefix table (tasks/0071). Optional: the four BERT models'
@@ -1763,6 +1963,13 @@ struct Encoder {
         const float *lo = x.data() + r * 2 * inter;
         const float *hi = lo + inter;
         float *dst = out.data() + r * inter;
+        // arch=3 (tasks/0136): exact-erf GELU on the gate half, same halves
+        // order. The SiLU arm below is byte-for-byte what arch=2 always ran.
+        if (g_gated_act == GatedAct::GeluErf) {
+          for (int64_t j = 0; j < inter; ++j)
+            dst[j] = lo[j] * gelu_erf_exact(hi[j]);
+          continue;
+        }
         int64_t j = 0;
 #if defined(__AVX2__)
         const __m256 log2e = _mm256_set1_ps(1.4426950408889634f);
@@ -1923,6 +2130,13 @@ struct Encoder {
             _mm256_storeu_ps(v + k, gelu8(_mm256_loadu_ps(v + k)));
 #endif
           for (; k < N; ++k) v[k] = gelu8(v[k]);
+        } else if (g_gated_act == GatedAct::GeluErf) {
+          // arch=3 (tasks/0136): exact-erf GELU on the gate half. The SiLU
+          // arm below is byte-for-byte what arch=2 always ran.
+          const int64_t inter = N / 2;
+          const float *hi = v + inter;
+          for (int64_t k = 0; k < inter; ++k)
+            v[k] = v[k] * gelu_erf_exact(hi[k]);
         } else {
           const int64_t inter = N / 2;
           const float *hi = v + inter;
@@ -2062,6 +2276,16 @@ struct Encoder {
                 _mm256_storeu_ps(v + j, gelu8(_mm256_loadu_ps(v + j)));
 #endif
               for (; j < n; ++j) v[j] = gelu8(v[j]);
+              return;
+            }
+            // arch=3 (tasks/0136): no int8 gte container exists yet
+            // (pack_npue refuses --int8 for arch=3), but if one arrives this
+            // arm must not silently run SiLU over a GELU model.
+            if (g_gated_act == GatedAct::GeluErf) {
+              const int64_t inter = n / 2;
+              const float *hi = v + inter;
+              for (int64_t j = 0; j < inter; ++j)
+                v[j] = v[j] * gelu_erf_exact(hi[j]);
               return;
             }
             // SwiGLU, narrowing 2*inter -> inter in place. Identical
@@ -2573,8 +2797,32 @@ struct Encoder {
       // exists), so every layer of every call shares this table.
       rope_cos.resize(static_cast<size_t>(g_seq * g_head_dim));
       rope_sin.resize(static_cast<size_t>(g_seq * g_head_dim));
-      npue::gemma_rope_tables(g_seq, g_head_dim, g_rope_theta,
-                              rope_cos.data(), rope_sin.data());
+      if (!g_rope_inv_freq.empty()) {
+        // arch=3: the frequencies come from the container (tasks/0134 --
+        // not derivable from any single theta). Same NeoX
+        // concat(freqs, freqs) table layout gemma_rope_tables() emits, and
+        // the same double-angle, round-once-at-the-end arithmetic; the
+        // rotation below only ever reads the first half of each row.
+        const int64_t half = g_head_dim / 2;
+        for (int64_t s = 0; s < g_seq; ++s) {
+          float *cs = rope_cos.data() + s * g_head_dim;
+          float *sn = rope_sin.data() + s * g_head_dim;
+          for (int64_t j = 0; j < half; ++j) {
+            const double ang =
+                static_cast<double>(s) *
+                static_cast<double>(g_rope_inv_freq[static_cast<size_t>(j)]);
+            const float c = static_cast<float>(std::cos(ang));
+            const float si = static_cast<float>(std::sin(ang));
+            cs[j] = c;
+            cs[half + j] = c;
+            sn[j] = si;
+            sn[half + j] = si;
+          }
+        }
+      } else {
+        npue::gemma_rope_tables(g_seq, g_head_dim, g_rope_theta,
+                                rope_cos.data(), rope_sin.data());
+      }
       rope_ready = true;
     }
     const int64_t half = g_head_dim / 2;
@@ -5243,6 +5491,12 @@ int main(int argc, char **argv) try {
       store = {argv[0], sub_root,       "--model",    want,
                "--artifacts", art,      "--threads",  threads,
                "--pipeline",  pipeline};
+      // Forward --cpu so the flag path can REFUSE it (tasks/0124, T50). It
+      // used to be dropped here, which combined with the flag path ignoring
+      // it into `embed <model> x.txt --cpu` silently running the NPU -- the
+      // exact fail-open shape tasks/0118 removed from --prefix.
+      for (int i = 3; i < argc; ++i)
+        if (std::string(argv[i]) == "--cpu") store.push_back("--cpu");
       if (have_prefix) {
         store.push_back("--prefix");
         store.push_back(prefix);
@@ -5445,6 +5699,23 @@ int main(int argc, char **argv) try {
           std::printf("  wrote %s\n", out.c_str());
           return 0;
         }
+        // arch=3 (gte-multilingual-base): model_type "new", same dispatch
+        // rule as the nomic branch above (the checkpoint's OWN config.json,
+        // never the directory name). max_seq 64 matches the Python-packed
+        // container this mirror is held byte-identical to (tasks/0135
+        // packed --max-seq 64; under RoPE the position table is zeros, so
+        // max_seq only caps request length). tasks/0138.
+        if (model_type == "new") {
+          std::printf("NpuEmbeddings -- preparing %s (arch=gte_new_rope_geglu)\n",
+                      out.c_str());
+          npue::prepare_model_gte(dir, pooling, source_repo, out, layout,
+                                  layout_hash, tile_k, tile_n, 64,
+                                  [](const std::string &s) {
+                                    std::printf("%s\n", s.c_str());
+                                  });
+          std::printf("  wrote %s\n", out.c_str());
+          return 0;
+        }
       }
     }
 
@@ -5496,6 +5767,22 @@ int main(int argc, char **argv) try {
   for (int i = 2; i < argc - 1; ++i)
     if (std::string(argv[i]) == "--bench") bench = std::atoi(argv[i + 1]);
 
+  // --cpu selects the host-only control encoder, which exists for arch=1
+  // only (run_gemma_mode honours it above). The BERT family has no host
+  // encoder in this build, and until tasks/0124 the flag was parsed there
+  // and silently ignored -- a caller asking for the CPU control got the NPU,
+  // with correct vectors, which is what made it invisible (T50, found by
+  // 0121's semantic gate reading the status line). Refusing beats ignoring
+  // (tasks/0118).
+  for (int i = 2; i < argc; ++i)
+    if (std::string(argv[i]) == "--cpu")
+      throw std::runtime_error(
+          "--cpu: no host encoder exists for this architecture in this "
+          "build -- the flag would be ignored and the NPU would run anyway "
+          "(T50). It is honoured for embeddinggemma-300m (arch=1) only; "
+          "drop the flag, or use a host reference implementation "
+          "(reference/encoder_*.py) as the CPU control.");
+
   // --artifacts selects which export to load, so two builds of the same
   // designs can be compared in the same session rather than across a rebuild.
   // --artifacts names a design set. It is resolved against both layouts this
@@ -5504,12 +5791,21 @@ int main(int argc, char **argv) try {
   // <root> itself when the name is "."). An absolute path is taken as given.
   // Chosen by which candidate actually CONTAINS a design, so a typo is an
   // error about the design rather than a confusing one about a missing file.
-  std::string art_name = "artifacts";
+  std::string art_name;
   for (int i = 2; i < argc - 1; ++i)
     if (std::string(argv[i]) == "--artifacts") art_name = argv[i + 1];
 
+  // With no --artifacts, the flag form used to default to the literal
+  // "artifacts" -- a per-op design set predating the unified xclbin, whose
+  // width happens to be 384. MiniLM and bge-small ran; every wider model
+  // died on a staged-buffer size check or a b_layout_hash refusal (the
+  // guards working -- no wrong answer was ever returned, but the error named
+  // the wrong problem). Since tasks/0124 (T50) the no-flag form resolves
+  // through pick_artifacts() from the loaded container's own geometry --
+  // the same call the `embed`/`serve` subcommands make -- which happens
+  // AFTER the model is loaded, below.
   std::string art;
-  {
+  if (!art_name.empty()) {
     auto has_design = [](const std::string &d) {
       return std::ifstream(d + "/gemm_rtp/design.json").good() ||
              std::ifstream(d + "/qkv/design.json").good();
@@ -5584,6 +5880,33 @@ int main(int argc, char **argv) try {
   npue::File model(model_path);
   set_model_shape(model);
   g_model_name = std::filesystem::path(model_path).stem().string();
+
+  // No --artifacts given: pick the design set from the container's own
+  // geometry and adopted datapath, exactly as the `embed`/`serve`
+  // subcommands do (tasks/0124, T50 -- see the comment at art_name above).
+  if (art.empty()) {
+    int64_t qkv_n = 0;
+    try { qkv_n = model.config_int("qkv_n"); } catch (const std::exception &) {}
+    std::string layout;
+    try { layout = model.info("layer.0.qkv").layout_hash;
+    } catch (const std::exception &) {}
+    const auto *ce = npue::hub::find(g_model_name);
+    const std::string want_datapath = ce ? ce->datapath : "bf16";
+    art = pick_artifacts(root, g_hidden,
+                         model.config_int("intermediate"),
+                         config_flag(model, "gated_ffn", false), qkv_n,
+                         layout, want_datapath);
+    if (art.empty())
+      throw std::runtime_error(
+          "no NPU design set matches " + g_model_name + " (hidden " +
+          std::to_string(g_hidden) + ", datapath " + want_datapath +
+          ") under " + root + " -- name one with --artifacts, or export one "
+          "with tools/export_gemm_rtp.py. The old fallback to the literal "
+          "'artifacts' directory is gone: it served only hidden-384 models "
+          "and failed everything wider with a misleading error (T50).");
+    std::printf("  artifacts  %s (picked from the container's geometry; "
+                "no --artifacts given)\n", art.c_str());
+  }
 
   // Fixtures live per model. The flat directory is the pre-multi-model layout
   // and is still honoured so an existing checkout keeps working; the
@@ -6463,14 +6786,33 @@ int main(int argc, char **argv) try {
       throw std::runtime_error("--probe-streams needs a unified gemm_rtp set");
     const int reps = 30;
     const size_t cb = d_qkv.info().c_elem_bytes;
+    // A/B element size and the N-tiling READ from the loaded design, exactly
+    // as cb above is (T47, tasks/0124). This block used to hardcode 2 and
+    // 48.0*8.0, which inflated every published int8 GB/s by 1.57-1.85x --
+    // differentially, because C was counted correctly. A design.json that
+    // predates the tile_n/cols fields is a refusal, not a guess.
+    const size_t ab = d_qkv.info().a_elem_bytes;
+    const int64_t tile_n = d_qkv.info().tile_n, cols = d_qkv.info().cols;
+    if (tile_n <= 0 || cols <= 0)
+      throw std::runtime_error(
+          "--probe-streams: this design.json records no tile_n/cols -- it "
+          "predates the fields. Re-export the set (tools/export_gemm_rtp.py); "
+          "refusing to substitute a guess (T47).");
     const int64_t mrows = 4, tm = 64;      // design rows, tile m
-    std::printf("\n  probe-streams -- %d repeats, no host work, C is %s\n",
-                reps, cb == 2 ? "bf16" : "fp32");
+    std::printf("\n  probe-streams -- %d repeats, no host work, A/B %s, "
+                "C %s, tile_n %lld x cols %lld\n",
+                reps, ab == 1 ? "i8" : "bf16", cb == 2 ? "bf16" : "fp32",
+                (long long)tile_n, (long long)cols);
     std::printf("    %-10s %6s %6s %6s  %8s  %8s  %9s  %8s  %8s\n",
                 "stream", "M", "K", "N", "GMAC", "MB", "us/disp",
                 "GMAC/ms", "GB/s");
+    // ALL tiers, not just the top one (T45, tasks/0128): the four batch
+    // tiers give an M-sweep 256 -> 8192 on identical geometry, which is
+    // exactly the intercept measurement the fixed-cost fits (0010: 150 us,
+    // 0048: 573 us, 0080: 627 us) disagreed about. Timing-only -- the
+    // buffers hold whatever is staged; a dispatch reads the same bytes
+    // regardless of their values.
     for (const auto &st : streams) {
-      if (st.batch != batch) continue;
       d_qkv.bind_instr(static_cast<size_t>(st.slot));
       d_qkv.dispatch_only();                       // warm
       const double t0 = now_s();
@@ -6478,11 +6820,11 @@ int main(int argc, char **argv) try {
       const double us = (now_s() - t0) / reps * 1e6;
       // tasks/0010's traffic accounting: A re-streamed once per n-block group,
       // B once per row block, C once.
-      const double nb_groups = double(st.N) / (48.0 * 8.0) > 0
-          ? std::max(1.0, double(st.N) / (48.0 * 8.0)) : 1.0;
+      const double nb_groups =
+          std::max(1.0, double(st.N) / double(tile_n * cols));
       const double row_blocks = double(st.M) / double(tm) / double(mrows);
-      const double mb = (double(st.M) * st.K * 2 * nb_groups
-                         + double(st.K) * st.N * 2 * row_blocks
+      const double mb = (double(st.M) * st.K * double(ab) * nb_groups
+                         + double(st.K) * st.N * double(ab) * row_blocks
                          + double(st.M) * st.N * cb) / 1e6;
       const double gmac = double(st.M) * st.K * st.N / 1e9;
       std::printf("    %-10s %6lld %6lld %6lld  %8.2f  %8.1f  %9.0f  %8.2f  %8.1f\n",
@@ -6501,7 +6843,7 @@ int main(int argc, char **argv) try {
   // and --serve (an OpenAI-shaped HTTP endpoint). Sharing it is the point:
   // the endpoint cannot drift from the thing the tests measure.
   struct EmbedService {
-    npue::Tokenizer tok;
+    AnyTokenizer tok;
     const float *w_word, *w_pos, *w_typ;
     Encoder *lead;
     std::vector<Encoder *> all;

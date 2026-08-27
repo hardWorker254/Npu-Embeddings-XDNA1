@@ -1,0 +1,98 @@
+0120 raw output -- 2026-08-26
+Env: no NPU, no XRT, no iron_env -- this task runs no hardware.
+Interpreter: C:\Users\vegar\.conda\envs\iron\python.exe (3.13.15)
+
+$ python tools/roofline.py --designs "dist/npuembeddings-0.4.0/artifacts_*/gemm_rtp" --measured tasks/0120-roofline-analytic/measured.json --out tasks/0120-roofline-analytic/roofline
+
+model        op        datapath          M     K     N    GMAC      MB      AI  ridge@40   bound@40
+---------------------------------------------------------------------------------------------------
+base_bfp16   qkv       mmac_bf16      8192   768  2304   14.50   226.5   128.0       741  bandwidth
+base_bfp16   attn_out  mmac_bf16      8192   768   768    4.83    75.5   128.0       741  bandwidth
+base_bfp16   ffn_up    mmac_bf16      8192   768  3072   19.33   302.0   128.0       741  bandwidth
+base_bfp16   ffn_down  mmac_bf16      8192  3072   768   19.33   264.2   146.3       741  bandwidth
+gemma_bfp16  qkv       mmac_bf16      8192   768  1536    9.66   151.0   128.0       741  bandwidth
+gemma_bfp16  attn_out  mmac_bf16      8192   768   768    4.83    75.5   128.0       741  bandwidth
+gemma_bfp16  ffn_up    mmac_bf16      8192   768  2304   14.50   226.5   128.0       741  bandwidth
+gemma_bfp16  ffn_down  mmac_bf16      8192  1152   768    7.25   107.0   135.5       741  bandwidth
+large_bfp16  qkv       mmac_bf16      8192  1024  3072   25.77   453.0   113.8       741  bandwidth
+large_bfp16  attn_out  mmac_bf16      8192  1024  1024    8.59   151.0   113.8       741  bandwidth
+large_bfp16  ffn_up    mmac_bf16      8192  1024  4096   34.36   604.0   113.8       741  bandwidth
+large_bfp16  ffn_down  mmac_bf16      8192  4096  1024   34.36   553.6   124.1       741  bandwidth
+minilm_bfp16 qkv       mmac_bf16      8192   384  1152    3.62    66.1   109.7       741  bandwidth
+minilm_bfp16 attn_out  mmac_bf16      8192   384   384    1.21    22.0   109.7       741  bandwidth
+minilm_bfp16 ffn_up    mmac_bf16      8192   384  1536    4.83    88.1   109.7       741  bandwidth
+minilm_bfp16 ffn_down  mmac_bf16      8192  1536   384    4.83    69.2   139.6       741  bandwidth
+nomic_bfp16  qkv       mmac_bf16      8192   768  2304   14.50   226.5   128.0       741  bandwidth
+nomic_bfp16  attn_out  mmac_bf16      8192   768   768    4.83    75.5   128.0       741  bandwidth
+nomic_bfp16  ffn_up    mmac_bf16      8192   768  6144   38.65   604.0   128.0       741  bandwidth
+nomic_bfp16  ffn_down  mmac_bf16      8192  3072   768   19.33   264.2   146.3       741  bandwidth
+small_bf16   qkv       vector_fp32    8192   384  1152    3.62    84.9    85.3        93  bandwidth
+small_bf16   attn_out  vector_fp32    8192   384   384    1.21    28.3    85.3        93  bandwidth
+small_bf16   ffn_up    vector_fp32    8192   384  1536    4.83   113.2    85.3        93  bandwidth
+small_bf16   ffn_down  vector_fp32    8192  1536   384    4.83    75.5   128.0        93    compute
+
+source                  op                 datapath           us   GMAC/s      AI   %peak    GB/s
+-------------------------------------------------------------------------------------------------
+0097/t18 b128il x3      qkv                vector_fp32      3008     1205    85.3   65.1%    28.2
+0097/t18 b128il x3      attn_out           vector_fp32      1355      891    85.3   48.2%    20.9
+0097/t18 b128il x3      ffn_up             vector_fp32      3865     1250    85.3   67.5%    29.3
+0097/t18 b128il x3      ffn_down           vector_fp32      3910     1236   128.0   66.7%    19.3
+0097/t18 cbf16 x1       qkv                vector_fp32      2974     1219   109.7   65.8%    22.2
+0097/t18 cbf16 x1       attn_out           vector_fp32      1278      945   109.7   51.1%    17.2
+0097/t18 cbf16 x1       ffn_up             vector_fp32      3890     1242   109.7   67.1%    22.6
+0097/t18 cbf16 x1       ffn_down           vector_fp32      3909     1236   139.6   66.8%    17.7
+0097/t21 int8c_mini x2  qkv                mmac_int8        1182     3066   170.7   10.3%    35.9
+0097/t21 int8c_mini x2  attn_out           mmac_int8         622     1942   170.7    6.6%    22.8
+0097/t21 int8c_mini x2  ffn_up             mmac_int8        1539     3140   170.7   10.6%    36.8
+0097/t21 int8c_mini x2  ffn_down           mmac_int8        1191     4057   256.0   13.7%    31.7
+0109 bench wait(hw)     MiniLM, layer      mmac_bf16        5940     2440   118.2   16.5%    41.3
+0109 bench wait(hw)     bge-small (the one vector_fp32     12100     1198    96.0   64.7%    25.0
+0109 bench wait(hw)     bge-base, layer    mmac_bf16       18544     3127   133.6   21.1%    46.8
+0109 bench wait(hw)     bge-large, layer   mmac_bf16       39300     2623   117.0   17.7%    44.8
+0109 bench wait(hw)     nomic, layer       mmac_bf16       25408     3043   132.1   20.5%    46.1
+
+wrote tasks/0120-roofline-analytic/roofline.json and tasks/0120-roofline-analytic/roofline.svg (24 dispatches, 17 measured)
+
+================================================================
+$ python tasks/0120-roofline-analytic/levers.py
+
+Lever 1 -- B streamed ONCE instead of once per row block (B-reuse).
+Channel-blocked at 8 columns (tasks/0046); this is the PRICE, not a plan.
+
+model         datapath        MB now  MB reuse  AI now  AI new  array x     e2e x
+---------------------------------------------------------------------------------
+base_bfp16    mmac_bf16          868       429   133.6   270.1    2.022     1.309
+gemma_bfp16   mmac_bf16          560       286   129.4   253.7    1.960       n/a  (no array share measured -- 0109 sec 2)
+large_bfp16   mmac_bf16         1762       981   117.0   210.1    1.795     1.335
+minilm_bfp16  mmac_bf16          245       136   118.2   213.7    1.809     1.176
+nomic_bfp16   mmac_bf16         1170       585   132.1   264.3    2.000     1.342
+small_bf16    vector_fp32        302       192    96.0   150.8    1.000     1.000  (compute-bound -- roofline prices this at 1.00x)
+
+
+Where the bytes are, per model (share of total DDR traffic):
+
+model                A       B       C  total MB
+------------------------------------------------
+base_bfp16         35%     52%     13%       868
+gemma_bfp16        34%     51%     16%       560
+large_bfp16        46%     46%      9%      1762
+minilm_bfp16       31%     46%     23%       245
+nomic_bfp16        34%     52%     14%      1170
+small_bf16         25%     37%     37%       302
+
+
+Lever 2 -- C narrowed to bf16 on bge-small, the one model still
+shipping fp32 C. It is on the FLAT roof, so the roofline prices it at
+1.00x -- and tasks/0045 measured exactly that (~0% of array time).
+
+  bge-small traffic 302 MB -> 245 MB (19% fewer bytes), predicted array gain 1.00x
+
+
+Lever 3 -- tile_n on bge-large (A re-streams N/(tile_n*cols) times).
+bge-large ships tile_n=32 and has the highest A share of any model.
+
+  tile_n=48: N divisible by n*cols=384? False | L1 53248 B of 64512 OK       | traffic 1762 -> 1493 MB (1.18x)
+  tile_n=64: N divisible by n*cols=512? True  | L1 65536 B of 64512 OVER BUDGET | traffic 1762 -> 1359 MB (1.30x)
+
+  Both are refused, and by DIFFERENT constraints -- 48 by geometry
+  (1024 mod 384 != 0), 64 by the L1 budget. bf16 bge-large is stuck at 32.

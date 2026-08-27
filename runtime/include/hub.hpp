@@ -96,8 +96,22 @@ struct CatalogEntry {
   // fuses to a narrower qkv than an MHA one. EmbeddingGemma-300M has ONE KV
   // head at head_dim 256, so Q|K|V is 1280 and the packer zero-pads it to 1536
   // to make the tiling legal at tile_n=48 (tasks/0074). 0 means "3*hidden",
-  // which is every other row here.
+  // which is every other row here except gte-multilingual-base, whose row
+  // states 2304 explicitly -- equal to 3*768, so 0 would behave identically.
   int64_t qkv_n = 0;
+
+  // GTE selects a third fetch file list (arch=3, model_type "new" -- the
+  // NewModel trust_remote_code family, gte-multilingual-base): no vocab.txt,
+  // since its tokenizer is the XLM-R Unigram table generated at pack time
+  // from tokenizer.json (tasks/0127/0133); needs tokenizer_config.json +
+  // special_tokens_map.json (both pinned in tasks/0127) and modules.json,
+  // whose 2_Normalize entry is what makes l2_normalize the checkpoint's own
+  // claim rather than this runtime's (tasks/0135). Routes to
+  // prepare_model_gte() (tasks/0138). Kept separate from `gemma` and
+  // `gated_ffn` for the same reason those two are kept separate from each
+  // other: a future model sharing one property must not silently inherit the
+  // rest.
+  bool gte = false;
 
   // Which MMAC datapath this model was ADOPTED for (tasks/0104, T23):
   // "bf16" (the default) or "bfp16". This is a DEPLOYMENT decision, not a

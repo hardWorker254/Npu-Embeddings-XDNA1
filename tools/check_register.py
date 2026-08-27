@@ -28,6 +28,14 @@ WHAT IT CHECKS, and why each one is worth its false-positive rate
    behind it. Notes count: T8 and T9 come from note 0007's survey of unused
    IRON surface and have no task, which is legitimate, and a check that
    demanded a task would have pushed someone to invent one.
+2b. A closed thread annotated `**REOPENED` that never moved back (T49 check 1).
+   T2 carried "**REOPENED for the int8 datapath, 2026-08-22**" for five days
+   while CLAUDE.md kept saying "three live threads" -- the annotation was a
+   tombstone, not an action. A reopening counts as acted on only when the
+   thread has a section back in OPEN-THREADS.md, or a later `SUPERSEDED by
+   [Tnn]` block hands the question to a successor. The bold marker is the
+   trigger on purpose: prose that merely mentions the word (as T49's own
+   closure does) must not fire it.
 3. Task logs no thread, doc or note references -- work that happened and left
    no way to find it.
 4. The open/closed split, reported rather than enforced: rule 3b says the
@@ -107,6 +115,27 @@ def main() -> int:
     if bare:
         print(f"FAIL: {len(bare)} thread(s) cite neither a task nor a note: "
               f"{' '.join(sorted(bare, key=lambda x: int(x[1:])))}")
+        fail = 1
+
+    # --- 2b. a REOPENED closed thread that never moved back (T49) -----------
+    open_bodies = thread_bodies(REGISTERS[0].read_text(encoding="utf-8"))
+    closed_bodies = thread_bodies(REGISTERS[1].read_text(encoding="utf-8"))
+    stuck = []
+    for tid, b in closed_bodies.items():
+        m = re.search(r"\*\*REOPENED", b)
+        if not m or tid in open_bodies:
+            continue
+        if not re.search(r"SUPERSEDED by \[T\d+\]", b[m.start():]):
+            stuck.append(tid)
+    if stuck:
+        print("FAIL: REOPENED annotation in CLOSED-THREADS that was never "
+              "acted on:")
+        for tid in sorted(stuck, key=lambda x: int(x[1:])):
+            print(f"  {tid} says **REOPENED but has no section back in "
+                  f"OPEN-THREADS.md")
+            print("       and no later 'SUPERSEDED by [Tnn]' block")
+        print("  (T2 sat like this for five days while CLAUDE.md said "
+              "'three live threads')")
         fail = 1
 
     # --- 3. task logs nothing points at (advisory) --------------------------

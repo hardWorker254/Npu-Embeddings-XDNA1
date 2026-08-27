@@ -228,6 +228,14 @@ Design::Design(Device &dev, const std::string &dir)
     // claim we cannot support.
     info_.datapath_recorded =
         js.find("\"emulate_bfp16\"") != std::string::npos;
+
+    // THE TILE GEOMETRY (T47, tasks/0124). "tile_n" is b_layout's key and
+    // "cols" is top-level; both are unique exact-key matches in every
+    // design.json this project's exporters write, which is what the naive
+    // reader above requires. 0 = an export that predates the fields, and a
+    // consumer that needs them must refuse rather than substitute a guess.
+    info_.tile_n = json_int(js, "tile_n", 0);
+    info_.cols = json_int(js, "cols", 0);
   }
 
   // TOOLCHAIN PROVENANCE (T39, tasks/0106). A SEPARATE file from design.json,

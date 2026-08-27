@@ -1,0 +1,8 @@
+The AMD Ryzen AI NPU accelerates transformer encoder models.
+A cargo ship crossed the Atlantic in eleven days despite heavy weather.
+Quantum error correction requires thousands of physical qubits per logical qubit.
+She planted tomatoes and basil along the sunny side of the garden fence.
+Das Wetter in Berlin ist heute überraschend sonnig und warm.
+Jeg liker å gå på ski om vinteren når snøen er tørr.
+東京は世界で最も人口の多い都市の一つです。
+Le musée du Louvre est situé au cœur de Paris.

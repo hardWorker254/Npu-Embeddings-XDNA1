@@ -106,4 +106,36 @@ void prepare_model_nomic(const std::string &model_dir,
                          int64_t tile_k, int64_t tile_n, int64_t max_seq,
                          void (*log)(const std::string &) = nullptr);
 
+// arch=3 (gte-multilingual-base / NTK RoPE + gated GeGLU, model_type "new")
+// mirror of tools/pack_npue.py's pack_gte() (tasks/0135, tasks/0138). Same
+// tensor names and emission order as arch=0/2 -- including the
+// `ln.weight -> tokenizer -> ln.bias` interleaving that is load-bearing for
+// byte parity -- with pack_gte()'s departures from the nomic shape it
+// otherwise mirrors: REAL biases on qkv / attn_out / ffn_down (the Q third
+// of the qkv bias scale-folded along with the Q weight block -- exact, RoPE
+// is linear), a gated FFN that arrives ALREADY FUSED upstream
+// (up_gate_proj, up columns first), exact-erf GELU recorded as
+// config["activation"], the NTK inv_freq set carried as DATA
+// (config["rope_inv_freq"], 32 float32 values the runtime must read -- a
+// consumer deriving frequencies from rope_theta alone is wrong by 1.9e-02
+// relfro at layer 0, tasks/0134), and the XLMRTOK1 Unigram tokenizer blob
+// stored whole as "tokenizer.xlmr_table". The blob is read from the cached
+// models/<dir>/xlmr_tokenizer.bin when present and otherwise generated here
+// in C++ (generate_xlmr_tokenizer_table(), byte-identical to the Python
+// generator per tasks/0133) and written back to that cache path -- the same
+// self-sufficiency prepare_model_gemma() has for its own table.
+//
+// `pooling` and `source_repo` are resolved by the CALLER exactly as for the
+// other packers above. The output must be byte-identical to pack_gte()'s
+// for the same inputs -- tools/verify_pack_parity.py's standing gate, held
+// for this arch in tasks/0138.
+void prepare_model_gte(const std::string &model_dir,
+                       const std::string &pooling,
+                       const std::string &source_repo,
+                       const std::string &out,
+                       const std::string &layout_json,
+                       const std::string &layout_hash,
+                       int64_t tile_k, int64_t tile_n, int64_t max_seq,
+                       void (*log)(const std::string &) = nullptr);
+
 }  // namespace npue

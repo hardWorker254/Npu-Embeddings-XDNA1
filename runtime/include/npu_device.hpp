@@ -76,6 +76,15 @@ struct DesignInfo {
   // applies one.
   bool c_is_int = false;
 
+  // The design's N-tile width and column count, READ from design.json
+  // (b_layout's "tile_n", and "cols"), never assumed. 0 means an export that
+  // predates the fields. Added for T47 (tasks/0124): --probe-streams
+  // hardcoded 48 and 8 here, which silently inflated every published int8
+  // GB/s figure by 1.57-1.85x -- bge-large ships tile_n 32 at bf16 and 64 at
+  // int8, and neither is 48.
+  int64_t tile_n = 0;
+  int64_t cols = 0;
+
   // True when this design's MMAC was built with
   // emulate_bf16_mmul_with_bfp16 (tasks/0104, T23). This changes MMAC
   // precision, not operand storage or B's tiling, so a_elem_bytes,

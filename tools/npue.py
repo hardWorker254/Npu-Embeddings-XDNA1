@@ -81,6 +81,27 @@ ARCH_GEMMA3_MQA_ROPE_GEGLU = 1
 # same, but only after padding its fused qkv -- see its note above.
 ARCH_NOMIC_ROPE_SWIGLU = 2
 
+# gte-multilingual-base (model_type "new", the NewModel trust_remote_code
+# impl; tasks/0134's oracle is the executable spec): RoPE with an NTK-scaled
+# frequency set THAT NO SINGLE THETA CAN EXPRESS -- inv_freq_i =
+# 160000^(-i/32) / 8^(1/32), derived from NTKScalingRotaryEmbedding's double
+# cache build and verified bit-for-bit against a freshly constructed module
+# (0134; the constant correction 8^(-1/32) scales even frequency 0). The
+# container therefore carries the 32 inv_freq values as data
+# ("rope_inv_freq"), and rope_theta/rope_scaling are provenance, not inputs.
+# Post-LN, fused-by-the-checkpoint up_gate GLU with exact-erf GELU on the
+# GATE half (up first, gate second -- nomic's ordering with GELU for SiLU),
+# REAL biases on qkv/attn_out/ffn_down (unlike nomic), bias-free ffn_up,
+# CLS pooling, l2_normalize genuinely from the checkpoint (2_Normalize in
+# modules.json). Tokenizer is SentencePiece Unigram via the XLMRTOK1 blob
+# (T52, tasks/0127) -- a third family beside WordPiece and Gemma's SP-BPE.
+#
+# Tensor names and emission order are IDENTICAL to arch=0/2 so the packer
+# and the whole NPU dispatch path work unchanged; geometry (qkv N=2304,
+# attn_out 768, ffn_up 6144, ffn_down K=3072, tile_n 48) is a literal match
+# to the shipping nomic design set, b_layout_hash included.
+ARCH_GTE_NEW_ROPE_GEGLU = 3
+
 FLAG_PRETILED = 1 << 0
 
 HEADER_FORMAT = "<4sIII QQQQ 16s"      # see SPEC CORRECTION above

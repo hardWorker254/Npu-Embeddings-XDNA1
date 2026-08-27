@@ -32,7 +32,7 @@
 [CmdletBinding()]
 param(
     [string[]]$Models = @(),
-    [string[]]$Skip = @(),          # accuracy | throughput | interleaved | energy | mteb
+    [string[]]$Skip = @(),          # accuracy | throughput | interleaved | energy | mteb | tail
     [int]$Bench = 5,
     [int]$Threads = 24,
     [int]$Lanes = 4,
@@ -163,6 +163,14 @@ $CATALOG = @(
     @{ name = "bge-large-en-v1.5";     artifacts = "artifacts_large_bfp16";  npu = $true; harness = "bert"; dtype = "bf16"; datapath = "bfp16"; gate = "pass" }
     @{ name = "nomic-embed-text-v1.5"; artifacts = "artifacts_nomic_bfp16";  npu = $true; harness = "bert"; dtype = "bf16"; datapath = "bfp16"; gate = "pass" }
     @{ name = "embeddinggemma-300m";   artifacts = "artifacts_gemma_bfp16";  npu = $true; harness = "gemma"; dtype = "bf16"; datapath = "bfp16"; gate = "pass" }
+    # gte (arch=3, 0.5.0): interleaved/energy are PER-ROW opt-outs, not
+    # oversights. Both stages need a CPU reference arm, and gte's
+    # trust_remote_code model is unusable without the 0134/0136 buffer
+    # repairs (compare_three.py and the energy CPU arm would either crash on
+    # the derived-position path or measure a silently position-scrambled
+    # model). Per docs/05-measurement the NPU figure is quoted alone and
+    # labelled; the quality delta vs fp32 is 0137's symmetric MTEB run.
+    @{ name = "gte-multilingual-base"; artifacts = "artifacts_nomic_bfp16"; npu = $true; harness = "bert"; dtype = "bf16"; datapath = "bfp16"; gate = "pass"; interleaved = $false; energy = $false }
 
     @{ name = "all-MiniLM-L6-v2.int8";      artifacts = "artifacts_int8c_mini"; cpu = "all-MiniLM-L6-v2";     npu = $true; harness = "bert";  dtype = "int8"; datapath = "int8-native"; gate = "pass" }
     @{ name = "bge-small-en-v1.5.int8";     artifacts = "artifacts_int8c_mini"; cpu = "bge-small-en-v1.5";     npu = $true; harness = "bert";  dtype = "int8"; datapath = "int8-native"; gate = "pass" }
@@ -406,7 +414,7 @@ foreach ($m in $CATALOG) {
     }
 
     # --- interleaved NPU vs torch vs ORT, one session, same statistic --------
-    if ((Want "interleaved") -and $m.npu) {
+    if ((Want "interleaved") -and $m.npu -and ($m.interleaved -ne $false)) {
         Write-Host "-- interleaved CPU ratio ($Rounds rounds)" -ForegroundColor Cyan
         $log = Join-Path $OUT "interleaved-$name.txt"
         $null = Invoke-Logged -Exe $PY -Log $log -Arguments @(
@@ -421,7 +429,7 @@ foreach ($m in $CATALOG) {
     }
 
     # --- energy, differential method ----------------------------------------
-    if ((Want "energy") -and $m.npu) {
+    if ((Want "energy") -and $m.npu -and ($m.energy -ne $false)) {
         Write-Host "-- energy (RAPL, differential)" -ForegroundColor Cyan
         $log = Join-Path $OUT "energy-$name.txt"
         # -CpuModel for the same reason MTEB needs --cpu-model: `$name` is a
@@ -488,6 +496,31 @@ foreach ($m in $CATALOG) {
     $summary += $row
 }
 
+# --- tail: p99 accuracy tail against stored fp32 references (T51) -----------
+# ONE invocation for the whole catalogue, not a per-model block: verify_tail.py
+# sweeps every model that has a reference under reference\tail\ and gates each
+# on its own recorded ceiling (baseline.p99_ceiling in the reference JSON).
+# This is the instrument every other stage lacks: accuracy/MTEB/semantic all
+# report central tendencies, and bge-large passed all three while carrying a
+# measured 100x max/median tail on single-word inputs (tasks/0122, 0129,
+# research/OPEN-THREADS.md#t51). The gate is stdlib-only, so $PY here is
+# convenience, not a dependency.
+$tailPass = $null
+$tailLog = $null
+if (Want "tail") {
+    Write-Host ""
+    Write-Host "-- tail gate (p99 per model per datapath, T51)" -ForegroundColor Cyan
+    $tailLog = Join-Path $OUT "tail.txt"
+    $code = Invoke-Logged -Exe $PY -Log $tailLog -Arguments @(
+        (Join-Path $REPO "tools\verify_tail.py"),
+        "--threads", "$Threads",
+        "--out", (Join-Path $OUT "tail_gate.json"))
+    $tailPass = ($code -eq 0)
+    if (-not $tailPass) {
+        Write-Host "  TAIL GATE FAILED -- a model's p99 exceeds its recorded ceiling (see $tailLog). NOT re-baselining; that is a deliberate act (verify_tail.py --write-baseline)." -ForegroundColor Red
+    }
+}
+
 $sum = Join-Path $OUT "sweep.json"
 
 # MERGE, DO NOT CLOBBER. The sweep is meant to be runnable in stages -- a full
@@ -531,10 +564,18 @@ $json = @{
     cpu_mean_percent = [math]::Round($cpu.MeanPercent, 1)
     cpu_quiet = $cpu.Quiet
     cpu_contenders = @($cpu.Busy | ForEach-Object { "$($_.Name) ~$($_.Cores) core(s)" })
-    stages_this_run = @("accuracy", "throughput", "interleaved", "energy", "mteb" |
+    stages_this_run = @("accuracy", "throughput", "interleaved", "energy", "mteb", "tail" |
                         Where-Object { -not ($Skip -contains $_) })
     rows = $rowsOut
-} | ConvertTo-Json -Depth 6
+}
+# Only set the tail keys when the stage actually ran -- an unset key cannot
+# misreport a skipped stage as a verdict (the same rule the per-model rows
+# follow for datapath_reported).
+if ($null -ne $tailPass) {
+    $json.tail_pass = $tailPass
+    $json.tail_log = $tailLog
+}
+$json = $json | ConvertTo-Json -Depth 6
 # WITHOUT a BOM. `Set-Content -Encoding utf8` on Windows PowerShell 5.1 writes
 # one, and Python's json.load() rejects it outright -- so the artifact this
 # sweep exists to produce could not be read by half the tooling in the repo.

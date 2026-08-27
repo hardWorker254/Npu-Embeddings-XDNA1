@@ -63,6 +63,23 @@ def score_of(result) -> dict:
     return out
 
 
+def subset_scores(result) -> dict:
+    """Per-subset main scores, {split: {hf_subset: score}}. score_of() above
+    collapses a multilingual task's subsets into one mean, which is the right
+    shape for the M8 gate and the wrong shape for a per-language baseline --
+    tasks/0137 stores both so the 0.6.0 multilingual gate can diff languages,
+    not just tasks."""
+    out = {}
+    try:
+        for split, entries in result.scores.items():
+            for e in entries:
+                if isinstance(e, dict) and "main_score" in e:
+                    out.setdefault(split, {})[str(e.get("hf_subset", "?"))] =                         float(e["main_score"])
+    except Exception as exc:                                # noqa: BLE001
+        out["error"] = str(exc)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tasks", default=",".join(DEFAULT_TASKS))
@@ -104,8 +121,39 @@ def main() -> int:
             # transformers/sentence-transformers. This is BUILD-TIME reference
             # code in .venv-ref, never the shipped runtime, which is the same
             # boundary the Gemma goldens already sit on.
-            m = SentenceTransformer(str(REPO / "models" / (args.cpu_model or args.model)),
-                                    device="cpu", trust_remote_code=True)
+            # gte-multilingual-base: transformers v5 + this checkpoint's
+            # remote code needs TWO repairs or the fp32 baseline itself is
+            # silently wrong (tasks/0134 landmines 1+2, tasks/0136 problem 1):
+            #   L1. v5 materialises the persistent=False rotary buffers AND
+            #       embeddings.position_ids as uninitialised meta-device
+            #       memory -- every forward without explicit position_ids
+            #       (which is what sentence-transformers does) indexes the
+            #       rope cache with garbage. repair_rotary() rebuilds both.
+            #   L2. the checkpoint config says torch_dtype: float16 and v5
+            #       honours it -- ~1e-03 per layer against fp32.
+            # An unrepaired baseline could fake a pass or a fail; refuse to
+            # measure without the repairs rather than trust luck.
+            ckpt_name = args.cpu_model or args.model
+            is_gte = ckpt_name.startswith("gte-multilingual-base")
+            st_kwargs = {}
+            if is_gte:
+                import torch
+                st_kwargs["model_kwargs"] = {"torch_dtype": torch.float32}
+            m = SentenceTransformer(str(REPO / "models" / ckpt_name),
+                                    device="cpu", trust_remote_code=True,
+                                    **st_kwargs)
+            if is_gte:
+                import torch
+                sys.path.insert(0, str(REPO / "reference"))
+                from make_goldens_gte import repair_rotary
+                repair_rotary(m[0].auto_model)
+                got_dtype = next(m[0].auto_model.parameters()).dtype
+                if got_dtype is not torch.float32:
+                    raise SystemExit(f"gte CPU reference loaded as "
+                                     f"{got_dtype}, not float32 -- landmine "
+                                     f"L2 (tasks/0134) is back")
+                print("  [cpu] gte rotary+position_ids repaired, fp32 "
+                      "verified (tasks/0134 L1+L2)", flush=True)
             # MUST match the NPU design's sequence length or the comparison
             # hands the CPU strictly more information.
             m.max_seq_length = SEQ
@@ -192,6 +240,8 @@ def main() -> int:
                                    if k in ("test", "validation", "dev")),
                                   next(iter(sc.values()), float("nan")))
                 results[side][name] = {"scores": sc, "main": main_score,
+                                       "per_subset": (subset_scores(res[0])
+                                                      if res else {}),
                                        "seconds": el}
                 print(f"  {name:<32} {main_score:.4f}   ({el:.1f} s)",
                       flush=True)

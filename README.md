@@ -5,8 +5,8 @@ Windows. The AI Engine kernels are written directly against the array with
 [MLIR-AIE / IRON](https://github.com/Xilinx/mlir-aie) — not through ONNX
 Runtime, not through a vendor overlay — and the shipped runtime is C++ and XRT.
 
-Six models, three architectures. An OpenAI-compatible endpoint, one executable,
-no Python at runtime.
+Seven models, four architectures — including a multilingual one. An
+OpenAI-compatible endpoint, one executable, no Python at runtime.
 
 **The point is not to beat the CPU.** It is to get embedding work *off* the CPU
 cores — a background job behind a search index should not take the machine
@@ -130,7 +130,9 @@ hardware limit and it is not baked into the kernels. It enters a design only as
 `M = batch × seq`, and the instruction streams know just `M`, `K` and `N`, so
 `batch 128 × seq 64` and `batch 16 × seq 512` are the same `M = 8192` and the
 same array work. `tools/export_gemm_rtp.py --seq N` builds a long-sequence
-design, and 0.4.0 ships two for nomic (`--seq 256`, `--seq 512`).
+design; the seq-256 and seq-512 sets serve both `nomic-embed-text-v1.5` and
+`gte-multilingual-base` (they share their array geometry exactly, which is
+why the multilingual model cost zero new NPU designs).
 
 They were exported and measured. **Across an 8× sequence range the array does
 not move: −2.0% on identical `M` and identical dispatch counts.** Everything
@@ -167,6 +169,7 @@ traffic.
 | `bge-large-en-v1.5` | 1024 | 24 | highest quality, slowest |
 | `nomic-embed-text-v1.5` | 768 | 12 | RoPE + gated SwiGLU; **needs a task prompt** |
 | `embeddinggemma-300m` | 768 | 24 | MQA + RoPE + GeGLU; needs a task prompt; gated, needs `HF_TOKEN` |
+| `gte-multilingual-base` | 768 | 12 | **multilingual** (XLM-R vocab, 70+ languages); RoPE + gated GELU; no prompt |
 
 ### Task prompts
 
@@ -193,7 +196,8 @@ POST /v1/embeddings
 
 `GET /health` lists the names, so a client never has to provoke the 400 to
 learn them. `"prompt_name": ""` means no prompt at all. Passing the field to a
-model that has no prompts (the four BERT models) is also a 400 — a client
+model that has no prompts (the four BERT models, and `gte-multilingual-base`)
+is also a 400 — a client
 sweeping one config across the whole catalogue should break loudly rather than
 quietly return unprompted vectors.
 
@@ -245,60 +249,71 @@ CPU comparisons are measured **interleaved in one session**, round-robin in one
 process, because wall clock on a shared machine drifts enough that numbers taken
 minutes apart compare the machine rather than the code.
 
-| model | datapath | **NPU** | vs 0.3.0 ¹ | **NPU / best CPU** | energy ² | worst `1 − cos` | MTEB Δ mean / worst ³ |
-|---|---|---:|---:|---:|---:|---:|---:|
-| `all-MiniLM-L6-v2` | bfp16 | **1459** | 1.55× | **1.876×** | **3.10×** better | 3.406e-04 | +0.12 / −0.07 |
-| `bge-small-en-v1.5` | bf16 | **630** | 1.28× | 1.561× | 2.73× | 8.348e-06 | −0.10 / **−0.5010** |
-| `bge-base-en-v1.5` | bfp16 | **324** | 1.54× | **2.714×** | 4.17× | 2.284e-04 | −0.06 / −0.19 |
-| `bge-large-en-v1.5` | bfp16 | **94.8** | 1.56× | 2.633× | **4.79×** | 2.626e-04 | +0.13 / −0.01 |
-| `nomic-embed-text-v1.5` | bfp16 | **259** | 1.57× | **3.447×** | 4.01× | 1.402e-03 | +0.01 / −0.25 |
-| `embeddinggemma-300m` | bfp16 | **108** | new ⁴ | 1.303× | 3.72× | 1.749e-04 ⁵ | +0.16 / −0.02 |
+| model | datapath | **NPU** | vs 0.4.0 ¹ | **NPU / best CPU** | energy ² | worst `1 − cos` | **p99 tail** ³ | MTEB Δ mean / worst ⁴ |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `all-MiniLM-L6-v2` | bfp16 | **1461** | 1.00× | **1.855×** | 3.42× better | 3.406e-04 | 9.7e-04 | +0.12 / −0.07 |
+| `bge-small-en-v1.5` | bf16 | **630** | 1.00× | 1.589× | 2.64× | 8.348e-06 | 1.2e-05 | −0.10 / **−0.5010** |
+| `bge-base-en-v1.5` | bfp16 | **324** | 1.00× | **2.713×** | 4.52× | 2.284e-04 | 3.7e-04 | −0.06 / −0.19 |
+| `bge-large-en-v1.5` | bfp16 | **95.2** | 1.00× | 2.607× | 4.89× | 2.626e-04 | **6.6e-03** ⁵ | +0.13 / −0.01 |
+| `nomic-embed-text-v1.5` | bfp16 | **262** | 1.00× | **3.494×** | 6.55× | 1.402e-03 | 1.6e-03 | +0.01 / −0.25 |
+| `embeddinggemma-300m` | bfp16 | **181** | 1.01× | 1.271× | 3.72× ⁶ | PASS ⁷ | 4.2e-04 | +0.16 / −0.02 |
+| `gte-multilingual-base` | bfp16 | **255** | new | — ⁸ | — ⁸ | 4.608e-04 | 5.2e-04 | **+0.06 / −0.06** ⁹ |
 
-¹ against 0.3.0's published figure, **same harness, same stage, same statistic** —
-it is the one release-over-release comparison in this table that is like for
-like. ² joules per 1000 sequences, by the differential RAPL method; carried from
-the run that measured it, not re-measured here. ³ from the gate run that decided
-bfp16 adoption per model; still valid because everything since has been
-bit-identical. ⁴ `embeddinggemma-300m` ran host-only in 0.3.0, so there is no NPU
-figure to compare against. ⁵ a **differential** against the host-only path, not a
-comparison against HuggingFace — arch 1 has no reference golden, which makes this
-a weaker claim than the other five.
+¹ against 0.4.0's sweep, **same harness, same stage, same statistic**. The six
+carried-over models reproducing 0.4.0 to within ±1% is itself the release's
+regression check passing: 0.5.0 changed no array code for them, and the column
+says so. ² joules per 1000 sequences, differential RAPL, **re-measured this
+sweep**; the ratio moves with the CPU side, which drifts more between sessions
+than the NPU side does (nomic read 4.01× in 0.4.0 and 6.55× here — treat the
+column as indicative, not as a constant of nature). ³ **new in 0.5.0**: p99 of
+per-text `1 − cos` over 224 varied inputs, single words included — the gate
+that sees what a mean hides. ⁴ from the symmetric gate runs (bfp16 adoption for
+the six, task 0137 for gte); still valid because everything since is
+bit-identical, verified by hash. ⁵ bge-large's tail is real, ~100× its median,
+carried as a register-linked waiver (T51) rather than rounded away — its
+median-regime accuracy is the 2.626e-04 column. ⁶ carried from 0.4.0: this
+sweep's gemma NPU energy arm produced a degenerate differential (Δt ≈ 0
+between the low and high runs — the harness limitation is recorded in the task
+log) and a wrong number reported confidently is worse than a carried one
+labelled. ⁷ arch 1 has no HF-reference golden; its gate is differential
+against the host-only control. ⁸ **deliberately absent**: both need a CPU
+reference arm, and gte's `trust_remote_code` model is unusable without buffer
+repairs (an unrepaired run is silently position-scrambled) — so the NPU figure
+stands alone and labelled, per this project's measurement rules. ⁹ the
+cleanest MTEB verdict in the catalogue, clustering cell positive; multilingual
+STS evidence (29 language subsets within [−0.30, +0.20]) is in the release
+note.
 
 Sequences per second, end to end, wall clock — **that is a throughput figure,
 not an NPU kernel performance claim**; per-kernel numbers in this project come
-from hardware traces only. Energy is joules per 1000 sequences by the
-differential RAPL method. The `1 − cos` gate is 2e-03 and the MTEB gate is
-`|mean| ≤ 0.5` with no task worse than −0.5.
+from hardware traces only. The `1 − cos` gate is 2e-03, the tail gate is p99
+against a per-model ceiling, and the MTEB gate is `|mean| ≤ 0.5` with no task
+worse than −0.5.
 
 **The `datapath` column is read from the runtime's own status line**, not
 restated from a table — a design and the intention behind it are different
 things, and only one of them is evidence.
 
-**Two rows are worth stopping on.** `bge-small-en-v1.5` is the one model still on
-plain bf16: it failed the bfp16 accuracy gate at **−0.5010** against a −0.5 line,
-bit-reproducibly, so it did not get the faster datapath. We did not round that
-away to tidy the column. And `embeddinggemma-300m`'s `1 − cos` is a
-**differential** against the host-only path rather than against HuggingFace,
-because arch 1 has no reference golden — a weaker claim than the other five, and
-labelled as one.
+**Rows worth stopping on.** `bge-small-en-v1.5` stays on plain bf16: it failed
+the bfp16 accuracy gate at **−0.5010** against a −0.5 line, bit-reproducibly,
+and we did not round that away. `bge-large-en-v1.5` carries the catalogue's
+one real accuracy tail — same five single words atop the tail on two
+arithmetically unrelated datapaths, so it is a property of the model × input,
+not of the number format (task 0129). And `gte-multilingual-base` runs on the
+**same NPU design set as nomic** — its geometry matches bit for bit, so the
+seventh model cost zero new array designs; every cost was host-side (a third
+tokenizer family and a fourth encoder architecture).
 
-**How much of this reproduces.** The sweep was run twice, twenty minutes apart
-on the same idle machine. **NPU throughput repeated to within 0.2% on every
-model**; the CPU baselines moved 3–4%. That is the ±20% caveat below, measured
-rather than asserted — and it is why the ratio column, not the NPU column, is
-the one to treat as indicative.
+**And the memory system is measured now, not inferred.** The bandwidth roof is
+**45.5 GB/s on the array's own clock** (trace-derived dispatch time agreeing
+with wall clock to 0.4%), four instruments concur, and the mem-tile↔L1 leg is
+two-thirds idle while the cores wait on locks — the DRAM leg is the one that
+binds. B-reuse, the biggest priced lever, re-priced on those measurements at
+1.72× array / 1.31× end-to-end and is parked behind a funded C-join re-plumb.
 
-Two contributions to the gain are separable and were each measured in one
-session: the bfp16 datapath adoption was **+7.3% to +20.5%** sweep-against-sweep
-(with `bge-small`, whose datapath did not change, flat at −2.2% as the control),
-and the host-side epilogue fusion on top of it was **1.153×–1.340×**,
-bit-identical.
-
-**→ [docs/06-performance.md](docs/06-performance.md) has the caveats**, and they
-matter more than the table: how the numbers were taken, which reproduce and which
-do not, and what we could not explain. The short version is that NPU throughput
-and accuracy are solid, and the CPU ratio is indicative to about ±20% because the
-CPU side moves more between sessions than the difference anyone is arguing about.
+**→ [docs/06-performance.md](docs/06-performance.md) has the caveats**, and
+they matter more than the table: how the numbers were taken, which reproduce
+and which do not, and what we could not explain.
 
 ## Contributing
 
@@ -315,11 +330,12 @@ several do not:
 
 - **A byte-level BPE tokenizer**
   ([T43](research/OPEN-THREADS.md#t43)) — this is the gate on nearly every
-  encoder released since 2024. We ship WordPiece and Gemma's SentencePiece BPE
-  and nothing byte-level, which blocks the whole ModernBERT, Qwen and Mistral
-  family at once. Gemma's merge machinery is reusable; the new part is a GPT-2
-  pretokenizer. **This one needs no NPU** — it is a tokenizer and a byte-exact
-  test against HuggingFace.
+  encoder released since 2024. We ship WordPiece, Gemma's SentencePiece BPE
+  and (since 0.5.0) XLM-R's SentencePiece Unigram, but nothing byte-level,
+  which blocks the whole ModernBERT, Qwen and Mistral family at once. The
+  Unigram build is the template: a table generator, a C++ port, and a
+  byte-exact test against HuggingFace — it went from filed to 343/343 in a
+  day. **This one needs no NPU.**
 - **Which encoder joins the catalogue next**
   ([T44](research/OPEN-THREADS.md#t44)) — four candidates are already priced
   against this project's own geometry gates, with the arithmetic shown.
@@ -328,7 +344,7 @@ several do not:
   trigger. The geometry blocker is gone (mem-tile padding is proven exact on
   all 8 columns); what is not settled is whether it is worth it.
 All three are filed with a price and a trigger rather than as open questions
-about the hardware — the register ran to 20 threads a week ago and 43 of the 46
+about the hardware — the register ran to 20 threads a week ago and 49 of the 54
 are now closed, each by a measurement or a build rather than by a decision to
 stop caring. **How** they were settled is in
 [`research/CLOSED-THREADS.md`](research/CLOSED-THREADS.md), verbatim, because

@@ -1,0 +1,58 @@
+[transformers] You are using a model of type `new` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] Missing validation function in 'RotaryEmbeddingConfigMixin' for 'rope_type'='ntk'
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+Loading weights:   0%|          | 0/136 [00:00<?, ?it/s]Loading weights: 100%|##########| 136/136 [00:00<00:00, 1644.60it/s]
+[transformers] [1mNewModel LOAD REPORT[0m from: C:\Users\vegar\Documents\GitHub\NpuEmbeddings\models\gte-multilingual-base
+Key               | Status     |  | 
+------------------+------------+--+-
+classifier.bias   | UNEXPECTED |  | 
+classifier.weight | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+[transformers] `use_return_dict` is deprecated! Use `return_dict` instead!
+[transformers] Detected the usage of `get_extended_attention_mask`: This function is deprecated and will be removed in v5.12.0. Please use the new API in `transformers.masking_utils`
+state dict: 136 tensors; sample names: ['embeddings.LayerNorm.bias', 'embeddings.LayerNorm.weight', 'embeddings.token_type_embeddings.weight'] ... ['encoder.layer.9.mlp_ln.bias', 'encoder.layer.9.mlp_ln.weight']
+
+inv_freq: ours vs module buffer  max|diff| = 0.000e+00
+  negative controls: plain-20000 relfro 1.722e-01, plain-160000 relfro 6.714e-02 (ours must be ~0, these must not)
+
+=== 18 tokens
+  embeddings           relfro 7.140e-08
+  layer  0             relfro 9.639e-07
+  layer  1             relfro 1.149e-06
+  layer  2             relfro 1.339e-06
+  layer  3             relfro 1.327e-06
+  layer  4             relfro 1.413e-06
+  layer  5             relfro 1.520e-06
+  layer  6             relfro 1.871e-06
+  layer  7             relfro 1.513e-06
+  layer  8             relfro 1.488e-06
+  layer  9             relfro 1.942e-06
+  layer 10             relfro 1.334e-06
+  layer 11             relfro 1.513e-06
+  CLS                  relfro 1.809e-06
+  control theta=20000 plain      relfro 1.928e-02
+  control theta=160000 no-corr   relfro 8.899e-03
+  control gelu-on-up-half      relfro 7.755e-01
+
+=== 19 tokens
+  embeddings           relfro 9.161e-08
+  layer  0             relfro 9.956e-07
+  layer  1             relfro 9.892e-07
+  layer  2             relfro 1.100e-06
+  layer  3             relfro 1.127e-06
+  layer  4             relfro 1.373e-06
+  layer  5             relfro 1.493e-06
+  layer  6             relfro 1.847e-06
+  layer  7             relfro 1.566e-06
+  layer  8             relfro 1.436e-06
+  layer  9             relfro 1.977e-06
+  layer 10             relfro 1.379e-06
+  layer 11             relfro 1.482e-06
+  CLS                  relfro 1.880e-06
+  control theta=20000 plain      relfro 1.409e-02
+  control theta=160000 no-corr   relfro 6.106e-03
+  control gelu-on-up-half      relfro 8.072e-01

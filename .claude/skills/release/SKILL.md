@@ -145,13 +145,28 @@ cd $S
 .\npuembeddings.exe embed <model> in.txt out.f32     # fetch, verify, pack, run
 ```
 
-Then the check that catches a mispacked release:
+Then the two checks that catch a mispacked release:
 
 ```powershell
-# the container the release built must equal the one you validated
-(Get-FileHash "$S\models\<model>.npue").Hash -eq
-    (Get-FileHash "models\<model>.npue").Hash
+# 1. the container's DATA REGION must equal the one you validated.
+#    NOT a whole-file hash: the JSON directory legitimately gains keys as
+#    the format evolves (0119's release failed a whole-file compare over 17
+#    bytes of `a_dtype` JSON while the tensor bytes were identical). The
+#    tool reads the data offset/length out of the container's own header
+#    and exits 1 on mismatch.
+python tools
+pue_data_hash.py "models\<model>.npue" "$S\models\<model>.npue"
+
+# 2. the semantic gate, against the cold zip -- the one accuracy gate that
+#    is stdlib-only and therefore runs where nothing is installed (0121).
+#    It reports the datapath the runtime actually used, per model.
+python toolserify_semantics.py --exe "$S
+puembeddings.exe" --root "$S"
 ```
+
+The requirement is that it runs **against the cold zip's own executable and
+root**, not the repo's — `--exe`/`--root` are exactly the flags it grew for
+this in 0121.
 
 **Also test a release staged *inside* the repository**, which is where
 `make_release.ps1` puts it. Root resolution is layout-sensitive and the two
@@ -200,7 +215,9 @@ the user say when to publish and under which tag.
 - [ ] `sync_public_repo.py` **PASSED** before any push
 - [ ] public repo committed and pushed
 - [ ] zip built; cold-tested from an unzip outside the repo
-- [ ] container from the release byte-identical to the validated one
+- [ ] container DATA REGION identical to the validated one (`tools/npue_data_hash.py`, exit 0)
+- [ ] semantic gate PASSES against the cold zip (`tools/verify_semantics.py`)
+- [ ] tail gate (p99 over varied inputs, T51 step 3) run per model and recorded
 - [ ] root correct in all four layouts
 - [ ] release note written to `dist/RELEASE-NOTES-<ver>.md`
 - [ ] tag and GitHub release left for the user to confirm

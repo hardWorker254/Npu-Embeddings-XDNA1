@@ -1,0 +1,507 @@
+{
+  "kind": "hardware measurement -- tail gate, p99-gated per model",
+  "exe": "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\runtime\\build\\npuembeddings.exe",
+  "reference_dir": "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\reference\\tail",
+  "write_baseline": false,
+  "models": [
+    {
+      "model": "all-MiniLM-L6-v2",
+      "hidden": 384,
+      "prompt": null,
+      "datapath_reported": "bfp16-emulated MMAC, C as bf16",
+      "designs_reported": "ONE xclbin, 16 streams (4 batch tiers), one hw_context",
+      "overall": {
+        "n": 224,
+        "median": 0.00034263477873464065,
+        "p90": 0.000511354679838083,
+        "p99": 0.0009651888423690216,
+        "max": 0.0018470506647122464,
+        "max_over_median": 5.390727326436195
+      },
+      "groups": {
+        "words": {
+          "n": 180,
+          "median": 0.0003560881057446674,
+          "p90": 0.000533140742930649,
+          "p99": 0.0009993568628991279,
+          "max": 0.0018470506647122464,
+          "max_over_median": 5.187060828245333
+        },
+        "sentences": {
+          "n": 36,
+          "median": 0.00030505526472524025,
+          "p90": 0.0003797924200176772,
+          "p99": 0.00039553142882887694,
+          "max": 0.0003967123466960265,
+          "max_over_median": 1.3004605806536096
+        },
+        "phrases": {
+          "n": 8,
+          "median": 0.0003203906353012598,
+          "p90": 0.0004284930373429141,
+          "p99": 0.0004891487340743383,
+          "max": 0.0004958882559333855,
+          "max_over_median": 1.5477613927982234
+        }
+      },
+      "worst": [
+        {
+          "text": "fucking",
+          "one_minus_cos": 0.0018470506647122464
+        },
+        {
+          "text": "saying",
+          "one_minus_cos": 0.0010134722062657975
+        },
+        {
+          "text": "tops",
+          "one_minus_cos": 0.0009956046830168486
+        },
+        {
+          "text": "suck",
+          "one_minus_cos": 0.000863361897591508
+        },
+        {
+          "text": "attracted",
+          "one_minus_cos": 0.0008303003430547573
+        }
+      ],
+      "baseline": {
+        "p99_measured": 0.0009651888423690216,
+        "p99_ceiling": 0.002,
+        "measured_date": "2026-08-27",
+        "datapath": "bfp16-emulated MMAC, C as bf16"
+      },
+      "verdict": "PASS",
+      "pass": true
+    },
+    {
+      "model": "bge-small-en-v1.5",
+      "hidden": 384,
+      "prompt": null,
+      "datapath_reported": "bf16 MMAC, C as fp32",
+      "designs_reported": "ONE xclbin, 16 streams (4 batch tiers), one hw_context",
+      "overall": {
+        "n": 224,
+        "median": 6.844773589087527e-06,
+        "p90": 8.322465276955348e-06,
+        "p99": 1.161899611602736e-05,
+        "max": 1.3011493157466525e-05,
+        "max_over_median": 1.9009384296086087
+      },
+      "groups": {
+        "words": {
+          "n": 180,
+          "median": 6.770306493431022e-06,
+          "p90": 8.21921491216404e-06,
+          "p99": 1.0902704468769296e-05,
+          "max": 1.3011493157466525e-05,
+          "max_over_median": 1.9218469902494215
+        },
+        "sentences": {
+          "n": 36,
+          "median": 7.492084995786019e-06,
+          "p90": 8.68294558387106e-06,
+          "p99": 9.894043735203527e-06,
+          "max": 1.0079573433019462e-05,
+          "max_over_median": 1.3453629315055549
+        },
+        "phrases": {
+          "n": 8,
+          "median": 6.658406378534654e-06,
+          "p90": 8.375081395961547e-06,
+          "p99": 1.1561784183501399e-05,
+          "max": 1.1915862271005828e-05,
+          "max_over_median": 1.7895967283433079
+        }
+      },
+      "worst": [
+        {
+          "text": "released",
+          "one_minus_cos": 1.3011493157466525e-05
+        },
+        {
+          "text": "assessment attracted awarding bancroft basel",
+          "one_minus_cos": 1.1915862271005828e-05
+        },
+        {
+          "text": "installment",
+          "one_minus_cos": 1.191318732829405e-05
+        },
+        {
+          "text": "distraught",
+          "one_minus_cos": 1.0634095101047514e-05
+        },
+        {
+          "text": "Astronomers say the faint smudge in that photograph is an entire galaxy far beyond our own.",
+          "one_minus_cos": 1.0079573433019462e-05
+        }
+      ],
+      "baseline": {
+        "p99_measured": 1.161899611602736e-05,
+        "p99_ceiling": 0.002,
+        "measured_date": "2026-08-27",
+        "datapath": "bf16 MMAC, C as fp32"
+      },
+      "verdict": "PASS",
+      "pass": true
+    },
+    {
+      "model": "bge-base-en-v1.5",
+      "hidden": 768,
+      "prompt": null,
+      "datapath_reported": "bfp16-emulated MMAC, C as bf16",
+      "designs_reported": "ONE xclbin, 16 streams (4 batch tiers), one hw_context",
+      "overall": {
+        "n": 224,
+        "median": 0.00017156208446916787,
+        "p90": 0.00022424357400367966,
+        "p99": 0.0003711060658165939,
+        "max": 0.0006132306690324052,
+        "max_over_median": 3.574395070623028
+      },
+      "groups": {
+        "words": {
+          "n": 180,
+          "median": 0.00016727507899672034,
+          "p90": 0.0002133158555490344,
+          "p99": 0.0004118041941978888,
+          "max": 0.0006132306690324052,
+          "max_over_median": 3.6660013715756694
+        },
+        "sentences": {
+          "n": 36,
+          "median": 0.00019199913456191542,
+          "p90": 0.00025357227822431216,
+          "p99": 0.00028475632718649165,
+          "max": 0.0002909830037532979,
+          "max_over_median": 1.5155433091781068
+        },
+        "phrases": {
+          "n": 8,
+          "median": 0.0001926408676820035,
+          "p90": 0.00024930855691998046,
+          "p99": 0.00026710607659996777,
+          "max": 0.000269083578786633,
+          "max_over_median": 1.3968146116888094
+        }
+      },
+      "worst": [
+        {
+          "text": "adjective",
+          "one_minus_cos": 0.0006132306690324052
+        },
+        {
+          "text": "fiction",
+          "one_minus_cos": 0.0005103981149588988
+        },
+        {
+          "text": "parent",
+          "one_minus_cos": 0.00038559568361584695
+        },
+        {
+          "text": "fucking",
+          "one_minus_cos": 0.00032259734535822204
+        },
+        {
+          "text": "The winger scored twice after the break and the crowd sang until the referee blew time.",
+          "one_minus_cos": 0.0002909830037532979
+        }
+      ],
+      "baseline": {
+        "p99_measured": 0.0003711060658165939,
+        "p99_ceiling": 0.002,
+        "measured_date": "2026-08-27",
+        "datapath": "bfp16-emulated MMAC, C as bf16"
+      },
+      "verdict": "PASS",
+      "pass": true
+    },
+    {
+      "model": "bge-large-en-v1.5",
+      "hidden": 1024,
+      "prompt": null,
+      "datapath_reported": "bfp16-emulated MMAC, C as bf16",
+      "designs_reported": "ONE xclbin, 4 streams (1 batch tiers), one hw_context",
+      "overall": {
+        "n": 224,
+        "median": 0.00021792005622411903,
+        "p90": 0.0003686606891045273,
+        "p99": 0.00662587148404564,
+        "max": 0.021831702858474022,
+        "max_over_median": 100.18216421540059
+      },
+      "groups": {
+        "words": {
+          "n": 180,
+          "median": 0.00022662504084730584,
+          "p90": 0.00039374409442438635,
+          "p99": 0.008781685108528135,
+          "max": 0.021831702858474022,
+          "max_over_median": 96.33402724098643
+        },
+        "sentences": {
+          "n": 36,
+          "median": 0.00020023720192979821,
+          "p90": 0.00023343923055707538,
+          "p99": 0.0002462856858834295,
+          "max": 0.0002473521972878867,
+          "max_over_median": 1.2352959135665844
+        },
+        "phrases": {
+          "n": 8,
+          "median": 0.00018949862424294528,
+          "p90": 0.00025795499336036534,
+          "p99": 0.00025955933062488335,
+          "max": 0.0002597375903209409,
+          "max_over_median": 1.3706568654975895
+        }
+      },
+      "worst": [
+        {
+          "text": "newsletter",
+          "one_minus_cos": 0.021831702858474022
+        },
+        {
+          "text": "sermons",
+          "one_minus_cos": 0.011948950456743712
+        },
+        {
+          "text": "contact",
+          "one_minus_cos": 0.007939753813432815
+        },
+        {
+          "text": "cinema",
+          "one_minus_cos": 0.002227221946531799
+        },
+        {
+          "text": "messages",
+          "one_minus_cos": 0.0022222879738402757
+        }
+      ],
+      "baseline": {
+        "p99_measured": 0.00662587148404564,
+        "p99_ceiling": 0.01325174296809128,
+        "measured_date": "2026-08-27",
+        "datapath": "bfp16-emulated MMAC, C as bf16",
+        "note": "p99 ceiling is wide because bge-large has a known, input-determined accuracy tail on single-word inputs -- see research/OPEN-THREADS.md#t51 (tasks/0122, 0129). This is a documented waiver, not an endorsement."
+      },
+      "verdict": "PASS",
+      "pass": true
+    },
+    {
+      "model": "nomic-embed-text-v1.5",
+      "hidden": 768,
+      "prompt": "search_document",
+      "datapath_reported": "bfp16-emulated MMAC, C as bf16",
+      "designs_reported": "ONE xclbin, 16 streams (4 batch tiers), one hw_context",
+      "overall": {
+        "n": 224,
+        "median": 0.0010811868897228627,
+        "p90": 0.0013285187344400983,
+        "p99": 0.001578685093539929,
+        "max": 0.0016570344084129163,
+        "max_over_median": 1.5326068269637072
+      },
+      "groups": {
+        "words": {
+          "n": 180,
+          "median": 0.0010545121451227546,
+          "p90": 0.0012545777720403327,
+          "p99": 0.0014401551358849754,
+          "max": 0.0015540559656809227,
+          "max_over_median": 1.4737203102577987
+        },
+        "sentences": {
+          "n": 36,
+          "median": 0.001219859103334442,
+          "p90": 0.0013314428297018233,
+          "p99": 0.0014336701807266647,
+          "max": 0.001481977045490801,
+          "max_over_median": 1.2148755880411672
+        },
+        "phrases": {
+          "n": 8,
+          "median": 0.0013824451479467759,
+          "p90": 0.0016536752147112033,
+          "p99": 0.001656698489042745,
+          "max": 0.0016570344084129163,
+          "max_over_median": 1.1986257905957163
+        }
+      },
+      "worst": [
+        {
+          "text": "conjunction contact convoy cottage crawling",
+          "one_minus_cos": 0.0016570344084129163
+        },
+        {
+          "text": "clearer cobb colourful como concentrate",
+          "one_minus_cos": 0.001652235560267612
+        },
+        {
+          "text": "bedfordshire berg bipolar blossoms borders",
+          "one_minus_cos": 0.0015860418460172943
+        },
+        {
+          "text": "enactment",
+          "one_minus_cos": 0.0015540559656809227
+        },
+        {
+          "text": "A worn timing belt and two bald tyres meant the garage kept the vehicle until Thursday.",
+          "one_minus_cos": 0.001481977045490801
+        }
+      ],
+      "baseline": {
+        "p99_measured": 0.001578685093539929,
+        "p99_ceiling": 0.003157370187079858,
+        "measured_date": "2026-08-27",
+        "datapath": "bfp16-emulated MMAC, C as bf16"
+      },
+      "verdict": "PASS",
+      "pass": true
+    },
+    {
+      "model": "embeddinggemma-300m",
+      "hidden": 768,
+      "prompt": "document",
+      "datapath_reported": "bfp16-emulated MMAC, C as bf16",
+      "designs_reported": "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\runtime\\artifacts_gemma_bfp16  (16 streams, 4 batch tiers)",
+      "overall": {
+        "n": 224,
+        "median": 0.00015776573991366227,
+        "p90": 0.00024551942697047523,
+        "p99": 0.0004226798648442146,
+        "max": 0.001163184576917553,
+        "max_over_median": 7.372859136299865
+      },
+      "groups": {
+        "words": {
+          "n": 180,
+          "median": 0.00014653628709254685,
+          "p90": 0.0002427985725428572,
+          "p99": 0.0004398629966161053,
+          "max": 0.001163184576917553,
+          "max_over_median": 7.937860307480898
+        },
+        "sentences": {
+          "n": 36,
+          "median": 0.0001686370114509228,
+          "p90": 0.00020664305242829029,
+          "p99": 0.0002455349092914894,
+          "max": 0.0002457625289755683,
+          "max_over_median": 1.457346325465989
+        },
+        "phrases": {
+          "n": 8,
+          "median": 0.0002534646723567069,
+          "p90": 0.0003234333990966731,
+          "p99": 0.00033691852842507753,
+          "max": 0.00033841687612823357,
+          "max_over_median": 1.3351638829255519
+        }
+      },
+      "worst": [
+        {
+          "text": "qaeda",
+          "one_minus_cos": 0.001163184576917553
+        },
+        {
+          "text": "tufts",
+          "one_minus_cos": 0.00047404745791579384
+        },
+        {
+          "text": "brant",
+          "one_minus_cos": 0.00043077598791618765
+        },
+        {
+          "text": "chichester",
+          "one_minus_cos": 0.0003955754528206512
+        },
+        {
+          "text": "eliot",
+          "one_minus_cos": 0.000360941907494583
+        }
+      ],
+      "baseline": {
+        "p99_measured": 0.0004226798648442146,
+        "p99_ceiling": 0.002,
+        "measured_date": "2026-08-27",
+        "datapath": "bfp16-emulated MMAC, C as bf16"
+      },
+      "verdict": "PASS",
+      "pass": true
+    },
+    {
+      "model": "gte-multilingual-base",
+      "hidden": 768,
+      "prompt": null,
+      "datapath_reported": "bfp16-emulated MMAC, C as bf16",
+      "designs_reported": "ONE xclbin, 16 streams (4 batch tiers), one hw_context",
+      "overall": {
+        "n": 224,
+        "median": 0.0003419219749867808,
+        "p90": 0.00042993407129849893,
+        "p99": 0.0005159707146285375,
+        "max": 0.0007361396211736926,
+        "max_over_median": 2.1529462129544403
+      },
+      "groups": {
+        "words": {
+          "n": 180,
+          "median": 0.0003544078664815542,
+          "p90": 0.00043788867053540237,
+          "p99": 0.0005328625767394119,
+          "max": 0.0007361396211736926,
+          "max_over_median": 2.0770972960669494
+        },
+        "sentences": {
+          "n": 36,
+          "median": 0.0002931898816317391,
+          "p90": 0.0003612615295059962,
+          "p99": 0.000370878992712792,
+          "max": 0.0003720407287411964,
+          "max_over_median": 1.2689412290445203
+        },
+        "phrases": {
+          "n": 8,
+          "median": 0.00034731228913809087,
+          "p90": 0.0004232701277714246,
+          "p99": 0.00044839469159045793,
+          "max": 0.0004511863097925728,
+          "max_over_median": 1.2990796004145473
+        }
+      },
+      "worst": [
+        {
+          "text": "defect",
+          "one_minus_cos": 0.0007361396211736926
+        },
+        {
+          "text": "trainee",
+          "one_minus_cos": 0.0005944675176314806
+        },
+        {
+          "text": "bedfordshire",
+          "one_minus_cos": 0.0005164865797934182
+        },
+        {
+          "text": "assessment",
+          "one_minus_cos": 0.0005142436877721979
+        },
+        {
+          "text": "denoted",
+          "one_minus_cos": 0.0004972081747811607
+        }
+      ],
+      "baseline": {
+        "p99_measured": 0.0005159707146285375,
+        "p99_ceiling": 0.002,
+        "measured_date": "2026-08-27",
+        "datapath": "bfp16-emulated MMAC, C as bf16"
+      },
+      "verdict": "PASS",
+      "pass": true
+    }
+  ],
+  "pass": true
+}

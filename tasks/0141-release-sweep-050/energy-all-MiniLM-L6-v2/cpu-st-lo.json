@@ -1,0 +1,23 @@
+﻿{
+    "kind":  "hardware measurement",
+    "label":  "cpu-st-20",
+    "command":  "\"C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\.venv-ref\\Scripts\\python.exe\" experiments\\m8-npu-vs-cpu\\energy_cpu_load.py --encodes 20 --batch 128 --model all-MiniLM-L6-v2",
+    "meter":  "RAPL_Package0_PKG",
+    "energy_unit_j":  3.6E-09,
+    "repeats":  1,
+    "idle_before_w":  3.9643759737304509,
+    "idle_after_w":  5.7782508899381684,
+    "idle_w":  4.8713134318343094,
+    "idle_drift":  0.37235849049538511,
+    "runs":  [
+                 {
+                     "joules":  318.965175,
+                     "seconds":  10.477,
+                     "watts":  30.44432327956476
+                 }
+             ],
+    "mean_watts":  30.44432327956476,
+    "mean_joules":  318.965175,
+    "best_joules":  318.965175,
+    "marginal_j":  267.92842417467193
+}

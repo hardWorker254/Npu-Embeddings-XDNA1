@@ -1,0 +1,355 @@
+{
+  "version": 6,
+  "purpose": [
+    "A MEANING check, not a numeric one. Every other gate in this repo compares",
+    "our vectors against a reference implementation and asks whether the numbers",
+    "agree. This one asks whether the vectors mean anything, and it answers with",
+    "ORDER rather than with decimals: sentences about the same thing must come",
+    "out closer than sentences about different things. No tolerance, no epsilon.",
+    "",
+    "Why that gap is worth its own file: a reference comparison passes when both",
+    "sides are wrong the SAME way. tools/verify_embed_e2e.py prepends the same",
+    "task prefix to the reference that the runtime applies, so a wrongly-chosen",
+    "prompt agrees with itself; and a container whose arch was read wrong returns",
+    "vectors that are correctly shaped, correctly normed and deterministic. This",
+    "corpus needs no reference at all -- which is also why the checker is stdlib",
+    "only and runs against a cold dist zip with nothing installed."
+  ],
+  "design": [
+    "TWELVE clusters of THREE sentences, chosen so the twelve topics are mutually",
+    "unrelated -- no two clusters share a domain, because a near/far test is only",
+    "as good as the far pairs. Inside a cluster the three sentences are:",
+    "",
+    "  .a  the anchor",
+    "  .b  a LEXICAL paraphrase -- most words shared, one or two swapped.",
+    "      This is the user's own example ('fishing in the river' vs 'fishing in",
+    "      the lake'), and it is the EASY half: a bag-of-words model passes it.",
+    "  .c  a SEMANTIC paraphrase -- same meaning, deliberately few shared words.",
+    "      This is the half that actually requires an embedding model, and it is",
+    "      where a broken pooling or a wrong arch shows up first.",
+    "",
+    "So .a-.b and .a-.c are both NEAR pairs but they fail for different reasons,",
+    "and the checker reports them separately rather than averaging them away.",
+    "",
+    "There is deliberately NO hand-picked list of hard negatives. The checker",
+    "DERIVES them: it ranks every far pair by word overlap and reports the worst",
+    "offenders, so the adversarial cases come out of the corpus instead of out of",
+    "the author's imagination, and cannot be quietly tuned to pass.",
+    "",
+    "Sentences are 80-95 characters. Long enough to carry a topic, short enough",
+    "that seq 64 never truncates (~20 tokens), so this corpus never trips",
+    "tasks/0110's truncation refusal and never measures the tokenizer's edges --",
+    "reference/corpus.py exists for that and is a different job.",
+    "",
+    "MULTILINGUAL CLUSTERS (v6, tasks/0137). Three additional clusters -- one",
+    "Norwegian, one German, one Spanish -- with the same .a/.b/.c discipline and",
+    "the same 80-95 character budget. Each carries a 'lang' field; sentences",
+    "without one are English. THE GATE IS PER-MODEL: the checker includes",
+    "non-English sentences only for models listed in 'multilingual_models'",
+    "below. The six English-only shipped models never claimed to separate",
+    "paraphrases in languages they were not trained for -- a pass there would be",
+    "shared-token luck and a fail would not be a regression, so gating them on",
+    "these clusters would measure the corpus, not the runtime (the exact trap",
+    "sec 3 of tasks/0121 kept finding). Topics were chosen against the existing",
+    "twelve AND each other: knitting (no), chess (de), flamenco dance (es) --",
+    "no shared domain, no shared incidental tokens (checked against the v1-v5",
+    "failure catalogue: no seasons/times shared with weather, no city names",
+    "already used by the flight cluster, no recipe words near cooking, no",
+    "first-person errand frame in the .c tier)."
+  ],
+  "sentences": [
+    {
+      "id": "fish.a",
+      "cluster": "fishing",
+      "text": "I like to spend the whole morning fishing for trout in the river below the old stone bridge."
+    },
+    {
+      "id": "fish.b",
+      "cluster": "fishing",
+      "kind": "lexical",
+      "text": "I like to spend the whole morning fishing for trout in the lake behind the old stone mill."
+    },
+    {
+      "id": "fish.c",
+      "cluster": "fishing",
+      "kind": "semantic",
+      "text": "Every angler along the shore was hoping the fish would start rising before the light faded."
+    },
+    {
+      "id": "furn.a",
+      "cluster": "furniture",
+      "text": "The grey office chair in the corner was bought at IKEA and assembled over the weekend."
+    },
+    {
+      "id": "furn.b",
+      "cluster": "furniture",
+      "kind": "lexical",
+      "text": "The grey office desk in the corner was bought at IKEA and assembled on a Sunday afternoon."
+    },
+    {
+      "id": "furn.c",
+      "cluster": "furniture",
+      "kind": "semantic",
+      "text": "The bookcase came flat packed in three pieces and took most of a Saturday to assemble."
+    },
+    {
+      "id": "wthr.a",
+      "cluster": "weather",
+      "text": "Heavy rain is expected along the coast tonight, with strong winds arriving before midnight."
+    },
+    {
+      "id": "wthr.b",
+      "cluster": "weather",
+      "kind": "lexical",
+      "text": "Heavy snow is expected across the mountains tonight, with strong winds arriving from the north."
+    },
+    {
+      "id": "wthr.c",
+      "cluster": "weather",
+      "kind": "semantic",
+      "text": "Forecasters warn of a storm rolling in after dark and advise everyone to stay indoors."
+    },
+    {
+      "id": "cook.a",
+      "cluster": "cooking",
+      "text": "Simmer the onions in butter for about ten minutes, then add the garlic and a pinch of salt."
+    },
+    {
+      "id": "cook.b",
+      "cluster": "cooking",
+      "kind": "lexical",
+      "text": "Fry the onions in olive oil for about ten minutes, then add the garlic and a pinch of pepper."
+    },
+    {
+      "id": "cook.c",
+      "cluster": "cooking",
+      "kind": "semantic",
+      "text": "Good cooking rewards slow heat, patience, and tasting the sauce as the seasoning builds."
+    },
+    {
+      "id": "car.a",
+      "cluster": "car",
+      "text": "The mechanic replaced the front brake pads and topped up the oil before the annual inspection."
+    },
+    {
+      "id": "car.b",
+      "cluster": "car",
+      "kind": "lexical",
+      "text": "The mechanic replaced the rear brake discs and changed the oil filter before the annual service."
+    },
+    {
+      "id": "car.c",
+      "cluster": "car",
+      "kind": "semantic",
+      "text": "A worn timing belt and two bald tyres meant the garage kept the vehicle until Thursday."
+    },
+    {
+      "id": "prog.a",
+      "cluster": "programming",
+      "text": "The build failed because a null pointer slipped through an untested branch of the parser."
+    },
+    {
+      "id": "prog.b",
+      "cluster": "programming",
+      "kind": "lexical",
+      "text": "The build broke because an off-by-one error slipped through an untested branch of the compiler."
+    },
+    {
+      "id": "prog.c",
+      "cluster": "programming",
+      "kind": "semantic",
+      "text": "A long session in the debugger finally showed why the unit tests kept crashing at startup."
+    },
+    {
+      "id": "med.a",
+      "cluster": "medicine",
+      "text": "The doctor prescribed antibiotics for the infection and asked me to come back in a week."
+    },
+    {
+      "id": "med.b",
+      "cluster": "medicine",
+      "kind": "lexical",
+      "text": "The doctor prescribed painkillers for the swelling and asked me to come back in a fortnight."
+    },
+    {
+      "id": "med.c",
+      "cluster": "medicine",
+      "kind": "semantic",
+      "text": "The swelling went down once the course of tablets was finished and the fever finally broke."
+    },
+    {
+      "id": "astr.a",
+      "cluster": "astronomy",
+      "text": "The telescope captured a faint spiral galaxy roughly twelve million light years away."
+    },
+    {
+      "id": "astr.b",
+      "cluster": "astronomy",
+      "kind": "lexical",
+      "text": "The telescope captured a faint spiral nebula roughly nine million light years away."
+    },
+    {
+      "id": "astr.c",
+      "cluster": "astronomy",
+      "kind": "semantic",
+      "text": "Astronomers say the faint smudge in that photograph is an entire galaxy far beyond our own."
+    },
+    {
+      "id": "ball.a",
+      "cluster": "football",
+      "text": "The striker scored twice in the second half and the crowd sang until the final whistle."
+    },
+    {
+      "id": "ball.b",
+      "cluster": "football",
+      "kind": "lexical",
+      "text": "The winger scored twice after the break and the crowd sang until the referee blew time."
+    },
+    {
+      "id": "ball.c",
+      "cluster": "football",
+      "kind": "semantic",
+      "text": "Two late goals turned the match completely around and the supporters went home delighted."
+    },
+    {
+      "id": "bank.a",
+      "cluster": "banking",
+      "text": "The bank approved our mortgage application after six weeks of paperwork and two meetings."
+    },
+    {
+      "id": "bank.b",
+      "cluster": "banking",
+      "kind": "lexical",
+      "text": "The bank approved our loan application after five weeks of paperwork and one long meeting."
+    },
+    {
+      "id": "bank.c",
+      "cluster": "banking",
+      "kind": "semantic",
+      "text": "We can finally buy the apartment, although the interest rate ended up higher than we hoped."
+    },
+    {
+      "id": "gard.a",
+      "cluster": "gardening",
+      "text": "I planted roses along the south wall in May and they flowered heavily right through August."
+    },
+    {
+      "id": "gard.b",
+      "cluster": "gardening",
+      "kind": "lexical",
+      "text": "I planted tulips along the south fence in June and they flowered well into early September."
+    },
+    {
+      "id": "gard.c",
+      "cluster": "gardening",
+      "kind": "semantic",
+      "text": "The hedge wants cutting back and the bulbs must go into the border before the month is out."
+    },
+    {
+      "id": "fly.a",
+      "cluster": "flight",
+      "text": "Our flight to Lisbon was delayed four hours because of a technical fault with the aircraft."
+    },
+    {
+      "id": "fly.b",
+      "cluster": "flight",
+      "kind": "lexical",
+      "text": "Our flight to Madrid was delayed three hours because of a technical problem with the plane."
+    },
+    {
+      "id": "fly.c",
+      "cluster": "flight",
+      "kind": "semantic",
+      "text": "We sat at the gate most of the afternoon while the airline tried to find another crew."
+    },
+    {
+      "id": "strikk.a",
+      "cluster": "knitting",
+      "lang": "no",
+      "text": "Hun strikker en ullgenser med fletter og vrangbord, og følger mønsteret nøye rad for rad."
+    },
+    {
+      "id": "strikk.b",
+      "cluster": "knitting",
+      "lang": "no",
+      "kind": "lexical",
+      "text": "Hun strikker en ulljakke med fletter og vrangbord, og følger mønsteret nøye rad for rad."
+    },
+    {
+      "id": "strikk.c",
+      "cluster": "knitting",
+      "lang": "no",
+      "kind": "semantic",
+      "text": "Med runde pinner og mykt garn lager hun et varmt plagg fullt av snoninger og flettverk."
+    },
+    {
+      "id": "schach.a",
+      "cluster": "chess",
+      "lang": "de",
+      "text": "Beim Schachturnier opferte er früh die Dame und gewann die Partie nach vierzig Zügen."
+    },
+    {
+      "id": "schach.b",
+      "cluster": "chess",
+      "lang": "de",
+      "kind": "lexical",
+      "text": "Beim Schachturnier opferte er früh den Läufer und gewann die Partie nach vierzig Zügen."
+    },
+    {
+      "id": "schach.c",
+      "cluster": "chess",
+      "lang": "de",
+      "kind": "semantic",
+      "text": "Am Brett entschied ein mutiges Springermanöver alles; der Gegner gab kurz vor dem Matt auf."
+    },
+    {
+      "id": "baile.a",
+      "cluster": "dance",
+      "lang": "es",
+      "text": "La bailaora de flamenco ensaya cada tarde el zapateado para el espectáculo de Sevilla."
+    },
+    {
+      "id": "baile.b",
+      "cluster": "dance",
+      "lang": "es",
+      "kind": "lexical",
+      "text": "La bailaora de flamenco ensaya cada noche el zapateado para el espectáculo de Sevilla."
+    },
+    {
+      "id": "baile.c",
+      "cluster": "dance",
+      "lang": "es",
+      "kind": "semantic",
+      "text": "Entre palmas y toques de guitarra, la artista pule sus pasos antes de salir al tablao."
+    }
+  ],
+  "prompts": {
+    "_note": [
+      "Which task prompt to exercise, per model that HAS a prompts table. This is",
+      "a SYMMETRIC similarity task -- sentence against sentence, neither one a",
+      "query -- so an asymmetric retrieval prompt is the wrong instrument and",
+      "would make the near/far separation worse for a reason that has nothing to",
+      "do with the runtime. Both names below are read back from the container at",
+      "run time and the checker refuses a name the container does not carry, so",
+      "this table cannot drift away from what is packed.",
+      "",
+      "Deliberately NOT taken from `prompt_default`: that field is advisory",
+      "metadata (tasks/0118) and for embeddinggemma it is 'document', one half of",
+      "an asymmetric retrieval pair. Choosing it here would be the same silent",
+      "default 0118 removed."
+    ],
+    "nomic-embed-text-v1.5": "clustering",
+    "embeddinggemma-300m": "STS"
+  },
+  "multilingual_models": {
+    "_note": [
+      "Models whose semantic gate includes the lang-tagged clusters. A",
+      "model appears here when it CLAIMS multilingual embeddings; the",
+      "six English shipped models are deliberately absent -- see the",
+      "design note above. Consumed by tools/verify_semantics.py."
+    ],
+    "models": [
+      "gte-multilingual-base"
+    ]
+  }
+}

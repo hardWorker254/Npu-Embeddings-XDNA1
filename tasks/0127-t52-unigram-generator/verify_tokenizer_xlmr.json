@@ -1,0 +1,87 @@
+{
+  "kind": "verification",
+  "model": "gte-multilingual-base",
+  "reference": "tools/xlmr_tokenizer_ref.py over XLMRTOK1 blob",
+  "n_total": 343,
+  "n_exact": 343,
+  "agreement": 1.0,
+  "per_category": {
+    "english": {
+      "ok": 30,
+      "total": 30
+    },
+    "norwegian": {
+      "ok": 20,
+      "total": 20
+    },
+    "chinese": {
+      "ok": 20,
+      "total": 20
+    },
+    "japanese": {
+      "ok": 20,
+      "total": 20
+    },
+    "korean": {
+      "ok": 15,
+      "total": 15
+    },
+    "cyrillic": {
+      "ok": 15,
+      "total": 15
+    },
+    "arabic": {
+      "ok": 15,
+      "total": 15
+    },
+    "thai": {
+      "ok": 12,
+      "total": 12
+    },
+    "hindi": {
+      "ok": 10,
+      "total": 10
+    },
+    "hebrew_greek": {
+      "ok": 10,
+      "total": 10
+    },
+    "vietnamese_turkish": {
+      "ok": 13,
+      "total": 13
+    },
+    "emoji": {
+      "ok": 15,
+      "total": 15
+    },
+    "mixed_script": {
+      "ok": 15,
+      "total": 15
+    },
+    "nfkc": {
+      "ok": 30,
+      "total": 30
+    },
+    "whitespace": {
+      "ok": 18,
+      "total": 18
+    },
+    "long": {
+      "ok": 6,
+      "total": 6
+    },
+    "unk": {
+      "ok": 12,
+      "total": 12
+    },
+    "punct_numbers": {
+      "ok": 15,
+      "total": 15
+    },
+    "nfd_decomposed": {
+      "ok": 52,
+      "total": 52
+    }
+  },
+  "mismatches": []
+}

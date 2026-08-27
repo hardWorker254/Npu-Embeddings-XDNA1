@@ -1,14 +1,14 @@
 # CURRENT STATUS
 
-*Last updated: 2026-08-25, after porting the host-side epilogue fusion to the
-bf16/bfp16 datapath in [`tasks/0108`](../tasks/0108-fuse-epilogue-bfp16/TASK.md)
-(1.153-1.340x, bit-identical). Before that: the whole-catalogue re-sweep on the
-adopted datapaths in [`tasks/0105`](../tasks/0105-release-sweep-adopted-datapaths/TASK.md).
-Earlier that session: the docs catch-up in
-[`tasks/0100`](../tasks/0100-docs-catch-up/TASK.md) (int8 headline and golden-gate
-fixes verified against [`0079`](../tasks/0079-m13-int8-why-only-1.1x/TASK.md),
-[`0085`](../tasks/0085-m13-release-sweep/TASK.md),
-[`0094`](../tasks/0094-t32-golden-gate-rows/TASK.md)).*
+*Last updated: 2026-08-27, after the 0.5.0 session (tasks/0123–0141):
+`gte-multilingual-base` shipped as the **seventh model** on the nomic design
+set with a new SentencePiece-Unigram tokenizer family and arch 3; the
+bandwidth roof **measured at 45.5 GB/s on the hardware timebase**
+([`0130`](../tasks/0130-t45-traced-roof/TASK.md)); a **p99 tail gate** joined
+the sweep ([`0132`](../tasks/0132-t51-tail-gate/TASK.md)); and six threads
+closed (T45/T46/T47/T49/T50/T52) with B-reuse re-priced and parked
+([`0131`](../tasks/0131-t48-gate-decision/TASK.md)). The 0.5.0 sweep is
+[`tasks/0141`](../tasks/0141-release-sweep-050/TASK.md).*
 
 > **Six models, and a second architecture on the array.**
 > [`0068`](../tasks/0068-m13-nomic-spike-and-oracle/TASK.md)–[`0071`](../tasks/0071-m13-nomic-shippable/TASK.md)
@@ -157,7 +157,37 @@ fixes verified against [`0079`](../tasks/0079-m13-int8-why-only-1.1x/TASK.md),
 > the *algebra* of vectorised float code is not enough; the intrinsics have to
 > match too.
 
-> **THE 0.4.0 NUMBERS, ON THE DATAPATHS THAT ACTUALLY SHIP, FUSED**
+> **THE 0.5.0 NUMBERS** ([`0141`](../tasks/0141-release-sweep-050/TASK.md):
+> one whole-catalogue sweep, one session, stages accuracy / throughput /
+> interleaved / energy / **tail**; MTEB carried forward bit-identically —
+> nomic verified by hash after the one change touching its path, gte from
+> [`0137`](../tasks/0137-gte-gates/TASK.md)'s own symmetric session).
+> End-to-end wall clock, **not an NPU kernel performance claim** (rule 1).
+>
+> | model | datapath (reported) | NPU seq/s | vs 0.4.0 | NPU/best CPU | J/1k better | worst `1-cos` | p99 tail | MTEB Δ |
+> |---|---|---:|---:|---:|---:|---:|---:|---:|
+> | all-MiniLM-L6-v2 | bfp16 | **1461** | 1.00× | 1.855× | 3.42× | 3.406e-04 | 9.7e-04 | +0.12 / −0.07 |
+> | bge-small-en-v1.5 | bf16 | **630** | 1.00× | 1.589× | 2.64× | 8.348e-06 | 1.2e-05 | −0.10 / **−0.5010** |
+> | bge-base-en-v1.5 | bfp16 | **324** | 1.00× | 2.713× | 4.52× | 2.284e-04 | 3.7e-04 | −0.06 / −0.19 |
+> | bge-large-en-v1.5 | bfp16 | **95.2** | 1.00× | 2.607× | 4.89× | 2.626e-04 | **6.6e-03** (T51 waiver) | +0.13 / −0.01 |
+> | nomic-embed-text-v1.5 | bfp16 | **262** | 1.00× | 3.494× | 6.55× | 1.402e-03 | 1.6e-03 | +0.01 / −0.25 |
+> | embeddinggemma-300m | bfp16 | **181** | 1.01× | 1.271× | 3.72× (carried) | PASS (differential) | 4.2e-04 | +0.16 / −0.02 |
+> | **gte-multilingual-base** | bfp16 | **255** | new | — (see below) | — | 4.608e-04 | 5.2e-04 | **+0.06 / −0.06** |
+>
+> The six carried-over models reproducing 0.4.0 to ±1% **is** the regression
+> check: no array code changed for them. gte's CPU-ratio and energy cells are
+> **deliberately absent** — both need a CPU reference arm, and gte's
+> `trust_remote_code` model is unusable without the 0134/0136 buffer repairs
+> (an unrepaired run is silently position-scrambled), so the NPU figure
+> stands alone and labelled. gemma's energy is carried from 0.4.0: this
+> sweep's gemma NPU energy arm produced a degenerate differential (Δt ≈ 0
+> between low and high — recorded in 0141). Energy ratios move with the CPU
+> side (nomic 4.01× → 6.55× between sweeps): indicative, not constants. The
+> **p99 tail** column is the new instrument — per-model ceilings with an
+> explicit ratchet; bge-large's tail is real and carried as a
+> register-linked waiver, not rounded away.
+
+> **THE 0.4.0 NUMBERS, ON THE DATAPATHS THAT ACTUALLY SHIP, FUSED (historical)**
 > ([`0108`](../tasks/0108-fuse-epilogue-bfp16/TASK.md) for throughput, after
 > [`0104`](../tasks/0104-adopt-bfp16-per-model/TASK.md)'s adoption and
 > [`0105`](../tasks/0105-release-sweep-adopted-datapaths/TASK.md)'s sweep; int8
@@ -178,7 +208,7 @@ fixes verified against [`0079`](../tasks/0079-m13-int8-why-only-1.1x/TASK.md),
 > | `all-MiniLM-L6-v2` | **bfp16** | **1168.8** | 1.265× | 3.406e-04 | 1.885× | 3.10× | +0.12 / −0.07 | PASS |
 > | `bge-small-en-v1.5` | **bf16** | **421.0** | 1.208× | 8.348e-06 | 1.688× | 2.73× | −0.10 / **−0.5010** | **FAIL — why it stays** |
 > | `bge-base-en-v1.5` | **bfp16** | **259.1** | 1.251× | 2.284e-04 | 2.734× | 4.17× | −0.06 / −0.19 | PASS |
-> | **`bge-large-en-v1.5`** | **bfp16** | **75.4** | 1.223× | 2.626e-04 | 2.691× | **4.79×** | +0.13 / −0.01 | PASS |
+> | **`bge-large-en-v1.5`** | **bfp16** | **75.4** | 1.223× | 2.626e-04 ⁹ | 2.691× | **4.79×** | +0.13 / −0.01 | PASS |
 > | `nomic-embed-text-v1.5` | **bfp16** | **210.2** | **1.340×** | 1.402e-03 ⁵ | **3.553×** | 4.01× | +0.01 / −0.25 | PASS |
 > | `embeddinggemma-300m` | **bfp16** | **167.1** ⁶ | 1.153× | 2.315e-04 ⁷ | 1.392× | 3.72× | +0.16 / −0.02 | PASS |
 >
@@ -194,6 +224,18 @@ fixes verified against [`0079`](../tasks/0079-m13-int8-why-only-1.1x/TASK.md),
 > inside the 2e-03 tolerance. ⁶ arch=1 has no `--bench`; corpus-encode harness,
 > and its within-arm spread is **5.2%** against ≤1.1% for the BERT-family rows.
 > ⁷ differential against the host-only path; arch=1 has no HuggingFace golden.
+>
+> ⁹ **THE `1-cos` COLUMN IS A CENTRAL TENDENCY, NOT AN UPPER BOUND**
+> ([`0122`](../tasks/0122-bge-large-short-input-tail/TASK.md), 2026-08-27). Each
+> figure is a mean over a small golden corpus **of sentences**, and at least one
+> model has a tail those sentences cannot see: `bge-large-en-v1.5` measures
+> **2.18e-04 at the median and 2.18e-02 at the worst** over 224 varied texts —
+> a **100×** spread — with **5 of 224 over the 2e-03 tolerance**, every one of
+> them a **single-word** input (`newsletter`, `sermons`, `contact`, `cinema`,
+> `messages`). Sentences and phrases stay within 1.24× of the median, and
+> `bge-base-en-v1.5` on the identical bfp16 datapath has a max/median of 3.6×
+> and zero violations. Read these numbers as "what a sentence typically costs",
+> never as "the worst this model does". → [T51](../research/OPEN-THREADS.md#t51)
 >
 > ⁸ [`0109`](../tasks/0109-fused-ratio-energy/TASK.md), on the fused build,
 > steady state, `\Energy Meter` RAPL counters per
@@ -771,59 +813,43 @@ are rewritten).
 
 ## 9. Next steps, in priority order
 
-The list this section carried through M7–M8 (one-xclbin architecture,
-`.split()`/`.join()` for eltwise, a tokenizer, MTEB, energy) is **all done** —
-see §2 and §"What geometry the array actually wants" in CLAUDE.md. It is
-replaced here with the project's actual current open work, which is
-[`research/OPEN-THREADS.md`](../research/OPEN-THREADS.md) — the authority per
-CLAUDE.md rule 3, not this file. As of this session it holds **9 live
-threads**; the priority order below is this file's own judgement of what to
-chase next, not the register's (the register does not rank).
+The authority on open work is
+[`research/OPEN-THREADS.md`](../research/OPEN-THREADS.md) (CLAUDE.md rule 3),
+which as of 2026-08-27 holds **five live threads** — down from ten at the
+start of the 0.5.0 session, every closure carrying the condition it depends
+on. The priority order below is this file's own judgement, not the
+register's (the register does not rank).
 
-1. **T28 — true phase fusion / device-resident intermediates (T3
-   converges here).** The biggest unclaimed lever in the project (F1). The
-   hang that blocked it is now fixed and a hierarchical 2-hop merge with a
-   real GELU passes at **production tile width**, bf16 output
-   ([`0092`](../tasks/0092-t28-relay-bf16-output/TASK.md), rel_fro 2.510e-03).
-   What is left is not correctness: whether `kernels.mm()`'s MMAC operand
-   order composes with a join's `dims_to_stream`, scaling past this probe's
-   `K=192` to production's `K=1536` across 8 columns (a core has only 2 input
-   channels, so this needs a third hierarchy tier or a different relay
-   strategy), and building a traceable version so a performance number can
-   exist at all.
-2. **T38 — does mem-tile `pad_dimensions` make attention worth folding onto
-   the array?** Unbuilt. [`0043`](../tasks/0043-m9-attention-geometry/TASK.md)/[`0097`](../tasks/0097-t18-t21-t4-measurements/TASK.md)
-   priced the two brackets: today's naive unified geometry taxes the
-   projections 2.229×, but if padding lets attention run at `cols=8` instead
-   of ≤4, the shared geometry only costs 1.289× — "clearly negative" becomes
-   "probably still negative, close enough to be worth an actual build."
-3. **T26 — why bfp16 + bf16-C measures 6.6× *more* accurate than bfp16 +
-   fp32-C.** [`0098`](../tasks/0098-t26-kernel-source/TASK.md) found a
-   specific, evidenced, **unconfirmed** hypothesis by reading the kernel
-   source: the emulated matmul's own rounding-mode fix-up looks like dead
-   code in the compiled object, so its bfp16 quantisation may run under
-   whatever rounding mode a *prior* kernel left on that core. Two ablations
-   are proposed, neither run — see CLAUDE.md trap 2b's addendum.
-4. **T23 — the bfp16-emulation datapath decision.** Emulated bf16 matmul is
-   2.9× the array's plain-bf16 GEMM time; this is an accuracy-vs-speed
-   decision for a human, not a build task.
-5. **T17 — bigger L1 tiles.** Re-priced down for bf16 by T16, then back up
-   again once int8 changed which cost model governs (0080). Worth revisiting
-   now that int8 is traffic-bound.
-6. **T13 — explain the pre-tiled instability**, re-scoped by
-   [`0093`](../tasks/0093-t11-t12-t13-research/TASK.md).
-7. **T9 — `xrt::runlist`**, priced at 0.9% today; low value, cheap to close
-   if anyone wants a clean sweep of the register.
-8. **T34 — arch=1 (EmbeddingGemma) has two items left** after MTEB passed:
-   see the thread for specifics.
+1. **T51 — the bge-large tail's mechanism** (step 2: layer-wise divergence,
+   now scoped to profile *depth*, since [`0129`](../tasks/0129-t51-int8-tail/TASK.md)
+   exonerated tiling and the number format — the same five words top the
+   tail on two unrelated datapaths). The *instrument* debt is paid: the p99
+   tail gate ships in the sweep. What is left is understanding, not
+   protection.
+2. **T43 — the byte-level BPE tokenizer**, still the gate on the
+   ModernBERT/Qwen/Mistral generation. The Unigram build
+   ([T52](../research/CLOSED-THREADS.md#t52), filed and closed in a day at
+   343/343 byte-exactness twice over) is the template: generator, C++ port,
+   byte-exact harness. Needs no NPU.
+3. **T44 — which encoder joins next.** gte moved from candidate to shipped;
+   the four byte-BPE candidates stand priced, all blocked on T43.
+4. **T48 — B-reuse**, measured at **1.72× array / 1.31× e2e** on bge-large
+   ([`0131`](../tasks/0131-t48-gate-decision/TASK.md)) and parked: the
+   channel census shows the cheap wiring does not exist, so the build is the
+   cascade C-collapse (vectorised `cascade_mm`) or a hierarchical C re-join
+   — fund it as a project, not a session. A build must re-run
+   [`0139`](../tasks/0139-t46-memtile-leg/TASK.md)'s port-coverage analysis:
+   B-reuse is exactly the change that could re-bind the mem-tile leg.
+5. **T42 — attention on the array for long sequences**, priced 1.65–1.95×
+   at seq 512, trigger unchanged: only if long-sequence traffic becomes
+   real. gte is now the second model the seq-256/512 sets serve, which is
+   the demand signal this trigger watches.
 
-Everything else this session touched (T4, T5, T6, T10, T15, T18, T21, T32)
-is **CLOSED** — see
-[`research/CLOSED-THREADS.md`](../research/CLOSED-THREADS.md) for how, per
-CLAUDE.md rule 3b, because the refuted hypotheses along the way are the part
-worth keeping.
-
----
+Also queued as evidence-to-gate promotions: the multilingual STS baseline
+([`0137`](../tasks/0137-gte-gates/TASK.md), 29 language subsets) becomes a
+gate in 0.6.0; and `verify_semantics.py`/`verify_tail.py` still default to
+the six-model built-in list — gte joins their defaults at the next canonical
+re-cut of those reports.
 
 ## 10. The traps that will cost you an hour each
 

@@ -61,6 +61,13 @@ add_executable(npuembed
   # not itself EmbeddingGemma-specific.
   src/json_min.cpp
   src/gemma_tokenizer_gen.cpp
+  # arch=3 (XLM-R family, T52, tasks/0127/0133): SentencePiece Unigram
+  # tokenizer + the C++ port of tools/gen_xlmr_tokenizer_table.py. Both
+  # XRT-free like the gemma pair above; not yet wired into main.cpp (the
+  # arch-3 integration is a later task) -- compiled in so the packer-side
+  # generator ships with the binary, same rationale as gemma's.
+  src/tokenizer_xlmr.cpp
+  src/xlmr_tokenizer_gen.cpp
 )
 target_include_directories(npuembed PRIVATE include "${XRT_INCLUDE_DIR}")
 if(DEFINED BOOST_ROOT AND EXISTS "${BOOST_ROOT}")
@@ -119,4 +126,20 @@ if(MSVC)
   # XRT headers use std::min/max; the Windows macros break them. XRT's own
   # headers also define NOMINMAX, so let theirs win rather than warning.
   target_compile_definitions(npuembed PRIVATE WIN32_LEAN_AND_MEAN)
+endif()
+
+# Standalone verification CLI for the XLM-R Unigram tokenizer (T52,
+# tasks/0133). tokenizer_gemma_cli.exe was compiled by hand with cl.exe in
+# 0061 and never got a target; this one gets a real target so
+# tools/verify_tokenizer_xlmr.py --cli has a reproducible build. XRT-free
+# on purpose: it must build and run without the NPU runtime.
+add_executable(xlmr_tok_cli
+  src/tokenizer_xlmr_cli.cpp
+  src/tokenizer_xlmr.cpp
+  src/xlmr_tokenizer_gen.cpp
+  src/json_min.cpp
+)
+target_include_directories(xlmr_tok_cli PRIVATE include)
+if(MSVC)
+  target_compile_options(xlmr_tok_cli PRIVATE /W3 /EHsc /Zc:__cplusplus /O2)
 endif()

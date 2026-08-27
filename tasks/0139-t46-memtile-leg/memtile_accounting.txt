@@ -1,0 +1,2 @@
+cols=4: DRAM   453.0 MB | memtile aggregate   906.0 MB = 2.00x DRAM | per-mem-tile demand at measured 9970 us:  22.7 GB/s
+cols=8: DRAM   302.0 MB | memtile aggregate   755.0 MB = 2.50x DRAM | per-mem-tile demand at measured 6782 us:  13.9 GB/s

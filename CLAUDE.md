@@ -45,8 +45,8 @@ tried and failed, and how to build and run the whole thing — see
    leave it only as ANSWERED, RETIRED or SUPERSEDED, with a pointer.
 
    **It is two files now (2026-08-23).** `OPEN-THREADS.md` holds only what is
-   open — **1 thread, 163 lines as of 2026-08-26**, down from 20/765 when the
-   split was made. Answered, retired and superseded threads live
+   open — ten threads as of 2026-08-27 (the count moves; the file's own header
+   is the authority, this sentence is not). Answered, retired and superseded threads live
    in [`research/CLOSED-THREADS.md`](research/CLOSED-THREADS.md), **verbatim**,
    because rule 3b's point is that the refuted claims and the measurements that
    killed them are the valuable part. They were 64% of the register, and a file
@@ -375,13 +375,16 @@ silent.
 
 ## Current state
 
-**Six models run end to end on the NPU, in C++, no Python in the process.**
+**Seven models run end to end on the NPU, in C++, no Python in the process —
+the seventh (`gte-multilingual-base`, 0.5.0) multilingual, on arch 3 and a
+third tokenizer family (SentencePiece Unigram), serving from the SAME design
+set as nomic because their GEMM geometry matches bit for bit.**
 M0–M9 and M12–M13 are done: the tokenizers ship, the MTEB gate passes, energy
 is measured, and the runtime reads its geometry from the container rather than
 having it compiled in.
 
 **The datapath is now a per-model decision, and the runtime states which one it
-ran.** Five of six models run the **bfp16-emulated MMAC with bf16 C**;
+ran.** Six of seven models run the **bfp16-emulated MMAC with bf16 C**;
 `bge-small-en-v1.5` alone stays on plain bf16, having failed the MTEB gate at
 −0.5010 against the −0.5 line, bit-reproducibly. The user's rule is *adopt
 wherever MTEB passes*
@@ -414,6 +417,7 @@ but the cheap host-side half of it is now collected.**
 | `bge-large-en-v1.5` | 0 | 1024 | 24 | highest quality; `tile_n` 32 at bf16, 64 at int8 |
 | `nomic-embed-text-v1.5` | 2 | 768 | 12 | RoPE + gated SwiGLU; needs a task prompt |
 | `embeddinggemma-300m` | 1 | 768 | 24 | MQA + RoPE + GeGLU; gated repo, needs a token |
+| `gte-multilingual-base` | 3 | 768 | 12 | multilingual (XLM-R Unigram); NTK-RoPE (`rope_inv_freq` is DATA — no single theta expresses it), gated GELU, real biases; runs on nomic's design set |
 
 **Those six are built in; more can be added without recompiling.**
 `npuembeddings add <org/model> [<sha256>]` reads a HuggingFace repository's own
@@ -580,17 +584,74 @@ task is not evidence that a thread is live; the register is. **How** something
 was settled is in [`research/CLOSED-THREADS.md`](research/CLOSED-THREADS.md),
 and `tools/check_register.py` checks the two against the task logs.
 
-**As of 2026-08-26 there are THREE live threads**, and all three are design
-tasks with a price and an explicit trigger rather than open questions about the
-hardware:
+**As of 2026-08-27 there are FIVE live threads.** Four are design tasks with
+a price and an explicit trigger rather than open questions about the hardware:
 [T42](research/OPEN-THREADS.md#t42) — fold attention onto the array for
 *long-sequence* designs; [T43](research/OPEN-THREADS.md#t43) — the missing
 byte-level BPE tokenizer, which is the gate on the whole ModernBERT/Qwen/Mistral
 generation of encoders; and [T44](research/OPEN-THREADS.md#t44) — which encoder
-joins the catalogue next, with four candidates already priced against this
-project's own geometry gates. The other 43 are closed. The next piece of work
-still comes from `docs/CURRENT_STATUS.md` or from the user as often as from
-here.
+joins the catalogue next, where the fifth candidate,
+`gte-multilingual-base`, needed **no new array design at all** and is now
+**shipped as the 7th catalogue model** (0.5.0: oracle 0134, container 0135,
+runtime 0136, gates all-PASS 0137, hub + byte-identical C++ packer mirror
+0138). The Unigram tokenizer that gated it, T52, was **filed and closed the
+same day** — built twice, byte-exact against HuggingFace everywhere
+([T52](research/CLOSED-THREADS.md#t52)).
+
+**One more came from one task**,
+[`0120`](tasks/0120-roofline-analytic/TASK.md)'s analytic roofline, which is
+what a new instrument does — it gives previously uncoordinated questions a
+coordinate system: [T48](research/OPEN-THREADS.md#t48) — **B-reuse, now re-priced on measured
+numbers at 1.72× array / 1.31× e2e on bge-large** — a priced design task
+whose build awaits a funded cascade C-collapse: the channel census showed
+the cheap version (a fifth fifo) does not exist
+([`0126`](tasks/0126-t48-channel-recensus/TASK.md),
+[`0131`](tasks/0131-t48-gate-decision/TASK.md)). **T45 and T46 are closed,
+and the memory system is measured now**: the roof is **45.5 GB/s on the
+hardware timebase, wall clock agreeing to 0.4%** — four instruments concur
+([`0128`](tasks/0128-t45-m-sweep/TASK.md),
+[`0130`](tasks/0130-t45-traced-roof/TASK.md),
+[T45](research/CLOSED-THREADS.md#t45)) — and the memtile↔L1 leg is
+**two-thirds idle while LOCK_STALL binds**, so the DRAM leg is the one that
+matters ([`0139`](tasks/0139-t46-memtile-leg/TASK.md),
+[T46](research/CLOSED-THREADS.md#t46)). Three of
+that day's filings are already **closed** by the 0.5.0 plan's first phases:
+T49 (`check_register.py` now fails on an unacted bold REOPENED annotation,
+and closures name the condition they depend on —
+[`0123`](tasks/0123-register-hygiene/TASK.md),
+[T49](research/CLOSED-THREADS.md#t49)); T47 (`--probe-streams` reads
+`a_elem_bytes`/`tile_n`/`cols` from the loaded design and refuses pre-field
+exports; the audit found no current doc quoting an inflated figure, and the
+corrected nine-set table corroborates the ~44 GB/s roof per-dispatch —
+[`0124`](tasks/0124-t47-t50-runtime-fixes/TASK.md),
+[`0125`](tasks/0125-t47-gbs-audit/TASK.md),
+[T47](research/CLOSED-THREADS.md#t47)); and T50 (`--cpu` on the BERT family
+now refuses instead of silently running the NPU, and the flag form's
+no-`--artifacts` fallback to the stale per-op set is gone — same rebuild,
+[T50](research/CLOSED-THREADS.md#t50)). The other 49 are closed. The next piece of work still comes from
+`docs/CURRENT_STATUS.md` or from the user as often as from here.
+
+**[T51](research/OPEN-THREADS.md#t51) is the one to read first.**
+[`0122`](tasks/0122-bge-large-short-input-tail/TASK.md) found that
+`bge-large-en-v1.5` measures **2.18e-04 at the median and 2.18e-02 at the
+worst** over 224 varied texts — a **100× tail**, entirely in **single-word**
+inputs, with 5 of 224 over the 2e-03 gate. `bge-base` on the identical bfp16
+datapath has a 3.6× spread and none. Two mechanisms were tested and refuted
+(cancellation; bfp16 block outliers) and the cause is unknown. **The durable
+lesson is the methodology**: `1-cos`, MTEB and the semantic gate all pass
+bge-large, because every accuracy instrument this project owns reports a
+central tendency and **none looks at a tail**. Never quote a `1-cos` figure
+from `docs/CURRENT_STATUS.md` as an upper bound — it is a mean over a golden
+corpus of sentences. It was found because a user brought a reference vector
+from outside, the first check here with no shared code lineage with us at all.
+
+**And there is a semantic gate now** ([`0121`](tasks/0121-semantic-gate/TASK.md)):
+`python tools/verify_semantics.py` asks whether the vectors *mean* anything —
+12 clusters of paraphrases, and every sentence's own partner must be its nearest
+neighbour. No tolerance; the gate is a ranking. It is **stdlib only**, so unlike
+every other accuracy gate it runs against a cold dist zip with nothing
+installed, and it records which datapath produced the vectors it validated. All
+six models pass.
 
 **Where the history is.** [`docs/history.md`](docs/history.md) holds the dated
 update blocks that used to live here — 1,027 lines of them, moved verbatim in

@@ -1,0 +1,241 @@
+﻿cpu_load_before: 4%
+
+===== all-MiniLM-L6-v2  /  artifacts_minilm_bfp16 =====
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      all-MiniLM-L6-v2: 78 tensors, 69.00 MB, checkpoint 53aa51172d142c89
+  shape      sentence-transformers/all-MiniLM-L6-v2: 6 layers, hidden 384, 12 heads x 32, ffn 1536, mean pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 6 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 6 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 13 fewer NPU dispatches
+  bo-align   last data buffer aligned to 65536 B
+  weights    21.23 MB staged on the device once, not per call
+
+  probe-streams -- 30 repeats, no host work, A/B bf16, C bf16, tile_n 48 x cols 8
+    stream          M      K      N      GMAC        MB    us/disp   GMAC/ms      GB/s
+    qkv          8192    384   1152      3.62      66.1       1507      2.40      43.8
+    attn_out     8192    384    384      1.21      22.0        717      1.68      30.7
+    ffn_up       8192    384   1536      4.83      88.1       1938      2.49      45.5
+    ffn_down     8192   1536    384      4.83      69.2       2227      2.17      31.1
+
+
+    Read the LAST TWO COLUMNS. If GMAC/ms is flat across shapes the design is compute-bound; if GB/s is flat it is traffic-bound; if neither, it is something we have not modelled (OPEN-THREADS T1).
+
+===== bge-small-en-v1.5  /  artifacts_small_bf16 =====
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-small-en-v1.5: 150 tensors, 90.48 MB, checkpoint 3c9f31665447c891
+  shape      BAAI/bge-small-en-v1.5: 12 layers, hidden 384, 12 heads x 32, ffn 1536, CLS pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bf16 MMAC, C as fp32
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 32768 B
+  weights    42.47 MB staged on the device once, not per call
+
+  probe-streams -- 30 repeats, no host work, A/B bf16, C fp32, tile_n 48 x cols 8
+    stream          M      K      N      GMAC        MB    us/disp   GMAC/ms      GB/s
+    qkv          8192    384   1152      3.62      84.9       3373      1.07      25.2
+    attn_out     8192    384    384      1.21      28.3       1887      0.64      15.0
+    ffn_up       8192    384   1536      4.83     113.2       4293      1.13      26.4
+    ffn_down     8192   1536    384      4.83      75.5       4399      1.10      17.2
+
+
+    Read the LAST TWO COLUMNS. If GMAC/ms is flat across shapes the design is compute-bound; if GB/s is flat it is traffic-bound; if neither, it is something we have not modelled (OPEN-THREADS T1).
+
+===== bge-base-en-v1.5  /  artifacts_base_bfp16 =====
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-base-en-v1.5: 150 tensors, 265.26 MB, checkpoint c7c1988aae201f80
+  shape      BAAI/bge-base-en-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, CLS pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 262144 B
+  weights    169.87 MB staged on the device once, not per call
+
+  probe-streams -- 30 repeats, no host work, A/B bf16, C bf16, tile_n 48 x cols 8
+    stream          M      K      N      GMAC        MB    us/disp   GMAC/ms      GB/s
+    qkv          8192    768   2304     14.50     226.5       5017      2.89      45.1
+    attn_out     8192    768    768      4.83      75.5       2296      2.10      32.9
+    ffn_up       8192    768   3072     19.33     302.0       6782      2.85      44.5
+    ffn_down     8192   3072    768     19.33     264.2       6670      2.90      39.6
+
+
+    Read the LAST TWO COLUMNS. If GMAC/ms is flat across shapes the design is compute-bound; if GB/s is flat it is traffic-bound; if neither, it is something we have not modelled (OPEN-THREADS T1).
+
+===== bge-large-en-v1.5  /  artifacts_large_bfp16 =====
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-large-en-v1.5: 294 tensors, 731.57 MB, checkpoint 45e1954914e29bd7
+  shape      BAAI/bge-large-en-v1.5: 24 layers, hidden 1024, 16 heads x 64, ffn 4096, CLS pooling
+  designs    ONE xclbin, 4 streams (1 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 24 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 24 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 49 fewer NPU dispatches
+  bo-align   last data buffer aligned to 131072 B
+  weights    603.98 MB staged on the device once, not per call
+
+  probe-streams -- 30 repeats, no host work, A/B bf16, C bf16, tile_n 32 x cols 8
+    stream          M      K      N      GMAC        MB    us/disp   GMAC/ms      GB/s
+    qkv          8192   1024   3072     25.77     453.0      10308      2.50      43.9
+    attn_out     8192   1024   1024      8.59     151.0       4155      2.07      36.3
+    ffn_up       8192   1024   4096     34.36     604.0      13638      2.52      44.3
+    ffn_down     8192   4096   1024     34.36     553.6      12985      2.65      42.6
+
+
+    Read the LAST TWO COLUMNS. If GMAC/ms is flat across shapes the design is compute-bound; if GB/s is flat it is traffic-bound; if neither, it is something we have not modelled (OPEN-THREADS T1).
+
+===== nomic-embed-text-v1.5  /  artifacts_nomic_bfp16 =====
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      nomic-embed-text-v1.5: 150 tensors, 322.05 MB, checkpoint 9e7d262b1fe5ea35
+  shape      nomic-ai/nomic-embed-text-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, mean pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 7e00b57955e108fe9d8e9419f5828a0c7e650858
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 2097152 B (>= 2 MB)
+  weights    226.49 MB staged on the device once, not per call
+
+  probe-streams -- 30 repeats, no host work, A/B bf16, C bf16, tile_n 48 x cols 8
+    stream          M      K      N      GMAC        MB    us/disp   GMAC/ms      GB/s
+    qkv          8192    768   2304     14.50     226.5       5098      2.84      44.4
+    attn_out     8192    768    768      4.83      75.5       2344      2.06      32.2
+    ffn_up       8192    768   6144     38.65     604.0      12926      2.99      46.7
+    ffn_down     8192   3072    768     19.33     264.2       6447      3.00      41.0
+
+
+    Read the LAST TWO COLUMNS. If GMAC/ms is flat across shapes the design is compute-bound; if GB/s is flat it is traffic-bound; if neither, it is something we have not modelled (OPEN-THREADS T1).
+
+===== all-MiniLM-L6-v2.int8  /  artifacts_int8c_mini =====
+  fixtures   all-MiniLM-L6-v2 (matched by checkpoint sha, not by name)
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      all-MiniLM-L6-v2.int8: 126 tensors, 58.65 MB, checkpoint 53aa51172d142c89
+  shape      sentence-transformers/all-MiniLM-L6-v2: 6 layers, hidden 384, 12 heads x 32, ffn 1536, mean pooling
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   UNRECORDED (design predates tasks/0104), C as bf16
+  toolchain  UNRECORDED (design predates tasks/0106)
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      4, 16, 32, 128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 6 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 6 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 13 fewer NPU dispatches
+  bo-align   last data buffer aligned to 65536 B
+  weights    10.62 MB staged on the device once, not per call
+
+  probe-streams -- 30 repeats, no host work, A/B i8, C bf16, tile_n 48 x cols 8
+    stream          M      K      N      GMAC        MB    us/disp   GMAC/ms      GB/s
+    qkv          8192    384   1152      3.62      42.5       1195      3.03      35.5
+    attn_out     8192    384    384      1.21      14.2        640      1.89      22.1
+    ffn_up       8192    384   1536      4.83      56.6       1559      3.10      36.3
+    ffn_down     8192   1536    384      4.83      37.7       1195      4.04      31.6
+
+
+    Read the LAST TWO COLUMNS. If GMAC/ms is flat across shapes the design is compute-bound; if GB/s is flat it is traffic-bound; if neither, it is something we have not modelled (OPEN-THREADS T1).
+
+===== bge-base-en-v1.5.int8  /  artifacts_int8c_base =====
+  fixtures   bge-base-en-v1.5 (matched by checkpoint sha, not by name)
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-base-en-v1.5.int8: 246 tensors, 181.01 MB, checkpoint c7c1988aae201f80
+  shape      BAAI/bge-base-en-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, CLS pooling
+  designs    ONE xclbin, 4 streams (1 batch tiers), one hw_context
+  datapath   UNRECORDED (design predates tasks/0104), C as bf16
+  toolchain  UNRECORDED (design predates tasks/0106)
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 65536 B
+  weights    84.93 MB staged on the device once, not per call
+
+  probe-streams -- 30 repeats, no host work, A/B i8, C bf16, tile_n 48 x cols 8
+    stream          M      K      N      GMAC        MB    us/disp   GMAC/ms      GB/s
+    qkv          8192    768   2304     14.50     132.1       3679      3.94      35.9
+    attn_out     8192    768    768      4.83      44.0       1701      2.84      25.9
+    ffn_up       8192    768   3072     19.33     176.2       4928      3.92      35.7
+    ffn_down     8192   3072    768     19.33     138.4       4301      4.49      32.2
+
+
+    Read the LAST TWO COLUMNS. If GMAC/ms is flat across shapes the design is compute-bound; if GB/s is flat it is traffic-bound; if neither, it is something we have not modelled (OPEN-THREADS T1).
+
+===== bge-large-en-v1.5.int8n64  /  artifacts_int8c_large_n64 =====
+  fixtures   bge-large-en-v1.5 (matched by checkpoint sha, not by name)
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      bge-large-en-v1.5.int8n64: 486 tensors, 431.16 MB, checkpoint 45e1954914e29bd7
+  shape      BAAI/bge-large-en-v1.5: 24 layers, hidden 1024, 16 heads x 64, ffn 4096, CLS pooling
+  designs    ONE xclbin, 4 streams (1 batch tiers), one hw_context
+  datapath   UNRECORDED (design predates tasks/0104), C as bf16
+  toolchain  UNRECORDED (design predates tasks/0106)
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 24 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 24 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 49 fewer NPU dispatches
+  bo-align   last data buffer aligned to 262144 B
+  weights    301.99 MB staged on the device once, not per call
+
+  probe-streams -- 30 repeats, no host work, A/B i8, C bf16, tile_n 64 x cols 8
+    stream          M      K      N      GMAC        MB    us/disp   GMAC/ms      GB/s
+    qkv          8192   1024   3072     25.77     201.3       5069      5.08      39.7
+    attn_out     8192   1024   1024      8.59      67.1       2383      3.60      28.2
+    ffn_up       8192   1024   4096     34.36     268.4       6579      5.22      40.8
+    ffn_down     8192   4096   1024     34.36     218.1       5845      5.88      37.3
+
+
+    Read the LAST TWO COLUMNS. If GMAC/ms is flat across shapes the design is compute-bound; if GB/s is flat it is traffic-bound; if neither, it is something we have not modelled (OPEN-THREADS T1).
+
+===== nomic-embed-text-v1.5.int8  /  artifacts_int8c_nomic =====
+  fixtures   nomic-embed-text-v1.5 (matched by checkpoint sha, not by name)
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      nomic-embed-text-v1.5.int8: 246 tensors, 209.64 MB, checkpoint 9e7d262b1fe5ea35
+  shape      nomic-ai/nomic-embed-text-v1.5: 12 layers, hidden 768, 12 heads x 64, ffn 3072, mean pooling
+  designs    ONE xclbin, 4 streams (1 batch tiers), one hw_context
+  datapath   UNRECORDED (design predates tasks/0104), C as bf16
+  toolchain  UNRECORDED (design predates tasks/0106)
+  shape      batch 128 x seq 64  (M = 8192)
+  tiers      128  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 131072 B
+  weights    113.25 MB staged on the device once, not per call
+
+  probe-streams -- 30 repeats, no host work, A/B i8, C bf16, tile_n 48 x cols 8
+    stream          M      K      N      GMAC        MB    us/disp   GMAC/ms      GB/s
+    qkv          8192    768   2304     14.50     132.1       3710      3.91      35.6
+    attn_out     8192    768    768      4.83      44.0       1221      3.96      36.1
+    ffn_up       8192    768   6144     38.65     352.3       9368      4.13      37.6
+    ffn_down     8192   3072    768     19.33     138.4       4095      4.72      33.8
+
+
+    Read the LAST TWO COLUMNS. If GMAC/ms is flat across shapes the design is compute-bound; if GB/s is flat it is traffic-bound; if neither, it is something we have not modelled (OPEN-THREADS T1).
+
+cpu_load_after: 1%

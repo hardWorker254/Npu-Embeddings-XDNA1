@@ -13,6 +13,9 @@ have said so ran to 308 lines. `tools/check_register.py` now checks for exactly
 that.
 
 A thread leaves this file only by being reopened — with a pointer, and a reason.
+**A closure names the condition it depends on** (T49, check 2): if the reason a
+thread closed can expire — a datapath not adopted, a host share, a seq length —
+the entry says so in one line, so a reader can tell whether it still holds.
 
 <a id="t30"></a>
 ### T30 — The C-drain guard is half-wired, and every shipped model is one step from it · **ANSWERED 2026-08-21 (found and fixed same day)**
@@ -244,6 +247,16 @@ about what the array can express, not about B.
 > tiles 6/6 in, with the C join spending the budget. So this is now a live
 > lever behind a real hardware wall, not a dead one. Note the C join is
 > *cheaper* since 0080 narrowed C, which is the first thing to re-census.
+
+> **SUPERSEDED by [T48](OPEN-THREADS.md#t48), 2026-08-27.** The reopening above
+> was scoped to int8. Since [`0104`](../tasks/0104-adopt-bfp16-per-model/TASK.md)
+> the *default* datapath is bfp16 on five of six models, where **B is 46–52% of
+> DDR traffic** — the largest single term on every dispatch —
+> and [`0120`](../tasks/0120-roofline-analytic/TASK.md) prices B-reuse at
+> **1.80–2.02× array / 1.18–1.34× end to end** from geometry alone. The
+> annotation above was also never acted on: this thread stayed in the *closed*
+> file while reading REOPENED, which is [T49](#t49)'s first
+> instance.
 
 <a id="t29"></a>
 ### T29 — EmbeddingGemma-300M: does the tile_n=16 tax rule it out? · **ANSWERED 2026-08-22** · NO — and the tax itself was avoidable. It runs on the array at ~133 seq/s.
@@ -1119,6 +1132,18 @@ arithmetic — four to six separate streaming passes over a 33.5 MB activation
 tensor between two GEMMs, ≈17 GB per encode.
 
 **Successor: [T37](#t37).** The byte-lever question has moved off the array.
+
+> **PREMISE EXPIRED — see [T48](OPEN-THREADS.md#t48), 2026-08-27.** This thread
+> is closed *"for int8, which replaced bfp16 as the fast datapath"*, and its
+> reasoning rests on the sentence above: *"bfp16 was never adopted (T23 is an
+> accuracy decision nobody took)."* That was true when written.
+> [`0103`](../tasks/0103-t23-bfp16-all-models/TASK.md) and
+> [`0104`](../tasks/0104-adopt-bfp16-per-model/TASK.md) then took the decision,
+> and **0.4.0 ships bfp16 on five of six models with int8 behind a flag** — the
+> exact reverse. The levers priced above were priced on int8 traffic, whose
+> composition differs from bfp16's. Nothing here is deleted or rewritten: the
+> reasoning was sound for the configuration it was written against, and the
+> class of failure is [T49](#t49).
 
 <a id="t37"></a>
 ### T37 — The host epilogue chain is four passes over one tensor · **BOTH CHAINS FUSED 2026-08-22** ([`0082`](../tasks/0082-m13-fused-ffn-epilogue/TASK.md)) · attention is what is left
@@ -3732,3 +3757,452 @@ back to dominate. [`0113`](../tasks/0113-t40-seq512-close/TASK.md) measured
 exactly that at seq 512 (host 75%, attention alone above the array) — but there
 the dominant host work is *attention*, not the FFN leg this relay addresses, so
 the lever is [T42](OPEN-THREADS.md#t42), not this one.
+
+<a id="t49"></a>
+### T49 — Nothing detects a closed thread whose closing premise expired · **ANSWERED 2026-08-27** · check 1 is in `check_register.py`; check 2 resolved editorially
+The generic form of [T48](OPEN-THREADS.md#t48), and the third distinct failure mode this
+register has produced.
+
+The first two are on record: a live question sitting unread after its blocker
+went away ([`0044`](../tasks/0044-m9-optimisation-sweep/TASK.md), twice), and a
+thread misleading its own reader by running to 308 lines without naming the task
+that had already built the thing it still called open — which is what produced
+`tools/check_register.py`. **This is the third**: a thread that left the register
+*correctly*, by the rules, with a pointer — and whose closing argument stopped
+being true afterwards, because this project changed its own configuration.
+
+Two instances, both found by [`0120`](../tasks/0120-roofline-analytic/TASK.md) §4b:
+
+* **[T27](#t27)** closed on *"bfp16 was never adopted"*.
+  Adopted five tasks later
+  ([`0104`](../tasks/0104-adopt-bfp16-per-model/TASK.md)).
+* **[T2](#t2)** carries an in-place block reading *"REOPENED
+  for the int8 datapath, 2026-08-22"* and **never moved back** to this file.
+  `CLAUDE.md` has stated "three live threads" ever since.
+
+**Why the existing check cannot catch it.** `tools/check_register.py` matches a
+task's **title** against the threads and asks whether the thread links back.
+That catches work done and not recorded. Premise decay is the opposite shape:
+the thread is internally consistent and its *world* moved.
+
+**Two candidate checks, cheapest first.**
+
+1. **A closed thread whose body contains "REOPENED" with no counterpart in
+   `OPEN-THREADS.md`.** Trivial, exact, no false positives by construction — and
+   it would have caught T2 on the day the annotation was written.
+2. **A closed thread naming a configuration `design.json` no longer matches.**
+   T27's own title says *"which replaced bfp16 as the fast datapath"* while five
+   of six shipped designs carry `emulate_bfp16: true`. Grepping closed threads
+   for `a_dtype`/`emulate_bfp16` claims against the shipped design files is more
+   work, and would have caught T27.
+
+Check 1 is worth writing regardless. Check 2 is worth **scoping before
+writing** — the honest fix may be editorial rather than mechanical: *a closed
+thread should name the condition its closure depends on*, so a reader sees in
+one line whether it still holds.
+
+**Trigger**: before the next release sweep. Rule 3 already says
+`check_register.py` runs then and exits non-zero.
+
+> **ANSWERED 2026-08-27
+> ([`0123`](../tasks/0123-register-hygiene/TASK.md)).** Check 1 is built:
+> `tools/check_register.py` now fails on a closed thread carrying a bold
+> REOPENED annotation that neither has a section back in `OPEN-THREADS.md` nor a
+> later `SUPERSEDED by [Tnn]` block after the annotation. Proven on a planted
+> copy of this file with T2's superseding block removed — it fires, exactly as
+> it would have on the day T2's annotation was written. The bold marker is the
+> trigger on purpose, so prose that merely mentions the word — this very
+> paragraph — cannot false-positive.
+>
+> Check 2 was scoped and resolved **editorially, not mechanically**, as this
+> thread itself suspected: grepping closed threads for `a_dtype` /
+> `emulate_bfp16` claims against shipped `design.json` files would catch only
+> the datapath flavour of premise decay while missing every other kind (T27's
+> premise was a *decision* not a config field until 0104 made it one). The
+> durable fix is the sentence now in this file's preamble: **a closure names
+> the condition it depends on**, so a reader — and a future grep — sees in one
+> line whether it still holds. Enforcement stays with the release-sweep
+> register check plus the reader; a mechanical check with a false-negative
+> guarantee would have been worse than none.
+
+<a id="t47"></a>
+### T47 — `--probe-streams` and the roofline disagree about bytes, and the tool is the one that is wrong · **ANSWERED 2026-08-27** · fixed, rebuilt, and every shipped set re-probed
+Found by [`0120`](../tasks/0120-roofline-analytic/TASK.md) §4a while making the
+two agree. `runtime/src/main.cpp:6484` computes the same traffic quantity as
+`tools/roofline.py` with **two `design.json` fields hardcoded as constants**:
+
+| hardcoded | true value | which shipped design breaks it |
+|---|---|---|
+| `2` as the A/B element size | 1 under int8 | every `--int8` container |
+| `48.0 * 8.0` as `tile_n * cols` | 32·8 at bf16 bge-large, 64·8 at int8 bge-large ([`0081`](../tasks/0081-m13-int8-everywhere/TASK.md)) | `large_bfp16`, `bge-large-en-v1.5.int8n64.npue` |
+
+**Measured effect on the one table audited**
+([`0097`](../tasks/0097-t18-t21-t4-measurements/TASK.md) t21, MiniLM int8): the
+`GB/s` column read 56.5 / 35.9 / 57.4 / **58.5** and should read
+35.9 / 22.8 / 36.8 / **31.7**. That is **1.57× to 1.85×**, and *differentially*
+— C is counted correctly and C's share varies by shape, so the error is largest
+exactly where C is smallest. The printed column made three of four shapes look
+flat, which is the tool's own stated signature for "traffic-bound".
+
+**The conclusion t21 drew survives** — `GMAC/s` still spreads 2.1× against
+bandwidth's 1.16× — so nothing needs re-deciding. The number was wrong and the
+flatness it displayed was partly an artifact.
+
+**Deliberately not fixed in 0120**, so the two implementations can be diffed
+rather than silently reconciled. **Two things are open, not one**: the fix
+(~5 lines, reading the operand dtype out of the design the runtime has already
+loaded, exactly as it already reads `c_elem_bytes`, plus a rebuild), and the
+**audit** — 0120 checked t21 line by line and nothing else. Any published
+`GB/s` from an int8 or bge-large probe is suspect until someone looks.
+
+**Trigger**: before the next time a `GB/s` figure is quoted anywhere, and before
+[T45](#t45) — a traced session that re-runs `--probe-streams` should not print a
+column known to be wrong.
+
+> **ANSWERED 2026-08-27
+> ([`0124`](../tasks/0124-t47-t50-runtime-fixes/TASK.md) fix,
+> [`0125`](../tasks/0125-t47-gbs-audit/TASK.md) audit).** `DesignInfo` now
+> carries `tile_n`/`cols` read from design.json, the probe uses
+> `a_elem_bytes` and refuses a design that predates the fields, and the
+> banner states the tiling it used. The audit found **no current doc quotes
+> a probe-streams `GB/s`** — the inflated figures live in task logs (kept,
+> rule 3b) and this thread's own text — and produced the corrected
+> nine-set reference table. The fixed binary reproduces `0097` t21's
+> hand-corrected MiniLM int8 numbers to ~2% (35.5/22.1/36.3/31.6 vs
+> 35.9/22.8/36.8/31.7), and the bfp16 large shapes cluster at
+> **43.8–46.7 GB/s** — an independent per-dispatch corroboration of the
+> ~44 GB/s roof, still on the host-observed y-axis
+> [T45](#t45) owns. **Closure condition**: holds while
+> `--probe-streams` is the only consumer of `DesignInfo::tile_n/cols`; a
+> future consumer that defaults instead of refusing on 0 reintroduces the
+> class.
+
+<a id="t50"></a>
+### T50 — `embed`'s CLI has a flag that is accepted and ignored, and a form that picks no design set · **ANSWERED 2026-08-27** · both halves refuse or resolve; silence is gone
+Both found by [`0121`](../tasks/0121-semantic-gate/TASK.md) while building the
+semantic gate, which drives the shipped `embed` subcommand rather than the
+older flag form. Filed together because they are one surface and one sitting.
+
+**The fail-open half: `--cpu` does nothing.** On *both* CLI forms, for the whole
+BERT family:
+
+```
+> npuembeddings.exe embed all-MiniLM-L6-v2 in.txt out.f32 --root . --cpu
+  designs    ONE xclbin, 16 streams (4 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+```
+
+`force_cpu` is parsed (`runtime/src/main.cpp:4490`) and reaches only the arch-1
+path. So a caller asking for the host encoder gets the NPU, silently, and the
+vectors are correct — which is what makes it the fail-open shape rather than a
+bug someone would notice. It is the exact fault
+[`0118`](../tasks/0118-prompt-name-per-request/TASK.md) removed elsewhere in
+this same file: **refusing beats ignoring**, which is why `serve` rejects
+`--prefix` outright and `resolve_prefix()` refuses rather than defaulting.
+
+Note the status line is *not* lying — it reports the datapath it really used, and
+that is how 0121 caught this. The defect is that nothing refuses the flag.
+
+**The loud half: the legacy form selects no design set.**
+`npuembed.exe <root> --model X --embed in out` falls back to
+`runtime/artifacts`, a per-op set predating the unified xclbin, and dies on every
+model wider than 384:
+
+| model | legacy form, no `--artifacts` |
+|---|---|
+| bge-base | `error: qkv: staged buffer for argument 1 is 3538944 bytes, design allows 884736` |
+| bge-large | `error: layer.0.qkv: layout mismatch -- design wants 94266693..., file has f2ab7b0d...` |
+
+**No wrong answer is ever returned** — the staged-buffer size check and the
+`b_layout_hash` refusal are the guards working exactly as designed, and CLAUDE.md
+already says a mismatched pair is refused rather than read as garbage. MiniLM and
+bge-small pass only because that stale directory happens to be their width. The
+shipped `embed <model> <in> <out> --root <dir>` form auto-picks correctly on all
+six, in the dev tree and in a dist zip, so this is a usability wart with a
+workaround (`--artifacts`) that every existing harness already uses — which is
+why nobody had noticed.
+
+**Priced together** because they are the same function and the same rebuild:
+route `force_cpu` through the BERT path (or refuse the flag where it cannot be
+honoured), and either give the legacy form the same `pick_artifacts()` call the
+subcommand gets or make it refuse rather than reach for a stale directory. Both
+sides of that choice are the 0118 rule; either is acceptable, silence is not.
+
+**What is NOT open**: which form to prefer. The subcommand is the shipped one
+(`embed.cmd` in a release zip runs it) and 0121's gate drives it.
+
+**Trigger**: the next runtime rebuild for any reason. Neither half blocks
+anything today, and 0121 removed `--cpu` from its own tool rather than shipping
+a flag it had just measured as inert.
+
+> **ANSWERED 2026-08-27
+> ([`0124`](../tasks/0124-t47-t50-runtime-fixes/TASK.md)).** Both halves, one
+> rebuild. `--cpu` on the BERT family (both CLI forms) now **refuses** with a
+> message naming why — there is no host BERT encoder to route it to — and the
+> subcommand rewrite forwards the flag it used to drop, so the refusal
+> actually fires on `embed <model> ... --cpu`. The flag form's
+> no-`--artifacts` default no longer means the stale per-op `artifacts`
+> directory: resolution defers until the container is loaded and goes through
+> the same `pick_artifacts()` call the subcommands make, catalogue datapath
+> included, printing what it picked. Verified: bge-base's legacy form went
+> from a staged-buffer error naming the wrong problem to running on
+> `artifacts_base_bfp16` with the adopted datapath in the status line; the
+> semantic gate passes 6/6 models on the rebuilt binary. **Closure
+> condition**: the `--cpu` refusal is correct while no host BERT encoder
+> exists in the C++ runtime — if one is built, the refusal should become
+> routing. Found along the way: arch-1's own `--cpu` control needs a
+> host-only container (`GemmaEncoder` reads raw `q_proj` F32 tensors); on
+> the shipped pretiled container it fails loudly — pre-existing, left
+> as-is, recorded in 0124.
+
+<a id="t45"></a>
+### T45 — The roofline's y-axis is wall clock, and its bandwidth roof is an inference · **ANSWERED 2026-08-27** · the roof is 45.5 GB/s on the hardware timebase, and the wall clock agreed to 0.4%
+Filed by [`0120`](../tasks/0120-roofline-analytic/TASK.md), which built the
+analytic roofline and could only build half of it. **x is safe**: `2·M·K·N /
+bytes` over `M`, `K`, `N`, `tile_n`, `cols` and two dtypes, every one of them a
+`design.json` field, so no other process on the machine can move it. **y is
+work ÷ time**, and time is exactly what rule 1 forbids taking from the wall
+clock.
+
+So 0120 §3c's headline — *the four shipped bfp16 models imply 41.3–46.8 GB/s, a
+13.3% spread against `GMAC/s`'s 28.2%, i.e. a bandwidth roof at ~44 GB/s* — is
+an **inference from four host-observed aggregates**, not a measurement. The
+aggregates are `--bench`'s `wait (hardware)` line, which
+[`0109`](../tasks/0109-fused-ratio-energy/TASK.md) itself describes as
+*"trace-adjacent … still reported as a host-observed duration, not a hardware
+trace."*
+
+**Two measurements, in value order.**
+
+1. **One traced dispatch on the bfp16 datapath at production tile width.**
+   Trap 7 caps tracing at 4 columns, which is fine — 0049 traced the plain-bf16
+   and emulated microkernels at 4 columns already, and this is the same
+   instrument pointed at a shipped geometry rather than at a probe. It converts
+   the ~44 GB/s roof from an inference into a number.
+2. **Separate the fixed cost from the slope.** A roofline has **no fixed-cost
+   term**, and this machine has a large one: three independent fits put it at
+   150 µs ([`0010`](../tasks/0010-m5-b-reuse-and-cost-model/TASK.md)), 573 µs
+   ([`0048`](../tasks/0048-m9-what-is-the-gemm-time/TASK.md)) and 627 µs
+   ([`0080`](../tasks/0080-m13-int8-traffic-bound/TASK.md)). It is already
+   visible as one consistent artifact, which is why this is not speculative:
+
+   | datapath | `attn_out` % of ceiling | its large sibling | ratio |
+   |---|---:|---:|---:|
+   | plain bf16, fp32 C | 48.2% | 65.1% (`qkv`) | 0.74 |
+   | plain bf16, bf16 C | 51.1% | 65.8% | 0.78 |
+   | int8 | 6.6% | 10.3% | 0.64 |
+
+   **`attn_out` is the smallest dispatch and reads low on every datapath we have
+   measured.** The same deficit in three datapaths is a per-dispatch constant,
+   not a property of arithmetic intensity — so the roofline mis-reads it by
+   construction, and an M-sweep intercept on one shape is what makes it
+   plottable. It also explains why MiniLM is the lowest of the four bfp16
+   aggregates: at 1 485 µs/dispatch a ~150 µs fixed cost is 10% of the reading,
+   against 1.5% at bge-large's 9 825.
+
+**What this does NOT need**: a new design, a new kernel, or an 8-column trace.
+Both items are the existing tracing path pointed at an existing artifact set.
+
+**Trigger**: the next session with a verified-idle array. Nothing downstream of
+
+> **Item 2 DONE, 2026-08-27
+> ([`0128`](../tasks/0128-t45-m-sweep/TASK.md)).** `--probe-streams` now
+> probes all four batch tiers, giving a 16-point sweep (~0.7 → 604 MB) per
+> set; least-squares `t = t0 + MB/B` fits: base_bfp16 **t0 180 µs / 44.0
+> GB/s** (R² 0.979), nomic_bfp16 **278 µs / 45.5 GB/s** (0.992),
+> minilm_bfp16 74 µs / 36.8, int8c_mini 85 µs / 29.6. **The ~44 GB/s roof
+> survives separating the intercept** on the h=768 bfp16 sets — and the
+> fixed cost is *not one number* (nomic vs base share a geometry class and
+> differ 278 vs 180 µs), so the two-parameter model is incomplete; do not
+> quote a single fixed cost from it. Item 1 — the traced dispatch at
+> production tile width, 4 columns — is what remains, and it now also owns
+> explaining the intercept's shape-dependence. (0125's corrected
+> per-dispatch table independently shows the same clustering, 43.8–46.7,
+> and the attn_out fixed-cost fingerprint.)
+0120 should be quoted as traced until item 1 lands — including [T48](OPEN-THREADS.md#t48)'s
+pricing, which assumes the shipped designs really are on the slanted roof.
+
+> **ANSWERED 2026-08-27
+> ([`0128`](../tasks/0128-t45-m-sweep/TASK.md) item 2,
+> [`0130`](../tasks/0130-t45-traced-roof/TASK.md) item 1).** The M-sweep
+> (probe extended to all four batch tiers) fits `t = t0 + MB/B` at R²
+> 0.98–0.99 with marginal rates **44.0–45.5 GB/s** on the h=768 bfp16 sets;
+> the traced dispatch (production tile, 4 columns, bge-base `ffn_up` at
+> M=8192) measures kernel-start pitch 2,932 cycles against a 1,658-cycle
+> window — duty 56.6%, effective 67.0 MACs/cyc/core — implying **9.97 ms on
+> the 1.808 GHz core clock against 10.006 ms measured by wall (0.4%)**, i.e.
+> 453 MB → **45.5 GB/s on the hardware timebase**. Four instruments now
+> agree on the roof (aggregate inference ~44; per-dispatch probes
+> 43.8–46.7; M-sweep marginal 44.0–45.5; trace 45.5), and the y-axis doubt
+> is resolved by cross-instrument agreement: on this dispatch the wall
+> clock was honest. LOCK_STALL covers ~53% of the traced span — the bfp16
+> datapath is traffic-bound *on the array*, measured. **Closure
+> condition**: 45.5 is a 4-column, one-shape trace; its 8-column standing
+> rests on 0128's marginal rate — if future probes stop clustering at
+> ~44–46 GB/s, re-trace before quoting. **Residual, not closed here**: the
+> fixed cost is shape-dependent (180 vs 278 µs on one geometry class,
+> 0128) — that anatomy belongs to [T46](#t46)'s ledger.
+
+<a id="t46"></a>
+### T46 — Only the DRAM leg is on the figure; there are three · **ANSWERED 2026-08-27** · measured: the memtile↔L1 leg is two-thirds idle while LOCK_STALL binds — the DRAM leg is the one that matters
+[`0120`](../tasks/0120-roofline-analytic/TASK.md) §6.3, stated as a limitation
+rather than discovered. The roofline it built counts **DDR bytes**, so it prices
+the shim leg and nothing else. The array has at least three levels worth a
+separate roofline — DRAM↔shim, memtile↔L1, and L1↔register — and the same kernel
+can be bound at one while looking healthy at another. A design that is
+memtile-starved appears on 0120's figure as a point below the roof with no
+explanation attached.
+
+**Why this is a second figure, not a second instrument.**
+`PortEvent(CoreEvent.PORT_RUNNING_0, port=WireBundle.DMA, channel=0,
+master=True)` is already in the tracing surface
+(`docs/05-measurement/README.md`), so an L2↔L1 roofline comes off the same
+trace. `tools/roofline.py` takes its byte accounting from one function
+(`traffic_bytes`), so a second accounting is an argument, not a rewrite.
+
+**What would make it urgent.** A dispatch whose measured y sits well below
+*both* the compute ceiling and the DRAM bandwidth roof. On the plain-bf16 rows
+that gap is 32–35% and [`0049`](../tasks/0049-m9-t16-iteration-anatomy/TASK.md)
+already accounts for it in-core (77.8% INSTR_VECTOR, 21.1% loop bookkeeping,
+2.5% MEMORY_STALL, **0% LOCK and STREAM_STALL**) — **so today there is no
+unexplained gap, and that is the honest reason this thread is not first.**
+
+**Trigger**: after [T45](#t45), or the first dispatch whose gap 0049's anatomy
+does not cover.
+
+> **ANSWERED 2026-08-27
+> ([`0139`](../tasks/0139-t46-memtile-leg/TASK.md)).** Closed from data
+> already on disk: exact interval-union coverage over 0130's stored trace
+> shows the traced core's input ports covered **30.9% + 3.7%** of the
+> steady-state span while **LOCK_STALL covers 52.8%** — the L2→L1 link
+> sits idle while the core waits for operands, the signature of an
+> upstream (DRAM→L2) bind. The second accounting is one argument, as this
+> thread predicted: `traffic_bytes(..., leg="memtile")` — the legs differ
+> only in B's ×4 row broadcast (aggregate 2.0–2.5× DRAM; 14–23 GB/s per
+> mem tile at measured dispatch times, against links two-thirds idle). The
+> L1↔register leg is 0049's in-core anatomy plus 0130's 118.5-of-256
+> window rate — a kernel roofline, already owned. **Closure condition**:
+> holds at the shipped operating point; **B-reuse is exactly the change
+> that re-binds this leg** (it removes B's DRAM re-streams but not its
+> L2→L1 broadcasts, and speeds the dispatch 1.72×), so a T48 build must
+> re-run 0139's port-coverage analysis as part of its verification. The
+> T45 residual (shape-dependent fixed cost) narrows to schedule effects —
+> input links idle, locks binding — but stays a recorded residual, not a
+> thread.
+
+<a id="t52"></a>
+### T52 — A SentencePiece Unigram tokenizer gates the multilingual encoder family · **ANSWERED 2026-08-27, same day it was filed** · built twice, byte-exact everywhere, and shipping inside the 7th catalogue model
+Filed by [`0123`](../tasks/0123-register-hygiene/TASK.md) while planning 0.5.0,
+as the sibling of [T43](OPEN-THREADS.md#t43) — a *third* tokenizer family, not a discharge of
+the second. The repo ships WordPiece (`runtime/src/tokenizer.cpp`, arch 0 and
+2) and SentencePiece **BPE** (`runtime/src/tokenizer_gemma.cpp`, arch 1). What
+`gte-multilingual-base` — and with it the whole XLM-R / multilingual-E5 / mGTE
+family — needs is SentencePiece **Unigram**: a Viterbi search over per-piece
+log-probs, plus XLM-R's `precompiled_charsmap` normalizer (a trie), neither of
+which shares an algorithm with the merges machinery BPE runs on.
+
+**The estimate already exists and was never spent.** The Gemma plan
+([`0055`](../tasks/0055-m10-embeddinggemma-spike/TASK.md)) budgeted **~600–900
+LOC** for SentencePiece Unigram before
+[`0061`](../tasks/0061-m12-embeddinggemma-tokenizer/TASK.md) read
+`tokenizer.json` and found Gemma3 is actually **BPE**, and built that instead
+([T29](#t29) records the reversal — "caught only by reading
+`tokenizer.json` before writing code", a lesson that applies verbatim here). The
+generator must read the HF *fast* `tokenizer.json` (17 MB — the repo pattern
+has no `sentencepiece.bpe.model` to lean on), emit a `GEMATOK1`-style blob
+(call it `XLMRTOK1`: charsmap trie + vocab with fp32 log-probs), and exist
+twice per the arch-1 precedent: a Python generator and a C++ port
+(`gemma_tokenizer_gen.hpp` records why the port is non-optional — a fresh
+clone packs without Python). `gemma_tokenizer_gen.cpp:90-95` already refuses
+Unigram by name; that refusal is this thread's TODO marker.
+
+**Reusable from the tree**: `json_min.cpp`, the table-blob container
+convention, `tools/verify_tokenizer_gemma.py`'s byte-exact-vs-HF harness (0061: 1,925/1,925 byte-identical). The
+part with no in-repo precedent is the charsmap trie and the Viterbi loop, and
+the verification corpus must be genuinely multilingual — CJK no-space text is
+where Viterbi bugs hide, and NFKC-sensitive input is where the charsmap does.
+
+**Trigger**: 0.5.0's adoption of `gte-multilingual-base`
+([T44](OPEN-THREADS.md#t44)) — the cost is paid once and unlocks the multilingual family the
+same way [T43](OPEN-THREADS.md#t43) unlocks the byte-BPE family.
+
+> **Step 1 DONE — the Python side is byte-exact, 2026-08-27
+> ([`0127`](../tasks/0127-t52-unigram-generator/TASK.md)).**
+> `tools/gen_xlmr_tokenizer_table.py` (stdlib, fail-closed on every
+> tokenizer.json assumption) emits an `XLMRTOK1` blob (5.3 MB: Darts trie +
+> normalized-strings blob verbatim, vocab scores, Metaspace/template
+> metadata); `tools/xlmr_tokenizer_ref.py` consumes the **blob** and matches
+> HuggingFace **343/343 byte-exact** across 19 categories (CJK no-space,
+> NFD-decomposed jamo, NFKC, emoji/ZWJ, unk-fusion, whitespace edge cases).
+> Three findings the C++ port must honour: **scores are f64** (65,856 of
+> 250,002 log-probs do not survive f32, and HF's Viterbi sums f64 — f32
+> storage would break near-tie exactness); **HF's Precompiled normalizer
+> deviates from sentencepiece** (grapheme clusters <6 UTF-8 bytes replaced
+> whole by the first prefix trie match — mirrored, confirmed live);
+> **fuse_unk is on** and Python `str.isspace()` ≠ Rust White_Space.
+> Deliberate gap, recorded: no added-tokens splitter (literal special-token
+> strings in input go through the model) — decision deferred to the C++
+> task. What remains: the C++ port (runtime tokenizer + generator port, the
+> gemma two-implementation pattern) and the container wiring.
+
+> **Step 2 DONE — the C++ side matches everything, first run, 2026-08-27
+> ([`0133`](../tasks/0133-t52-cpp-port/TASK.md)).** Three verifications at
+> the full bar: the C++ generator's blob is **byte-identical** to the
+> Python generator's (sha256 equal over 5,318,988 B — which also settles
+> the f64 worry: json_min's `strtod` is correctly-rounded, proven by
+> identity over all 250,002 raw-f64 scores); the C++ CLI matches
+> HuggingFace **343/343** and the Python reference **343/343**. New:
+> `tokenizer_xlmr.{hpp,cpp}` (f64 Viterbi, grapheme quirk, Rust
+> White_Space, in-place Darts walk, `from_table_bytes` ready for .npue),
+> `xlmr_tokenizer_gen.{hpp,cpp}` (every fail-closed guard in the Python's
+> order), `tokenizer_xlmr_cli` (a real CMake target — the gemma CLI never
+> had one), and generated `xlmr_unicode_tables.hpp` (UCD 15.1.0, the
+> `bert_unicode_tables` precedent). Deferred, recorded: the added-tokens
+> splitter decision, and the arch-3 wiring — which is the only thing left
+> before this thread closes.
+
+> **The wiring is DONE and the tokenizer runs in production code, 2026-08-27
+> ([`0136`](../tasks/0136-gte-runtime/TASK.md)).** arch 3 encodes end to end
+> on the NPU through `tokenizer.xlmr_table` (8/8 byte-exact vs AutoTokenizer
+> in-process, truncation refusal per 0110 included). What remains for T52's
+> closure is only the C++ packer mirror (`prepare_model_gte`) so a
+> no-Python clone can pack — the gemma precedent's last leg.
+
+## Closed
+
+| thread | status | where |
+|---|---|---|
+| Is `aie::vector<float>` really IEEE fp32? | **ANSWERED** — yes, ~24 mantissa bits | [`0016`](../tasks/0016-m5-fp32-probe/TASK.md), refuting [`0015`](../tasks/0015-m5-gelu-polynomial/TASK.md) |
+| What carries GELU's 3.886e-03 implementation error, if not fp32 precision? | **ANSWERED** — the default `floor` rounding mode | [`0044`](../tasks/0044-m9-optimisation-sweep/TASK.md) Part 3, chasing [`0016`](../tasks/0016-m5-fp32-probe/TASK.md)'s own hypothesis after 28 tasks |
+| Can B reuse be expressed with `consumer_obj_type`? | **ANSWERED** — no; no spare DMA channel exists | [`0046`](../tasks/0046-m9-b-reuse-asymmetric/TASK.md) |
+| Does cascade free the channels B-reuse needs? | **ANSWERED** — frees inputs 6/6→3/6, costs outputs 3/6→6/6 | [`0047`](../tasks/0047-m9-cascade-channel-probe/TASK.md) |
+| LayerNorm still opens three fifos per core | **ANSWERED** — params broadcast from the mem tile, 8 columns | [`0030`](../tasks/0030-m7-expert-review-tests/TASK.md) |
+| M6 speed not measured | **ANSWERED** — deliberately deferred to M7, then measured | [`0023`](../tasks/0023-m7-full-cpp-encode/TASK.md) onward |
+| Is bge-small a byte-identical drop-in? | **ANSWERED** — no; 12 layers and CLS pooling are data, not constants | [`0039`](../tasks/0039-m9-bge-small/TASK.md) |
+| `pack_npue.py` had not run in months | **ANSWERED** — broken import found and fixed | [`0036`](../tasks/0036-m8-tokenizer/TASK.md) |
+| Is the centred polynomial basis worth 2.5×? | **RETIRED** — measured, worth nothing at fp32 | [note 0007](notes/0007-unused-iron-surface.md) §3.2 |
+| `AIE_LOOP_UNROLL_FULL` | **RETIRED** — 14% slower on straight vector loops | [note 0007](notes/0007-unused-iron-surface.md) §1.9 |
+| `burst_length` tuning | **RETIRED** — already maximal by default | [note 0007](notes/0007-unused-iron-surface.md) §2 |
+| MTEB on the bf16-C datapath | **RETIRED** — datapath decided as bf16 in / fp32 out, 2026-08-19 | [`0045`](../tasks/0045-m9-bf16-gemm-epilogue/TASK.md) |
+| `--emulate-bfp16` | **RETIRED** — fails accuracy; closed by the MTEB gate | [`0035`](../tasks/0035-m8-mteb-gate/TASK.md) |
+| Pre-tiling as a performance lever | **RETIRED** — a wash under isolation | [`0007`](../tasks/0007-m5-pretiled-gemm-on-npu/TASK.md), [`0008`](../tasks/0008-m5-bfp16-real-data/TASK.md) |
+
+> **ANSWERED 2026-08-27
+> ([`0127`](../tasks/0127-t52-unigram-generator/TASK.md) generator,
+> [`0133`](../tasks/0133-t52-cpp-port/TASK.md) C++ port,
+> [`0136`](../tasks/0136-gte-runtime/TASK.md) runtime wiring,
+> [`0138`](../tasks/0138-gte-hub-adoption/TASK.md) packer mirror).** The
+> family is built at the gemma discipline's full bar and beyond it:
+> Python generator + reference **343/343** byte-exact vs HuggingFace over
+> 19 adversarial categories; C++ port byte-identical blob and 343/343 on
+> all three comparison axes; the runtime encodes through
+> `tokenizer.xlmr_table` in production; and `prepare_model_gte`'s C++
+> container is **whole-file byte-identical** to the Python packer's —
+> including the from-scratch path that regenerates the blob in C++, so a
+> no-Python clone self-produces a working container (the exact gap
+> tasks/0067 closed for gemma). The estimate history closed the loop: the
+> ~600–900 LOC budgeted in 0055 for an algorithm gemma turned out not to
+> need was finally spent on the model that does. **Closure condition**:
+> the added-tokens splitter remains deliberately unimplemented (literal
+> special-token strings in input text go through the Unigram model —
+> recorded in 0127/0133); revisit if a use case feeds such strings.

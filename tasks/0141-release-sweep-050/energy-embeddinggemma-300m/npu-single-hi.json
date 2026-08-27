@@ -1,0 +1,23 @@
+﻿{
+    "kind":  "hardware measurement",
+    "label":  "npu-single-60",
+    "command":  ".\\build\\npuembed.exe .. --model embeddinggemma-300m --artifacts artifacts_gemma_bfp16 --threads 24 --pipeline 1 --embed \"C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\tasks\\0141-release-sweep-050\\energy-embeddinggemma-300m\\corpus-60.txt\"",
+    "meter":  "RAPL_Package0_PKG",
+    "energy_unit_j":  3.6E-09,
+    "repeats":  1,
+    "idle_before_w":  4.9168380606522559,
+    "idle_after_w":  4.1040623634434112,
+    "idle_w":  4.510450212047834,
+    "idle_drift":  0.18019835249214033,
+    "runs":  [
+                 {
+                     "joules":  12.4486800012,
+                     "seconds":  1.333,
+                     "watts":  9.33884471207802
+                 }
+             ],
+    "mean_watts":  9.33884471207802,
+    "mean_joules":  12.4486800012,
+    "best_joules":  12.4486800012,
+    "marginal_j":  6.4362498685402372
+}

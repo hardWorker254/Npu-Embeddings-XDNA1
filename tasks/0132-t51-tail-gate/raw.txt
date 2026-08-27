@@ -1,0 +1,52 @@
+tail gate -- per-text 1-cos against stored fp32 references, gated on p99
+exe C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembeddings.exe
+THE GATE IS THE p99 against each model's recorded ceiling. max and
+max/median are REPORTED, never gated -- a max-gate is uninformative
+where the median already fails (tasks/0129). bge-large's wide
+ceiling is a register-linked waiver: research/OPEN-THREADS.md#t51.
+
+  all-MiniLM-L6-v2         PASS       median 3.426e-04  p90 5.114e-04  p99 9.652e-04  max 1.847e-03  (max/median 5.4x)
+                          ceiling 2.000e-03  (p99 9.652e-04 measured 2026-08-27)
+                          bfp16-emulated MMAC, C as bf16
+                          words      n=180  median 3.56e-04  p99 9.99e-04  max 1.85e-03
+                          sentences  n= 36  median 3.05e-04  p99 3.96e-04  max 3.97e-04
+                          phrases    n=  8  median 3.20e-04  p99 4.89e-04  max 4.96e-04
+                          worst: 'fucking' 1.85e-03, 'saying' 1.01e-03, 'tops' 9.96e-04, 'suck' 8.63e-04, 'attracted' 8.30e-04
+  bge-small-en-v1.5        PASS       median 6.845e-06  p90 8.322e-06  p99 1.162e-05  max 1.301e-05  (max/median 1.9x)
+                          ceiling 2.000e-03  (p99 1.162e-05 measured 2026-08-27)
+                          bf16 MMAC, C as fp32
+                          words      n=180  median 6.77e-06  p99 1.09e-05  max 1.30e-05
+                          sentences  n= 36  median 7.49e-06  p99 9.89e-06  max 1.01e-05
+                          phrases    n=  8  median 6.66e-06  p99 1.16e-05  max 1.19e-05
+                          worst: 'released' 1.30e-05, 'assessment attract' 1.19e-05, 'installment' 1.19e-05, 'distraught' 1.06e-05, 'Astronomers say th' 1.01e-05
+  bge-base-en-v1.5         PASS       median 1.716e-04  p90 2.242e-04  p99 3.711e-04  max 6.132e-04  (max/median 3.6x)
+                          ceiling 2.000e-03  (p99 3.711e-04 measured 2026-08-27)
+                          bfp16-emulated MMAC, C as bf16
+                          words      n=180  median 1.67e-04  p99 4.12e-04  max 6.13e-04
+                          sentences  n= 36  median 1.92e-04  p99 2.85e-04  max 2.91e-04
+                          phrases    n=  8  median 1.93e-04  p99 2.67e-04  max 2.69e-04
+                          worst: 'adjective' 6.13e-04, 'fiction' 5.10e-04, 'parent' 3.86e-04, 'fucking' 3.23e-04, 'The winger scored ' 2.91e-04
+  bge-large-en-v1.5        PASS       median 2.179e-04  p90 3.687e-04  p99 6.626e-03  max 2.183e-02  (max/median 100.2x)
+                          ceiling 1.325e-02  (p99 6.626e-03 measured 2026-08-27)   [T51 waiver]
+                          bfp16-emulated MMAC, C as bf16
+                          words      n=180  median 2.27e-04  p99 8.78e-03  max 2.18e-02
+                          sentences  n= 36  median 2.00e-04  p99 2.46e-04  max 2.47e-04
+                          phrases    n=  8  median 1.89e-04  p99 2.60e-04  max 2.60e-04
+                          worst: 'newsletter' 2.18e-02, 'sermons' 1.19e-02, 'contact' 7.94e-03, 'cinema' 2.23e-03, 'messages' 2.22e-03
+  nomic-embed-text-v1.5    PASS       median 1.081e-03  p90 1.329e-03  p99 1.579e-03  max 1.657e-03  (max/median 1.5x)
+                          ceiling 3.157e-03  (p99 1.579e-03 measured 2026-08-27)
+                          bfp16-emulated MMAC, C as bf16
+                          words      n=180  median 1.05e-03  p99 1.44e-03  max 1.55e-03
+                          sentences  n= 36  median 1.22e-03  p99 1.43e-03  max 1.48e-03
+                          phrases    n=  8  median 1.38e-03  p99 1.66e-03  max 1.66e-03
+                          worst: 'conjunction contac' 1.66e-03, 'clearer cobb colou' 1.65e-03, 'bedfordshire berg ' 1.59e-03, 'enactment' 1.55e-03, 'A worn timing belt' 1.48e-03
+  embeddinggemma-300m      PASS       median 1.578e-04  p90 2.455e-04  p99 4.227e-04  max 1.163e-03  (max/median 7.4x)
+                          ceiling 2.000e-03  (p99 4.227e-04 measured 2026-08-27)
+                          bfp16-emulated MMAC, C as bf16
+                          words      n=180  median 1.47e-04  p99 4.40e-04  max 1.16e-03
+                          sentences  n= 36  median 1.69e-04  p99 2.46e-04  max 2.46e-04
+                          phrases    n=  8  median 2.53e-04  p99 3.37e-04  max 3.38e-04
+                          worst: 'qaeda' 1.16e-03, 'tufts' 4.74e-04, 'brant' 4.31e-04, 'chichester' 3.96e-04, 'eliot' 3.61e-04
+
+wrote C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0132-t51-tail-gate\tail_gate.json
+PASS -- every model's p99 is under its recorded ceiling

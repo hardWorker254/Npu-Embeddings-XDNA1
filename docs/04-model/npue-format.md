@@ -66,6 +66,7 @@ struct FileHeader {           // exactly 64 bytes at offset 0
                                //     on-disk form is in config.gemm_layout,
                                //     not in this field)
                                // 2 = NOMIC_ROPE_SWIGLU (M13, see below)
+                               // 3 = GTE_NEW_ROPE_GEGLU (0.5.0, see below)
   uint32_t flags;             // bit0 = pre-tiled
   uint64_t json_offset;       // 64
   uint64_t json_length;
@@ -288,6 +289,54 @@ a live discriminating control, the RoPE-fold proof, and the config facts.
 Goldens comparison (`reference/encoder_nomic.py` + `goldens_nomic/`) is a
 separate, later task; the verifier is structured so that check can be added
 without touching what is already here.
+
+## `arch = 3` — `gte_new_rope_geglu` (0.5.0)
+
+`tools/pack_npue.py::pack_gte()`, dispatched on the checkpoint's own
+`config.json` `model_type == "new"` (the NewModel `trust_remote_code`
+family; written for `gte-multilingual-base`). Every architectural fact was
+settled by [`tasks/0134`](../../tasks/0134-gte-oracle/TASK.md)'s per-layer
+probe against the repaired fp32 reference (1e-06 relfro on all 12 layers,
+with negative controls), and the container was bit-verified against its
+sources in [`tasks/0135`](../../tasks/0135-gte-container/TASK.md).
+
+Same load-bearing decision as arch 2: **identical tensor names, identical
+emission order** — so `Encoder::stage_all()` and the NPU dispatch path work
+unchanged, and packing at `(64, 48)` reproduces layout_hash
+`94266693ea31aa67…`, which is why the model runs on the **shipping nomic
+design set** (seq 256/512 variants included) with zero new exports.
+
+It is arch 2's shape with four deltas, each represented as data:
+
+- **Real biases** on `qkv` / `attn_out` / `ffn_down` (arch 2 zero-fills all
+  three). `ffn_up` is genuinely bias-free — zero-filled. Because 1/√64 is
+  folded into the Q block, the **Q third of `qkv.bias` is folded too**
+  (`(xW+b)·s = x(Ws) + (bs)`; RoPE is linear, so this stays exact).
+- **`config.activation = "gelu"`** — and arch 3 is where this key stops
+  being write-only: the runtime must READ it (exact-erf GELU on the gate
+  half; arch 2's containers predate the key and default to `"silu"`). The
+  gated FFN arrives already fused upstream (`up_gate_proj`, up cols first,
+  gate second — the `lo * act(hi)` order the runtime computes).
+- **`config.rope_inv_freq` IS the RoPE** — 32 float32 values,
+  `inv_freq_i = 160000^(-i/32) / 8^(1/32)`, because the checkpoint's NTK
+  scaling is **not expressible as any single theta** (0134: the constant
+  correction scales even frequency 0; deriving from `rope_theta` alone is
+  wrong by 1.9e-02 relfro at layer 0). `rope_theta`/`rope_scaling` are
+  provenance only. An arch-3 consumer without `rope_inv_freq` support must
+  refuse, never derive.
+- **`tokenizer.xlmr_table`** — the `XLMRTOK1` SentencePiece-Unigram blob
+  (T52, [`tasks/0127`](../../tasks/0127-t52-unigram-generator/TASK.md) /
+  [`0133`](../../tasks/0133-t52-cpp-port/TASK.md); charsmap Darts trie +
+  f64 scores; byte-exact against HuggingFace 343/343 in both the Python
+  reference and the C++ port), interleaved between `embeddings.ln.weight`
+  and `.bias` exactly where arch 0/2 put `tokenizer.vocab`.
+
+`embeddings.word` is 250,048 × 768 F32 (768 MB — same deliberate-F32 gather
+as every arch; rows 250,002+ are unreachable padding). `l2_normalize: true`
+is genuinely the checkpoint's own (`modules.json` carries `2_Normalize`) —
+unlike nomic, where the same flag records this runtime's behaviour. No
+prompts table: requests carry no `prompt_name`, and giving one is a 400.
+`--int8` refuses (no gte calibration oracle yet).
 
 ## `arch = 1` — `gemma3_mqa_rope_geglu` (M12, put on the array in M13)
 

@@ -1,0 +1,1254 @@
+{
+  "constants": {
+    "clock_hz": 1808000000.0,
+    "cores": 32,
+    "peak_macs_per_cycle": {
+      "vector_fp32": 32,
+      "mmac_bf16": 256,
+      "mmac_int8": 512
+    },
+    "measured_macs_per_cycle": {
+      "vector_fp32": 28.9,
+      "mmac_bf16": 146.7,
+      "mmac_int8": null
+    },
+    "bandwidth_gbs": [
+      [
+        60.0,
+        "docs band, upper (Zen-Attention, AMD: ~60 GB/s read+write)"
+      ],
+      [
+        40.0,
+        "docs band, lower (Gemma3 team on Krackan: below 40 GB/s)"
+      ],
+      [
+        33.0,
+        "tasks/0010 marginal fit, R2 0.902 -- superseded for production"
+      ],
+      [
+        28.0,
+        "tasks/0080 int8 marginal fit, R2 0.987"
+      ]
+    ]
+  },
+  "designs": [
+    "dist/npuembeddings-0.4.0\\artifacts_base_bfp16\\gemm_rtp\\design.json",
+    "dist/npuembeddings-0.4.0\\artifacts_gemma_bfp16\\gemm_rtp\\design.json",
+    "dist/npuembeddings-0.4.0\\artifacts_large_bfp16\\gemm_rtp\\design.json",
+    "dist/npuembeddings-0.4.0\\artifacts_minilm_bfp16\\gemm_rtp\\design.json",
+    "dist/npuembeddings-0.4.0\\artifacts_nomic_bfp16\\gemm_rtp\\design.json",
+    "dist/npuembeddings-0.4.0\\artifacts_small_bf16\\gemm_rtp\\design.json"
+  ],
+  "dispatches": [
+    {
+      "model": "base_bfp16",
+      "op": "qkv",
+      "M": 8192,
+      "K": 768,
+      "N": 2304,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 14.495514624,
+      "traffic_mb": 226.492416,
+      "traffic_a_mb": 75.497472,
+      "traffic_b_mb": 113.246208,
+      "traffic_c_mb": 37.748736,
+      "ai_flop_per_byte": 128.0,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 3840.0,
+        "40": 2560.0,
+        "33": 2112.0,
+        "28": 1792.0
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "base_bfp16",
+      "op": "attn_out",
+      "M": 8192,
+      "K": 768,
+      "N": 768,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 4.831838208,
+      "traffic_mb": 75.497472,
+      "traffic_a_mb": 25.165824,
+      "traffic_b_mb": 37.748736,
+      "traffic_c_mb": 12.582912,
+      "ai_flop_per_byte": 128.0,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 3840.0,
+        "40": 2560.0,
+        "33": 2112.0,
+        "28": 1792.0
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "base_bfp16",
+      "op": "ffn_up",
+      "M": 8192,
+      "K": 768,
+      "N": 3072,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 19.327352832,
+      "traffic_mb": 301.989888,
+      "traffic_a_mb": 100.663296,
+      "traffic_b_mb": 150.994944,
+      "traffic_c_mb": 50.331648,
+      "ai_flop_per_byte": 128.0,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 3840.0,
+        "40": 2560.0,
+        "33": 2112.0,
+        "28": 1792.0
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "base_bfp16",
+      "op": "ffn_down",
+      "M": 8192,
+      "K": 3072,
+      "N": 768,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 19.327352832,
+      "traffic_mb": 264.241152,
+      "traffic_a_mb": 100.663296,
+      "traffic_b_mb": 150.994944,
+      "traffic_c_mb": 12.582912,
+      "ai_flop_per_byte": 146.28571428571428,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 4388.571428571428,
+        "40": 2925.7142857142853,
+        "33": 2413.714285714286,
+        "28": 2048.0
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "gemma_bfp16",
+      "op": "qkv",
+      "M": 8192,
+      "K": 768,
+      "N": 1536,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 9.663676416,
+      "traffic_mb": 150.994944,
+      "traffic_a_mb": 50.331648,
+      "traffic_b_mb": 75.497472,
+      "traffic_c_mb": 25.165824,
+      "ai_flop_per_byte": 128.0,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 3840.0,
+        "40": 2560.0,
+        "33": 2112.0,
+        "28": 1792.0
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "gemma_bfp16",
+      "op": "attn_out",
+      "M": 8192,
+      "K": 768,
+      "N": 768,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 4.831838208,
+      "traffic_mb": 75.497472,
+      "traffic_a_mb": 25.165824,
+      "traffic_b_mb": 37.748736,
+      "traffic_c_mb": 12.582912,
+      "ai_flop_per_byte": 128.0,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 3840.0,
+        "40": 2560.0,
+        "33": 2112.0,
+        "28": 1792.0
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "gemma_bfp16",
+      "op": "ffn_up",
+      "M": 8192,
+      "K": 768,
+      "N": 2304,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 14.495514624,
+      "traffic_mb": 226.492416,
+      "traffic_a_mb": 75.497472,
+      "traffic_b_mb": 113.246208,
+      "traffic_c_mb": 37.748736,
+      "ai_flop_per_byte": 128.0,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 3840.0,
+        "40": 2560.0,
+        "33": 2112.0,
+        "28": 1792.0
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "gemma_bfp16",
+      "op": "ffn_down",
+      "M": 8192,
+      "K": 1152,
+      "N": 768,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 7.247757312,
+      "traffic_mb": 106.954752,
+      "traffic_a_mb": 37.748736,
+      "traffic_b_mb": 56.623104,
+      "traffic_c_mb": 12.582912,
+      "ai_flop_per_byte": 135.52941176470588,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 4065.8823529411766,
+        "40": 2710.5882352941176,
+        "33": 2236.2352941176473,
+        "28": 1897.4117647058824
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "large_bfp16",
+      "op": "qkv",
+      "M": 8192,
+      "K": 1024,
+      "N": 3072,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 32,
+      "cols": 8,
+      "gmac": 25.769803776,
+      "traffic_mb": 452.984832,
+      "traffic_a_mb": 201.326592,
+      "traffic_b_mb": 201.326592,
+      "traffic_c_mb": 50.331648,
+      "ai_flop_per_byte": 113.77777777777777,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 3413.333333333333,
+        "40": 2275.5555555555557,
+        "33": 1877.3333333333333,
+        "28": 1592.8888888888887
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "large_bfp16",
+      "op": "attn_out",
+      "M": 8192,
+      "K": 1024,
+      "N": 1024,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 32,
+      "cols": 8,
+      "gmac": 8.589934592,
+      "traffic_mb": 150.994944,
+      "traffic_a_mb": 67.108864,
+      "traffic_b_mb": 67.108864,
+      "traffic_c_mb": 16.777216,
+      "ai_flop_per_byte": 113.77777777777777,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 3413.333333333333,
+        "40": 2275.5555555555557,
+        "33": 1877.3333333333333,
+        "28": 1592.8888888888887
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "large_bfp16",
+      "op": "ffn_up",
+      "M": 8192,
+      "K": 1024,
+      "N": 4096,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 32,
+      "cols": 8,
+      "gmac": 34.359738368,
+      "traffic_mb": 603.979776,
+      "traffic_a_mb": 268.435456,
+      "traffic_b_mb": 268.435456,
+      "traffic_c_mb": 67.108864,
+      "ai_flop_per_byte": 113.77777777777777,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 3413.333333333333,
+        "40": 2275.5555555555557,
+        "33": 1877.3333333333333,
+        "28": 1592.8888888888887
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "large_bfp16",
+      "op": "ffn_down",
+      "M": 8192,
+      "K": 4096,
+      "N": 1024,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 32,
+      "cols": 8,
+      "gmac": 34.359738368,
+      "traffic_mb": 553.648128,
+      "traffic_a_mb": 268.435456,
+      "traffic_b_mb": 268.435456,
+      "traffic_c_mb": 16.777216,
+      "ai_flop_per_byte": 124.12121212121212,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 3723.636363636364,
+        "40": 2482.4242424242425,
+        "33": 2048.0,
+        "28": 1737.6969696969697
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "minilm_bfp16",
+      "op": "qkv",
+      "M": 8192,
+      "K": 384,
+      "N": 1152,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 3.623878656,
+      "traffic_mb": 66.060288,
+      "traffic_a_mb": 18.874368,
+      "traffic_b_mb": 28.311552,
+      "traffic_c_mb": 18.874368,
+      "ai_flop_per_byte": 109.71428571428571,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 3291.428571428571,
+        "40": 2194.285714285714,
+        "33": 1810.2857142857142,
+        "28": 1536.0
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "minilm_bfp16",
+      "op": "attn_out",
+      "M": 8192,
+      "K": 384,
+      "N": 384,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 1.207959552,
+      "traffic_mb": 22.020096,
+      "traffic_a_mb": 6.291456,
+      "traffic_b_mb": 9.437184,
+      "traffic_c_mb": 6.291456,
+      "ai_flop_per_byte": 109.71428571428571,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 3291.428571428571,
+        "40": 2194.285714285714,
+        "33": 1810.2857142857142,
+        "28": 1536.0
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "minilm_bfp16",
+      "op": "ffn_up",
+      "M": 8192,
+      "K": 384,
+      "N": 1536,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 4.831838208,
+      "traffic_mb": 88.080384,
+      "traffic_a_mb": 25.165824,
+      "traffic_b_mb": 37.748736,
+      "traffic_c_mb": 25.165824,
+      "ai_flop_per_byte": 109.71428571428571,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 3291.428571428571,
+        "40": 2194.285714285714,
+        "33": 1810.2857142857142,
+        "28": 1536.0
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "minilm_bfp16",
+      "op": "ffn_down",
+      "M": 8192,
+      "K": 1536,
+      "N": 384,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 4.831838208,
+      "traffic_mb": 69.206016,
+      "traffic_a_mb": 25.165824,
+      "traffic_b_mb": 37.748736,
+      "traffic_c_mb": 6.291456,
+      "ai_flop_per_byte": 139.63636363636363,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 4189.090909090909,
+        "40": 2792.7272727272725,
+        "33": 2304.0,
+        "28": 1954.9090909090908
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "nomic_bfp16",
+      "op": "qkv",
+      "M": 8192,
+      "K": 768,
+      "N": 2304,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 14.495514624,
+      "traffic_mb": 226.492416,
+      "traffic_a_mb": 75.497472,
+      "traffic_b_mb": 113.246208,
+      "traffic_c_mb": 37.748736,
+      "ai_flop_per_byte": 128.0,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 3840.0,
+        "40": 2560.0,
+        "33": 2112.0,
+        "28": 1792.0
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "nomic_bfp16",
+      "op": "attn_out",
+      "M": 8192,
+      "K": 768,
+      "N": 768,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 4.831838208,
+      "traffic_mb": 75.497472,
+      "traffic_a_mb": 25.165824,
+      "traffic_b_mb": 37.748736,
+      "traffic_c_mb": 12.582912,
+      "ai_flop_per_byte": 128.0,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 3840.0,
+        "40": 2560.0,
+        "33": 2112.0,
+        "28": 1792.0
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "nomic_bfp16",
+      "op": "ffn_up",
+      "M": 8192,
+      "K": 768,
+      "N": 6144,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 38.654705664,
+      "traffic_mb": 603.979776,
+      "traffic_a_mb": 201.326592,
+      "traffic_b_mb": 301.989888,
+      "traffic_c_mb": 100.663296,
+      "ai_flop_per_byte": 128.0,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 3840.0,
+        "40": 2560.0,
+        "33": 2112.0,
+        "28": 1792.0
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "nomic_bfp16",
+      "op": "ffn_down",
+      "M": 8192,
+      "K": 3072,
+      "N": 768,
+      "datapath": "mmac_bf16",
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 19.327352832,
+      "traffic_mb": 264.241152,
+      "traffic_a_mb": 100.663296,
+      "traffic_b_mb": 150.994944,
+      "traffic_c_mb": 12.582912,
+      "ai_flop_per_byte": 146.28571428571428,
+      "peak_gmac_s": 14811.136,
+      "peak_measured_gmac_s": 8487.475199999999,
+      "ridge_ai": {
+        "60": 493.70453333333336,
+        "40": 740.5568,
+        "33": 897.6446060606061,
+        "28": 1057.9382857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 4388.571428571428,
+        "40": 2925.7142857142853,
+        "33": 2413.714285714286,
+        "28": 2048.0
+      },
+      "bound_by": {
+        "60": "bandwidth",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "small_bf16",
+      "op": "qkv",
+      "M": 8192,
+      "K": 384,
+      "N": 1152,
+      "datapath": "vector_fp32",
+      "a_dtype": "bf16",
+      "c_dtype": "f32",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 3.623878656,
+      "traffic_mb": 84.934656,
+      "traffic_a_mb": 18.874368,
+      "traffic_b_mb": 28.311552,
+      "traffic_c_mb": 37.748736,
+      "ai_flop_per_byte": 85.33333333333333,
+      "peak_gmac_s": 1851.392,
+      "peak_measured_gmac_s": 1672.0384,
+      "ridge_ai": {
+        "60": 61.71306666666667,
+        "40": 92.5696,
+        "33": 112.20557575757576,
+        "28": 132.2422857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 2560.0,
+        "40": 1706.6666666666665,
+        "33": 1408.0,
+        "28": 1194.6666666666665
+      },
+      "bound_by": {
+        "60": "compute",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "small_bf16",
+      "op": "attn_out",
+      "M": 8192,
+      "K": 384,
+      "N": 384,
+      "datapath": "vector_fp32",
+      "a_dtype": "bf16",
+      "c_dtype": "f32",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 1.207959552,
+      "traffic_mb": 28.311552,
+      "traffic_a_mb": 6.291456,
+      "traffic_b_mb": 9.437184,
+      "traffic_c_mb": 12.582912,
+      "ai_flop_per_byte": 85.33333333333333,
+      "peak_gmac_s": 1851.392,
+      "peak_measured_gmac_s": 1672.0384,
+      "ridge_ai": {
+        "60": 61.71306666666667,
+        "40": 92.5696,
+        "33": 112.20557575757576,
+        "28": 132.2422857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 2560.0,
+        "40": 1706.6666666666665,
+        "33": 1408.0,
+        "28": 1194.6666666666665
+      },
+      "bound_by": {
+        "60": "compute",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "small_bf16",
+      "op": "ffn_up",
+      "M": 8192,
+      "K": 384,
+      "N": 1536,
+      "datapath": "vector_fp32",
+      "a_dtype": "bf16",
+      "c_dtype": "f32",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 4.831838208,
+      "traffic_mb": 113.246208,
+      "traffic_a_mb": 25.165824,
+      "traffic_b_mb": 37.748736,
+      "traffic_c_mb": 50.331648,
+      "ai_flop_per_byte": 85.33333333333333,
+      "peak_gmac_s": 1851.392,
+      "peak_measured_gmac_s": 1672.0384,
+      "ridge_ai": {
+        "60": 61.71306666666667,
+        "40": 92.5696,
+        "33": 112.20557575757576,
+        "28": 132.2422857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 2560.0,
+        "40": 1706.6666666666665,
+        "33": 1408.0,
+        "28": 1194.6666666666665
+      },
+      "bound_by": {
+        "60": "compute",
+        "40": "bandwidth",
+        "33": "bandwidth",
+        "28": "bandwidth"
+      }
+    },
+    {
+      "model": "small_bf16",
+      "op": "ffn_down",
+      "M": 8192,
+      "K": 1536,
+      "N": 384,
+      "datapath": "vector_fp32",
+      "a_dtype": "bf16",
+      "c_dtype": "f32",
+      "tile_n": 48,
+      "cols": 8,
+      "gmac": 4.831838208,
+      "traffic_mb": 75.497472,
+      "traffic_a_mb": 25.165824,
+      "traffic_b_mb": 37.748736,
+      "traffic_c_mb": 12.582912,
+      "ai_flop_per_byte": 128.0,
+      "peak_gmac_s": 1851.392,
+      "peak_measured_gmac_s": 1672.0384,
+      "ridge_ai": {
+        "60": 61.71306666666667,
+        "40": 92.5696,
+        "33": 112.20557575757576,
+        "28": 132.2422857142857
+      },
+      "bw_bound_gmac_s": {
+        "60": 3840.0,
+        "40": 2560.0,
+        "33": 2112.0,
+        "28": 1792.0
+      },
+      "bound_by": {
+        "60": "compute",
+        "40": "compute",
+        "33": "compute",
+        "28": "bandwidth"
+      }
+    }
+  ],
+  "measured": [
+    {
+      "source": "0097/t18 b128il x3",
+      "annotate": "",
+      "op": "qkv",
+      "M": 8192,
+      "K": 384,
+      "N": 1152,
+      "a_dtype": "bf16",
+      "c_dtype": "f32",
+      "tile_n": 48,
+      "cols": 8,
+      "datapath": "vector_fp32",
+      "us": 3008,
+      "traffic_mb": 84.934656,
+      "ai_flop_per_byte": 85.33333333333333,
+      "gmac_s": 1204.7468936170212,
+      "frac_of_peak": 0.6507249105629824,
+      "implied_gbs": 28.23625531914894
+    },
+    {
+      "source": "0097/t18 b128il x3",
+      "op": "attn_out",
+      "M": 8192,
+      "K": 384,
+      "N": 384,
+      "a_dtype": "bf16",
+      "c_dtype": "f32",
+      "tile_n": 48,
+      "cols": 8,
+      "datapath": "vector_fp32",
+      "us": 1355,
+      "traffic_mb": 28.311552,
+      "ai_flop_per_byte": 85.33333333333333,
+      "gmac_s": 891.4830642066422,
+      "frac_of_peak": 0.48152042582372734,
+      "implied_gbs": 20.894134317343173
+    },
+    {
+      "source": "0097/t18 b128il x3",
+      "annotate": "ffn_up",
+      "op": "ffn_up",
+      "M": 8192,
+      "K": 384,
+      "N": 1536,
+      "a_dtype": "bf16",
+      "c_dtype": "f32",
+      "tile_n": 48,
+      "cols": 8,
+      "datapath": "vector_fp32",
+      "us": 3865,
+      "traffic_mb": 113.246208,
+      "ai_flop_per_byte": 85.33333333333333,
+      "gmac_s": 1250.1521883570506,
+      "frac_of_peak": 0.6752498597579824,
+      "implied_gbs": 29.30044191461837
+    },
+    {
+      "source": "0097/t18 b128il x3",
+      "annotate": "ffn_down  (identical MACs, 1.50x the AI, same y)",
+      "op": "ffn_down",
+      "M": 8192,
+      "K": 1536,
+      "N": 384,
+      "a_dtype": "bf16",
+      "c_dtype": "f32",
+      "tile_n": 48,
+      "cols": 8,
+      "datapath": "vector_fp32",
+      "us": 3910,
+      "traffic_mb": 75.497472,
+      "ai_flop_per_byte": 128.0,
+      "gmac_s": 1235.7642475703328,
+      "frac_of_peak": 0.667478441934681,
+      "implied_gbs": 19.30881636828645
+    },
+    {
+      "source": "0097/t18 cbf16 x1",
+      "op": "qkv",
+      "M": 8192,
+      "K": 384,
+      "N": 1152,
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "datapath": "vector_fp32",
+      "us": 2974,
+      "traffic_mb": 66.060288,
+      "ai_flop_per_byte": 109.71428571428571,
+      "gmac_s": 1218.5200591795563,
+      "frac_of_peak": 0.6581642673078182,
+      "implied_gbs": 22.212605245460658
+    },
+    {
+      "source": "0097/t18 cbf16 x1",
+      "op": "attn_out",
+      "M": 8192,
+      "K": 384,
+      "N": 384,
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "datapath": "vector_fp32",
+      "us": 1278,
+      "traffic_mb": 22.020096,
+      "ai_flop_per_byte": 109.71428571428571,
+      "gmac_s": 945.195267605634,
+      "frac_of_peak": 0.5105322198678799,
+      "implied_gbs": 17.230122065727702
+    },
+    {
+      "source": "0097/t18 cbf16 x1",
+      "op": "ffn_up",
+      "M": 8192,
+      "K": 384,
+      "N": 1536,
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "datapath": "vector_fp32",
+      "us": 3890,
+      "traffic_mb": 88.080384,
+      "ai_flop_per_byte": 109.71428571428571,
+      "gmac_s": 1242.1177912596402,
+      "frac_of_peak": 0.6709102077029825,
+      "implied_gbs": 22.642772236503856
+    },
+    {
+      "source": "0097/t18 cbf16 x1",
+      "op": "ffn_down",
+      "M": 8192,
+      "K": 1536,
+      "N": 384,
+      "a_dtype": "bf16",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "datapath": "vector_fp32",
+      "us": 3909,
+      "traffic_mb": 69.206016,
+      "ai_flop_per_byte": 139.63636363636363,
+      "gmac_s": 1236.0803806600154,
+      "frac_of_peak": 0.6676491962048099,
+      "implied_gbs": 17.70427628549501
+    },
+    {
+      "source": "0097/t21 int8c_mini x2",
+      "op": "qkv",
+      "M": 8192,
+      "K": 384,
+      "N": 1152,
+      "a_dtype": "i8",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "datapath": "mmac_int8",
+      "us": 1182,
+      "traffic_mb": 42.467328,
+      "ai_flop_per_byte": 170.66666666666666,
+      "gmac_s": 3065.8871878172595,
+      "frac_of_peak": 0.10349939355824089,
+      "implied_gbs": 35.9283654822335
+    },
+    {
+      "source": "0097/t21 int8c_mini x2",
+      "op": "attn_out",
+      "M": 8192,
+      "K": 384,
+      "N": 384,
+      "a_dtype": "i8",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "datapath": "mmac_int8",
+      "us": 622,
+      "traffic_mb": 14.155776,
+      "ai_flop_per_byte": 170.66666666666666,
+      "gmac_s": 1942.0571575562703,
+      "frac_of_peak": 0.06556070910280853,
+      "implied_gbs": 22.75848231511254
+    },
+    {
+      "source": "0097/t21 int8c_mini x2",
+      "annotate": "int8 ffn_up",
+      "op": "ffn_up",
+      "M": 8192,
+      "K": 384,
+      "N": 1536,
+      "a_dtype": "i8",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "datapath": "mmac_int8",
+      "us": 1539,
+      "traffic_mb": 56.623104,
+      "ai_flop_per_byte": 170.66666666666666,
+      "gmac_s": 3139.595976608187,
+      "frac_of_peak": 0.10598768307198674,
+      "implied_gbs": 36.79214035087719
+    },
+    {
+      "source": "0097/t21 int8c_mini x2",
+      "annotate": "int8 ffn_down  (same MACs, 1.50x the AI, 1.29x the y)",
+      "op": "ffn_down",
+      "M": 8192,
+      "K": 1536,
+      "N": 384,
+      "a_dtype": "i8",
+      "c_dtype": "bf16",
+      "tile_n": 48,
+      "cols": 8,
+      "datapath": "mmac_int8",
+      "us": 1191,
+      "traffic_mb": 37.748736,
+      "ai_flop_per_byte": 256.0,
+      "gmac_s": 4056.9590327455917,
+      "frac_of_peak": 0.13695637636254207,
+      "implied_gbs": 31.694992443324935
+    },
+    {
+      "source": "0109 bench wait(hw)",
+      "kind": "aggregate",
+      "annotate": "MiniLM",
+      "design": "dist/npuembeddings-0.4.0/artifacts_minilm_bfp16/gemm_rtp/design.json",
+      "us_per_dispatch": 1485,
+      "op": "layer (4 shapes)",
+      "datapath": "mmac_bf16",
+      "us": 5940,
+      "traffic_mb": 245.366784,
+      "ai_flop_per_byte": 118.15384615384616,
+      "gmac_s": 2440.322327272727,
+      "frac_of_peak": 0.1647626709573612,
+      "implied_gbs": 41.30753939393939
+    },
+    {
+      "source": "0109 bench wait(hw)",
+      "kind": "aggregate",
+      "annotate": "bge-small (the one still on plain bf16)",
+      "design": "dist/npuembeddings-0.4.0/artifacts_small_bf16/gemm_rtp/design.json",
+      "us_per_dispatch": 3025,
+      "op": "layer (4 shapes)",
+      "datapath": "vector_fp32",
+      "us": 12100,
+      "traffic_mb": 301.989888,
+      "ai_flop_per_byte": 96.0,
+      "gmac_s": 1197.9764152066116,
+      "frac_of_peak": 0.647067944123455,
+      "implied_gbs": 24.957841983471077
+    },
+    {
+      "source": "0109 bench wait(hw)",
+      "kind": "aggregate",
+      "annotate": "bge-base",
+      "design": "dist/npuembeddings-0.4.0/artifacts_base_bfp16/gemm_rtp/design.json",
+      "us_per_dispatch": 4636,
+      "op": "layer (4 shapes)",
+      "datapath": "mmac_bf16",
+      "us": 18544,
+      "traffic_mb": 868.220928,
+      "ai_flop_per_byte": 133.56521739130434,
+      "gmac_s": 3126.728779982744,
+      "frac_of_peak": 0.21110661464338346,
+      "implied_gbs": 46.81950647109578
+    },
+    {
+      "source": "0109 bench wait(hw)",
+      "kind": "aggregate",
+      "annotate": "bge-large",
+      "design": "dist/npuembeddings-0.4.0/artifacts_large_bfp16/gemm_rtp/design.json",
+      "us_per_dispatch": 9825,
+      "op": "layer (4 shapes)",
+      "datapath": "mmac_bf16",
+      "us": 39300,
+      "traffic_mb": 1761.60768,
+      "ai_flop_per_byte": 117.02857142857142,
+      "gmac_s": 2622.8807914503814,
+      "frac_of_peak": 0.177088428021347,
+      "implied_gbs": 44.82462290076336
+    },
+    {
+      "source": "0109 bench wait(hw)",
+      "kind": "aggregate",
+      "annotate": "nomic",
+      "design": "dist/npuembeddings-0.4.0/artifacts_nomic_bfp16/gemm_rtp/design.json",
+      "us_per_dispatch": 6352,
+      "op": "layer (4 shapes)",
+      "datapath": "mmac_bf16",
+      "us": 25408,
+      "traffic_mb": 1170.210816,
+      "ai_flop_per_byte": 132.1290322580645,
+      "gmac_s": 3042.7192745591938,
+      "frac_of_peak": 0.2054345645438131,
+      "implied_gbs": 46.05678589420655
+    }
+  ]
+}

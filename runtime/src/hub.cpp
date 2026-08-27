@@ -102,6 +102,37 @@ const std::vector<CatalogEntry> &table() {
        "needs --prefix (search_document / search_query / clustering / "
        "classification)", /*gated=*/false, /*gemma=*/false,
        /*gated_ffn=*/true},
+      // arch=3 (tasks/0134-0138): the multilingual encoder -- XLM-R Unigram
+      // tokenizer, NTK-corrected RoPE with the frequency set carried as DATA
+      // in the container (rope_inv_freq -- a consumer deriving it from
+      // rope_theta alone is wrong by 1.9e-02 relfro at layer 0, tasks/0134),
+      // gated GeGLU with the halves fused UPSTREAM, and real biases. Packs to
+      // the same layout_hash as bge-base/nomic and runs on the same designs
+      // (tasks/0135). `gte=true` selects the kFilesGte fetch list and (via
+      // model_type "new" in the pack dispatch below) prepare_model_gte().
+      // qkv_n is stated explicitly per the container though it equals
+      // 3*hidden, so 0 would behave identically in design_fits().
+      //
+      // The model.safetensors pin below is the one ensure_model() enforces,
+      // like every other row (the table's scheme pins exactly that file).
+      // The tokenizer/config files were additionally pinned in tasks/0127
+      // and re-verified against the local checkout in tasks/0138; recorded
+      // here for traceability, NOT enforced by the fetch path:
+      //   tokenizer.json           f59925fcb90c92b894cb93e51bb9b4a6105c5c24
+      //                            9fe54ce1c704420ac39b81af
+      //   tokenizer_config.json    24cebbf2ef20fc317256e03e52ac7b2ca326586f
+      //                            946a8427ecac036332bf0933
+      //   special_tokens_map.json  8c785abebea9ae3257b61681b4e6fd8365ceafde
+      //                            980c21970d001e834cf10835
+      //   config.json              711bdc81365fc25d30533cf05b9fdf588e5ba01f
+      //                            18540fbbb1307d787597a313
+      {"gte-multilingual-base", "Alibaba-NLP/gte-multilingual-base",
+       "f5a35a10faa54da7717870af1517c9b41e9bd8e3880bc5a8e9363d4c3c63e9b0",
+       "cls", 768, 12, 12, 3072, 48, 582.5,
+       "multilingual, XLM-R tokenizer; NTK RoPE + gated GeGLU (arch=3); "
+       "same array designs as bge-base/nomic",
+       /*gated=*/false, /*gemma=*/false, /*gated_ffn=*/true,
+       /*qkv_n=*/2304, /*gte=*/true},
     };
     // THE bfp16 ADOPTION (tasks/0104, T23), set by NAME rather than by
     // rewriting every row's positional initialiser above -- the struct's
@@ -127,6 +158,7 @@ const std::vector<CatalogEntry> &table() {
         "bge-large-en-v1.5",        // MTEB +0.13 / worst -0.01
         "nomic-embed-text-v1.5",    // MTEB +0.01 / worst -0.25
         "embeddinggemma-300m",      // MTEB +0.16 / worst -0.02
+        "gte-multilingual-base",    // MTEB +0.06 / worst -0.06 (tasks/0137)
     };
     for (auto &e : rows)
       for (const char *n : kAdoptedBfp16)
@@ -169,6 +201,25 @@ const Want kFilesGemma[] = {
     {"2_Dense/model.safetensors", true},
     {"3_Dense/config.json", true},
     {"3_Dense/model.safetensors", true},
+};
+
+// gte's file set (arch=3, model_type "new"): no vocab.txt -- its tokenizer
+// is the XLM-R Unigram table, generated at pack time from tokenizer.json by
+// prepare_model_gte() (or read from the cached xlmr_tokenizer.bin --
+// tasks/0127/0133/0138). tokenizer_config.json and special_tokens_map.json
+// are what the tokenizer verifier and any HF cross-check read; modules.json
+// carries the 2_Normalize entry that makes l2_normalize the checkpoint's own
+// claim rather than this runtime's (tasks/0135). Subdirectory paths are fine
+// here for the same reason kFiles' 1_Pooling/config.json already is:
+// download() creates the destination's parent directories.
+const Want kFilesGte[] = {
+    {"model.safetensors", true},
+    {"config.json", true},
+    {"tokenizer.json", true},
+    {"tokenizer_config.json", true},
+    {"special_tokens_map.json", true},
+    {"1_Pooling/config.json", true},
+    {"modules.json", true},
 };
 
 std::wstring widen(const std::string &s) {
@@ -306,6 +357,7 @@ void load_user_catalog(const std::string &root, const Log &log) {
     e.gemma = bl("gemma");
     e.gated_ffn = bl("gated_ffn");
     e.qkv_n = i("qkv_n", 0);
+    e.gte = bl("gte");
     if (e.name.empty() || e.repo.empty()) continue;
     // A user row must never shadow a built-in. `add` refuses to write one, so
     // reaching here means the file was hand-edited -- say so and keep the
@@ -368,7 +420,8 @@ void add_to_user_catalog(const std::string &root, const CatalogEntry &e) {
          std::to_string(u.qkv_n) + ", \"gated\": " +
          (u.gated ? "true" : "false") + ", \"gemma\": " +
          (u.gemma ? "true" : "false") + ", \"gated_ffn\": " +
-         (u.gated_ffn ? "true" : "false") + ", \"note\": \"" + esc(u.note) +
+         (u.gated_ffn ? "true" : "false") + ", \"gte\": " +
+         (u.gte ? "true" : "false") + ", \"note\": \"" + esc(u.note) +
          "\"}";
   }
   j += "\n  ]\n}\n";
@@ -634,7 +687,10 @@ CatalogEntry probe_repo(const std::string &repo, const Log &log,
   // dispatch both packers use. A finetune inherits its base model's
   // model_type, which is exactly why finetunes are the supported case.
   e.gemma = (mt == "gemma3_text");
-  e.gated_ffn = e.gemma || (mt == "nomic_bert");
+  e.gte = (mt == "new");  // the NewModel family (gte-multilingual-base):
+                          // selects the kFilesGte fetch list and, at pack
+                          // time, prepare_model_gte() -- tasks/0138
+  e.gated_ffn = e.gemma || e.gte || (mt == "nomic_bert");
   e.gated = e.gemma;      // the Gemma family is licence-gated upstream
 
   // MQA/GQA narrows the fused qkv and then the packer pads it. Both facts are
@@ -776,6 +832,8 @@ std::string ensure_model(const std::string &root, const std::string &name,
   const auto fetch_list = [&]() -> std::vector<Want> {
     if (e->gemma)
       return std::vector<Want>(std::begin(kFilesGemma), std::end(kFilesGemma));
+    if (e->gte)
+      return std::vector<Want>(std::begin(kFilesGte), std::end(kFilesGte));
     return std::vector<Want>(std::begin(kFiles), std::end(kFiles));
   }();
   for (const auto &w : fetch_list) {
@@ -859,6 +917,18 @@ std::string ensure_model(const std::string &root, const std::string &name,
     prepare_model_nomic(dir.string(), e->pooling, e->repo, container.string(),
                         layout.json, layout.hash, 64, e->tile_n, 256,
                         nullptr);
+  } else if (json_str(slurp_text(dir / "config.json"), "model_type") ==
+            "new") {
+    // arch=3 (tasks/0135-0138): same dispatch rule as the nomic branch --
+    // the CHECKPOINT's own model_type, never a catalogue bit. max_seq is 64,
+    // matching the Python-packed container this mirror is held byte-identical
+    // to (tasks/0135 packed --max-seq 64): under RoPE the position table is
+    // zeros, so max_seq only caps request length, and the shipped designs
+    // and goldens for this model are seq-64.
+    const Layout layout = gemm_b_layout(64, e->tile_n);
+    prepare_model_gte(dir.string(), e->pooling, e->repo, container.string(),
+                      layout.json, layout.hash, 64, e->tile_n, 64,
+                      nullptr);
   } else {
     const Layout layout = gemm_b_layout(64, e->tile_n);
     prepare_model((dir / "model.safetensors").string(),

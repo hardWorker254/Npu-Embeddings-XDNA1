@@ -30,9 +30,11 @@
 
 #include "gemma_tokenizer_gen.hpp"
 #include "json_min.hpp"
+#include "xlmr_tokenizer_gen.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -1434,6 +1436,455 @@ void prepare_model_nomic(const std::string &model_dir,
   }
 
   w.write(out, cj, /*arch=*/2);
+  if (log) {
+    std::ostringstream s;
+    s << "\n  tensors    : " << w.count()
+      << "\n  data       : " << (w.data_bytes() / 1e6) << " MB"
+      << "\n  source     : " << sha.substr(0, 16) << "...";
+    log(s.str());
+  }
+}
+
+// Python's repr(float) -- the exact text json.dumps writes for a double --
+// reimplemented for the one config field this packer must FORMAT rather than
+// copy verbatim: "rope_inv_freq", whose 32 values are COMPUTED here (the
+// same float32 arithmetic as pack_gte(), verified bit-for-bit against the
+// Python-packed container in tasks/0138) and so have no source text to copy
+// the way cfg_raw copies "1e-12" or "8.0".
+//
+// Both sides print the SHORTEST decimal string that round-trips the double
+// (CPython: format_float_short mode 'r'; MSVC: std::to_chars, [charconv]'s
+// "minimal representation" guarantee) -- so the digit sequences agree by
+// construction, and only the DRESSING differs. CPython's rules, mirrored
+// here: fixed notation when the decimal point lands in (-4, 16] digits from
+// the front, else scientific with a sign and at least two exponent digits;
+// a fixed integer value gets a trailing ".0"; a single-digit scientific
+// mantissa gets NO ".0" (repr(1e-05) == '1e-05').
+static std::string py_double_repr(double v) {
+  char buf[64];
+  const auto res =
+      std::to_chars(buf, buf + sizeof buf, v, std::chars_format::scientific);
+  std::string s(buf, res.ptr);
+  std::string sign;
+  if (!s.empty() && s[0] == '-') { sign = "-"; s.erase(0, 1); }
+  const size_t ep = s.find('e');
+  if (ep == std::string::npos)
+    throw std::runtime_error("py_double_repr: non-finite value");  // inf/nan
+  std::string digits = s.substr(0, ep);
+  const size_t dot = digits.find('.');
+  if (dot != std::string::npos) digits.erase(dot, 1);
+  const int exp10 = std::stoi(s.substr(ep + 1));
+  const int decpt = exp10 + 1;      // digits before the decimal point
+  if (decpt > -4 && decpt <= 16) {
+    std::string o = sign;
+    if (decpt <= 0) {
+      o += "0.";
+      o.append(static_cast<size_t>(-decpt), '0');
+      o += digits;
+    } else if (static_cast<size_t>(decpt) >= digits.size()) {
+      o += digits;
+      o.append(static_cast<size_t>(decpt) - digits.size(), '0');
+      o += ".0";
+    } else {
+      o += digits.substr(0, static_cast<size_t>(decpt)) + "." +
+           digits.substr(static_cast<size_t>(decpt));
+    }
+    return o;
+  }
+  std::string o = sign + digits.substr(0, 1);
+  if (digits.size() > 1) o += "." + digits.substr(1);
+  o += 'e';
+  o += exp10 < 0 ? '-' : '+';
+  const int ae = exp10 < 0 ? -exp10 : exp10;
+  if (ae < 10) o += '0';
+  o += std::to_string(ae);
+  return o;
+}
+
+// arch=3 mirror of tools/pack_npue.py's pack_gte() (tasks/0135, 0138). See
+// npue_pack.hpp for the departures from the nomic shape it otherwise
+// mirrors. Every architectural fact asserted below was settled EMPIRICALLY
+// in tasks/0134 (per-layer probe against the repaired fp32 reference, with
+// negative controls on the wrong-theta and wrong-half readings) -- this
+// function only implements that already-settled architecture, and refuses a
+// checkpoint that silently changed underneath it rather than packing wrong.
+void prepare_model_gte(const std::string &model_dir,
+                       const std::string &pooling,
+                       const std::string &source_repo,
+                       const std::string &out,
+                       const std::string &layout_json,
+                       const std::string &layout_hash,
+                       int64_t tile_k, int64_t tile_n, int64_t max_seq,
+                       void (*log)(const std::string &)) {
+  const auto st_buf = slurp(model_dir + "/model.safetensors");
+  const auto src = read_safetensors(st_buf);   // widens this checkpoint's
+                                               // F16 to F32 at read time
+  Sha256 sh;
+  sh.update(st_buf.data(), st_buf.size());
+  const std::string sha = sh.hex();
+
+  // pack_gte() strips the leading "new." from every checkpoint key (only
+  // classifier.weight/classifier.bias lack it, and those are deliberately
+  // not packed). Mirrored in the lookup rather than by rebuilding the map.
+  auto get = [&](const std::string &n) -> const Tensor & {
+    auto it = src.find("new." + n);
+    if (it == src.end()) it = src.find(n);
+    if (it == src.end())
+      throw std::runtime_error("checkpoint has no tensor '" + n + "'");
+    if (it->second.dtype != "F32")
+      throw std::runtime_error("checkpoint tensor '" + n + "' is " +
+                               it->second.dtype + "; this packer reads F32 "
+                               "(F16/BF16 are widened at read time)");
+    return it->second;
+  };
+
+  const auto cfg_buf = slurp(model_dir + "/config.json");
+  const std::string cfg(reinterpret_cast<const char *>(cfg_buf.data()),
+                        cfg_buf.size());
+  auto find_key = [&](const char *key) -> size_t {
+    return cfg.find(std::string("\"") + key + "\"");
+  };
+  auto cfg_int = [&](const char *key) -> int64_t {
+    const size_t i = find_key(key);
+    if (i == std::string::npos)
+      throw std::runtime_error(std::string("config.json has no ") + key);
+    return std::stoll(cfg.substr(cfg.find(':', i) + 1));
+  };
+  auto cfg_str = [&](const char *key) -> std::string {
+    const size_t i = find_key(key);
+    if (i == std::string::npos)
+      throw std::runtime_error(std::string("config.json has no ") + key);
+    const size_t c = cfg.find(':', i) + 1;
+    const size_t q1 = cfg.find('"', c);
+    const size_t q2 = cfg.find('"', q1 + 1);
+    return cfg.substr(q1 + 1, q2 - q1 - 1);
+  };
+  // The value's EXACT literal text, verbatim -- see prepare_model_gemma()'s
+  // cfg_raw for why this is safe rather than reparsing and reformatting:
+  // every numeric field this copies into the output ("1e-12", "20000",
+  // "8.0", "250048") is already Python's canonical shortest-round-trip form,
+  // checked directly against this checkpoint's config.json.
+  auto cfg_raw = [&](const char *key) -> std::string {
+    const size_t i = find_key(key);
+    if (i == std::string::npos)
+      throw std::runtime_error(std::string("config.json has no ") + key);
+    size_t c = cfg.find(':', i) + 1;
+    while (c < cfg.size() && std::isspace(static_cast<unsigned char>(cfg[c])))
+      ++c;
+    size_t e = c;
+    while (e < cfg.size() && cfg[e] != ',' && cfg[e] != '}' &&
+          cfg[e] != '\n' && cfg[e] != '\r')
+      ++e;
+    while (e > c && std::isspace(static_cast<unsigned char>(cfg[e - 1])))
+      --e;
+    return cfg.substr(c, e - c);
+  };
+
+  const std::string model_type = cfg_str("model_type");
+  const int64_t L = cfg_int("num_hidden_layers");
+  const int64_t H = cfg_int("num_attention_heads");
+  const int64_t hidden = cfg_int("hidden_size");
+  const int64_t inter = cfg_int("intermediate_size");
+  const int64_t vocab_size = cfg_int("vocab_size");
+  const int64_t type_vocab = cfg_int("type_vocab_size");
+  const int64_t head_dim = hidden / H;    // gte's config carries no head_dim
+
+  // -- fail-closed assertions: every fact tasks/0134's probe settled, in
+  // pack_gte()'s order. ----------------------------------------------------
+  if (model_type != "new")
+    throw std::runtime_error("model_type='" + model_type +
+                             "', expected 'new'");
+  if (cfg_str("hidden_act") != "gelu")
+    throw std::runtime_error("hidden_act='" + cfg_str("hidden_act") +
+                             "', expected 'gelu' (exact erf -- tasks/0134)");
+  if (cfg_str("position_embedding_type") != "rope")
+    throw std::runtime_error("position_embedding_type='" +
+                             cfg_str("position_embedding_type") +
+                             "', expected 'rope'");
+  // rope_theta / rope_scaling: read SCOPED to the rope_scaling object --
+  // "type" as a bare key search would also match rope_scaling's own row in
+  // some other object, and this file has several *_type keys.
+  const std::string theta_raw = cfg_raw("rope_theta");
+  std::string rs_type, rs_factor_raw;
+  bool rs_has_mixed_b = false;
+  {
+    const size_t i = find_key("rope_scaling");
+    if (i == std::string::npos)
+      throw std::runtime_error("config.json has no rope_scaling");
+    const size_t ob = cfg.find('{', i);
+    const size_t cb = cfg.find('}', ob);
+    if (ob == std::string::npos || cb == std::string::npos)
+      throw std::runtime_error("config.json: rope_scaling is not an object");
+    const std::string rs = cfg.substr(ob, cb - ob + 1);
+    auto rs_find = [&](const char *key) -> size_t {
+      return rs.find(std::string("\"") + key + "\"");
+    };
+    const size_t ti = rs_find("type");
+    if (ti != std::string::npos) {
+      const size_t q1 = rs.find('"', rs.find(':', ti) + 1);
+      const size_t q2 = rs.find('"', q1 + 1);
+      rs_type = rs.substr(q1 + 1, q2 - q1 - 1);
+    }
+    const size_t fi = rs_find("factor");
+    if (fi != std::string::npos) {
+      size_t c = rs.find(':', fi) + 1;
+      while (c < rs.size() && std::isspace(static_cast<unsigned char>(rs[c])))
+        ++c;
+      size_t e = c;
+      while (e < rs.size() && rs[e] != ',' && rs[e] != '}' &&
+             rs[e] != '\n' && rs[e] != '\r')
+        ++e;
+      while (e > c && std::isspace(static_cast<unsigned char>(rs[e - 1])))
+        --e;
+      rs_factor_raw = rs.substr(c, e - c);
+    }
+    const size_t mi = rs_find("mixed_b");
+    if (mi != std::string::npos) {
+      size_t c = rs.find(':', mi) + 1;
+      while (c < rs.size() && std::isspace(static_cast<unsigned char>(rs[c])))
+        ++c;
+      // Python: `rs.get("mixed_b") is not None` -- only an explicit null
+      // (or the key's absence) passes.
+      rs_has_mixed_b = rs.compare(c, 4, "null") != 0;
+    }
+  }
+  if (std::stod(theta_raw) != 20000.0 || rs_type != "ntk" ||
+      rs_factor_raw.empty() || std::stod(rs_factor_raw) != 8.0 ||
+      rs_has_mixed_b)
+    throw std::runtime_error(
+        "rope_theta=" + theta_raw + ", rope_scaling{type='" + rs_type +
+        "', factor=" + rs_factor_raw + "} -- expected 20000 / ntk / 8.0 / "
+        "mixed_b None. The baked inv_freq below is derived for exactly that "
+        "configuration (tasks/0134); refusing to pack an unverified RoPE "
+        "against it");
+  if (type_vocab != 1)
+    throw std::runtime_error("type_vocab_size=" + std::to_string(type_vocab) +
+                             ", expected 1");
+  if (find_key("layer_norm_type") != std::string::npos &&
+      cfg_str("layer_norm_type") != "layer_norm")
+    throw std::runtime_error("layer_norm_type='" +
+                             cfg_str("layer_norm_type") + "'");
+  if (find_key("logn_attention_scale") != std::string::npos) {
+    const std::string v = cfg_raw("logn_attention_scale");
+    if (v != "false" && v != "null" && std::stod("0" + v) != 0.0)
+      throw std::runtime_error("logn_attention_scale is set -- tasks/0134's "
+                               "probe validated the plain 1/sqrt(head_dim) "
+                               "scale only");
+  }
+  if (find_key("pack_qkv") == std::string::npos ||
+      cfg_raw("pack_qkv") != "true")
+    throw std::runtime_error("pack_qkv is false -- this packer reads the "
+                             "fused qkv_proj tensor");
+  const std::string eps_raw = cfg_raw("layer_norm_eps");
+
+  // FLOAT, not double, exactly as prepare_model()'s scale is -- but note
+  // that for head_dim 64 the value is 0.125, a power of two, so the fold
+  // below is EXACT regardless (no rounding anywhere in x * 0.125f).
+  const float scale = static_cast<float>(1.0 / std::sqrt(
+      static_cast<double>(head_dim)));
+
+  // The NTK frequency set, float32 arithmetic exactly as pack_gte() (and
+  // torch) compute it: inv_freq_i = (theta*factor)^(-2i/head_dim), then
+  // divided by factor^(2/head_dim). MSVC's powf reproduces numpy's float32
+  // power bit-for-bit on all 32 values -- verified against the
+  // Python-packed container in tasks/0138, which is what licenses computing
+  // rather than transcribing them.
+  const int64_t half = head_dim / 2;
+  std::vector<float> inv_freq(static_cast<size_t>(half));
+  {
+    const float tf = static_cast<float>(std::stod(theta_raw) *
+                                        std::stod(rs_factor_raw)); // 160000
+    const float corr = std::pow(static_cast<float>(std::stod(rs_factor_raw)),
+                                2.0f / static_cast<float>(head_dim));
+    for (int64_t j = 0; j < half; ++j) {
+      const float e = static_cast<float>(2 * j) /
+                      static_cast<float>(head_dim);
+      inv_freq[static_cast<size_t>(j)] = (1.0f / std::pow(tf, e)) / corr;
+    }
+  }
+
+  // The XLMRTOK1 tokenizer blob: prefer the cached file (byte-identical
+  // either way it got there -- tasks/0133's sha256 identity), else generate
+  // it here in C++ and write it back to the same cache path, exactly as
+  // prepare_model_gemma() does for its own table.
+  const std::string tok_path = model_dir + "/xlmr_tokenizer.bin";
+  std::vector<uint8_t> tb;
+  bool tok_generated = false;
+  {
+    std::ifstream tf(tok_path, std::ios::binary);
+    if (tf.good()) {
+      tf.close();
+      tb = slurp(tok_path);
+    } else {
+      tb = generate_xlmr_tokenizer_table(model_dir + "/tokenizer.json");
+      tok_generated = true;
+      std::ofstream of(tok_path, std::ios::binary);
+      if (!of) throw std::runtime_error("cannot write " + tok_path);
+      of.write(reinterpret_cast<const char *>(tb.data()),
+               static_cast<std::streamsize>(tb.size()));
+      if (!of) throw std::runtime_error("error writing " + tok_path);
+    }
+  }
+
+  if (log) {
+    std::ostringstream s;
+    s << "packing " << model_dir << " -> " << out
+      << "  (arch=gte_new_rope_geglu)\n"
+      << "  hidden=" << hidden << " heads=" << H << " head_dim=" << head_dim
+      << " layers=" << L << " inter=" << inter
+      << " rope=ntk(20000 x 8.0, " << half << " baked inv_freq)";
+    log(s.str());
+  }
+
+  // Exact key order of tools/pack_npue.py's pack_gte() config dict --
+  // json.dumps(..., separators=(",", ":")) preserves insertion order, and
+  // this must match it byte for byte (tools/verify_pack_parity.py's gate,
+  // held for arch=3 in tasks/0138).
+  std::string cj;
+  cj += "{\"arch\":\"gte_new_rope_geglu\"";
+  cj += ",\"a_dtype\":\"bf16\"";
+  cj += ",\"model_type\":\"" + model_type + "\"";
+  cj += ",\"source_repo\":\"" + source_repo + "\"";
+  cj += ",\"source_sha256\":\"" + sha + "\"";
+  cj += ",\"num_layers\":" + std::to_string(L);
+  cj += ",\"num_heads\":" + std::to_string(H);
+  cj += ",\"hidden\":" + std::to_string(hidden);
+  cj += ",\"head_dim\":" + std::to_string(head_dim);
+  cj += ",\"intermediate\":" + std::to_string(inter);
+  cj += ",\"layer_norm_eps\":" + eps_raw;
+  cj += ",\"vocab_size\":" + std::to_string(vocab_size);
+  cj += ",\"max_seq_len\":" + std::to_string(max_seq);
+  cj += ",\"pooling\":\"" + pooling + "\",\"l2_normalize\":true";
+  cj += ",\"l2_normalize_note\":\"genuinely the checkpoint's own: "
+        "modules.json lists a 2_Normalize module (unlike nomic, where true "
+        "records this runtime's behaviour).\"";
+  cj += ",\"activation\":\"gelu\",\"gated_ffn\":true";
+  cj += ",\"glu_halves\":\"up_first|gate_second -- runtime computes "
+        "lo * gelu(hi), same half order as nomic's fc11_up|fc12_gate with "
+        "GELU for SiLU\"";
+  cj += ",\"position_embedding_type\":\"rope\"";
+  cj += ",\"rope_theta\":" + theta_raw;
+  cj += ",\"rope_scaling\":{\"type\":\"" + rs_type + "\",\"factor\":" +
+        rs_factor_raw + "}";
+  cj += ",\"rope_inv_freq\":[";
+  for (int64_t j = 0; j < half; ++j) {
+    if (j) cj += ",";
+    cj += py_double_repr(static_cast<double>(inv_freq[static_cast<size_t>(j)]));
+  }
+  cj += "]";
+  cj += ",\"rope_note\":\"rope_inv_freq IS the model -- inv_freq_i = "
+        "160000^(-i/32) / 8^(1/32), NOT expressible as any single theta "
+        "(tasks/0134, verified bit-for-bit). rope_theta/rope_scaling above "
+        "are provenance only; a consumer that derives frequencies from "
+        "rope_theta alone is wrong by 1.9e-02 relfro at layer 0.\"";
+  cj += ",\"attention_bias\":true";
+  cj += ",\"mlp_bias\":\"down_only -- up_gate_proj is genuinely bias-free\"";
+  cj += ",\"tile_k\":" + std::to_string(tile_k) +
+        ",\"tile_n\":" + std::to_string(tile_n) +
+        ",\"mac_s\":" + std::to_string(kMacS) +
+        ",\"mac_t\":" + std::to_string(kMacT);
+  cj += ",\"fusions\":{\"qkv_fused\":true,\"transposed_to_kn\":true,"
+        "\"qk_scale_folded_into_q\":true,"
+        "\"qk_scale_folded_into_q_bias\":true,"
+        "\"gemm_operands_bf16\":true,"
+        "\"biases_and_layernorm_fp32\":true,"
+        "\"gated_ffn_fused_upstream\":true,"
+        "\"position_embeddings_zeroed_rope_instead\":true}";
+  cj += ",\"not_implemented\":[\"int8 datapath (calibrate_smoothing has no "
+        "'gte' oracle)\",\"vocab rows 250002-" +
+        std::to_string(vocab_size - 1) +
+        " are padding: unreachable from the tokenizer, packed only so "
+        "vocab_size and the tensor agree\",\"classifier.weight/"
+        "classifier.bias (a task head this encoder never runs) are "
+        "deliberately NOT packed\"]}";
+
+  Writer w;
+  auto add_f32 = [&](const std::string &name, const Tensor &t,
+                     const char *role, const std::vector<int64_t> &shape) {
+    w.add(name, t.data, static_cast<size_t>(t.count()) * 4, "F32", role,
+          shape);
+  };
+
+  // -- embeddings: SAME order as arch=0/2, including the ln.weight ->
+  // tokenizer -> ln.bias interleaving (load-bearing for byte parity). ------
+  add_f32("embeddings.word", get("embeddings.word_embeddings.weight"),
+          "embedding", {vocab_size, hidden});
+  {
+    // No position table -- RoPE instead. Zero-filled, not omitted: the same
+    // reasoning (and bytes) as prepare_model_nomic() above.
+    std::vector<float> zpos(static_cast<size_t>(max_seq) * hidden, 0.f);
+    w.add("embeddings.position", zpos.data(), zpos.size() * 4, "F32",
+          "embedding", {max_seq, hidden});
+  }
+  add_f32("embeddings.token_type",
+          get("embeddings.token_type_embeddings.weight"), "embedding",
+          {type_vocab, hidden});
+  add_f32("embeddings.ln.weight", get("embeddings.LayerNorm.weight"),
+          "layernorm", {hidden});
+  w.add("tokenizer.xlmr_table", tb.data(), tb.size(), "U8", "tokenizer",
+        {static_cast<int64_t>(tb.size())});
+  if (log) {
+    std::ostringstream s;
+    s << (tok_generated
+              ? "  generated tokenizer.xlmr_table (no cached "
+                "xlmr_tokenizer.bin found)  "
+              : "  tokenizer.xlmr_table  ")
+      << (tb.size() / 1e6) << " MB (XLMRTOK1, tasks/0127)";
+    log(s.str());
+  }
+  add_f32("embeddings.ln.bias", get("embeddings.LayerNorm.bias"),
+          "layernorm", {hidden});
+
+  for (int64_t i = 0; i < L; ++i) {
+    const std::string p = "encoder.layer." + std::to_string(i) + ".";
+    const std::string at = p + "attention.";
+    const std::string tag = "layer." + std::to_string(i) + ".";
+
+    // Fused upstream already: qkv_proj is [2304,768] [Q|K|V]-major.
+    // 1/sqrt(head_dim) folded into the Q block (first `hidden` columns of
+    // the transposed [768,2304] operand) -- exact, RoPE is linear in q.
+    // Unlike nomic, gte HAS a qkv bias, so its Q third scales too:
+    // (xW + b)*s == x(Ws) + (bs).
+    add_gemm_b(w, tag + "qkv", get(at + "qkv_proj.weight"), tile_k, tile_n,
+               layout_json, layout_hash, scale, hidden);
+    {
+      const Tensor &b = get(at + "qkv_proj.bias");
+      std::vector<float> bias(b.f32(), b.f32() + b.count());
+      for (int64_t o = 0; o < hidden; ++o)
+        bias[static_cast<size_t>(o)] *= scale;
+      w.add(tag + "qkv.bias", bias.data(), bias.size() * 4, "F32", "bias",
+            {3 * hidden});
+    }
+
+    add_gemm_b(w, tag + "attn_out", get(at + "o_proj.weight"), tile_k,
+               tile_n, layout_json, layout_hash);
+    add_f32(tag + "attn_out.bias", get(at + "o_proj.bias"), "bias", {hidden});
+    add_f32(tag + "ln1.weight", get(p + "attn_ln.weight"), "layernorm",
+            {hidden});
+    add_f32(tag + "ln1.bias", get(p + "attn_ln.bias"), "layernorm", {hidden});
+
+    // up_gate_proj is already the fused [2*inter, hidden] the runtime
+    // wants: transposed to [hidden, 2*inter] by add_gemm_b; up columns
+    // [0, inter), gate columns [inter, 2*inter) -- the lo/hi order of
+    // `lo * act(hi)`. Genuinely bias-free upstream -- zero-filled.
+    add_gemm_b(w, tag + "ffn_up", get(p + "mlp.up_gate_proj.weight"),
+               tile_k, tile_n, layout_json, layout_hash);
+    {
+      std::vector<float> z(static_cast<size_t>(2 * inter), 0.f);
+      w.add(tag + "ffn_up.bias", z.data(), z.size() * 4, "F32", "bias",
+            {2 * inter});
+    }
+
+    add_gemm_b(w, tag + "ffn_down", get(p + "mlp.down_proj.weight"), tile_k,
+               tile_n, layout_json, layout_hash);
+    add_f32(tag + "ffn_down.bias", get(p + "mlp.down_proj.bias"), "bias",
+            {hidden});
+    add_f32(tag + "ln2.weight", get(p + "mlp_ln.weight"), "layernorm",
+            {hidden});
+    add_f32(tag + "ln2.bias", get(p + "mlp_ln.bias"), "layernorm", {hidden});
+  }
+
+  w.write(out, cj, /*arch=*/3);
   if (log) {
     std::ostringstream s;
     s << "\n  tensors    : " << w.count()

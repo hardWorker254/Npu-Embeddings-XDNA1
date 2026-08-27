@@ -1,0 +1,80 @@
+{
+  "kind": "hardware measurement -- tail gate, p99-gated per model",
+  "exe": "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\runtime\\build\\npuembeddings.exe",
+  "reference_dir": "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\reference\\tail",
+  "write_baseline": false,
+  "models": [
+    {
+      "model": "gte-multilingual-base",
+      "hidden": 768,
+      "prompt": null,
+      "datapath_reported": "bfp16-emulated MMAC, C as bf16",
+      "designs_reported": "ONE xclbin, 16 streams (4 batch tiers), one hw_context",
+      "overall": {
+        "n": 224,
+        "median": 0.0003419219749867808,
+        "p90": 0.00042993407129849893,
+        "p99": 0.0005159707146285375,
+        "max": 0.0007361396211736926,
+        "max_over_median": 2.1529462129544403
+      },
+      "groups": {
+        "words": {
+          "n": 180,
+          "median": 0.0003544078664815542,
+          "p90": 0.00043788867053540237,
+          "p99": 0.0005328625767394119,
+          "max": 0.0007361396211736926,
+          "max_over_median": 2.0770972960669494
+        },
+        "sentences": {
+          "n": 36,
+          "median": 0.0002931898816317391,
+          "p90": 0.0003612615295059962,
+          "p99": 0.000370878992712792,
+          "max": 0.0003720407287411964,
+          "max_over_median": 1.2689412290445203
+        },
+        "phrases": {
+          "n": 8,
+          "median": 0.00034731228913809087,
+          "p90": 0.0004232701277714246,
+          "p99": 0.00044839469159045793,
+          "max": 0.0004511863097925728,
+          "max_over_median": 1.2990796004145473
+        }
+      },
+      "worst": [
+        {
+          "text": "defect",
+          "one_minus_cos": 0.0007361396211736926
+        },
+        {
+          "text": "trainee",
+          "one_minus_cos": 0.0005944675176314806
+        },
+        {
+          "text": "bedfordshire",
+          "one_minus_cos": 0.0005164865797934182
+        },
+        {
+          "text": "assessment",
+          "one_minus_cos": 0.0005142436877721979
+        },
+        {
+          "text": "denoted",
+          "one_minus_cos": 0.0004972081747811607
+        }
+      ],
+      "baseline": {
+        "p99_measured": 0.0005159707146285375,
+        "p99_ceiling": 0.002,
+        "measured_date": "2026-08-27",
+        "datapath": "bfp16-emulated MMAC, C as bf16"
+      },
+      "verdict": "PASS",
+      "pass": true
+    }
+  ],
+  "pass": true
+}

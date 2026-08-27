@@ -37,6 +37,10 @@ reference/goldens_gemma/*_taps.safetensors
 #   & .\.venv-ref\Scripts\python.exe reference\make_goldens_nomic.py --taps
 reference/goldens_nomic/*_taps.safetensors
 
+# Same policy for arch=3; regenerate:
+#   .venv-ref python reference/make_goldens_gte.py --taps
+reference/goldens_gte/*_taps.safetensors
+
 # Exported ONNX graphs -- 90-133 MB each, and a deterministic derivative of a
 # sha256-pinned checkpoint, exactly like the taps goldens above.
 # bench_cpu_ort.py regenerates them on demand and caches them here.
@@ -144,3 +148,9 @@ repo/
 # not vendored, not redistributed -- read for architecture and ideas, exactly
 # like ../FastFlowLM. Re-clone with tools noted in tasks/0044/TASK.md.
 externalrepos/
+
+# Parsed trace for tasks/0130 -- same policy as the experiments traces
+# above: a derivative of the committed trace.txt + the committed physical
+# MLIR (experiments/m5-pretiled-gemm/artifacts/mlir_pretiled_kn_st_4c_*).
+# Regenerate with cfg.trace_to_json(mlir, out) or re-run the traced dispatch.
+tasks/0130-t45-traced-roof/trace.json

@@ -1,0 +1,55 @@
+0121 raw output -- 2026-08-27
+Env: repo root; NPU used (the gate runs the real encoder). No iron_env, no .venv-ref.
+Interpreter: C:\Users\vegar\.conda\envs\iron\python.exe -- but the tool is STDLIB ONLY,
+so any CPython works; the conda one is just what was on PATH.
+
+$ python tools/verify_semantics.py
+
+semantic gate -- 24 gate sentences in 12 clusters (12 near pairs, 264 far), plus 12 probes scored against them
+exe C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\build\npuembeddings.exe
+THE GATE IS ORDER: every gate sentence's own cluster partner must
+be its NEAREST of the other 23. No tolerance is involved -- the one
+number in the file catches a COLLAPSED encoder, not a semantic
+disagreement. The probe row and the global margin are REPORTED and
+never gated; the reasoning is in check_model()'s docstring.
+
+  all-MiniLM-L6-v2         PASS   gate 24/24   near +0.790 vs far +0.057   margin +0.387   probe 12/12   ctrl fails-as-required
+                          bfp16-emulated MMAC, C as bf16   [ONE xclbin, 16 streams (4 batch tiers), one hw_context]
+  bge-small-en-v1.5        PASS   gate 24/24   near +0.856 vs far +0.400   margin +0.224   probe 10/12   ctrl fails-as-required
+                          bf16 MMAC, C as fp32   [ONE xclbin, 16 streams (4 batch tiers), one hw_context]
+  bge-base-en-v1.5         PASS   gate 24/24   near +0.846 vs far +0.353   margin +0.217   probe 12/12   ctrl fails-as-required
+                          bfp16-emulated MMAC, C as bf16   [ONE xclbin, 16 streams (4 batch tiers), one hw_context]
+  bge-large-en-v1.5        PASS   gate 24/24   near +0.830 vs far +0.328   margin +0.237   probe 12/12   ctrl fails-as-required
+                          bfp16-emulated MMAC, C as bf16   [ONE xclbin, 4 streams (1 batch tiers), one hw_context]
+  nomic-embed-text-v1.5    PASS   gate 24/24   near +0.925 vs far +0.599   margin +0.189   probe 12/12   ctrl fails-as-required   prompt 'clustering'
+                          bfp16-emulated MMAC, C as bf16   [ONE xclbin, 16 streams (4 batch tiers), one hw_context]
+  embeddinggemma-300m      PASS   gate 24/24   near +0.826 vs far +0.357   margin +0.256   probe 12/12   ctrl fails-as-required   prompt 'STS'
+                          bfp16-emulated MMAC, C as bf16   [C:\Users\vegar\Documents\GitHub\NpuEmbeddings\runtime\artifacts_gemma_bfp16  (16 streams, 4 batch tiers)]
+
+  model                     near min  far max   margin   probe
+  all-MiniLM-L6-v2             0.595    0.207    0.387   12/12
+  bge-small-en-v1.5            0.782    0.558    0.224   10/12
+  bge-base-en-v1.5             0.750    0.533    0.217   12/12
+  bge-large-en-v1.5            0.729    0.492    0.237   12/12
+  nomic-embed-text-v1.5        0.871    0.682    0.189   12/12
+  embeddinggemma-300m          0.748    0.492    0.256   12/12
+
+  near min / far max are the extremes the GATE does not use: a
+  negative margin means two unrelated clusters sit closer than the
+  weakest paraphrase pair, which is a fact about English, not a
+  regression. Watch it move, do not gate on it.
+
+  probe misses (same topic, almost no shared words -- model
+  quality, not runtime correctness):
+    bge-small-en-v1.5        car.c->fly.b(own rank 3), gard.c->med.b(own rank 2)
+
+  worst far pairs by shared words (derived, not hand-picked):
+    all-MiniLM-L6-v2         cook.a/med.b overlap 0.19  cos +0.133  (weakest near +0.595)
+    bge-small-en-v1.5        cook.a/med.b overlap 0.19  cos +0.438  (weakest near +0.782)
+    bge-base-en-v1.5         cook.a/med.b overlap 0.19  cos +0.407  (weakest near +0.750)
+    bge-large-en-v1.5        cook.a/med.b overlap 0.19  cos +0.328  (weakest near +0.729)
+    nomic-embed-text-v1.5    cook.a/med.a overlap 0.19  cos +0.569  (weakest near +0.871)
+    embeddinggemma-300m      cook.a/med.a overlap 0.19  cos +0.388  (weakest near +0.748)
+
+wrote C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0121-semantic-gate\semantic_gate.json
+PASS -- every model puts each paraphrase pair together

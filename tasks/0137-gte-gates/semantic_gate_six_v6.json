@@ -1,0 +1,915 @@
+{
+  "kind": "behavioural gate, ordering only -- no tolerance",
+  "corpus": "semantic_corpus.json",
+  "corpus_version": 6,
+  "exe": "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\runtime\\build\\npuembeddings.exe",
+  "models": [
+    {
+      "n_gate": 24,
+      "n_probe": 12,
+      "n_near": 12,
+      "n_far": 264,
+      "gate_rank_failures": [],
+      "collapsed_pairs": [],
+      "worst_near": {
+        "cos": 0.5946360136887892,
+        "pair": [
+          "wthr.a",
+          "wthr.b"
+        ]
+      },
+      "best_far": {
+        "cos": 0.20725976492326895,
+        "pair": [
+          "car.b",
+          "med.a"
+        ]
+      },
+      "margin": 0.38737624876552024,
+      "separated": true,
+      "near_mean": 0.7900052833046635,
+      "far_mean": 0.05683046127679232,
+      "probe_hits": 12,
+      "probe_rate": 1.0,
+      "probes": [
+        {
+          "id": "fish.c",
+          "nearest": "fish.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.4183626231576212
+        },
+        {
+          "id": "furn.c",
+          "nearest": "furn.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.3948478157693939
+        },
+        {
+          "id": "wthr.c",
+          "nearest": "wthr.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.4683802679741187
+        },
+        {
+          "id": "cook.c",
+          "nearest": "cook.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.3108771692352229
+        },
+        {
+          "id": "car.c",
+          "nearest": "car.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.20529801176048615
+        },
+        {
+          "id": "prog.c",
+          "nearest": "prog.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.4698318094983531
+        },
+        {
+          "id": "med.c",
+          "nearest": "med.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.5597288134061712
+        },
+        {
+          "id": "astr.c",
+          "nearest": "astr.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.5243603066057526
+        },
+        {
+          "id": "ball.c",
+          "nearest": "ball.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.5226151899466097
+        },
+        {
+          "id": "bank.c",
+          "nearest": "bank.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.2651792989322723
+        },
+        {
+          "id": "gard.c",
+          "nearest": "gard.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.37314384799217076
+        },
+        {
+          "id": "fly.c",
+          "nearest": "fly.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.3592464816533273
+        }
+      ],
+      "adversarial_far": [
+        {
+          "pair": [
+            "cook.a",
+            "med.b"
+          ],
+          "cos": 0.13292009286680245,
+          "word_overlap": 0.18518518518518517
+        },
+        {
+          "pair": [
+            "cook.a",
+            "med.a"
+          ],
+          "cos": 0.13531347683494185,
+          "word_overlap": 0.18518518518518517
+        },
+        {
+          "pair": [
+            "cook.b",
+            "med.b"
+          ],
+          "cos": 0.17174729836162486,
+          "word_overlap": 0.17857142857142858
+        }
+      ],
+      "pass": true,
+      "model": "all-MiniLM-L6-v2",
+      "hidden": 384,
+      "arch": 0,
+      "prompt": null,
+      "datapath_reported": "bfp16-emulated MMAC, C as bf16",
+      "designs_reported": "ONE xclbin, 16 streams (4 batch tiers), one hw_context",
+      "toolchain_reported": "mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 7e00b57955e108fe9d8e9419f5828a0c7e650858",
+      "control_pass": false,
+      "control_gate_failures": 24,
+      "control_ok": true
+    },
+    {
+      "n_gate": 24,
+      "n_probe": 12,
+      "n_near": 12,
+      "n_far": 264,
+      "gate_rank_failures": [],
+      "collapsed_pairs": [],
+      "worst_near": {
+        "cos": 0.7823474149358681,
+        "pair": [
+          "wthr.a",
+          "wthr.b"
+        ]
+      },
+      "best_far": {
+        "cos": 0.5581863912055072,
+        "pair": [
+          "prog.b",
+          "fly.b"
+        ]
+      },
+      "margin": 0.22416102373036095,
+      "separated": true,
+      "near_mean": 0.8563133778089528,
+      "far_mean": 0.39954847197229887,
+      "probe_hits": 10,
+      "probe_rate": 0.8333333333333334,
+      "probes": [
+        {
+          "id": "fish.c",
+          "nearest": "fish.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.5892147762986998
+        },
+        {
+          "id": "furn.c",
+          "nearest": "furn.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.5965044917016338
+        },
+        {
+          "id": "wthr.c",
+          "nearest": "wthr.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.6318197363356216
+        },
+        {
+          "id": "cook.c",
+          "nearest": "cook.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.6138118360343029
+        },
+        {
+          "id": "car.c",
+          "nearest": "fly.b",
+          "own_cluster_rank": 3,
+          "hit": false,
+          "cos_to_own": 0.4965645454269387
+        },
+        {
+          "id": "prog.c",
+          "nearest": "prog.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.6770140494295114
+        },
+        {
+          "id": "med.c",
+          "nearest": "med.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.6830023086797968
+        },
+        {
+          "id": "astr.c",
+          "nearest": "astr.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.6679527995822028
+        },
+        {
+          "id": "ball.c",
+          "nearest": "ball.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.6960859470833495
+        },
+        {
+          "id": "bank.c",
+          "nearest": "bank.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.6314671222421391
+        },
+        {
+          "id": "gard.c",
+          "nearest": "med.b",
+          "own_cluster_rank": 2,
+          "hit": false,
+          "cos_to_own": 0.5284226910353973
+        },
+        {
+          "id": "fly.c",
+          "nearest": "fly.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.6597706094248033
+        }
+      ],
+      "adversarial_far": [
+        {
+          "pair": [
+            "cook.a",
+            "med.b"
+          ],
+          "cos": 0.437946412033633,
+          "word_overlap": 0.18518518518518517
+        },
+        {
+          "pair": [
+            "cook.a",
+            "med.a"
+          ],
+          "cos": 0.44532634702212237,
+          "word_overlap": 0.18518518518518517
+        },
+        {
+          "pair": [
+            "cook.b",
+            "med.b"
+          ],
+          "cos": 0.43983696235930914,
+          "word_overlap": 0.17857142857142858
+        }
+      ],
+      "pass": true,
+      "model": "bge-small-en-v1.5",
+      "hidden": 384,
+      "arch": 0,
+      "prompt": null,
+      "datapath_reported": "bf16 MMAC, C as fp32",
+      "designs_reported": "ONE xclbin, 16 streams (4 batch tiers), one hw_context",
+      "toolchain_reported": "mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 7e00b57955e108fe9d8e9419f5828a0c7e650858",
+      "control_pass": false,
+      "control_gate_failures": 24,
+      "control_ok": true
+    },
+    {
+      "n_gate": 24,
+      "n_probe": 12,
+      "n_near": 12,
+      "n_far": 264,
+      "gate_rank_failures": [],
+      "collapsed_pairs": [],
+      "worst_near": {
+        "cos": 0.7503425596267413,
+        "pair": [
+          "wthr.a",
+          "wthr.b"
+        ]
+      },
+      "best_far": {
+        "cos": 0.533405023226145,
+        "pair": [
+          "prog.b",
+          "fly.a"
+        ]
+      },
+      "margin": 0.21693753640059632,
+      "separated": true,
+      "near_mean": 0.8458480607463842,
+      "far_mean": 0.3533783967217598,
+      "probe_hits": 12,
+      "probe_rate": 1.0,
+      "probes": [
+        {
+          "id": "fish.c",
+          "nearest": "fish.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.49516603616469795
+        },
+        {
+          "id": "furn.c",
+          "nearest": "furn.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.524266164935298
+        },
+        {
+          "id": "wthr.c",
+          "nearest": "wthr.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.6589670464199837
+        },
+        {
+          "id": "cook.c",
+          "nearest": "cook.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.5996523617815956
+        },
+        {
+          "id": "car.c",
+          "nearest": "car.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.5376062711928359
+        },
+        {
+          "id": "prog.c",
+          "nearest": "prog.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.6674411128653838
+        },
+        {
+          "id": "med.c",
+          "nearest": "med.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.6376126136278717
+        },
+        {
+          "id": "astr.c",
+          "nearest": "astr.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.6502730775387526
+        },
+        {
+          "id": "ball.c",
+          "nearest": "ball.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.7100612390409224
+        },
+        {
+          "id": "bank.c",
+          "nearest": "bank.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.6587009198855528
+        },
+        {
+          "id": "gard.c",
+          "nearest": "gard.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.5055227525098547
+        },
+        {
+          "id": "fly.c",
+          "nearest": "fly.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.578304387750113
+        }
+      ],
+      "adversarial_far": [
+        {
+          "pair": [
+            "cook.a",
+            "med.b"
+          ],
+          "cos": 0.40659251495069354,
+          "word_overlap": 0.18518518518518517
+        },
+        {
+          "pair": [
+            "cook.a",
+            "med.a"
+          ],
+          "cos": 0.4176850041842099,
+          "word_overlap": 0.18518518518518517
+        },
+        {
+          "pair": [
+            "cook.b",
+            "med.b"
+          ],
+          "cos": 0.39963136138313654,
+          "word_overlap": 0.17857142857142858
+        }
+      ],
+      "pass": true,
+      "model": "bge-base-en-v1.5",
+      "hidden": 768,
+      "arch": 0,
+      "prompt": null,
+      "datapath_reported": "bfp16-emulated MMAC, C as bf16",
+      "designs_reported": "ONE xclbin, 16 streams (4 batch tiers), one hw_context",
+      "toolchain_reported": "mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 7e00b57955e108fe9d8e9419f5828a0c7e650858",
+      "control_pass": false,
+      "control_gate_failures": 24,
+      "control_ok": true
+    },
+    {
+      "n_gate": 24,
+      "n_probe": 12,
+      "n_near": 12,
+      "n_far": 264,
+      "gate_rank_failures": [],
+      "collapsed_pairs": [],
+      "worst_near": {
+        "cos": 0.7285881506315705,
+        "pair": [
+          "gard.a",
+          "gard.b"
+        ]
+      },
+      "best_far": {
+        "cos": 0.491830220278697,
+        "pair": [
+          "med.a",
+          "bank.b"
+        ]
+      },
+      "margin": 0.23675793035287346,
+      "separated": true,
+      "near_mean": 0.8300806048160756,
+      "far_mean": 0.32836414937220737,
+      "probe_hits": 12,
+      "probe_rate": 1.0,
+      "probes": [
+        {
+          "id": "fish.c",
+          "nearest": "fish.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.5062755909981734
+        },
+        {
+          "id": "furn.c",
+          "nearest": "furn.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.5523794495401563
+        },
+        {
+          "id": "wthr.c",
+          "nearest": "wthr.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.6387017364896662
+        },
+        {
+          "id": "cook.c",
+          "nearest": "cook.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.5949947019838526
+        },
+        {
+          "id": "car.c",
+          "nearest": "car.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.48547741379436016
+        },
+        {
+          "id": "prog.c",
+          "nearest": "prog.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.5836172086294198
+        },
+        {
+          "id": "med.c",
+          "nearest": "med.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.5830797977234644
+        },
+        {
+          "id": "astr.c",
+          "nearest": "astr.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.6206720793128888
+        },
+        {
+          "id": "ball.c",
+          "nearest": "ball.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.7124282854364641
+        },
+        {
+          "id": "bank.c",
+          "nearest": "bank.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.621529245113087
+        },
+        {
+          "id": "gard.c",
+          "nearest": "gard.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.4466071995293844
+        },
+        {
+          "id": "fly.c",
+          "nearest": "fly.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.6082197314173357
+        }
+      ],
+      "adversarial_far": [
+        {
+          "pair": [
+            "cook.a",
+            "med.b"
+          ],
+          "cos": 0.3283898183642889,
+          "word_overlap": 0.18518518518518517
+        },
+        {
+          "pair": [
+            "cook.a",
+            "med.a"
+          ],
+          "cos": 0.3673963729838896,
+          "word_overlap": 0.18518518518518517
+        },
+        {
+          "pair": [
+            "cook.b",
+            "med.b"
+          ],
+          "cos": 0.3329814270742792,
+          "word_overlap": 0.17857142857142858
+        }
+      ],
+      "pass": true,
+      "model": "bge-large-en-v1.5",
+      "hidden": 1024,
+      "arch": 0,
+      "prompt": null,
+      "datapath_reported": "bfp16-emulated MMAC, C as bf16",
+      "designs_reported": "ONE xclbin, 4 streams (1 batch tiers), one hw_context",
+      "toolchain_reported": "mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 7e00b57955e108fe9d8e9419f5828a0c7e650858",
+      "control_pass": false,
+      "control_gate_failures": 24,
+      "control_ok": true
+    },
+    {
+      "n_gate": 24,
+      "n_probe": 12,
+      "n_near": 12,
+      "n_far": 264,
+      "gate_rank_failures": [],
+      "collapsed_pairs": [],
+      "worst_near": {
+        "cos": 0.8714065855354975,
+        "pair": [
+          "prog.a",
+          "prog.b"
+        ]
+      },
+      "best_far": {
+        "cos": 0.6821701226523929,
+        "pair": [
+          "fish.a",
+          "gard.b"
+        ]
+      },
+      "margin": 0.1892364628831047,
+      "separated": true,
+      "near_mean": 0.925245383700423,
+      "far_mean": 0.5993526503515038,
+      "probe_hits": 12,
+      "probe_rate": 1.0,
+      "probes": [
+        {
+          "id": "fish.c",
+          "nearest": "fish.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.7892557700993238
+        },
+        {
+          "id": "furn.c",
+          "nearest": "furn.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.8137934969944207
+        },
+        {
+          "id": "wthr.c",
+          "nearest": "wthr.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.8294220584520748
+        },
+        {
+          "id": "cook.c",
+          "nearest": "cook.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.7434213721533788
+        },
+        {
+          "id": "car.c",
+          "nearest": "car.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.8023273327760329
+        },
+        {
+          "id": "prog.c",
+          "nearest": "prog.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.7964588771924217
+        },
+        {
+          "id": "med.c",
+          "nearest": "med.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.8562578884499341
+        },
+        {
+          "id": "astr.c",
+          "nearest": "astr.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.8627820510442469
+        },
+        {
+          "id": "ball.c",
+          "nearest": "ball.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.8159042378190343
+        },
+        {
+          "id": "bank.c",
+          "nearest": "bank.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.8031570162397688
+        },
+        {
+          "id": "gard.c",
+          "nearest": "gard.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.7981065113426915
+        },
+        {
+          "id": "fly.c",
+          "nearest": "fly.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.7809210039308688
+        }
+      ],
+      "adversarial_far": [
+        {
+          "pair": [
+            "cook.a",
+            "med.a"
+          ],
+          "cos": 0.5690217755144011,
+          "word_overlap": 0.18518518518518517
+        },
+        {
+          "pair": [
+            "cook.a",
+            "med.b"
+          ],
+          "cos": 0.6011780357240595,
+          "word_overlap": 0.18518518518518517
+        },
+        {
+          "pair": [
+            "cook.b",
+            "med.a"
+          ],
+          "cos": 0.5872964157580007,
+          "word_overlap": 0.17857142857142858
+        }
+      ],
+      "pass": true,
+      "model": "nomic-embed-text-v1.5",
+      "hidden": 768,
+      "arch": 2,
+      "prompt": "clustering",
+      "datapath_reported": "bfp16-emulated MMAC, C as bf16",
+      "designs_reported": "ONE xclbin, 16 streams (4 batch tiers), one hw_context",
+      "toolchain_reported": "mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 7e00b57955e108fe9d8e9419f5828a0c7e650858",
+      "control_pass": false,
+      "control_gate_failures": 24,
+      "control_ok": true
+    },
+    {
+      "n_gate": 24,
+      "n_probe": 12,
+      "n_near": 12,
+      "n_far": 264,
+      "gate_rank_failures": [],
+      "collapsed_pairs": [],
+      "worst_near": {
+        "cos": 0.7477859193180962,
+        "pair": [
+          "wthr.a",
+          "wthr.b"
+        ]
+      },
+      "best_far": {
+        "cos": 0.4920829600780115,
+        "pair": [
+          "prog.b",
+          "fly.a"
+        ]
+      },
+      "margin": 0.25570295924008474,
+      "separated": true,
+      "near_mean": 0.8263828173084171,
+      "far_mean": 0.3569057739812346,
+      "probe_hits": 12,
+      "probe_rate": 1.0,
+      "probes": [
+        {
+          "id": "fish.c",
+          "nearest": "fish.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.5431374751324304
+        },
+        {
+          "id": "furn.c",
+          "nearest": "furn.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.6027159410779278
+        },
+        {
+          "id": "wthr.c",
+          "nearest": "wthr.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.7044524407401231
+        },
+        {
+          "id": "cook.c",
+          "nearest": "cook.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.5825856870436809
+        },
+        {
+          "id": "car.c",
+          "nearest": "car.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.5349727731366746
+        },
+        {
+          "id": "prog.c",
+          "nearest": "prog.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.5652614744587646
+        },
+        {
+          "id": "med.c",
+          "nearest": "med.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.6316020662886963
+        },
+        {
+          "id": "astr.c",
+          "nearest": "astr.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.7245396102909216
+        },
+        {
+          "id": "ball.c",
+          "nearest": "ball.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.742552969267126
+        },
+        {
+          "id": "bank.c",
+          "nearest": "bank.a",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.564899814118568
+        },
+        {
+          "id": "gard.c",
+          "nearest": "gard.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.5442783688866261
+        },
+        {
+          "id": "fly.c",
+          "nearest": "fly.b",
+          "own_cluster_rank": 1,
+          "hit": true,
+          "cos_to_own": 0.5601480853120839
+        }
+      ],
+      "adversarial_far": [
+        {
+          "pair": [
+            "cook.a",
+            "med.a"
+          ],
+          "cos": 0.38771477093403217,
+          "word_overlap": 0.18518518518518517
+        },
+        {
+          "pair": [
+            "cook.a",
+            "med.b"
+          ],
+          "cos": 0.41389346976140984,
+          "word_overlap": 0.18518518518518517
+        },
+        {
+          "pair": [
+            "cook.b",
+            "med.a"
+          ],
+          "cos": 0.3756303306892935,
+          "word_overlap": 0.17857142857142858
+        }
+      ],
+      "pass": true,
+      "model": "embeddinggemma-300m",
+      "hidden": 768,
+      "arch": 1,
+      "prompt": "STS",
+      "datapath_reported": "bfp16-emulated MMAC, C as bf16",
+      "designs_reported": "C:\\Users\\vegar\\Documents\\GitHub\\NpuEmbeddings\\runtime\\artifacts_gemma_bfp16  (16 streams, 4 batch tiers)",
+      "toolchain_reported": "mlir_aie 1.4.2.dev16+g7e00b57, peano 21.0.0.2026080301+c9c5ecb7, mlir-aie HEAD 7e00b57955e108fe9d8e9419f5828a0c7e650858",
+      "control_pass": false,
+      "control_gate_failures": 24,
+      "control_ok": true
+    }
+  ],
+  "pass": true
+}

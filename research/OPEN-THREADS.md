@@ -28,12 +28,41 @@ Status: **OPEN** · **ANSWERED** · **RETIRED** · **BLOCKED**
 
 ## Live, ordered by what they would change
 
-**Three threads, as of 2026-08-26.** The register ran to 20 threads and 765
-lines when it was split on 2026-08-23; 2026-08-25/26 closed the rest, each
-with a measurement or a build rather than a decision to stop caring. All
-three that are left are design tasks with a price and a trigger, not
-questions about the hardware — so a session that finds nothing to pick up here is reading
-the file correctly.
+**Five threads, as of 2026-08-27, and falling: the 0.5.0 plan is working
+through them.** It was three threads two days before; five of the seven filed
+on the 27th came from one task —
+[`0120`](../tasks/0120-roofline-analytic/TASK.md), the analytic roofline. That
+is what a new instrument does: it does not answer questions so much as make
+questions askable that previously had no coordinate system. Three of the
+27th's batch have already closed: [T49](CLOSED-THREADS.md#t49) (the register
+mechanism, [`0123`](../tasks/0123-register-hygiene/TASK.md) — which also filed
+[T52](CLOSED-THREADS.md#t52), the Unigram tokenizer — **filed and ANSWERED the
+same day**: built twice, byte-exact everywhere, shipping inside the 7th
+catalogue model),
+[T47](CLOSED-THREADS.md#t47) (the `--probe-streams` byte accounting, fixed and
+audited, [`0124`](../tasks/0124-t47-t50-runtime-fixes/TASK.md)/
+[`0125`](../tasks/0125-t47-gbs-audit/TASK.md)) and
+[T50](CLOSED-THREADS.md#t50) (the fail-open `--cpu` and the stale artifacts
+fallback, same rebuild).
+
+T42/T43/T44 are still design tasks with a price and a trigger. **T48 is the
+roofline's one remaining debt** — the lever it re-priced against a
+retirement whose premise expired ([T48](#t48)), now measured at 1.72× array
+and parked behind a funded C-join re-plumb. The other roofline debts are
+paid: [T46](CLOSED-THREADS.md#t46) closed with the memtile leg measured
+two-thirds idle ([`0139`](../tasks/0139-t46-memtile-leg/TASK.md)). The measurement it could not take is now taken:
+[T45](CLOSED-THREADS.md#t45) closed with the roof **measured at 45.5 GB/s on
+the hardware timebase**, wall clock agreeing to 0.4%
+([`0128`](../tasks/0128-t45-m-sweep/TASK.md),
+[`0130`](../tasks/0130-t45-traced-roof/TASK.md)).
+
+[T51](#t51) came from
+[`0122`](../tasks/0122-bge-large-short-input-tail/TASK.md) and is the most
+consequential of the batch: **bge-large is 100× worse at the tail than at the
+median on single-word inputs**, and the reason nobody knew is that all three of
+this project's accuracy gates report a central tendency. It was found because a
+user brought a reference vector from outside — the first check this project has
+ever run with no shared code lineage with us at all.
 
 ---
 
@@ -206,30 +235,306 @@ larger than arch 1, because arch 1 could still reuse the four-GEMM design, the
 container's single geometry block and a text-only input API — and a multimodal
 model reuses none of those three.
 
+> **UPDATED 2026-08-27
+> ([`0123`](../tasks/0123-register-hygiene/TASK.md)), and the ranking changed:
+> a fifth candidate needs no array work at all, and it was picked for 0.5.0.**
+> `Alibaba-NLP/gte-multilingual-base` (`model_type: "new"`, the NewModel
+> `trust_remote_code` impl): hidden 768 / 12 layers, 12 heads (head_dim 64),
+> gated MLP with **GELU on the gate half in nomic's exact `fc11_up|fc12_gate`
+> ordering** (`up_gate_proj` 768→6144 bias-free, `down_proj` 3072→768 with
+> bias), post-LN, RoPE base 20000 with NTK scaling `{factor: 8.0}`, cls
+> pooling, vocab 250,048, `unpad_inputs: false`. Its four GEMM shapes — qkv
+> N=2304, attn_out 768, ffn_up 6144, ffn_down K=3072 — are a **literal match
+> to `runtime/artifacts_nomic_bfp16/gemm_rtp/design.json`, `b_layout_hash`
+> included**, with seq 256/512 sets already built. Zero `export_gemm_rtp.py`
+> runs: the first candidate whose array cost is *nothing*.
+>
+> What blocks it is also not [T43](#t43): XLM-R's tokenizer is SentencePiece
+> **Unigram** (Viterbi over log-probs), a third family distinct from both
+> WordPiece and Gemma's SP-BPE — filed as [T52](CLOSED-THREADS.md#t52). Its forward pass is
+> arch 2 with three deltas (GELU-for-SiLU on the gate, real biases, an
+> NTK-scaled theta that must be read out of `new-impl/modeling.py`, not
+> assumed — a wrong theta is silently wrong, tasks/0068). **The theta is now
+> derived and probe-verified bit-for-bit
+> ([`0134`](../tasks/0134-gte-oracle/TASK.md)): `inv_freq_i = 160000^(-i/32)
+> / 8^(1/32)` — not expressible as a single theta — and the oracle
+> `reference/encoder_gte.py` matches the repaired fp32 reference per-layer
+> at 1e-06** (the loaded reference itself carried two landmines, recorded
+> there — and [`0136`](../tasks/0136-gte-runtime/TASK.md) found a **third**:
+> v5 also garbages `embeddings.position_ids`, so a sentence-transformers
+> run of gte without the repair is *silently position-scrambled* when the
+> garbage is in-bounds — measured 9.0e-02 before repair, 6.7e-08 after;
+> every future MTEB/ST run of gte must carry
+> `make_goldens_gte.py::repair_rotary`). **The model now encodes end to end
+> on the NPU** ([`0135`](../tasks/0135-gte-container/TASK.md) container,
+> [`0136`](../tasks/0136-gte-runtime/TASK.md) runtime): 1-cos vs the oracle
+> **2.2e-04–3.7e-04** on the shipping nomic bfp16 design set, semantic gate
+> 24/24, goldens 17/17. **The gates are run and everything PASSES
+> ([`0137`](../tasks/0137-gte-gates/TASK.md))**: English MTEB (0103
+> protocol, repaired fp32 baseline) mean **+0.06 / worst −0.06** — the
+> cleanest verdict in the catalogue, with the clustering cell *positive*;
+> multilingual STS17/STS22.v2 deltas +0.00/−0.02 with all 29 per-language
+> subsets in [−0.30, +0.20] (recorded as the 0.6.0 gate's baseline,
+> non-gating in 0.5.0 per the user's decision); tail p99 5.2e-04,
+> max/median 2.2× — no bge-large-style tail, consistent with 0129's
+> depth-12 expectation; semantic corpus v6 adds lang-gated no/de/es
+> clusters (gte 30/30, the six English models bit-for-bit unchanged).
+> **Adoption decision taken: bfp16, on the shipping nomic design set —
+> and SHIPPED as the 7th catalogue model the same day
+> ([`0138`](../tasks/0138-gte-hub-adoption/TASK.md))**: built-in row with
+> the weights pin, bfp16 adoption record citing the 0137 gate, `kFilesGte`
+> fetch set, `probe_repo` routing for `model_type: "new"`, and a C++
+> `prepare_model_gte` whose container is **whole-file byte-identical** to
+> the Python packer's — `embed gte-multilingual-base` with no
+> `--artifacts` runs on the NPU and reports the adopted datapath. All
+> seven models pass the semantic and tail gates. **This thread stays open
+> for the question it asks — which encoder joins NEXT** — and the four
+> byte-BPE candidates above remain priced and blocked on [T43](#t43)
+> exactly as written.
+
 **Trigger**: pick one up when T43 is built, or when a specific retrieval need
-names a model. Ranking is by cost, not by quality — no MTEB score for any of the
-four has been measured here, and none should be quoted until one is.
+names a model — **gte-multilingual-base named itself for 0.5.0, gated on
+[T52](CLOSED-THREADS.md#t52)**. Ranking is by cost, not by quality — no MTEB score for any of
+the five has been measured here, and none should be quoted until one is.
 
 ---
 
-## Closed
+<a id="t48"></a>
+### T48 — B-reuse, re-priced on measured numbers: **1.72× array / 1.31× e2e on bge-large** — a priced design task awaiting a funded C-join re-plumb · **OPEN, filed 2026-08-27, gates closed 2026-08-27**
+Successor to [T2](CLOSED-THREADS.md#t2) (RETIRED 2026-08-19) and
+[T27](CLOSED-THREADS.md#t27) (ANSWERED 2026-08-22). Neither was wrong when it
+was written; both premises have since been overturned by decisions this project
+itself took.
 
-| thread | status | where |
+**Premise 1, expired.** T2 was retired by
+[T1](CLOSED-THREADS.md#t1)/[`0048`](../tasks/0048-m9-what-is-the-gemm-time/TASK.md)
+on *"B-reuse removes bytes; bytes are not the constraint"*. That is a
+**plain-bf16 statement** — 0048's own discriminating pair sits on the flat
+compute roof, and [`0120`](../tasks/0120-roofline-analytic/TASK.md) §3a
+re-derives it from geometry alone (1.50× apart on arithmetic intensity, 1.1%
+apart on throughput). Since
+[`0104`](../tasks/0104-adopt-bfp16-per-model/TASK.md), **five of six shipped
+models are not on that roof.** Only `bge-small-en-v1.5` still is — and it is the
+one model 0120 prices this lever at exactly 1.00× for.
+
+**Premise 2, expired.** T27 is closed *"ANSWERED for int8, **which replaced
+bfp16 as the fast datapath**"*, and its reasoning turns on the sentence *"bfp16
+was never adopted (T23 is an accuracy decision nobody took)."* True on
+2026-08-22. [`0103`](../tasks/0103-t23-bfp16-all-models/TASK.md) and
+[`0104`](../tasks/0104-adopt-bfp16-per-model/TASK.md) then took the decision, and
+0.4.0 ships **bfp16 on five of six models with int8 behind a flag** — the exact
+reverse. The levers T27 priced were priced on int8 traffic, whose composition
+differs from bfp16's.
+
+**Where the bytes actually are now**, from `design.json` alone
+([`0120`](../tasks/0120-roofline-analytic/TASK.md) §2):
+
+| model | A | **B** | C |
+|---|---:|---:|---:|
+| `minilm_bfp16` | 31% | **46%** | 23% |
+| `base_bfp16` | 35% | **52%** | 13% |
+| `gemma_bfp16` | 34% | **51%** | 16% |
+| `nomic_bfp16` | 34% | **52%** | 14% |
+| `large_bfp16` | 46% | **46%** | 9% |
+
+C is down to 9–23% because the project already narrowed it
+([`0045`](../tasks/0045-m9-bf16-gemm-epilogue/TASK.md),
+[`0080`](../tasks/0080-m13-int8-traffic-bound/TASK.md)). **B is now the largest
+single term on every dispatch of every model**, replicated ×32 by the row
+blocks.
+
+**The price** (byte ratio on the slanted roof, × 0109's measured array share):
+
+| model | array | end to end |
+|---|---:|---:|
+| bge-base | 2.02× | **1.31×** |
+| nomic | 2.00× | **1.34×** |
+| bge-large | 1.80× | **1.34×** |
+| MiniLM | 1.81× | **1.18×** |
+| bge-small | 1.00× | 1.00× |
+
+**What has NOT changed: the wall.**
+[`0046`](../tasks/0046-m9-b-reuse-asymmetric/TASK.md) and
+[`0047`](../tasks/0047-m9-cascade-channel-probe/TASK.md) established that the
+blocker is DMA **channels**, not capacity — every core tile 2/2 in, five of eight
+mem tiles 6/6 in, with the **C join spending the budget**. `repeat_count` is
+unavailable on shim tiles, and `forward()`/`split()` do not expose
+`consumer_obj_type`. Nothing above affects any of that. **This is a price, not a
+plan.**
+
+**Two things to check before anyone builds it.**
+
+1. **Re-census the channels.** The C join is *cheaper* since C was narrowed to
+   bf16, and 0046's census predates that. `tools/count_dma_channels.py` on the
+   shipped `artifacts_*_bfp16` sets is the cheap first step and **needs no
+   build**. That is why this thread is filed OPEN rather than BLOCKED.
+2. **The pricing assumes pure proportionality to bytes**, which holds only to
+   the left of the ridge. 0120 establishes that production sits 5–7× left of it
+   (AI ≈ 120 against a ridge at 741) — but on a y-axis [T45](CLOSED-THREADS.md#t45) has not
+   confirmed, and with a fixed cost the model does not carry. **Expect the real
+   number to be below 1.80×.**
+
+**Trigger**: item 1, which is one `python` invocation. Do not fund the build
+before [T45](CLOSED-THREADS.md#t45) — now closed, so gate 2 is unblocked.
+
+> **Gate 2 DONE — the price is measured and the build is NOT funded,
+> 2026-08-27 ([`0131`](../tasks/0131-t48-gate-decision/TASK.md)).**
+> Subtracting only the saved B bytes at the measured 45.5 GB/s roof from
+> the measured 8-column dispatch times: **1.715× array / 1.310× e2e on
+> bge-large** (at 0109's 56.7% array share). This thread's own prediction
+> — "expect the real number to be below 1.80×" — was right. But
+> [`0126`](../tasks/0126-t48-channel-recensus/TASK.md)'s census failed the
+> wiring gate: no spare mem-tile input exists on the current topology, so
+> a build is the cascade C-collapse (vectorised kernel unfunded, 0047's
+> "not a session") or a hierarchical re-join, not a fifth fifo. **What
+> remains here is a priced design task, not an open question**: the prize
+> is 1.72×/1.31×, the first target is bge-large at k=64 (container format
+> unchanged), and the trigger is someone funding the cascade microkernel
+> or an equivalent re-plumb. Re-run 0131's arithmetic if the roof, the
+> array share, or the dispatch times move.
+
+> **Gate 1 DONE, and its conjecture refuted, 2026-08-27
+> ([`0126`](../tasks/0126-t48-channel-recensus/TASK.md)).** The re-census on
+> the shipped sets (all three geometry classes, cache dirs matched to the
+> shipped xclbins by **0-byte** content diff) is bit-for-bit 0046's: every
+> core tile 2/2 in, five of eight mem tiles 6/6 in, C join spending 4 of 6.
+> Narrowing C to bf16 freed nothing because **a channel is an integer
+> allocation — element width changes bytes per transfer, not channel
+> count.** So the "expressible wiring" gate fails on the current topology:
+> a build means re-plumbing the C join (0047's cascade collapse, whose
+> vectorised kernel is the unfunded part) or a hierarchical re-join, not a
+> fifth fifo. The remaining open item is gate 2: the re-price on T45's
+> measured roof and fixed cost. Spare inputs exist only on (0,1)/(1,1)
+> (one each) and (7,1) (two) — three tiles cannot broadcast to eight
+> columns without transiting the five full ones.
+
+---
+
+<a id="t51"></a>
+### T51 — bge-large has a 100× accuracy tail on single-word inputs, and every gate we own averages it away · **OPEN, filed 2026-08-27**
+Found by [`0122`](../tasks/0122-bge-large-short-input-tail/TASK.md), which
+started from something this project had never had: **a reference vector with no
+shared code lineage with us at all.** The user obtained embeddings for the word
+`"test"` from an online service. `bge-small` matched at the quoting floor;
+`bge-large` did not, and the disagreement survived being re-measured against
+full precision.
+
+**The measurement.** 224 texts — 180 single words drawn deterministically from
+the model's own vocabulary, 36 corpus sentences, 8 five-word phrases — against
+fp32 `AutoModel` CLS:
+
+| `bge-large-en-v1.5` (bfp16) | n | median | max | over the 2e-03 gate |
+|---|---:|---:|---:|---:|
+| sentences | 36 | 2.00e-04 | **2.47e-04** | 0 |
+| 5-word phrases | 8 | 1.89e-04 | 2.60e-04 | 0 |
+| **single words** | 180 | 2.27e-04 | **2.18e-02** | **5** |
+
+`p99 6.63e-03 · max/median 100.2×`. Against `bge-base-en-v1.5` on the
+**identical bfp16 datapath**: max 6.13e-04, max/median **3.6×**, zero
+violations.
+
+Worst five: `newsletter` 2.183e-02, `sermons` 1.195e-02, `contact` 7.940e-03,
+`cinema` 2.227e-03, `messages` 2.222e-03. `test`, the input that started this,
+is only sixth.
+
+**Deterministic and not a harness artifact.** Bit-stable across batch
+compositions (alone, with 1, with 36), and the five were reproduced to four
+significant figures through `tools/verify_embed_e2e.py`, which uses
+sentence-transformers rather than the `AutoModel` path — two different reference
+implementations.
+
+**Two mechanisms tested and REFUTED** (0122 §3), which is why this is filed as
+an open question rather than a fix:
+
+* **Cancellation** — ‖CLS‖ is 16.5–19.1 for every word and `test` has the
+  **largest**; `corr(log‖CLS‖, log 1-cos) = +0.111` where the hypothesis needs
+  ≈ −1.
+* **Block-FP outliers** — bfp16 shares one exponent per block of 8, so an
+  outlier channel costs its neighbours mantissa bits. Measured as the hardware
+  sees it: the crest factor `max|x|/rms|x|` over aligned blocks of 8 is
+  **1.879–1.909** across every word and `max|h|` is 17.6–18.0. Correlations
+  −0.00 / −0.20 / −0.28.
+
+**No input statistic predicts the error.** Whatever this is, it is not visible
+in the activations going in.
+
+**THE PART WITH THE LONGEST REACH IS THE METHODOLOGY, NOT THE NUMBER.** Three
+gates pass bge-large and all three are blind for the same reason:
+
+| gate | reads | why it misses |
 |---|---|---|
-| Is `aie::vector<float>` really IEEE fp32? | **ANSWERED** — yes, ~24 mantissa bits | [`0016`](../tasks/0016-m5-fp32-probe/TASK.md), refuting [`0015`](../tasks/0015-m5-gelu-polynomial/TASK.md) |
-| What carries GELU's 3.886e-03 implementation error, if not fp32 precision? | **ANSWERED** — the default `floor` rounding mode | [`0044`](../tasks/0044-m9-optimisation-sweep/TASK.md) Part 3, chasing [`0016`](../tasks/0016-m5-fp32-probe/TASK.md)'s own hypothesis after 28 tasks |
-| Can B reuse be expressed with `consumer_obj_type`? | **ANSWERED** — no; no spare DMA channel exists | [`0046`](../tasks/0046-m9-b-reuse-asymmetric/TASK.md) |
-| Does cascade free the channels B-reuse needs? | **ANSWERED** — frees inputs 6/6→3/6, costs outputs 3/6→6/6 | [`0047`](../tasks/0047-m9-cascade-channel-probe/TASK.md) |
-| LayerNorm still opens three fifos per core | **ANSWERED** — params broadcast from the mem tile, 8 columns | [`0030`](../tasks/0030-m7-expert-review-tests/TASK.md) |
-| M6 speed not measured | **ANSWERED** — deliberately deferred to M7, then measured | [`0023`](../tasks/0023-m7-full-cpp-encode/TASK.md) onward |
-| Is bge-small a byte-identical drop-in? | **ANSWERED** — no; 12 layers and CLS pooling are data, not constants | [`0039`](../tasks/0039-m9-bge-small/TASK.md) |
-| `pack_npue.py` had not run in months | **ANSWERED** — broken import found and fixed | [`0036`](../tasks/0036-m8-tokenizer/TASK.md) |
-| Is the centred polynomial basis worth 2.5×? | **RETIRED** — measured, worth nothing at fp32 | [note 0007](notes/0007-unused-iron-surface.md) §3.2 |
-| `AIE_LOOP_UNROLL_FULL` | **RETIRED** — 14% slower on straight vector loops | [note 0007](notes/0007-unused-iron-surface.md) §1.9 |
-| `burst_length` tuning | **RETIRED** — already maximal by default | [note 0007](notes/0007-unused-iron-surface.md) §2 |
-| MTEB on the bf16-C datapath | **RETIRED** — datapath decided as bf16 in / fp32 out, 2026-08-19 | [`0045`](../tasks/0045-m9-bf16-gemm-epilogue/TASK.md) |
-| `--emulate-bfp16` | **RETIRED** — fails accuracy; closed by the MTEB gate | [`0035`](../tasks/0035-m8-mteb-gate/TASK.md) |
-| Pre-tiling as a performance lever | **RETIRED** — a wash under isolation | [`0007`](../tasks/0007-m5-pretiled-gemm-on-npu/TASK.md), [`0008`](../tasks/0008-m5-bfp16-real-data/TASK.md) |
+| `1-cos` in `CURRENT_STATUS` | 2.626e-04 PASS | a mean over a small golden corpus of **sentences** — it is the median, and the tail is not in the corpus |
+| MTEB delta | +0.13 / −0.01 PASS | averages thousands of pairs; the docs already say `1-cos` is *"sensitive to what MTEB averages away"* |
+| the semantic gate ([`0121`](../tasks/0121-semantic-gate/TASK.md)) | 24/24 PASS | a ranking over 36 sentences, with no absolute error term by design |
+
+Every instrument this project owns reports a central tendency. **None looks at a
+tail**, and a tail is where a user meets a bad answer.
+
+**What is not known**: the mechanism; whether depth (24 layers against
+bge-base's 12), width (1024 against 768) or `tile_n = 32` (bge-large is the only
+model not at 48) is the discriminator; and whether a 12° angle actually reorders
+a retrieval result — that needs an MTEB *retrieval* task, which
+[`0035`](../tasks/0035-m8-mteb-gate/TASK.md) deliberately excluded.
+
+**Three candidate next steps, cheapest first.**
+
+1. **Which of the three differences matters.** bge-large at `tile_n = 48` is
+   geometrically illegal (1024 mod 384 ≠ 0), but an int8 bge-large at
+   `tile_n = 64` already ships ([`0081`](../tasks/0081-m13-int8-everywhere/TASK.md))
+   — running the same 224 texts through it separates "tiling" from "depth and
+   width" for the price of one sweep and no build.
+2. **Layer-by-layer divergence** on `newsletter` against `sample`. Needs
+   intermediate NPU activations, which only `arch = 1` exposes today
+   (`tools/dump_gemma_kernel_vectors.py`), so this is real work.
+3. **Make a gate that can see a tail.** A p99 over a few hundred varied inputs
+   costs one encode per model and would have caught this on the day bge-large
+   was adopted. Cheaper than either diagnosis and useful regardless of the
+   outcome.
+
+**Trigger**: step 3 belongs in the next release sweep whatever happens to steps
+1 and 2. Step 1 whenever someone next has the array idle.
+
+> **Step 1 DONE, 2026-08-27
+> ([`0129`](../tasks/0129-t51-int8-tail/TASK.md)) — and it excludes two of
+> the three candidates.** The same 224 texts through the shipping **int8
+> bge-large at `tile_n = 64`** produce the **same worst words** as bfp16 at
+> `tile_n = 32` (`newsletter`/`contact`/`sermons`/`cinema`/`messages`;
+> log-Pearson **0.834**, top-10 overlap 8/10). So `tile_n` is exonerated,
+> and the number format is exonerated *as the cause*: two arithmetically
+> unrelated quantisation schemes rank the same inputs worst. The tail is a
+> property of **(model × input)** — bge-large's forward pass amplifies any
+> low-precision perturbation on these single-word inputs. Left standing vs
+> bge-base: depth, width, or the learned representations themselves — step
+> 2's question, now better-scoped (profile depth, not tiling). Step 3's
+> gate must be **per-model, per-datapath, on a p99** — int8 bge-large's
+> *median* already exceeds 2e-03 (its adoption rests on MTEB, 0085), so a
+> max-gate says nothing there, while bfp16's p99/median of 30× is exactly
+> what the averaging instruments miss.
+
+> **Step 3 DONE — the release sweep has a gate that sees a tail, 2026-08-27
+> ([`0132`](../tasks/0132-t51-tail-gate/TASK.md)).** `tools/verify_tail.py`
+> (stdlib-only, `--exe`/`--root` for cold-zip runs) gates **p99 of per-text
+> `1-cos`** over 0129's 224 texts against per-model baselines in
+> `reference/tail/` (`ceiling = max(2e-3, 2×p99_measured)` — a ratchet;
+> bge-large's wide ceiling carries an explicit T51 waiver note). It refuses
+> to compare across datapaths, per 0129. All six models baselined and
+> passing; bge-large reproduces 0122/0129 to the digit (same worst five);
+> the negative control (tightened ceiling → FAIL, exit 1) is proven. Wired
+> into `tools/release_benchmark.ps1` as a `tail` stage — and the seventh
+> baseline, gte's, is recorded in
+> [`0137`](../tasks/0137-gte-gates/TASK.md): p99 5.2e-04, max/median
+> **2.2×**, no bge-large-style tail, the depth-12 expectation measured. Watch item: MiniLM's
+> worst input sits at 1.85e-03, 8% under its ceiling — the likely first
+> alarm if anything drifts. **What remains open in this thread is only the
+> mechanism** (step 2: layer-wise divergence, now scoped to profile depth,
+> not tiling) — the instrument debt is paid.
+
+**Not blocking anything today** — for phrase-length text and longer, bge-large
+is within 1.24× of its own median. But `newsletter` and `contact` are exactly
+what a search box receives, and in retrieval the document side is sentences
+while the **query** side is where one-word inputs live.
+
+---
 
 ---
 
