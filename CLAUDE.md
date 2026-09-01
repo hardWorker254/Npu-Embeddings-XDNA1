@@ -372,6 +372,90 @@ silent.
    what the host actually allocates, not just what the internal pipeline
    declares. → [`0092`](tasks/0092-t28-relay-bf16-output/TASK.md) Parts 1
    and 4
+7e. **Trap 7d again, in a new place, and a partial defence did not stop it**
+   ([`0145`](tasks/0145-granite-npu-gemv/TASK.md)). A GEMV design derived its
+   tiles-per-call *inside* the jitted generator. Two runs differing only in
+   that value collided on one cache entry; the second got the first's xclbin
+   while the host laid out weights for its own value -- **cosine 0.208 on a
+   configuration that had passed twice**, after editing only a constant.
+   Putting the value into the generated kernel's file name AND its C symbol
+   was not enough: it also sets ObjectFifo object sizes and the entry-point
+   count, i.e. the whole dataflow, none of which is in the kernel symbol.
+   **Rule: anything that changes the generated design must be a `CompileTime`
+   argument, never derived in the generator.** Seventh instance of the
+   "stale binary fails open" class.
+9. **Core program memory (~16 KB) is a first-class budget, and the fastest
+   way to reason about it is to stop reasoning.** Found in
+   [`0145`](tasks/0145-granite-npu-gemv/TASK.md), where a kernel overflowed
+   it and **three** successive theories (entry-point count, loop unrolling,
+   runtime `extract` indices) were all wrong. Compiling the object directly
+   and reading `llvm-objdump -h` settled it in seconds against minutes per
+   IRON build. Two mechanisms, both invisible in the source:
+   - **A kernel body templated on a per-call constant is instantiated once
+     per entry point.** Making the constant a *runtime* argument plus
+     `__attribute__((noinline))` cut a 4,736 B body to 2,528 B. Check
+     whether a template parameter is load-bearing or merely habitual -- a
+     K-tile index used only for pointer arithmetic is the latter.
+   - **`static` vs `inline` on that shared body decides whether the copies
+     merge.** `static` gives every translation unit a private copy;
+     `inline` gives it vague linkage, so the copies land in a COMDAT and
+     the linker keeps one (`llvm-objdump -t`: symbol `l` -> `w`). Dropped
+     8 entry points from 11,648 B to 2,912 B, and was ~7% *faster*.
+10. **Scalar loops inside a vector kernel cost far more than they look.**
+   A 32-iteration scalar `sum of x` per block was **half the kernel's
+   code** (2,528 B -> 1,248 B when vectorised) and ~27% of its runtime
+   (11.88 -> 8.72 ms); scalar work does not overlap the vector pipeline.
+   Reduce through an fp32 accumulator (`accum<accfloat,N>` + `reduce_add`),
+   not a bf16 running sum, which would lose ~5 bits over 32 terms.
+11. **A float32 cosine/norm is not a safe correctness metric at LLM widths.**
+   Over ~100k terms the dot product and the two norms accumulate in
+   different orders, so the ratio drifts from 1 for **bit-identical**
+   vectors -- 0.99999988 against a 0.9999999 gate, i.e. a spurious FAIL.
+   Diagnosed by contradiction: `max rel err` was exactly 0.0 at the same
+   time. Compute the metric in float64; do not loosen the gate. The
+   generalisable form: when two metrics disagree about whether the same
+   result is exact, suspect the metric before the kernel.
+12. **The `aie_kernels/aie2p/` reference kernels are demos, not drop-ins,
+   and they fail open.** `rms_norm.cc` hardcodes `const float gamma =
+   1.0f` -- it never applies the per-channel weight tensor a Llama-family
+   RMSNorm needs (`epsilon` is a `constexpr` too). `rope.cc` uses the
+   **interleaved-pair** convention (`filter_even`/`filter_odd`), while
+   Llama/Granite use **half-split** `rotate_half`; the two are different
+   rotations with identical magnitudes, so the output looks reasonable and
+   is wrong. Read the kernel body before adopting one.
+   (`softmax.cc`'s `#define log2e 1.4453125` looks truncated but is
+   correct -- it is log2(e) rounded to bf16.)
+13. **One shim stream per core caps a design at 8 cores on a 32-core
+   device.** npu2 is 8 columns x 6 rows (row 0 shim, row 1 memtile, rows
+   2-5 compute). Each column's shim has 2 MM2S + 2 S2MM, so a design with
+   a private weight stream and result stream per core costs n+1 in / n out
+   and dies at 16 cores with `no ShimNOCTile has sufficient DMA capacity`.
+   Reaching rows 3-5 needs the memtile leg: one shim stream per column,
+   `ObjectFifo.cons().split()` to the column's cores and `.prod().join()`
+   back. -> `programming_examples/basic/matrix_multiplication/whole_array`
+
+14. **A 128-byte shim DMA transfer silently delivers zeros**
+   ([`0145`](tasks/0145-granite-npu-gemv/TASK.md)). An attention design's `q`
+   input and its result were both 64 bf16 = 128 B; both arrived as all zeros,
+   with no error at any stage. The same design's 8192 B weight stream and its
+   264 B state readback worked. Padding both to 1024 B fixed it. The symptom
+   was every score wrong, in a plausible range, with no permutation structure --
+   which reads like a maths bug and is not one. **Suspect small transfers before
+   suspecting arithmetic, and dump what the kernel actually received.** Eighth
+   member of the "fails open" family and the first inside the shim DMA. (IRON
+   does check host tensor sizes against the compiled design; the silence is in
+   the transfer itself.)
+
+   **It is the shim transfer size that matters, not the ObjectFifo element
+   size.** The same task's GEMV designs have 128-byte `y` elements (32 floats
+   per tile-row) and are exact -- there the shim moves the whole drain at once
+   and only the core-side objects are small. The attention design's `q` fill and
+   result drain were each a 128-byte transfer end to end. The exact threshold
+   between 128 B (fails) and 1024 B (works) was not narrowed.
+15. **`aie::exp2<bfloat16>` has ~5.5e-02 relative error** on an fp32 vector --
+   an order of magnitude coarser than bf16 storage rounding (4e-03), and not
+   mentioned in the aie_kernels sources. It is the accuracy floor of any softmax
+   built on it. Measure it before setting a gate on anything downstream.
 
 ## Current state
 
@@ -584,8 +668,10 @@ task is not evidence that a thread is live; the register is. **How** something
 was settled is in [`research/CLOSED-THREADS.md`](research/CLOSED-THREADS.md),
 and `tools/check_register.py` checks the two against the task logs.
 
-**As of 2026-08-27 there are FIVE live threads.** Four are design tasks with
-a price and an explicit trigger rather than open questions about the hardware:
+**As of 2026-09-01 there are NINE live threads: five about the encoders, and
+four about the decoder workstream described further down.** Of the encoder
+five, four are design tasks with a price and an explicit trigger rather than
+open questions about the hardware:
 [T42](research/OPEN-THREADS.md#t42) — fold attention onto the array for
 *long-sequence* designs; [T43](research/OPEN-THREADS.md#t43) — the missing
 byte-level BPE tokenizer, which is the gate on the whole ModernBERT/Qwen/Mistral
@@ -652,6 +738,33 @@ neighbour. No tolerance; the gate is a ranking. It is **stdlib only**, so unlike
 every other accuracy gate it runs against a cold dist zip with nothing
 installed, and it records which datapath produced the vectors it validated. All
 six models pass.
+
+**There is a SECOND WORKSTREAM now, and it is not the product.**
+[`0144`](tasks/0144-granite-q4nx/TASK.md)/[`0145`](tasks/0145-granite-npu-gemv/TASK.md)
+took this project's XDNA2 knowledge to a **decoder**: `granite-4.2-3B` in
+FastFlowLM's `q4nx` container, on a **W4A16 GEMV kernel written here** that
+consumes the packed `q4` nibbles directly. All 8 projection shapes match a host
+reference at cosine **1.00000000** (exact under a one-hot activation), RMSNorm /
+RoPE / SwiGLU / attention run on the array, a granite layer fuses to **three
+dispatches (1.40×)**, and the memtile leg reaches **24 of 32 cores (2.04×)**.
+**The headline is still a negative: a 24-thread AVX2 CPU baseline is 2.4×
+faster**, at 89% of its own memory bandwidth. A null-kernel probe is what makes
+that useful — the array's weight path sustains **46.3 GB/s against the CPU's
+47.0**, so the kernel is compute-bound by 2.3× and needs ~18 cores, not a better
+memory path. **The task refuted two of its own claims and kept both, per rule
+3b**: "even a perfect NPU design loses" (killed by the null kernel) and "~50
+GB/s is what the machine delivers" — **it is a per-agent limit**, and running
+both devices at once put a real matmul **1.37×** ahead of the best single
+device.
+
+**None of that code is in this repository** (`../LLMNpuTest`, `../q4nx-build`,
+both public) and nothing is vendored from FastFlowLM — rule 4. What is here is
+the task logs, [note 0010](research/notes/0010-q4nx-format.md) on the `q4nx`
+format, traps 9–15 above, and
+[T55](research/OPEN-THREADS.md#t55)–[T58](research/OPEN-THREADS.md#t58). **The
+question that decides whether the direction is a product one is T55, and it is
+unmeasured**: decode is bandwidth-bound, so the NPU's case is energy or prefill,
+and neither has been measured. → [`docs/CURRENT_STATUS.md`](docs/CURRENT_STATUS.md) §11
 
 **Where the history is.** [`docs/history.md`](docs/history.md) holds the dated
 update blocks that used to live here — 1,027 lines of them, moved verbatim in

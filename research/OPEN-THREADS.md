@@ -28,7 +28,17 @@ Status: **OPEN** · **ANSWERED** · **RETIRED** · **BLOCKED**
 
 ## Live, ordered by what they would change
 
-**Five threads, as of 2026-08-27, and falling: the 0.5.0 plan is working
+**Nine threads, as of 2026-09-01 — five about the encoders, four new ones
+about a second workstream.** [T55](#t55)–[T58](#t58) come from
+[`0143`](../tasks/0143-gte-cpu-energy/TASK.md)–[`0145`](../tasks/0145-granite-npu-gemv/TASK.md),
+which took this project's XDNA2 knowledge to a **decoder** — `granite-4.2-3B`
+in FastFlowLM's `q4nx` format, on a W4A16 GEMV kernel written here. They are
+filed in the same register deliberately: they are questions about *this*
+hardware, and rule 3 has no second file for questions that arrive from a
+different direction. Three of them are unmeasured numbers rather than
+mysteries, and each names the measurement that would close it.
+
+**The encoder five, as of 2026-08-27, and falling: the 0.5.0 plan is working
 through them.** It was three threads two days before; five of the seven filed
 on the 27th came from one task —
 [`0120`](../tasks/0120-roofline-analytic/TASK.md), the analytic roofline. That
@@ -537,6 +547,158 @@ while the **query** side is where one-word inputs live.
 ---
 
 ---
+
+<a id="t55"></a>
+### T55 — Is there an NPU case for decode at all? Energy and prefill are the two candidates, and neither is measured · **OPEN, filed 2026-09-01**
+
+From [`0145`](../tasks/0145-granite-npu-gemv/TASK.md), which is the first task
+in this repository about a **decoder** rather than an encoder, and which ends on
+a negative that the task itself calls the headline: a W4A16 GEMV kernel of our
+own runs every matmul in `granite-4.2-3B` on the array, correctly, and **a
+24-thread AVX2 CPU baseline is 2.4× faster**.
+
+The comparison is like-for-like — same bytes, same arithmetic, the CPU arm
+validated against numpy to 7 significant figures before being timed — and the
+CPU is at **89% of its own memory bandwidth** (47.0 of a 52.8 GB/s STREAM), so
+there is no CPU-side straw man in it.
+
+| `lm_head`, 100352 × 2560, 160.6 MB | time | GB/s |
+|---|---|---|
+| CPU GEMV, 24 threads, AVX2 | **3.41 ms** | 47.0 |
+| NPU, 8 cores, this kernel | 8.08 ms | 19.9 |
+| NPU DMA only (null kernel, no arithmetic) | 3.47 ms | **46.3** |
+
+**What the null kernel settles is that the memory path is not the problem** —
+the array's weight stream sustains 46.3 GB/s, within 2% of the CPU's 47.0, so at
+the DMA bound `lm_head` would take 3.47 ms against the CPU's 3.41. The kernel is
+compute-bound by 2.3×, per-core compute is ~2.5 GB/s, and saturating the DMA
+bound therefore needs **~18 cores**. That part is [T56](#t56).
+
+**What is open here is the different question: whether latency parity is even
+the thing to want.** 0145 lists three cases that would justify the work and
+records that **none of them is established**:
+
+* **Energy.** This project already measures J/1k for the encoders
+  ([`0141`](../tasks/0141-release-sweep-050/TASK.md)). A CPU holding 24 threads
+  at 47 GB/s is not free and the array's draw is far lower, but the decode ratio
+  **has not been measured**. This is the number that would decide it.
+* **Leaving the CPU alone.** The baseline uses the whole machine. Inference that
+  runs beside a user's actual workload does not have 24 idle cores. Not measured
+  under contention for a real engine — though the hybrid result below is the
+  first evidence in that direction.
+* **Prefill, not decode.** Decode is one token against the whole weight set:
+  arithmetic intensity ~1, pure bandwidth. Prefill batches many tokens against
+  the same weights, which is the regime an array with high compute density
+  should win. **Every measurement in 0145 is decode.**
+
+**One measurement already reframed the ceiling and belongs with the thread**,
+because it is the reason the question is worth asking rather than closing: 0145
+first wrote that ~50 GB/s is what the machine can deliver "for the CPU and the
+NPU alike, and that is physics", then ran both at once and refuted itself. The
+NPU's stream falls only 3% under concurrent CPU load while the CPU keeps
+running, and a real split matmul measured **1.37× over the best single device**
+at an aggregate of ~75 GB/s. **~50 GB/s is a per-agent limit, not the platform's.**
+
+**Trigger.** Measure energy per token for the NPU GEMV against the CPU baseline
+on the same harness the encoders use, and measure one prefill-shaped batch. If
+energy is not decisively better and prefill does not win, the decoder direction
+is a learning exercise rather than a product one — which is a fine answer, but
+it should be the measured one.
+
+---
+
+<a id="t56"></a>
+### T56 — 24 cores and fusion each pay, and they do not compose: the channel budget is the wall · **OPEN, filed 2026-09-01**
+
+Also [`0145`](../tasks/0145-granite-npu-gemv/TASK.md). Two levers were built and
+both work, separately:
+
+* **The memtile leg** — one shim stream per column, `split()` to that column's
+  four cores, `join()` back — reaches **24 of 32 cores for 2.04×**. Without it a
+  design is capped at 8 cores by trap 13 (one shim stream per core, 2 MM2S +
+  2 S2MM per column).
+* **Fusion** — nine ops of a granite layer in **three dispatches** for **1.40×**
+  ([q,k,v,RoPE] + o + [gate,up,SwiGLU,gather,down], cosine 0.99999788 with `v`
+  checked separately so a kernel that rotated everything could not pass on the
+  q/k majority).
+
+Combining them looks like the obvious next 2–3×. **It does not work, and the
+reason is channel budgets rather than anything about the code** — 0145 works the
+arithmetic through, and the follow-up adds the second half: the stream merge
+does not help either, because the obstruction is divisibility, not channels.
+
+**What is open.** Whether a different plumbing plan reaches a fused design at 24
+cores at all — and, smaller, **why 8 columns measured slower than 6**, and
+whether a remainder path (so the row count need not divide by the core count)
+changes the picture at 32.
+
+**Price, from 0145's own projection** (whole model, matmuls only): the design at
+8 cores is ~6.4 tok/s; at 24 cores ~10; at 24 cores **with dispatch removed by
+fusion, ~21** — which is where the CPU alone already is. So the two levers
+together are what the direction needs, and they are exactly the pair that does
+not currently compose. This thread is upstream of [T55](#t55) having a fair
+subject to measure.
+
+---
+
+<a id="t57"></a>
+### T57 — `gte-multilingual-base` still has no CPU ratio and no energy figure, and the harness that blocked it is fixed · **OPEN, filed 2026-09-01**
+
+[`0143`](../tasks/0143-gte-cpu-energy/TASK.md) is **interrupted deliberately**:
+the harness work is done and verified, the measurement is not, and the task says
+so at the top rather than in a footnote.
+
+`docs/CURRENT_STATUS.md`'s 0.5.0 table has two empty cells for the seventh
+model — `NPU / best CPU` and `J/1k better` — because
+[`0141`](../tasks/0141-release-sweep-050/TASK.md) opted the row out of the
+`interleaved` and `energy` stages. That was correct at the time: both stages
+need a CPU reference arm and this checkpoint's arm was broken by
+`transformers` 5.15 instantiating `trust_remote_code` modules on the meta
+device, which returns every `persistent=False` buffer as uninitialised memory —
+including `embeddings.position_ids`, where in-bounds garbage silently encodes
+the **wrong positions** and returns a plausible vector.
+
+**The repair is in and verified** (`compare_three.py` and `energy_cpu_load.py`
+detect gte from the container's own `arch` field, force fp32 at construction,
+and call `repair_rotary` imported from `reference/make_goldens_gte.py` rather
+than restated); `tools/release_benchmark.ps1`'s opt-outs are gone.
+
+**What is open is only the run.** Rule 1 and `docs/05-measurement/` apply: the
+CPU arm must be measured **interleaved in one session** with the NPU arm, or the
+ratio is not defensible ([`0040`](../tasks/0040-m9-honest-cpu-baseline/TASK.md)).
+**Trigger: the next whole-catalogue sweep** — which the user's standing rule
+makes every release anyway. Until then the two cells stay empty and say why,
+rather than being filled from an older, differently-measured run.
+
+---
+
+<a id="t58"></a>
+### T58 — The granite host engine's output-quality bug is unexplained, and the tool that would explain it has never completed a run · **OPEN, filed 2026-09-01**
+
+From [`0144`](../tasks/0144-granite-q4nx/TASK.md) and restated in
+[`0145`](../tasks/0145-granite-npu-gemv/TASK.md)'s "What is NOT done". The
+conversion half of 0144 is verified — the four granite multipliers fold into the
+weights **bit-exactly**, and the model generates coherently through an engine
+written for it — but the host engine's output quality has a defect nobody has
+located, and `diff_engine_logits.py`, the instrument built to locate it by
+comparing engine logits against the oracle layer by layer, **has still never
+completed a run**.
+
+**Why it stays open rather than being closed as somebody else's problem.** It is
+unrelated to the array work — 0145's kernel is validated against a numpy
+reference built from the same bytes, not against that engine (cosine 1.00000000
+on all 8 projection shapes, exact under a one-hot activation) — so nothing on
+the NPU side is blocked by it. But it is the only known defect in the decoder
+workstream with **no mechanism at all**, and this register's rule is that such a
+thing is written down rather than left in a task log that is never revisited.
+
+**Trigger.** Any further work on the host engine, or the first attempt to wire
+the NPU kernel into it — at which point an unexplained quality bug in the
+surrounding engine stops being harmless and starts being the thing that makes a
+kernel look wrong.
+
+---
+
 
 ## Closed threads
 

@@ -1,2 +1,7 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# The commit-msg hook is executed by sh. A CRLF shebang line ("#!/bin/sh")
+# is not a valid interpreter path, so autocrlf would silently disable the one
+# thing stopping session URLs from reaching the public repository (tasks/0143).
+tools/git-hooks/* text eol=lf

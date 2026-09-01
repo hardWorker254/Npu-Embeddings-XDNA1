@@ -163,14 +163,19 @@ $CATALOG = @(
     @{ name = "bge-large-en-v1.5";     artifacts = "artifacts_large_bfp16";  npu = $true; harness = "bert"; dtype = "bf16"; datapath = "bfp16"; gate = "pass" }
     @{ name = "nomic-embed-text-v1.5"; artifacts = "artifacts_nomic_bfp16";  npu = $true; harness = "bert"; dtype = "bf16"; datapath = "bfp16"; gate = "pass" }
     @{ name = "embeddinggemma-300m";   artifacts = "artifacts_gemma_bfp16";  npu = $true; harness = "gemma"; dtype = "bf16"; datapath = "bfp16"; gate = "pass" }
-    # gte (arch=3, 0.5.0): interleaved/energy are PER-ROW opt-outs, not
-    # oversights. Both stages need a CPU reference arm, and gte's
-    # trust_remote_code model is unusable without the 0134/0136 buffer
-    # repairs (compare_three.py and the energy CPU arm would either crash on
-    # the derived-position path or measure a silently position-scrambled
-    # model). Per docs/05-measurement the NPU figure is quoted alone and
-    # labelled; the quality delta vs fp32 is 0137's symmetric MTEB run.
-    @{ name = "gte-multilingual-base"; artifacts = "artifacts_nomic_bfp16"; npu = $true; harness = "bert"; dtype = "bf16"; datapath = "bfp16"; gate = "pass"; interleaved = $false; energy = $false }
+    # gte (arch=3): interleaved/energy were PER-ROW opt-outs in 0141 because
+    # both stages need a CPU reference arm and gte's trust_remote_code model
+    # is unusable without the 0134/0136 buffer repairs -- an unrepaired
+    # sentence-transformers run does not crash, it silently encodes the WRONG
+    # positions, which is the worse of the two failures. tasks/0143 taught
+    # BOTH CPU arms the repairs (compare_three.py and energy_cpu_load.py,
+    # importing repair_rotary from the one place it is written down), so the
+    # opt-outs are gone and this row is measured like every other. The ORT
+    # third arm still declines for this checkpoint -- `AutoModel` without
+    # trust_remote_code cannot load `model_type: "new"` -- so gte's CPU
+    # baseline is torch alone, exactly as nomic's is, and the harness says so
+    # rather than dropping the side silently.
+    @{ name = "gte-multilingual-base"; artifacts = "artifacts_nomic_bfp16"; npu = $true; harness = "bert"; dtype = "bf16"; datapath = "bfp16"; gate = "pass" }
 
     @{ name = "all-MiniLM-L6-v2.int8";      artifacts = "artifacts_int8c_mini"; cpu = "all-MiniLM-L6-v2";     npu = $true; harness = "bert";  dtype = "int8"; datapath = "int8-native"; gate = "pass" }
     @{ name = "bge-small-en-v1.5.int8";     artifacts = "artifacts_int8c_mini"; cpu = "bge-small-en-v1.5";     npu = $true; harness = "bert";  dtype = "int8"; datapath = "int8-native"; gate = "pass" }

@@ -17,6 +17,116 @@ A thread leaves this file only by being reopened — with a pointer, and a reaso
 thread closed can expire — a datapath not adopted, a host share, a seq length —
 the entry says so in one line, so a reader can tell whether it still holds.
 
+<a id="t54"></a>
+
+### T54 — Can a new model shape run on FLM's shipped xclbins? · **ANSWERED 2026-08-31 — no: `llama_npu.dll` whitelists `hidden_size` to {2048, 3072, 4096}, and granite is 2560**
+
+Answered by [`0144`](../tasks/0144-granite-q4nx/TASK.md) on hardware. The engine
+refuses before it reaches an xclbin at all, so the whole question of which
+xclbin binds is moot for this model:
+
+```
+[FLM]  Loading model: C:\Users\vegar\Documents\flm\models\Granite-4.2-3B-NPU2
+[ERROR]  Failed to load model: Unsupported hidden size: 2560
+```
+
+**The gate reads `hidden_size` from `config.json`**, and it is a whitelist, not
+a divisibility rule. Mapped by editing the config and reading which error comes
+back — a rejected value stops at the gate, an accepted one gets past it and
+fails later on `Invalid size for bytes allocation` because the weights no longer
+match:
+
+| hidden_size | |
+|---|---|
+| 512, 1024, 1536, 1792 | REJECTED |
+| **2048** | **accepted** |
+| 2304, **2560**, 2816 | REJECTED |
+| **3072** | **accepted** |
+| 3584 | REJECTED |
+| **4096** | **accepted** |
+| 5120, 8192 | REJECTED |
+
+`{2048, 3072, 4096}` is exactly the set of hidden sizes among the three shipped
+llama-family models (Llama-3.2-1B, Llama-3.2-3B, Llama-3.1-8B). The whitelist is
+the shipped design set, enumerated.
+
+**The spike design worked and cost nothing installed.** `FLM_CONFIG_PATH` +
+`FLM_MODELINFO_PATH` + `FLM_XCLBIN_PATH` against a scratch tree, granite
+registered under the existing `"family": "llama3"` so no C++ was written, and
+`flm list` showed `granite:3b ✅`. No administrator, nothing written into
+`Program Files`. That part of this thread's estimate held.
+
+**What this means for the port.** Granite-4.2-3B cannot run on the stock llama
+engine at any xclbin combination. Two ways forward, and the second is now the
+live one:
+
+1. **AMD-side.** Add 2560 to the whitelist and ship a llama-architecture
+   `layer.xclbin` at `(2560, 8192)`. That is the clean fix and the precise ask.
+2. **Pad hidden 2560 -> 3072.** Newly attractive, because 3072 is on the
+   whitelist *and* `Llama-3.2-3B` is `(3072, 8192)` — llama architecture, and
+   granite's intermediate is **already 8192**, so the padded model lands exactly
+   on a shipped layer design. Zero-padding the residual stream is exact if the
+   RMSNorm width term is corrected: RMSNorm divides by `sqrt(mean(x^2))` over
+   the full width, so widening 2560 -> 3072 needs the norm weights scaled by
+   `sqrt(2560/3072)` and `rms_norm_eps` by `2560/3072`, both folded the same way
+   the Granite multipliers already fold. Cost is ~20% wasted arithmetic in the
+   hidden dimension.
+   Open sub-question: `head_dim` 64 against Llama-3.2-3B's 128. The five
+   `addr_*` keys are all attention-named (`qk`, `kv`, `kk`, `l_begin_mha`,
+   `l_end_mha`), which suggests they belong to `attn.xclbin` and that a mixed
+   donor — `layer` from Llama-3.2-3B, `attn`/`mm`/`dequant` and `addr_*` from
+   Llama-3.2-1B — is coherent. Untested.
+
+**What the thread got right and wrong.** The `attn.xclbin`-is-keyed-by-head_dim
+finding stands and was never exercised. The `layer.xclbin` analysis was never
+reached, so it remains inference rather than measurement. And the earlier
+pad-to-Qwen3-4B proposal stays refuted for the reason recorded above — but
+pad-to-Llama-3.2-3B is a *different* proposal that does not cross an
+architecture boundary, which is exactly why it survives where the other did not.
+
+<a id="t53"></a>
+
+### T53 — the `q4nx` nibble order is undetermined by one bit · **ANSWERED 2026-08-28, same day it was filed** · `LOW_NIBBLE_IS_EVEN = True`, cosine 0.9975 against ground truth versus 0.0298 for the alternative
+Filed from [note 0010](notes/0010-q4nx-format.md) as a question the data could
+not answer: the parity swaps adjacent output rows and nothing else, so every
+group stays a valid Q4_1 group under either reading — `min == 0` in 100% of
+groups either way. The thread said it would close "as a side effect of the next
+step". It did, but not the way it predicted.
+
+**The prediction was wrong about the instrument.** The thread expected a forward
+pass to settle it, and reasoned that a row swap "is not subtle". It ran the model
+both ways and **both were degenerate** — repeated `.` one way, repeated `!` the
+other — because a *second* layout bug was also present, and a broken model is
+broken the same way for every reason. An end-to-end signal is a poor
+discriminator precisely when more than one thing is wrong.
+
+**What settled it** was the upstream bf16 checkpoint
+(`Qwen/Qwen3.5-0.8B`, 1.7 GB), the thing FLM quantised, diffed tensor by tensor:
+
+| `LOW_NIBBLE_IS_EVEN` | cosine vs upstream `layers.0.mlp.up_proj` |
+|---|---:|
+| **True** | **+0.997465** — the int4 quantisation floor |
+| False | +0.029775 |
+
+The same diff found the second bug in one line: `q_proj` at cosine **0.138**,
+because `attn_output_gate` makes it twice as wide and the two sides group it
+differently — transformers per head `[q_h | g_h | ...]`, FLM as whole halves
+`[all query | all gate]`. Re-grouped, 0.9974. Two more conversion differences
+came out of the same comparison and were silent in exactly the same way:
+FLM folds the `+1` of `Qwen3NextRMSNorm`'s `(1 + w)` into the stored weight, and
+stores `-exp(A_log)` where transformers keeps `A_log`.
+
+**The durable lesson, and it is the same shape as [T51](OPEN-THREADS.md#t51).**
+The thread reached for the end-to-end check because it was cheap and available.
+It cost a wrong conclusion and two dead-end runs; the decisive instrument was
+ground truth for each tensor, and it existed the whole time. *An aggregate signal
+cannot localise, and with two faults present it cannot even detect.*
+
+`../LLMNpuTest/reference/check_weights.py` is that instrument, kept: all 150
+quantised tensors, q4 floor 0.995 and q8 floor 0.998, worst 0.996116. The
+closure depends on nothing that can expire — it is a diff against the published
+checkpoint.
+
 <a id="t30"></a>
 ### T30 — The C-drain guard is half-wired, and every shipped model is one step from it · **ANSWERED 2026-08-21 (found and fixed same day)**
 **A design built with `N > 4096` COMPILES and returns the wrong answer.**

@@ -343,10 +343,19 @@ several do not:
   ([T42](research/OPEN-THREADS.md#t42)) — filed with a price and an explicit
   trigger. The geometry blocker is gone (mem-tile padding is proven exact on
   all 8 columns); what is not settled is whether it is worth it.
-All three are filed with a price and a trigger rather than as open questions
-about the hardware — the register ran to 20 threads a week ago and 49 of the 54
-are now closed, each by a measurement or a build rather than by a decision to
-stop caring. **How** they were settled is in
+- **Does the NPU have a case for LLM *decode* at all?**
+  ([T55](research/OPEN-THREADS.md#t55)) — a side workstream took the same
+  hardware knowledge to a decoder (`granite-4.2-3B`, a W4A16 GEMV kernel
+  written from scratch) and got a **negative**: a 24-thread AVX2 CPU baseline
+  is 2.4× faster, at 89% of its own memory bandwidth. Decode is bandwidth-bound
+  and both devices sustain ~47 GB/s. The two cases left are **energy** and
+  **prefill**, and neither has been measured. None of that code is in this
+  repository, but the question and the numbers are.
+
+Those are filed with a price and a trigger rather than as open questions
+about the hardware — the register ran to 20 threads a fortnight ago and 51 of
+the 60 are now closed, each by a measurement or a build rather than by a
+decision to stop caring. **How** they were settled is in
 [`research/CLOSED-THREADS.md`](research/CLOSED-THREADS.md), verbatim, because
 the refuted claims and the measurements that killed them are the valuable part.
 

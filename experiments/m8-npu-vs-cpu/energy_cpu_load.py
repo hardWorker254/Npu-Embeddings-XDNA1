@@ -35,12 +35,9 @@ def main() -> int:
     sys.path.insert(0, str(REPO / "reference"))
     from corpus import SENTENCES, SEQ_LEN
 
-    # trust_remote_code: needed by nomic-embed-text-v1.5 on older
-    # transformers/sentence-transformers. Build-time .venv-ref only.
-    st = SentenceTransformer(str(REPO / "models" / args.model),
-                             device="cpu", trust_remote_code=True)
-    st.max_seq_length = SEQ_LEN
-
+    # The container is read FIRST now, because two things below depend on it:
+    # the task prefix, and whether this checkpoint needs the 0134 repairs.
+    #
     # The task prefix is part of the WORK, so an energy-per-sequence figure
     # that omits it is measuring a shorter sequence than the model actually
     # runs. Read it from the container, like every other harness now does.
@@ -49,6 +46,31 @@ def main() -> int:
     with Reader(str(REPO / "models" / f"{args.model}.npue")) as c:
         cfg = c.config
     prefix = (cfg.get("prompts") or {}).get(cfg.get("prompt_default"), "")
+
+    # arch=3 (gte-multilingual-base): the same two reference repairs
+    # compare_three.py applies, and for the same reason -- transformers v5
+    # materialises this checkpoint's trust_remote_code persistent=False
+    # buffers as uninitialised memory, and `embeddings.position_ids` is one of
+    # them, so an unrepaired sentence-transformers run is silently
+    # position-scrambled (tasks/0134 L1, 0136; L2 is the config's own
+    # torch_dtype: float16, honoured silently by v5). An energy figure is a
+    # per-sequence cost of doing the RIGHT work; this is what makes it that.
+    # It is also why 0141 opted this row out rather than reporting a number.
+    is_gte = cfg.get("arch") == "gte_new_rope_geglu"
+
+    # trust_remote_code: needed by nomic-embed-text-v1.5 on older
+    # transformers/sentence-transformers. Build-time .venv-ref only.
+    import torch
+    st = SentenceTransformer(
+        str(REPO / "models" / args.model), device="cpu",
+        trust_remote_code=True,
+        **({"model_kwargs": {"torch_dtype": torch.float32}} if is_gte else {}))
+    if is_gte:
+        from make_goldens_gte import repair_rotary
+        repair_rotary(st[0].auto_model)
+        print("  gte: rotary + position_ids repaired, fp32 forced "
+              "(tasks/0134 L1+L2)")
+    st.max_seq_length = SEQ_LEN
     sents = (SENTENCES * ((args.batch // len(SENTENCES)) + 1))[:args.batch]
     if prefix:
         sents = [prefix + s for s in sents]

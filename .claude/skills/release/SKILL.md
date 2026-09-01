@@ -102,8 +102,33 @@ python tools\sync_public_repo.py
 ```powershell
 python tools\sync_public_repo.py
 if ($LASTEXITCODE -ne 0) { throw "sync failed -- fix the source, do not push" }
-cd repo; git add -A; git commit; git push origin main
+cd repo
+git rev-parse --abbrev-ref HEAD          # MUST print 'main' before anything else
+git add -A; git commit; git push origin main
 ```
+
+**Two guards on that block, both of them bought in `tasks/0143`:**
+
+- **Check which branch `repo/` is on.** It is a generated tree nobody
+  navigates, so a checkout left on a tag or an old release branch is
+  invisible — 0143's Part 3 pushed a whole release onto a `v0.4.0` branch and
+  `main` never received it. The commits were public only in the sense that
+  they were on the remote.
+- **A push rejected as non-fast-forward must NEVER be answered with `git
+  pull`.** If the local history was rewritten (0143 stripped session URLs from
+  every commit), the pull asks git to merge the pre-rewrite branch back in —
+  which recreates exactly the commits the rewrite removed, and presents as **23
+  files in conflict on a tree neither side touched**. The check that tells the
+  two apart in one line:
+
+  ```powershell
+  git diff --stat <local-tip> <remote-tip>   # empty  => content-identical
+  git cherry -v main origin/main             # all '-' => remote has nothing new
+  ```
+
+  Empty diff and all `-`: **a rewrite is finished by force-pushing it**, with
+  `--force-with-lease=refs/heads/main:<expected-sha>` so it refuses rather than
+  overwrites if anything reached the remote meanwhile.
 
 The sync rewrites links into excluded material (`research/papers/<id>.md`
 becomes an arXiv citation) and then **re-scans and refuses** if any survive.
@@ -213,7 +238,8 @@ the user say when to publish and under which tag.
 - [ ] README, CURRENT_STATUS, CLAUDE.md, task log updated
 - [ ] open questions filed in `research/OPEN-THREADS.md`
 - [ ] `sync_public_repo.py` **PASSED** before any push
-- [ ] public repo committed and pushed
+- [ ] `repo/` is on **main** (`git rev-parse --abbrev-ref HEAD`) before committing
+- [ ] public repo committed and pushed — and a rejected push answered with a rewrite check, never `git pull`
 - [ ] zip built; cold-tested from an unzip outside the repo
 - [ ] container DATA REGION identical to the validated one (`tools/npue_data_hash.py`, exit 0)
 - [ ] semantic gate PASSES against the cold zip (`tools/verify_semantics.py`)

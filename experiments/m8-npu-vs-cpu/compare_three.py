@@ -97,6 +97,17 @@ def main() -> int:
     # be prefixed twice -- which would lengthen only the NPU side's sequences
     # and make the throughput comparison measure the double prefix (0075).
     is_gemma = _cfg.get("arch") == "gemma3_mqa_rope_geglu"
+    # arch=3 (gte-multilingual-base) needs the two reference repairs of
+    # tasks/0134-0136 before sentence-transformers may be believed at all --
+    # this is why 0141 opted the row out of this stage rather than reporting a
+    # number. transformers v5 instantiates the checkpoint's trust_remote_code
+    # modules on the meta device, so every persistent=False buffer comes back
+    # as UNINITIALISED memory: rotary inv_freq/cos/sin (L1) and, worse,
+    # `embeddings.position_ids` -- which SentenceTransformer's derived-position
+    # path reads, so in-bounds garbage silently encodes the WRONG positions
+    # (9.0e-02 vs 6.7e-08 after repair, measured in 0136). L2 is the config's
+    # own `torch_dtype: float16`, which v5 honours silently.
+    is_gte = _cfg.get("arch") == "gte_new_rope_geglu"
     # `prompt_default` is ADVISORY metadata (tasks/0118): the runtime stopped
     # applying it, so this is the harness choosing WHICH prompt to exercise --
     # which is the role the field kept. None for a BERT container, and the flag
@@ -114,8 +125,21 @@ def main() -> int:
     # trust_remote_code: nomic-embed-text-v1.5 needs it on older
     # transformers/sentence-transformers. Build-time .venv-ref only, never the
     # shipped runtime.
-    st = SentenceTransformer(str(model_dir), device="cpu",
-                             trust_remote_code=True)
+    st = SentenceTransformer(
+        str(model_dir), device="cpu", trust_remote_code=True,
+        # L2: explicit fp32, or the checkpoint's float16 wins and this side is
+        # neither the reference dtype nor a comparable amount of work.
+        **({"model_kwargs": {"torch_dtype": torch.float32}} if is_gte else {}))
+    if is_gte:
+        # L1, from the one place it is written down -- reference/ is already on
+        # sys.path above. Importing it rather than restating the constructor
+        # arguments is deliberate: a second copy of this repair is a second
+        # thing that can silently fall out of date with the checkpoint.
+        from make_goldens_gte import repair_rotary          # noqa: E402
+        repair_rotary(st[0].auto_model)
+        print("  gte: rotary + position_ids repaired, fp32 forced "
+              "(tasks/0134 L1+L2) -- without this the torch side is silently "
+              "position-scrambled")
     st.max_seq_length = SEQ_LEN
 
     def run_torch():

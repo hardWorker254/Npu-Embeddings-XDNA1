@@ -10,6 +10,15 @@ closed (T45/T46/T47/T49/T50/T52) with B-reuse re-priced and parked
 ([`0131`](../tasks/0131-t48-gate-decision/TASK.md)). The 0.5.0 sweep is
 [`tasks/0141`](../tasks/0141-release-sweep-050/TASK.md).*
 
+*Amended 2026-09-01 (tasks/0143–0145). **Nothing about the shipped product
+changed** — no new model, no new design, no runtime code, and every figure below
+still comes from the 0.5.0 sweep. What changed is around it: the
+`gte-multilingual-base` CPU reference arm is **repaired but still unmeasured**
+([T57](../research/OPEN-THREADS.md#t57)), so its two empty cells stay empty; and
+the project grew a **second workstream**, taking the XDNA2 knowledge to a
+decoder LLM — see §11, which is a research direction and not part of what
+`npuembeddings` ships.*
+
 > **Six models, and a second architecture on the array.**
 > [`0068`](../tasks/0068-m13-nomic-spike-and-oracle/TASK.md)–[`0071`](../tasks/0071-m13-nomic-shippable/TASK.md)
 > added **nomic-embed-text-v1.5** (Apache-2.0) as `arch=2`: RoPE instead of
@@ -815,9 +824,12 @@ are rewritten).
 
 The authority on open work is
 [`research/OPEN-THREADS.md`](../research/OPEN-THREADS.md) (CLAUDE.md rule 3),
-which as of 2026-08-27 holds **five live threads** — down from ten at the
-start of the 0.5.0 session, every closure carrying the condition it depends
-on. The priority order below is this file's own judgement, not the
+which as of 2026-09-01 holds **nine live threads**: the five encoder threads
+below — down from ten at the start of the 0.5.0 session, every closure carrying
+the condition it depends on — plus
+[T55](../research/OPEN-THREADS.md#t55)–[T58](../research/OPEN-THREADS.md#t58),
+which belong to the decoder workstream of §11 and do not compete with the
+encoder work for the same hours. The priority order below is this file's own judgement, not the
 register's (the register does not rank).
 
 1. **T51 — the bge-large tail's mechanism** (step 2: layer-wise divergence,
@@ -879,3 +891,66 @@ hardest.
 - **Never scalar float math in a kernel** — 1,617× slower, measured.
 - **Watch the worker stack.** Four interleaved chains in GELU overran
   `stack_size=0xD00`. It does not fault; it **corrupts**, and produced NaN.
+
+## 11. A second workstream: a decoder on the same array
+
+**Read this section as a research direction, not as product status.** Nothing
+in it ships in `npuembeddings`, nothing in it changes a number above, and none
+of the kernels live in this repository. It is here because CLAUDE.md rule 3b
+wants every unit of work recorded, and because what it learned about XDNA2 —
+seven of the traps in [`CLAUDE.md`](../CLAUDE.md) — applies directly to the
+encoder work.
+
+**What it is.** [`0144`](../tasks/0144-granite-q4nx/TASK.md) and
+[`0145`](../tasks/0145-granite-npu-gemv/TASK.md) take `ibm-granite/granite-4.2-3b`
+— a dense `GraniteForCausalLM`, hidden 2560, 40 layers, 40 heads / 8 KV,
+head_dim 64 — through FastFlowLM's `q4nx` weight container and onto the array
+through a **W4A16 GEMV kernel written here**, consuming the packed `q4` nibbles
+directly. The container format is written down in
+[`research/notes/0010-q4nx-format.md`](../research/notes/0010-q4nx-format.md),
+solved against ground truth; the one bit the layout does not determine (nibble
+order) was settled by measurement, [T53](../research/CLOSED-THREADS.md#t53).
+
+**Where the code is.** `../LLMNpuTest` and `../q4nx-build`, both public repos of
+their own. **Nothing is vendored or redistributed** from FastFlowLM — CLAUDE.md
+rule 4 — and the weights are read from an installed model directory. What lives
+*here* is the task logs, the format note, and the traps.
+
+### What works
+
+| | result |
+|---|---|
+| All 8 projection shapes (q, k, v, o, gate, up, down, lm_head) | cosine **1.00000000**, exact under a one-hot activation, max rel err 1.1e-05 on random input — ~99% of the model's weight traffic |
+| RMSNorm, RoPE, SwiGLU, attention on the array | PASS (RoPE 2.7e-03, SwiGLU 8.1e-03, attention 0.9993–0.9998) |
+| A granite layer, fused | **three dispatches** for nine ops, **1.40×** — `[q,k,v,RoPE]` + `o` + `[gate,up,SwiGLU,gather,down]` |
+| The memtile leg | **24 of 32 cores, 2.04×** (trap 13 caps a per-core-stream design at 8) |
+| Hybrid NPU + CPU on one matmul | **1.37×** over the best single device, ~75 GB/s aggregate |
+
+### The headline is a negative, and it is the useful part
+
+A like-for-like CPU baseline — same bytes, same arithmetic, AVX2 + FMA, 24
+threads, validated against numpy to 7 significant figures before being timed —
+**is 2.4× faster than the NPU kernel** on `lm_head`, and it is running at 89% of
+its own memory bandwidth, so there is no CPU-side slack left to find.
+
+What makes that interesting rather than merely disappointing is the **null
+kernel**: stream every weight byte, do no arithmetic. It measures **46.3 GB/s**
+against the CPU's 47.0, so the array's memory path is at parity and the kernel
+is **compute-bound by 2.3×** — per-core compute is ~2.5 GB/s, and saturating the
+DMA bound needs **~18 cores** against the 8 a per-core-stream design reaches.
+0145 had already written the opposite conclusion ("even a perfect NPU design
+loses") from two unchecked assumptions, and the ~20-line probe refuted it.
+
+A second correction in the same task is worth carrying into the encoder work:
+**~50 GB/s is a per-agent limit, not the platform's.** Running both devices at
+once, the NPU's stream falls 3% while the CPU keeps going. Two coincidentally
+similar numbers had been promoted to a property of the machine.
+
+### What is open
+
+[T55](../research/OPEN-THREADS.md#t55) — whether there is an NPU case for decode
+at all: **energy and prefill are the two candidates and neither is measured**.
+[T56](../research/OPEN-THREADS.md#t56) — the 24-core memtile leg and the fusion
+each pay, and **they do not compose**; the obstruction is channel budgets and
+divisibility, not code. [T58](../research/OPEN-THREADS.md#t58) — the host
+engine's output-quality bug, still without a mechanism.
