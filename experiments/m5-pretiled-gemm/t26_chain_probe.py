@@ -190,7 +190,7 @@ def main() -> int:
 
     # trap: without this, IRON silently compiles for NPU1 and bfp16 becomes a
     # no-op (research/notes/0002).
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
 
     rng = np.random.default_rng(args.seed)
 

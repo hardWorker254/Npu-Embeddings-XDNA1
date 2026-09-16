@@ -63,7 +63,7 @@ import aie.iron as iron                        # noqa: E402
 from aie.iron.device import from_name          # noqa: E402
 from ml_dtypes import bfloat16                 # noqa: E402
 
-iron.set_current_device(from_name("npu2", n_cols=None))
+iron.set_current_device(from_name("npu1", n_cols=None))
 
 from aie.iron import kernels, str_to_dtype     # noqa: E402
 from gemm_pretiled import pretiled_array       # noqa: E402

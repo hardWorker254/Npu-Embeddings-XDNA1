@@ -139,7 +139,9 @@ void softmax_impl(bfloat16 *restrict input, bfloat16 *restrict output,
       if constexpr (kUsePoly) {
         ev[i] = aie::mul(exp2_poly(arg), vone_f).to_vector<bfloat16>();
       } else {
-        ev[i] = aie::exp2<bfloat16>(arg);
+          aie::vector<float, 16> exp_f = exp2_poly(arg);
+          const aie::vector<float, 16> vone_f = aie::broadcast<float, 16>(1.0f);
+          ev[i] = aie::mul(exp_f, vone_f).to_vector<bfloat16>();
       }
       acc = aie::add(acc, aie::mul(ev[i], vone_bf).to_vector<float>());
     }

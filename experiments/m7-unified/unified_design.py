@@ -555,7 +555,7 @@ def main() -> int:
                     help="comma-separated subset; default all seven")
     args = ap.parse_args()
 
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
     rng = np.random.default_rng(7)
 
     streams = (args.streams.split(",") if args.streams

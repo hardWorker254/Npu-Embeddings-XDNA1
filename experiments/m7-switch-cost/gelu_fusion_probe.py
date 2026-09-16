@@ -44,7 +44,7 @@ def gelu_exact(x):
 
 
 def main() -> int:
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
     rng = np.random.default_rng(7)
 
     a_real = (rng.standard_normal((M, K_REAL)) * 0.5).astype(np.float32)

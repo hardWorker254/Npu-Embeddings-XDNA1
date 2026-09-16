@@ -242,7 +242,7 @@ def main() -> int:
     #   * the aie_kernels/aie2/ source is compiled instead of aie_kernels/aie2p/
     # None of this errors or warns at the user level. Verified: before this call
     # mac_dims == (4,8,4) for both plain and bfp16; after it, (4,8,8) and (8,8,8).
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
 
     shape = dict(PRESETS[args.preset])
     for key in ("M", "K", "N"):

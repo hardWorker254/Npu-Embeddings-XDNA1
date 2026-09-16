@@ -89,7 +89,7 @@ OPS = {"add": ("fp32_probe_bf16", "(1.0f + eps) - 1.0f"),
 def main() -> int:
     op = sys.argv[1] if len(sys.argv) > 1 else "add"
     symbol, formula = OPS[op]
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
 
     exps = np.arange(1, 25)                       # 2^-1 .. 2^-24
     eps = (2.0 ** -exps).astype(np.float32)

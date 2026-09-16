@@ -104,10 +104,13 @@ public:
   size_t tensor_count() const { return tensors_.size(); }
 
 private:
+private:
+#ifdef _WIN32
   void *handle_file_ = nullptr;
   void *handle_map_ = nullptr;
-  const uint8_t *base_ = nullptr;
+#endif
   size_t size_ = 0;
+  const uint8_t *base_ = nullptr;
 
   uint32_t version_ = 0;
   uint64_t data_offset_ = 0;

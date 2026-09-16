@@ -34,8 +34,22 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <netdb.h>
+#include <cstring>
+typedef int SOCKET;
+#define INVALID_SOCKET (-1)
+#define SOCKET_ERROR (-1)
+#define closesocket close
+#endif
 
 namespace npue {
 namespace http {
@@ -250,29 +264,37 @@ inline std::string base64(const uint8_t *data, size_t n) {
 
 class Server {
 public:
-  explicit Server(uint16_t port, const std::string &bind_addr = "127.0.0.1") {
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
-      throw std::runtime_error("WSAStartup failed");
-    listen_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listen_ == INVALID_SOCKET) throw std::runtime_error("socket() failed");
-    BOOL yes = TRUE;
-    setsockopt(listen_, SOL_SOCKET, SO_REUSEADDR,
-               reinterpret_cast<const char *>(&yes), sizeof yes);
-    sockaddr_in a{};
-    a.sin_family = AF_INET;
-    a.sin_port = htons(port);
-    inet_pton(AF_INET, bind_addr.c_str(), &a.sin_addr);
-    if (bind(listen_, reinterpret_cast<sockaddr *>(&a), sizeof a) == SOCKET_ERROR)
-      throw std::runtime_error("bind() failed on port " + std::to_string(port));
-    if (::listen(listen_, 16) == SOCKET_ERROR)
-      throw std::runtime_error("listen() failed");
-  }
+    explicit Server(uint16_t port, const std::string &bind_addr = "127.0.0.1") {
+    #ifdef _WIN32
+        WSADATA wsa;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+          throw std::runtime_error("WSAStartup failed");
+    #endif
+        listen_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (listen_ == INVALID_SOCKET) throw std::runtime_error("socket() failed");
+    #ifdef _WIN32
+        BOOL yes = TRUE;
+    #else
+        int yes = 1;
+    #endif
+        setsockopt(listen_, SOL_SOCKET, SO_REUSEADDR,
+                   reinterpret_cast<const char *>(&yes), sizeof yes);
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_port = htons(port);
+        inet_pton(AF_INET, bind_addr.c_str(), &a.sin_addr);
+        if (bind(listen_, reinterpret_cast<sockaddr *>(&a), sizeof a) == SOCKET_ERROR)
+          throw std::runtime_error("bind() failed on port " + std::to_string(port));
+        if (::listen(listen_, 16) == SOCKET_ERROR)
+          throw std::runtime_error("listen() failed");
+      }
 
-  ~Server() {
-    if (listen_ != INVALID_SOCKET) closesocket(listen_);
-    WSACleanup();
-  }
+      ~Server() {
+        if (listen_ != INVALID_SOCKET) closesocket(listen_);
+    #ifdef _WIN32
+        WSACleanup();
+    #endif
+      }
   Server(const Server &) = delete;
   Server &operator=(const Server &) = delete;
 

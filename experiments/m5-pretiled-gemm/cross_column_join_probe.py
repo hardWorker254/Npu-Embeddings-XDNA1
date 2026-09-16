@@ -278,7 +278,7 @@ def cross_column_join(A: In, B: In, Y: Out):
 
 
 def main() -> int:
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
     print(f"  SRC_COLS={SRC_COLS} DEST_COL={DEST_COL} "
           f"(set via NPUE_SRC_COLS / NPUE_DEST_COL env vars)")
     purge()

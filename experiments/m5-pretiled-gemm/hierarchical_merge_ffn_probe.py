@@ -460,7 +460,7 @@ def main() -> int:
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     purge()
 

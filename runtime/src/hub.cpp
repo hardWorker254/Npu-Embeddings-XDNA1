@@ -16,8 +16,14 @@
 #include "json_min.hpp"
 #include "npue_pack.hpp"
 
+#ifdef _WIN32
 #include <windows.h>
 #include <winhttp.h>
+#else
+#include <curl/curl.h>
+#include <unistd.h>
+#include <cstring>
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -222,6 +228,7 @@ const Want kFilesGte[] = {
     {"modules.json", true},
 };
 
+#ifdef _WIN32
 std::wstring widen(const std::string &s) {
   if (s.empty()) return std::wstring();
   const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(),
@@ -230,6 +237,7 @@ std::wstring widen(const std::string &s) {
   MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), w.data(), n);
   return w;
 }
+#endif
 
 std::string human(uint64_t bytes) {
   char b[64];
@@ -242,6 +250,7 @@ std::string human(uint64_t bytes) {
 
 // A WinHTTP handle that closes itself. WinHttpCloseHandle on a null handle is
 // a no-op, so the empty case needs no branch.
+#ifdef _WIN32
 struct Handle {
   HINTERNET h = nullptr;
   Handle() = default;
@@ -279,6 +288,7 @@ Url parse_url(const std::string &url) {
   u.https = (c.nScheme == INTERNET_SCHEME_HTTPS);
   return u;
 }
+#endif
 
 }  // namespace
 
@@ -435,6 +445,7 @@ void add_to_user_catalog(const std::string &root, const CatalogEntry &e) {
 
 void download(const std::string &url, const std::string &dest,
               const Log &log, const std::string &bearer_token) {
+#ifdef _WIN32
   const Url u = parse_url(url);
 
   Handle session(WinHttpOpen(L"NpuEmbeddings/0.2",
@@ -549,6 +560,93 @@ void download(const std::string &url, const std::string &dest,
   if (ec)
     throw std::runtime_error("cannot rename " + part.string() + ": " +
                              ec.message());
+#else
+  CURL *curl = curl_easy_init();
+  if (!curl) throw std::runtime_error("cannot initialise libcurl");
+
+  const std::filesystem::path final_path(dest);
+  const std::filesystem::path part = final_path.string() + ".part";
+  std::filesystem::create_directories(final_path.parent_path());
+
+  std::ofstream out(part, std::ios::binary | std::ios::trunc);
+  if (!out) throw std::runtime_error("cannot write " + part.string());
+
+  // NOTE: no CURLOPT_ACCEPT_ENCODING — negotiating gzip would make the
+  // decoded byte count disagree with Content-Length.
+  struct Ctx { std::ofstream *out; const Log *log; uint64_t got = 0; int last_pct = -1; } ctx;
+  ctx.out = &out; ctx.log = &log;
+
+  auto write_cb = [](char *p, size_t sz, size_t nm, void *ud) -> size_t {
+    auto *c = static_cast<Ctx *>(ud);
+    const size_t n = sz * nm;
+    c->out->write(p, static_cast<std::streamsize>(n));
+    if (!*c->out) return 0;              // abort on write failure
+    c->got += n;
+    return n;
+  };
+  auto prog_cb = [](void *ud, curl_off_t tot, curl_off_t now,
+                    curl_off_t, curl_off_t) -> int {
+    auto *c = static_cast<Ctx *>(ud);
+    if (!c->log || !*c->log || tot <= 0 || now <= 0) return 0;
+    const int pct = static_cast<int>(now * 100 / tot);
+    if (pct != c->last_pct && pct % 5 == 0) {
+      c->last_pct = pct;
+      (*c->log)("    " + std::to_string(pct) + "%  " + human(uint64_t(now)) +
+                " of " + human(uint64_t(tot)));
+    }
+    return 0;
+  };
+
+  char errbuf[CURL_ERROR_SIZE] = {};
+  curl_slist *headers = nullptr;
+  std::string auth;
+  if (!bearer_token.empty()) {
+    auth = "Authorization: Bearer " + bearer_token;
+    headers = curl_slist_append(headers, auth.c_str());
+  }
+
+  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+  curl_easy_setopt(curl, CURLOPT_USERAGENT, "NpuEmbeddings/0.2");
+  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);   // HF -> CDN redirect
+  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 15000L);
+  curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);  // stalled-CDN abort
+  curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+  curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+  curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, prog_cb);
+  curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
+  curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
+
+  const CURLcode rc = curl_easy_perform(curl);
+  long status = 0;
+  curl_off_t clen = -1;
+  if (rc == CURLE_OK) {
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &clen);
+  }
+  curl_slist_free_all(headers);
+  curl_easy_cleanup(curl);
+  out.close();
+
+  if (rc != CURLE_OK)
+    throw std::runtime_error("download failed for " + url + ": " +
+                             (errbuf[0] ? std::string(errbuf)
+                                        : std::string(curl_easy_strerror(rc))));
+  if (status != 200)
+    throw std::runtime_error("HTTP " + std::to_string(status) + " for " + url);
+  if (clen > 0 && ctx.got != static_cast<uint64_t>(clen))
+    throw std::runtime_error("short read on " + url + ": got " +
+                             std::to_string(ctx.got) + " of " +
+                             std::to_string(clen) + " bytes");
+
+  std::error_code ec;
+  std::filesystem::remove(final_path, ec);
+  std::filesystem::rename(part, final_path, ec);
+  if (ec)
+    throw std::runtime_error("cannot rename " + part.string() + ": " + ec.message());
+#endif
 }
 
 namespace {

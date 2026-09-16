@@ -32,7 +32,7 @@ from pipeline_diag_gemm_only import gemm_only               # noqa: E402
 
 
 def main() -> int:
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
     rng = np.random.default_rng(3)
     a = (rng.standard_normal((M, K)) * 0.5).astype(np.float32)
     b = (rng.standard_normal((K, N)) * 0.05).astype(np.float32)

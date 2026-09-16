@@ -278,7 +278,7 @@ def main() -> int:
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
     g, meta = load(Path(args.goldens) / "minilm_l6_s64_boundary.safetensors")
 
     with Reader(args.npue) as r:

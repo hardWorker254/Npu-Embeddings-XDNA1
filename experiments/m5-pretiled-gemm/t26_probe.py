@@ -265,7 +265,7 @@ def main() -> int:
 
     # trap: without this, IRON silently compiles for NPU1 and bfp16 becomes a
     # no-op (research/notes/0002). n_cols=None or it defaults to one column.
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
 
     rng = np.random.default_rng(args.seed)
     A_full = (rng.standard_normal((M, K_FULL)).astype(np.float32)

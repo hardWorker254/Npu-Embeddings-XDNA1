@@ -227,7 +227,7 @@ def main() -> int:
     args = ap.parse_args()
 
     # Without this IRON silently compiles for NPU1. research/notes/0002.
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
 
     rng = np.random.default_rng(38)
 

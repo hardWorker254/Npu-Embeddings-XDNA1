@@ -144,7 +144,7 @@ def run(A_np, B_np, M, K, N, m, k, n, cols, emulate):
     from aie.iron.device import from_name
     from gemm_pretiled import pretiled_array
 
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
     dt_in, dt_out = str_to_dtype("bf16"), str_to_dtype("f32")
     A = iron.rand((M, K), dtype=dt_in, device="npu")
     B = iron.rand((K, N), dtype=dt_in, device="npu")

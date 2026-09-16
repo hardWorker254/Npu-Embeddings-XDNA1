@@ -187,7 +187,7 @@ def main() -> int:
     ap.add_argument("--stack", type=lambda v: int(v, 0), default=0xD00)
     args = ap.parse_args()
 
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
     taps, _ = load(Path(args.goldens) / "minilm_l6_s64_taps.safetensors")
     site = SITES[args.tap]
 

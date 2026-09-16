@@ -401,7 +401,7 @@ def main() -> int:
     args = ap.parse_args()
 
     # See research/notes/0002 -- without this IRON silently targets NPU1.
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
 
     shape = dict(PRESETS[args.preset])
     for key in ("M", "K", "N"):

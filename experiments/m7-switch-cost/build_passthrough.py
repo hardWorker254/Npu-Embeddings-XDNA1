@@ -133,7 +133,7 @@ def main() -> int:
     n_elem = a.batch * 64 * 1536
 
     # Trap 1 in CLAUDE.md: without this the arch falls back to aie2 silently.
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
 
     X = iron.zeros(n_elem, dtype=bfloat16, device="npu")
     Y = iron.zeros(n_elem, dtype=bfloat16, device="npu")

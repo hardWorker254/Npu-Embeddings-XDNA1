@@ -264,8 +264,8 @@ def export_eltwise(out_root, n_cols=1, batch=4, gelu_tile=1024,
             t = m.read_text(encoding="utf-8", errors="ignore")
             return symbol in t and f"memref<{n_elems}xbf16>" in t                 and width_matches(d, n_cols)
         purge_ambiguous(_m, what)
-    X = iron.zeros(n_gelu, dtype=bfloat16, device="npu")
-    Y = iron.zeros(n_gelu, dtype=bfloat16, device="npu")
+    X = iron.zeros(n_gelu, dtype=bfloat16)
+    Y = iron.zeros(n_gelu, dtype=bfloat16)
     _purge_elt(GELU_PROBE if gelu_variant == "probe2"
                else GELU_POLY_TILES[gelu_tile], n_gelu, "gelu")
     gelu_array(X, Y, n_elem=n_gelu, n_cols=n_cols, use_ours=gelu_variant,
@@ -281,9 +281,9 @@ def export_eltwise(out_root, n_cols=1, batch=4, gelu_tile=1024,
 
     # LayerNorm: [batch*SEQ, 384] with gamma|beta as one 768-float buffer.
     ln_rows = batch * SEQ
-    X = iron.zeros(ln_rows * LN_COLS, dtype=bfloat16, device="npu")
-    P = iron.zeros(2 * LN_COLS, dtype=np.float32, device="npu")
-    Y = iron.zeros(ln_rows * LN_COLS, dtype=bfloat16, device="npu")
+    X = iron.zeros(ln_rows * LN_COLS, dtype=bfloat16)
+    P = iron.zeros(2 * LN_COLS, dtype=np.float32)
+    Y = iron.zeros(ln_rows * LN_COLS, dtype=bfloat16)
     # il4: four rows interleaved (tasks/0031) -- the one-row kernel is
     # latency bound (~7,800 cycles/row against ~1,000 of issued work), and the
     # interleaved variant is bit-identical numerically. Needs the 0x2000 stack.
@@ -358,15 +358,13 @@ def find_cache_dir(M, K, N, k=None, n=None, cols=None):
     M*N, and those three together are unique across the shapes we build.
     """
     want = [f"memref<{M * K}xbf16>", f"memref<{K * N}xbf16>",
-            f"memref<{M * N}xf32>"]
+            f"memref<{M * N}xf32>", f"{k}, {n}] strides = ["]
     # The buffer shapes alone do NOT distinguish a pre-tiled design from a
     # row-major one -- both declare the same three memrefs. What differs is B's
     # innermost DMA stride: pre-tiled reads a contiguous k*n tile, so the
     # size-k dimension strides by n; row-major strides by N. Without this the
     # search happily returns the row-major build and the runtime produces a
     # confidently wrong answer (measured: rel_fro 1.186).
-    if k is not None and n is not None:
-        want.append(f"<size = {k}, stride = {n}>")
     # Nor do they distinguish a 4-column build from an 8-column one: same M, K,
     # N, same memrefs, same strides, different half of the array. That only
     # stayed correct while every width was built fresh and mtime happened to
@@ -398,7 +396,7 @@ def build_one(name, shape, m, k, n, cols, emulate, out_root):
     M, K, N = shape["M"], shape["K"], shape["N"]
 
     want = [f"memref<{M * K}xbf16>", f"memref<{K * N}xbf16>",
-            f"memref<{M * N}xf32>", f"<size = {k}, stride = {n}>"]
+            f"memref<{M * N}xf32>", f"{k}, {n}] strides = ["]
 
     def _matches(d):
         m = d / "aie.mlir"
@@ -409,9 +407,9 @@ def build_one(name, shape, m, k, n, cols, emulate, out_root):
 
     purge_ambiguous(_matches, name)
 
-    A = iron.zeros((M, K), dtype=dt_in, device="npu")
-    B = iron.zeros((K, N), dtype=dt_in, device="npu")
-    C = iron.zeros(M * N, dtype=dt_out, device="npu")
+    A = iron.zeros((M, K), dtype=dt_in)
+    B = iron.zeros((K, N), dtype=dt_in)
+    C = iron.zeros(M * N, dtype=dt_out)
     A[:] = np.zeros((M, K), np.float32).astype(bfloat16)
     B[:] = np.zeros((K, N), np.float32).astype(bfloat16)
     pretiled_array(A, B, C, M=M, K=K, N=N, m=m, k=k, n=n, n_aie_cols=cols,
@@ -526,7 +524,7 @@ def main() -> int:
         raise SystemExit(f"--batch {args.batch}: must be a multiple of 4, "
                          f"since the whole-array design needs M % 256 == 0")
 
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
     out_root = Path(args.out)
     print(f"exporting designs for the C++ runtime -> {out_root}")
     if args.eltwise_only:

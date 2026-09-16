@@ -870,7 +870,7 @@ hardest.
 
 - **Set the device explicitly** or IRON silently compiles for NPU1 and
   `--emulate-bfp16` becomes a no-op — worth 5.5×, no error.
-  `iron.set_current_device(from_name("npu2", n_cols=None))`
+  `iron.set_current_device(from_name("npu1", n_cols=None))`
 - **Never write device tensors through `.numpy()`.** `A[:] = x`, not
   `A.numpy()[:] = x`. The first dispatch in a process is correct either way,
   which is what makes it so easy to ship.

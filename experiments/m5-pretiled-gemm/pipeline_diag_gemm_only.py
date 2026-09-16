@@ -131,7 +131,7 @@ def gemm_only(A: In, B: In, C: Out):
 
 
 def main() -> int:
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
     purge()
     rng = np.random.default_rng(11)
     a = (rng.standard_normal((M, K)) * 0.5).astype(np.float32)

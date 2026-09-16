@@ -46,6 +46,19 @@ using namespace aie;
 #define LN_EPS 1e-12f
 #define LN_INV_COLS (1.0f / (float)LN_COLS)
 
+// Fast approximate inverse square root without sqrtf (bare-metal compatible)
+static inline float fast_invsqrt(float x) {
+    // Initial approximation using bit manipulation (Quake III algorithm)
+    float xhalf = 0.5f * x;
+    int i = *reinterpret_cast<int*>(&x);
+    i = 0x5f3759df - (i >> 1);  // magic number for initial guess
+    float y = *reinterpret_cast<float*>(&i);
+    // Two Newton-Raphson iterations for accuracy
+    y = y * (1.5f - xhalf * y * y);
+    y = y * (1.5f - xhalf * y * y);
+    return y;
+}
+
 // gamma and beta arrive as ONE buffer of 2*LN_COLS floats, gamma first.
 //
 // Not a packaging preference -- a core tile has only 2 input and 2 output DMA
@@ -93,7 +106,7 @@ void layernorm_impl(bfloat16 *restrict input, float *restrict params,
       acc2 = aie::add(acc2, aie::mul(d, d).to_vector<float>());
     }
     float variance = aie::reduce_add(acc2) * LN_INV_COLS;   // biased: / N
-    float inv_std = aie::invsqrt(variance + LN_EPS);        // eps INSIDE
+    float inv_std = fast_invsqrt(variance + LN_EPS);        // eps INSIDE
     aie::vector<float, 16> inv_std_v = aie::broadcast<float, 16>(inv_std);
 
     // -- normalize, scale, shift -------------------------------------------
@@ -213,13 +226,13 @@ void layernorm_il4_impl(bfloat16 *restrict input, float *restrict params,
       a3 = aie::add(a3, aie::mul(d3, d3).to_vector<float>());
     }
     const aie::vector<float, 16> is0 = aie::broadcast<float, 16>(
-        aie::invsqrt(aie::reduce_add(a0) * LN_INV_COLS + LN_EPS));
+        fast_invsqrt(aie::reduce_add(a0) * LN_INV_COLS + LN_EPS));
     const aie::vector<float, 16> is1 = aie::broadcast<float, 16>(
-        aie::invsqrt(aie::reduce_add(a1) * LN_INV_COLS + LN_EPS));
+        fast_invsqrt(aie::reduce_add(a1) * LN_INV_COLS + LN_EPS));
     const aie::vector<float, 16> is2 = aie::broadcast<float, 16>(
-        aie::invsqrt(aie::reduce_add(a2) * LN_INV_COLS + LN_EPS));
+        fast_invsqrt(aie::reduce_add(a2) * LN_INV_COLS + LN_EPS));
     const aie::vector<float, 16> is3 = aie::broadcast<float, 16>(
-        aie::invsqrt(aie::reduce_add(a3) * LN_INV_COLS + LN_EPS));
+        fast_invsqrt(aie::reduce_add(a3) * LN_INV_COLS + LN_EPS));
 
     // -- pass 3: normalize, scale, shift; gamma/beta shared across rows -----
     for (int i = 0; i < LN_VECS; i++) {

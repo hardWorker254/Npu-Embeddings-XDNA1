@@ -53,7 +53,7 @@ sys.path.insert(0, str(REPO / "tools"))
 import aie.iron as iron                      # noqa: E402
 from aie.iron.device import from_name        # noqa: E402
 
-iron.set_current_device(from_name("npu2", n_cols=None))
+iron.set_current_device(from_name("npu1", n_cols=None))
 
 from gemm_pretiled import run_one            # noqa: E402
 

@@ -158,7 +158,7 @@ therefore reported as **MACs/cycle against the datapath peak**, which is defensi
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| **`mac_dims` = `(4,8,4)` on NPU2, bfp16 flag a no-op** | `_detect_arch()` uses `get_current_device(probe_runtime=False)`, which needs an **explicitly set** device; the handler silently falls back to `'aie2'` | `iron.set_current_device(from_name("npu2", n_cols=None))` before any `kernels.mm()`. **Verified**: before (4,8,4)/(4,8,4), after (4,8,8)/(8,8,8). See [note 0002](../../research/notes/0002-iron-silent-arch-fallback.md) |
+| **`mac_dims` = `(4,8,4)` on NPU2, bfp16 flag a no-op** | `_detect_arch()` uses `get_current_device(probe_runtime=False)`, which needs an **explicitly set** device; the handler silently falls back to `'aie2'` | `iron.set_current_device(from_name("npu1", n_cols=None))` before any `kernels.mm()`. **Verified**: before (4,8,4)/(4,8,4), after (4,8,8)/(8,8,8). See [note 0002](../../research/notes/0002-iron-silent-arch-fallback.md) |
 | `ModuleNotFoundError: aie.helpers.dialects.ext` | Guessed import path | `from aie.iron.controlflow import range_` |
 | `iron.tensor(bf16_array)` raises casting to uint32 | `iron.tensor()` cannot ingest an `ml_dtypes` bfloat16 array | Build on device with `iron.rand` / `iron.randint`, read `.numpy()` back for the reference |
 | Correctness failed at 7.4e-3 | bf16 accumulator (finding 3) | `output_dtype=float32` |

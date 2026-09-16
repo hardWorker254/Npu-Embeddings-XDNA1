@@ -42,6 +42,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <vector>
+#include <memory>
 
 namespace npue {
 namespace {

@@ -56,7 +56,7 @@ from aie.iron.device import from_name        # noqa: E402
 # silently falls back to NPU1 (aie2, not aie2p) and bf16 mac_dims/burst
 # sizes change with no error. n_cols=None or from_name("npu2") defaults to
 # ONE column.
-iron.set_current_device(from_name("npu2", n_cols=None))
+iron.set_current_device(from_name("npu1", n_cols=None))
 
 from gemm_pretiled import run_one            # noqa: E402
 

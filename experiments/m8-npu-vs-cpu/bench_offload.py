@@ -62,7 +62,7 @@ def measure(fn, iters):
 
 
 def main() -> int:
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
     # time.process_time() on Windows ticks at ~15.6 ms. At 20 iterations the
     # NPU's CPU cost lands ON that floor (readings of 0.0 / 15.6 / 31.2), so the
     # ratio would be a bound rather than a measurement. Enough iterations to

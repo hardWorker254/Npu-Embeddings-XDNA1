@@ -268,7 +268,7 @@ def prebuild_and_verify():
     (not mtime, trap 7c), and objdump their kernel objects."""
     import os
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
 
     rng = np.random.default_rng(12345)
     A = randn_bf16(rng, (M, K))
@@ -337,7 +337,7 @@ def main() -> int:
     if args.mode is None or args.out is None:
         raise SystemExit("--mode and --out are required unless --prebuild")
 
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
 
     rng = np.random.default_rng(args.seed)
     A = randn_bf16(rng, (M, K))

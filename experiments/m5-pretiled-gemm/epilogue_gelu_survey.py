@@ -295,7 +295,7 @@ def main() -> int:
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
 
     wanted = [s.strip() for s in args.shapes.split(",") if s.strip()]
     trace_wanted = set(s.strip() for s in args.trace_shapes.split(",") if s.strip())

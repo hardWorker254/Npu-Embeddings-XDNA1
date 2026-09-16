@@ -149,7 +149,7 @@ silent.
 
 1. **Set the device explicitly, or you compile for the wrong NPU.**
    ```python
-   iron.set_current_device(from_name("npu2", n_cols=None))   # BEFORE any kernels.*
+   iron.set_current_device(from_name("npu1", n_cols=None))   # BEFORE any kernels.*
    ```
    Without it, `_detect_arch()` silently falls back to `aie2` (NPU1): bf16 `mac_dims`
    become `(4,8,4)` instead of `(4,8,8)`, and `emulate_bf16_mmul_with_bfp16` — worth

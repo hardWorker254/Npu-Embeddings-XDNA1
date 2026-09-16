@@ -331,7 +331,7 @@ def main() -> int:
               "measurement above seq 64. Treat this design's throughput as "
               "unknown until it is traced (CLAUDE.md rules 1 and 6).")
 
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
 
     # Build every (shape, tier). The identity check then covers BOTH axes:
     # if any of them diverged, the whole one-context story is false and the
@@ -380,9 +380,9 @@ def main() -> int:
             mk = markers_for(sh, args.m, args.k, args.n, c_marker, a_str)
             purge(mk, args.cols, f"{name}@b{b}")
             M, K, N = sh["M"], sh["K"], sh["N"]
-            A = iron.zeros((M, K), dtype=a_np, device="npu")
-            B = iron.zeros((K, N), dtype=a_np, device="npu")
-            C = iron.zeros(M * N, dtype=c_np, device="npu")
+            A = iron.zeros((M, K), dtype=a_np)
+            B = iron.zeros((K, N), dtype=a_np)
+            C = iron.zeros(M * N, dtype=c_np)
             pretiled_array(A, B, C, M=M, K=K, N=N, m=args.m, k=args.k,
                            n=args.n, n_aie_cols=args.cols,
                            dtype_in_str=a_str, dtype_out_str=acc_str,

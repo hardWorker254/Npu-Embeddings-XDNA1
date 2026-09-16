@@ -44,6 +44,7 @@
 #include <cctype>
 #include <thread>
 #include <vector>
+#include <ctime>
 
 #include "gemma_encode.hpp"
 #include "gemma_kernels.hpp"
@@ -68,7 +69,15 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
+#endif
 
 namespace {
 
@@ -1404,6 +1413,7 @@ inline float hsum256(__m256 v) {
 #endif
 
 double cpu_seconds() {
+#ifdef _WIN32
   FILETIME c, e, k, u;
   GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u);
   auto to_s = [](FILETIME f) {
@@ -1411,6 +1421,11 @@ double cpu_seconds() {
            1e-7;
   };
   return to_s(k) + to_s(u);
+#else
+  timespec ts{};
+  clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
+  return double(ts.tv_sec) + double(ts.tv_nsec) * 1e-9;
+#endif
 }
 
 // The whole encoder. Designs are constructed once by the caller and reused --

@@ -149,7 +149,7 @@ def main() -> int:
               f"{sorted(TRACE_ROUTING)}")
         return 1
 
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
     _, meta = load(Path(args.goldens) / "minilm_l6_s64_boundary.safetensors")
     taps, _ = load(Path(args.goldens) / "minilm_l6_s64_taps.safetensors")
 

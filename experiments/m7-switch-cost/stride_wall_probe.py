@@ -49,7 +49,7 @@ CASES = [
 
 
 def main() -> int:
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
     print(f"stride-wall probe, M={M}, tile 64x64x48, 2 columns\n")
     results = []
     for label, K, N, tile_n, pred in CASES:

@@ -65,7 +65,7 @@ def probe(X: In, Y: Out):
     return _build(iron.get_current_device())
 
 
-iron.set_current_device(from_name("npu2", n_cols=None))
+iron.set_current_device(from_name("npu1", n_cols=None))
 out_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(".")
 out_dir.mkdir(parents=True, exist_ok=True)
 spec = probe.specialize()

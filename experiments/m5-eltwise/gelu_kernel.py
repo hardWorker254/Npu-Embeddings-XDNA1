@@ -241,7 +241,7 @@ def main() -> int:
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
     taps, _ = load(Path(args.goldens) / "minilm_l6_s64_taps.safetensors")
 
     x_f32 = taps["L0.ffn_up"].reshape(-1)          # pre-activation, real data

@@ -39,7 +39,7 @@ def main():
     ap.add_argument("--cols", type=int, default=8)
     args = ap.parse_args()
 
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
 
     a_str, acc_str, a_np = "i8", "i32", np.int8
     c_np, c_marker, c_bytes_out = bfloat16, "bf16", 2

@@ -59,7 +59,7 @@ def newest_cache_with(marker):
 
 
 def main() -> int:
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
     dirs = {}
     for name, (K, N) in SHAPES.items():
         build(K, N)

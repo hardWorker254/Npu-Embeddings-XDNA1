@@ -75,7 +75,7 @@ def npu_variants():
 
 
 def main() -> int:
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
     others = npu_variants()
     print(f"host: {platform.processor()}")
     print(f"numpy {np.__version__}, BLAS threads = all cores")

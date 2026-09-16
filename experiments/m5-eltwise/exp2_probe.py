@@ -63,7 +63,7 @@ def probe(X: In, Y: Out):
     return _build(iron.get_current_device())
 
 
-iron.set_current_device(from_name("npu2", n_cols=None))
+iron.set_current_device(from_name("npu1", n_cols=None))
 xs = np.linspace(-120.0, 0.0, N).astype(np.float32)
 x16 = xs.astype(bfloat16)
 X = iron.zeros(N, dtype=bfloat16, device="npu")

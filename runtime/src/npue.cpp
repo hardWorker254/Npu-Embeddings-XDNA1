@@ -16,10 +16,17 @@
 
 #include <cstring>
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace npue {
 namespace {
@@ -104,10 +111,10 @@ std::vector<int64_t> read_int_array(const std::string &s, size_t &i) {
   }
   return out;
 }
-
 }  // namespace
 
 File::File(const std::string &path) {
+#ifdef _WIN32
   std::wstring wpath(path.begin(), path.end());
   handle_file_ = CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ,
                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
@@ -125,6 +132,28 @@ File::File(const std::string &path) {
   base_ = static_cast<const uint8_t *>(
       MapViewOfFile(handle_map_, FILE_MAP_READ, 0, 0, 0));
   if (!base_) throw std::runtime_error("cannot view " + path);
+#else
+  const int fd = ::open(path.c_str(), O_RDONLY);
+  if (fd < 0) throw std::runtime_error("cannot open " + path);
+
+  struct stat st{};
+  if (::fstat(fd, &st) < 0) {
+    ::close(fd);
+    throw std::runtime_error("cannot stat " + path);
+  }
+  size_ = static_cast<size_t>(st.st_size);
+
+  void *m = ::mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd, 0);
+  ::close(fd);
+  if (m == MAP_FAILED) throw std::runtime_error("cannot mmap " + path);
+  base_ = static_cast<const uint8_t *>(m);
+#endif
+
+  // common tail — everything from here down (the size_ < sizeof(FileHeader)
+  // check, header validation, JSON directory parse) is UNCHANGED, it just now
+  // follows #endif so BOTH platforms run it:
+  if (size_ < sizeof(FileHeader))
+    throw std::runtime_error(path + ": truncated");
 
   if (size_ < sizeof(FileHeader)) throw std::runtime_error(path + ": truncated");
   FileHeader h{};
@@ -220,10 +249,14 @@ File::File(const std::string &path) {
 }
 
 File::~File() {
+#ifdef _WIN32
   if (base_) UnmapViewOfFile(base_);
   if (handle_map_) CloseHandle(handle_map_);
   if (handle_file_ && handle_file_ != INVALID_HANDLE_VALUE)
     CloseHandle(handle_file_);
+#else
+  if (base_) ::munmap(const_cast<uint8_t *>(base_), size_);
+#endif
 }
 
 const TensorInfo &File::info(const std::string &name) const {

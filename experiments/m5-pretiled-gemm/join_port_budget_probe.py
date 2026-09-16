@@ -54,7 +54,7 @@ HERE = Path(__file__).parent
 REPO = HERE.parent.parent
 CACHE = Path.home() / ".npu" / "cache"
 
-iron.set_current_device(from_name("npu2", n_cols=None))
+iron.set_current_device(from_name("npu1", n_cols=None))
 
 # Deliberately tiny. TM*TN = 512 floats = 2 KB per source tile.
 TM, TN = 32, 16

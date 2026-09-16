@@ -77,7 +77,17 @@ endif()
 # winhttp: fetching a model (src/hub.cpp). Both ship with Windows, so the
 # release stays one executable with no DLL to carry -- which is the point of
 # having replaced the curl+certutil batch script with this.
-target_link_libraries(npuembed PRIVATE "${XRT_COREUTIL_LIB}" ws2_32 winhttp)
+if(WIN32)
+  target_link_libraries(npuembed PRIVATE winhttp)
+else()
+  # XRT C++ API — all the xrt:: classes live here
+  find_library(XRT_COREUTIL_LIB xrt_coreutil
+               PATHS "${XRT_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
+  target_link_libraries(npuembed PRIVATE ${XRT_COREUTIL_LIB})
+
+  find_package(CURL REQUIRED)
+  target_link_libraries(npuembed PRIVATE CURL::libcurl)
+endif()
 
 # The product is `npuembeddings`; `npuembed.exe` is kept as the name every
 # task log, script and doc in this repo already invokes. One binary, two
@@ -126,6 +136,9 @@ if(MSVC)
   # XRT headers use std::min/max; the Windows macros break them. XRT's own
   # headers also define NOMINMAX, so let theirs win rather than warning.
   target_compile_definitions(npuembed PRIVATE WIN32_LEAN_AND_MEAN)
+else()
+  target_compile_options(npuembed PRIVATE -Wall -O2 -march=native)
+  target_compile_definitions(npuembed PRIVATE _FILE_OFFSET_BITS=64)
 endif()
 
 # Standalone verification CLI for the XLM-R Unigram tokenizer (T52,

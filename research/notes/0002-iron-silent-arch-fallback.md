@@ -65,7 +65,7 @@ runs:
 import aie.iron as iron
 from aie.iron.device import from_name
 
-iron.set_current_device(from_name("npu2", n_cols=None))
+iron.set_current_device(from_name("npu1", n_cols=None))
 ```
 
 `n_cols=None` matters too: `from_name("npu2")` defaults to **1 column**, not the full

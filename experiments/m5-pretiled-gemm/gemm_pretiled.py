@@ -63,7 +63,7 @@ from ml_dtypes import bfloat16
 
 import aie.iron as iron
 from aie.iron import (
-    Buffer, CompileTime, In, ObjectFifo, Out, Program, Runtime, TaskGroup, Worker,
+    Buffer, CompileTime, In, ObjectFifo, Out, Program, Runtime, Worker,
     WorkerRuntimeBarrier, kernels,
     str_to_dtype,
 )
@@ -702,13 +702,12 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
                 for c in range(n_aie_cols):
                     rtp_barriers[r][c].set(1)
 
-        tg = TaskGroup()
         if b_reuse:
             # Stream each column's B slice from DDR exactly ONCE, before any row
             # block runs. The mem tile replays it n_row_blocks times, so DDR
             # traffic for B drops by that factor -- 2x at M=512, 16x at M=4096.
             for col in range(n_aie_cols):
-                B_prod_hs[col].fill(B, tap=B_taps[col], group=tg)
+                B_prod_hs[col].fill(B, tap=B_taps[col])
         # NPUE-M13 (tasks/0068): the C-drain tap's row-group width is
         # `tb_n_rows` (computed above, line ~503, and forced to 1 by the
         # 20-bit DMA-stride guard at line ~511). This fill/drain walk used to
@@ -735,18 +734,14 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
                 current_tb_n_rows = min([tb_n_rows,
                                          M // m // n_aie_rows - row_base])
                 for col in range(n_aie_cols):
-                    C_cons_hs[col].drain(C, tap=C_tiles[c_index], wait=True, group=tg)
+                    C_cons_hs[col].drain(C, tap=C_tiles[c_index], wait=True)
                     c_index += 1
                     for tile_row in range(current_tb_n_rows):
                         off = ((row_base + tile_row) * n_shim_mem_A + col) % len(A_tiles)
                         if col < n_aie_rows:
-                            A_prod_hs[col].fill(A, tap=A_tiles[off], group=tg)
+                            A_prod_hs[col].fill(A, tap=A_tiles[off])
                         if not b_reuse:
-                            B_prod_hs[col].fill(B, tap=B_taps[col], group=tg)
-                if tb > 0 or (tb == 0 and pingpong > 0):
-                    tg.finish()
-                    tg = TaskGroup()
-        tg.finish()
+                            B_prod_hs[col].fill(B, tap=B_taps[col])
 
     rt = Runtime(sequence, [A_ty, B_ty, C_ty, A_prods, B_prods, C_conss])
 
@@ -1065,7 +1060,7 @@ def main() -> int:
 
     # Without this IRON silently compiles for NPU1 and the bfp16 flag becomes a
     # no-op. research/notes/0002. n_cols=None or it defaults to a single column.
-    iron.set_current_device(from_name("npu2", n_cols=None))
+    iron.set_current_device(from_name("npu1", n_cols=None))
 
     shapes = (list(PRESETS.items()) if args.all_shapes
               else [(args.preset, dict(PRESETS[args.preset]))])
