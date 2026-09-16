@@ -1,3 +1,54 @@
+# FORK DETAILS
+
+I have added support for NPU1 and Linux. Some command are not working, but ./runtime/build/npuembeddings.exe serve works. NPU1 can only load 1 .xclbin
+Operations:
+QKV projection NPU
+Attention output NPU
+FFN up NPU
+FFN down NPU
+LayerNorm CPU
+Softmax CPU
+GELU CPU
+
+In the beginning you need to compile artifacts:
+
+source /opt/xilinx/xrt/setup.sh # Or your cutom path
+export PEANO_INSTALL_DIR=/home/prof/.local/lib/python3.14/site-packages/llvm-aie # Or your path to llvm-aie
+export XRT_INCLUDE_DIR=/opt/xilinx/xrt/include
+
+python tools/export_gemm_rtp.py --batch 16 --batches 4,8,16 --cols 4     --hidden 768 --intermediate 3072 --gated-ffn --qkv-n 2304     --emulate-bfp16 --c-bf16     --out runtime/artifacts_npu1 # For gte-multilimgual-base
+
+python tools/export_gemm_rtp.py --batch 16 --batches 4,8,16 --cols 4     --emulate-bfp16 --c-bf16 --out runtime/artifacts_npu1 # For all-MiniLM-L6-v2
+
+cd runtime
+cmake --build build --config Release
+
+#Run the model
+./runtime/build/npuembeddings.exe serve gte-multilingual-base --root . --artifacts runtime/artifacts_npu1 --threads 16 --pipeline 4
+
+
+You will see something like this:
+NpuEmbeddings C++ runtime -- full encode
+  bo-mode    host_only (data-buffer allocation)
+  model      gte-multilingual-base: 150 tensors, 1000.91 MB, checkpoint f5a35a10faa54da7
+  shape      Alibaba-NLP/gte-multilingual-base: 12 layers, hidden 768, 12 heads x 64, ffn 3072, CLS pooling
+  designs    ONE xclbin, 12 streams (3 batch tiers), one hw_context
+  datapath   bfp16-emulated MMAC, C as bf16
+  toolchain  mlir_aie 1.4.2, peano 22.0.0.2026090701+3e93bf7b, mlir-aie HEAD unavailable
+  shape      batch 16 x seq 64  (M = 1024)
+  tiers      4, 8, 16  (requests are right-sized, not padded)
+  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
+  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
+  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
+  bo-align   last data buffer aligned to 16384 B
+  weights    226.49 MB staged on the device once, not per call
+  pipeline   4 concurrent encodes of 16, one NPU mutex, 4 host threads per lane
+  tokenizer  250002 tokens, from the .npue
+
+  serving http://127.0.0.1:8080/v1/embeddings   (model gte-multilingual-base-npu, seq 64)
+  POST {"input": "text" | ["a","b"], "encoding_format": "float"|"base64"}
+
+
 # NpuEmbeddings
 
 Sentence embeddings on the **XDNA2 NPU** in AMD Ryzen AI processors, on native
