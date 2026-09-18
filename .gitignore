@@ -113,6 +113,9 @@ OthersResarch/
 #   python tools\export_xclbin.py
 #   python tools\export_validation.py
 runtime/build/
+# CMake build directory configured at the repo root (Linux / GCC + XRT in
+# /opt/xilinx/xrt). Regenerate with: cmake -B build -DCMAKE_BUILD_TYPE=Release
+/build/
 # Standalone build dir for the EmbeddingGemma tokenizer test CLI
 # (tasks/0061), compiled by hand with cl.exe -- not part of the CMake
 # npuembed target, has no XRT dependency, regenerate per that task's TASK.md.
