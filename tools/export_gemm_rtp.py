@@ -1,19 +1,5 @@
 #!/usr/bin/env python3
-# tools/export_gemm_rtp_multiarch.py
-#
-# Export FOUR GEMM shapes as ONE xclbin + instruction streams for multiple
-# NPU architectures.
-#
 # SPDX-License-Identifier: Apache-2.0
-#
-# This is a reworked version of export_gemm_rtp.py with:
-#   * architecture 1 / architecture 2 support;
-#   * safer cache handling;
-#   * less brittle MLIR marker matching;
-#   * earlier geometry validation;
-#   * more explicit design.json metadata;
-#   * optional per-architecture cache isolation.
-#
 # Usage:
 #   python tools/export_gemm_rtp_multiarch.py --arch all --batch 128 --cols 8 \
 #       --out runtime/artifacts_b128il

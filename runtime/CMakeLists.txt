@@ -105,18 +105,3 @@ else()
   target_compile_options(npuembed PRIVATE -Wall -O2 -march=native)
   target_compile_definitions(npuembed PRIVATE _FILE_OFFSET_BITS=64)
 endif()
-
-add_executable(xlmr_tok_cli
-  src/tokenizer_xlmr_cli.cpp
-  src/tokenizer_xlmr.cpp
-  src/xlmr_tokenizer_gen.cpp
-  src/json_min.cpp
-)
-target_include_directories(xlmr_tok_cli PRIVATE include)
-
-if(MSVC)
-  target_compile_options(xlmr_tok_cli PRIVATE /W3 /EHsc /Zc:__cplusplus /O2)
-else()
-  target_compile_options(xlmr_tok_cli PRIVATE -Wall -O2 -march=native)
-  target_compile_definitions(xlmr_tok_cli PRIVATE _FILE_OFFSET_BITS=64)
-endif()
