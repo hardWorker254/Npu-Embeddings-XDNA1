@@ -1,510 +1,1050 @@
-# NpuEmbeddings -- M7: export the FOUR GEMM shapes as ONE xclbin + four
-# instruction streams (tasks/0032).
+#!/usr/bin/env python3
+# tools/export_gemm_rtp_multiarch.py
+#
+# Export FOUR GEMM shapes as ONE xclbin + instruction streams for multiple
+# NPU architectures.
+#
 # SPDX-License-Identifier: Apache-2.0
 #
-# tasks/0030 proved the mechanism (RTP loop bounds, exact results, zero switch
-# cost); tasks/0031 measured what it is worth (~2.3 ms per design switch); and
-# with LayerNorm, softmax and GELU on the host (tasks/0032), the encode's NPU
-# work is 24 GEMM dispatches -- so ONE static design serving all four shapes
-# makes every switch disappear.
+# This is a reworked version of export_gemm_rtp.py with:
+#   * architecture 1 / architecture 2 support;
+#   * safer cache handling;
+#   * less brittle MLIR marker matching;
+#   * earlier geometry validation;
+#   * more explicit design.json metadata;
+#   * optional per-architecture cache isolation.
 #
-# The export builds each shape with gemm_pretiled(rtp=True), verifies the four
-# final.xclbin files are byte-identical modulo UUID metadata (the 0029 check --
-# anything beyond ~80 differing bytes is real divergence and the export
-# REFUSES), and emits:
-#
-#   gemm_rtp/final.xclbin              the shared static configuration
-#   gemm_rtp/insts.bin                 the largest tier's qkv (slot 0)
-#   gemm_rtp/insts_<shape>_b<batch>.bin every (shape, batch) stream
-#   gemm_rtp/design.json               per-stream metadata the C++ parser reads
-#
-# BATCH TIERS (0037). M enters the static design ONLY through the loop bound
-# `n_tiles_per_core`, which is a runtime parameter, so a batch-4 stream and a
-# batch-128 stream share the same xclbin -- measured, 67-69 differing bytes,
-# the UUID footprint (experiments/m7-switch-cost/batch_share_probe.py).
-# Exporting several tiers lets a server RIGHT-SIZE each request: four texts run
-# a four-sequence encode instead of padding to 128, and switching tiers costs
-# nothing because it is the same context.
-#
-# Env: iron env WITH iron_env.ps1 dot-sourced.
 # Usage:
-#   python tools\export_gemm_rtp.py --batch 128 --cols 8 --out runtime\artifacts_b128il
+#   python tools/export_gemm_rtp_multiarch.py --arch all --batch 128 --cols 8 \
+#       --out runtime/artifacts_b128il
+#
+#   python tools/export_gemm_rtp_multiarch.py --arch 1 --batch 128 --cols 8 \
+#       --out runtime/artifacts_b128il
+#
+#   python tools/export_gemm_rtp_multiarch.py --arch 2 --batch 128 --cols 8 \
+#       --out runtime/artifacts_b128il
 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
+import os
+import re
+import shlex
 import shutil
+import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from ml_dtypes import bfloat16
 
+
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "experiments" / "m5-pretiled-gemm"))
 sys.path.insert(0, str(REPO / "tools"))
-CACHE = Path.home() / ".npu" / "cache"
 
-import aie.iron as iron                              # noqa: E402
-from aie.iron.device import from_name                # noqa: E402
-from gemm_pretiled import pretiled_array             # noqa: E402
-from npue import gemm_b_layout, layout_hash          # noqa: E402
-from toolchain_provenance import write_toolchain_json  # noqa: E402
 
-# THE SEQUENCE LENGTH, and the only thing in this file that decides it.
-#
-# It reaches a design through exactly one expression -- `M = batch * seq` in
-# shapes_for() below -- and nowhere else. The GEMMs themselves never see it:
-# an instruction stream knows M, K and N, so `batch 128 x seq 64` and
-# `batch 16 x seq 512` are the SAME M = 8192 and the same arithmetic. The
-# runtime inverts the split at load time (`batch = design.M / design.seq`,
-# main.cpp), which is why seq has to be RECORDED in design.json rather than
-# inferred -- two different splits of one M are indistinguishable afterwards.
-#
-# So this is a HOST-SIDE SLICING CONVENTION over a fixed row count, not a
-# hardware limit, and --seq costs a re-export rather than a redesign.
-#
-# It is a flag rather than an edited constant for a specific reason: `M` is a
-# CompileTime[int] KEYWORD ARGUMENT to pretiled_array(), so the JIT cache key
-# derives from it and a changed seq produces a genuinely new build. CLAUDE.md
-# trap 7d -- iron.jit's cache key never inspecting a generator's module
-# globals -- would have applied had shapes_for() been a generator reading SEQ
-# via LOAD_GLOBAL. It is not: it is a plain helper that computes M and passes
-# it down as an argument. Read out of gemm_pretiled.py's signature, not
-# assumed.
-#
-# WHAT ELSE HAS TO AGREE, before exporting a longer design:
-#   * the runtime requires `seq % 8 == 0` (set_design_seq, main.cpp)
-#   * the container must carry at least `seq` position embeddings -- the
-#     packer's --max-seq, default 256. set_design_seq REFUSES seq >
-#     max_seq_len rather than indexing past the table, so that one is already
-#     loud; it just fires at load rather than here.
-#   * attention runs on the HOST and is O(seq^2). F3 prices it at 2-5% of the
-#     work AT SEQ 64. Nothing here predicts what it costs at 512, and no
-#     measurement in this repo covers it -- that is a hardware question, and
-#     until it is traced the throughput of a long-seq design is unknown
-#     rather than assumed-proportional.
 DEFAULT_SEQ = 64
 STREAM_ORDER = ["qkv", "attn_out", "ffn_up", "ffn_down"]
 
+# In the original design M tiling assumes 4 AIE rows.
+AIE_ROWS = 4
 
-def shapes_for(batch, hidden=384, intermediate=None, gated=False,
-               qkv_n=None, seq=DEFAULT_SEQ):
-    # NPUE-M13 (tasks/0069): the FFN width used to be hardcoded `4 * hidden`.
-    # That is true of every BERT-family model this project ships, and it is a
-    # property of those checkpoints rather than of the architecture -- so it was
-    # an assumption wearing a constant's clothes. A GATED FFN (SwiGLU/GeGLU)
-    # breaks it twice over: `ffn_up` must emit BOTH halves, N = 2*intermediate,
-    # while `ffn_down` still consumes only one, K = intermediate.
-    #
-    # nomic-embed-text-v1.5: hidden 768, intermediate 3072 (so 4*h happens to
-    # hold), gated -> ffn_up N = 6144. Note that 6144 crosses the C-drain guard
-    # threshold that tasks/0068 found half-wired; do not build this without that
-    # fix in gemm_pretiled.py.
-    #
-    # NPUE-M13 (tasks/0074): and `qkv` N used to be hardcoded `3 * hidden`, for
-    # the same reason and with the same lifetime -- true of every model that
-    # has MHA with `num_key_value_heads == num_attention_heads`, false the
-    # moment one arrives with MQA/GQA. EmbeddingGemma-300M has ONE KV head at
-    # head_dim 256, so its fused Q|K|V is 1280 wide, and it is PADDED to 1536
-    # to make `N % (n * n_aie_cols) == 0` hold at tile_n=48 (the packer's
-    # gemma_qkv_blocks() owns that arithmetic; this only has to agree with it).
-    M, h = batch * seq, hidden
+DEFAULT_CACHE_ROOT = Path.home() / ".npu" / "cache"
+
+# If architecture 2 has another device name in your toolchain, override with:
+#   NPU_ARCH1_DEVICE=...
+#   NPU_ARCH2_DEVICE=...
+ARCH_DEVICES = {
+    "1": os.environ.get("NPU_ARCH1_DEVICE", "npu1"),
+    "2": os.environ.get("NPU_ARCH2_DEVICE", "npu2"),
+}
+
+ARCHES = ("1", "2")
+
+TILE_RE = re.compile(r"aie\.tile\((\d+)\s*,\s*(\d+)\)")
+
+
+@dataclass(frozen=True)
+class DataPath:
+    a_str: str
+    acc_str: str
+    a_np: object
+    c_np: object
+    c_marker: str
+    c_bytes_out: int
+
+
+def shapes_for(
+    batch: int,
+    hidden: int = 384,
+    intermediate: int | None = None,
+    gated: bool = False,
+    qkv_n: int | None = None,
+    seq: int = DEFAULT_SEQ,
+) -> dict[str, dict[str, int]]:
+    """
+    Return M/K/N for the four GEMM streams.
+
+    M is only batch * seq. The GEMM cores never see seq directly.
+    """
+    M = batch * seq
+    h = hidden
     f = 4 * h if intermediate is None else intermediate
+
     return {
-        "qkv":      dict(M=M, K=h, N=3 * h if qkv_n is None else qkv_n),
-        "attn_out": dict(M=M, K=h, N=h),
-        "ffn_up":   dict(M=M, K=h, N=2 * f if gated else f),
-        "ffn_down": dict(M=M, K=f, N=h),
+        "qkv": {
+            "M": M,
+            "K": h,
+            "N": 3 * h if qkv_n is None else qkv_n,
+        },
+        "attn_out": {
+            "M": M,
+            "K": h,
+            "N": h,
+        },
+        "ffn_up": {
+            "M": M,
+            "K": h,
+            "N": 2 * f if gated else f,
+        },
+        "ffn_down": {
+            "M": M,
+            "K": f,
+            "N": h,
+        },
     }
 
 
-def core_columns(d):
-    import re
-    m = d / "input_with_addresses.mlir"
-    if not m.exists():
+def datapath_from_args(args: argparse.Namespace) -> DataPath:
+    """
+    Decide operand/accumulator/transport dtypes.
+
+    bf16 is default.
+    int8 is a different MMAC datapath, not just a different container.
+    """
+    if args.int8 and args.emulate_bfp16:
+        raise SystemExit("--int8 and --emulate-bfp16 are both datapath choices; pick one")
+
+    if args.int8:
+        a_str = "i8"
+        acc_str = "i32"
+        a_np = np.int8
+
+        if args.c_bf16:
+            c_np = bfloat16
+            c_marker = "bf16"
+            c_bytes_out = 2
+        else:
+            c_np = np.int32
+            c_marker = "i32"
+            c_bytes_out = 4
+    else:
+        a_str = "bf16"
+        acc_str = "f32"
+        a_np = bfloat16
+
+        if args.c_bf16:
+            c_np = bfloat16
+            c_marker = "bf16"
+            c_bytes_out = 2
+        else:
+            c_np = np.float32
+            c_marker = "f32"
+            c_bytes_out = 4
+
+    return DataPath(
+        a_str=a_str,
+        acc_str=acc_str,
+        a_np=a_np,
+        c_np=c_np,
+        c_marker=c_marker,
+        c_bytes_out=c_bytes_out,
+    )
+
+
+def markers_for(
+    shape: dict[str, int],
+    m: int,
+    k: int,
+    n: int,
+    c_dtype: str,
+    a_dtype: str,
+    extra_markers: tuple[str, ...] | list[str] = (),
+) -> list[re.Pattern[str]]:
+    """
+    Return compiled regexes that identify this exact design in the JIT cache.
+
+    The old implementation used exact substring markers. That is brittle when
+    MLIR pretty-printing changes whitespace or formatting. Regexes here are
+    more tolerant while still strict enough to distinguish shapes.
+
+    Important:
+      * A/B operand dtype is part of identity.
+      * C transport dtype is part of identity.
+      * tile geometry marker is still based on the last two B DMA sizes,
+        because that was the most stable structural marker observed.
+    """
+    M = shape["M"]
+    K = shape["K"]
+    N = shape["N"]
+
+    raw_patterns = [
+        # Runtime sequence signature: binds A/B/C by argument position.
+        rf"aie\.runtime_sequence\(\s*"
+        rf"%arg0\s*:\s*memref<{M * K}x{a_dtype}>\s*,\s*"
+        rf"%arg1\s*:\s*memref<{K * N}x{a_dtype}>\s*,\s*"
+        rf"%arg2\s*:\s*memref<{M * N}x{c_dtype}>\s*\)",
+
+        # B tile geometry marker.
+        #
+        # Old form:
+        #   <size = k, stride = n>
+        #
+        # Newer mlir-aie form:
+        #   sizes = [..., k, n] strides = [...]
+        #
+        # We match the tail: k, n] strides = [
+        rf"{k}\s*,\s*{n}\s*\]\s*strides\s*=\s*\[",
+
+        # RTP symbol marker.
+        r'sym_name\s*=\s*"rtp_0_0"',
+    ]
+
+    raw_patterns.extend(extra_markers)
+
+    try:
+        return [re.compile(p) for p in raw_patterns]
+    except re.error as exc:
+        raise SystemExit(f"invalid marker regex: {exc}") from exc
+
+
+def all_markers_match(text: str, markers: list[re.Pattern[str]]) -> bool:
+    return all(marker.search(text) for marker in markers)
+
+
+def core_columns(build_dir: Path) -> int | None:
+    """
+    Count distinct AIE columns used by cores.
+
+    This parses input_with_addresses.mlir and counts distinct column indices
+    for tiles with row >= 2. If the file is absent or no such tiles are found,
+    returns None.
+    """
+    mlir = build_dir / "input_with_addresses.mlir"
+    if not mlir.exists():
         return None
-    tiles = re.findall(r"aie\.tile\((\d+),\s*(\d+)\)",
-                       m.read_text(encoding="utf-8", errors="ignore"))
-    cols = {int(c) for c, r in tiles if int(r) >= 2}
+
+    try:
+        text = mlir.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+
+    cols = set()
+    for col_s, row_s in TILE_RE.findall(text):
+        try:
+            col = int(col_s)
+            row = int(row_s)
+        except ValueError:
+            continue
+        if row >= 2:
+            cols.add(col)
+
     return len(cols) if cols else None
 
 
-def markers_for(shape, m, k, n, c_dtype="f32", a_dtype="bf16"):
-    """Strings that identify THIS design in the JIT cache.
-
-    The C element type is part of the identity and must be, because
-    `--c-bf16` and the fp32 default differ in the cache only by it.
-
-    MATCH THE ORDERED SIGNATURE, NOT THREE LOOSE MEMREF STRINGS. The old form
-    listed `memref<M*K xbf16>`, `memref<K*N xbf16>` and `memref<M*N xf32>` and
-    asked only whether each appeared SOMEWHERE in the module. With fp32 C the
-    `xf32` suffix happened to keep them apart. With bf16 C it does not, and the
-    collision is exact rather than theoretical (tasks/0045):
-
-        ffn_up   [8192,  384, 1536]  -> M*K=3145728  K*N=589824  M*N=12582912
-        ffn_down [8192, 1536,  384]  -> M*K=12582912 K*N=589824  M*N=3145728
-
-    Same three numbers, all now `bf16`, so the two shapes became
-    indistinguishable and `purge()` for ffn_down DELETED ffn_up's build
-    mid-export. It surfaced as a FileNotFoundError on a missing final.xclbin,
-    which is luck: had ffn_up been built second it would have shipped the wrong
-    instruction stream.
-
-    `aie.runtime_sequence(%arg0: ..., %arg1: ..., %arg2: ...)` binds each size
-    to an ARGUMENT POSITION, so A, B and C cannot trade places whatever their
-    element types are.
-
-    TILE-GEOMETRY MARKER, mlir-aie 1.4.x FORMAT (tasks/0060, T22). Up to and
-    including 1.3.4, the sequence-body `aie.dma_bd` op printed each access-
-    pattern dimension as a bracket-tuple (`<size = k, stride = n>`), and the
-    second marker below matched that literally against B's innermost tiled
-    dimension. The 1.4.x MLIR pretty-printer replaced that with a flat
-    `sizes = [...] strides = [...]` pair of arrays for `aie.dma_bd` specif-
-    ically -- `<size = N, stride = M>` bracket-tuples survive ONLY in
-    `aie.objectfifo`'s `dimensionsToStream` attribute, a different op, so the
-    old substring silently stopped matching anything in a freshly built
-    `aie.mlir` (confirmed by grepping a fresh cache dir: 0 hits for the old
-    form, `markers_for` always finding 0 cache candidates).
-
-    Confirmed directly (all four production shapes, m=64/k=64/n=48, cols=2):
-    B's (`%arg1`) `aie.dma_bd` always ends its access pattern with the tile
-    dims as the LAST TWO entries of `sizes`, immediately followed by the
-    `strides` array --
-        sizes = [.., .., 64, 48] strides = [.., .., 48, 1]
-    -- exactly twice per build (the ping/pong pair), in every one of qkv,
-    attn_out, ffn_up and ffn_down, and nowhere else in the file (A's and C's
-    `aie.dma_bd` end their `sizes` in different values). So `f"{k}, {n}]
-    strides = ["` is the direct translation of the old `<size=k, stride=n>`
-    marker into the new textual form: same two numbers, same adjacency
-    requirement, just spelled the way 1.4.x's printer spells it.
+def purge(
+    markers: list[re.Pattern[str]],
+    cols: int,
+    what: str,
+    cache_dir: Path,
+) -> int:
     """
-    # A and B carry the OPERAND type, which stopped being bf16 in tasks/0078.
-    # Leaving `xbf16` hardcoded here would have made the cache search look for
-    # a design that does not exist and report "0 cache candidates after purge"
-    # -- the same silent-miss shape tasks/0060 hit when the MLIR printer
-    # changed format under an unchanged marker string.
-    M, K, N = shape["M"], shape["K"], shape["N"]
-    return [f"aie.runtime_sequence(%arg0: memref<{M * K}x{a_dtype}>, "
-            f"%arg1: memref<{K * N}x{a_dtype}>, "
-            f"%arg2: memref<{M * N}x{c_dtype}>)",
-            f"{k}, {n}] strides = [",
-            'sym_name = "rtp_0_0"']
+    Remove cache entries matching this design before rebuilding.
 
+    This avoids stale cache entries with identical shape markers but different
+    datapath or architecture. It is intentionally conservative: it only purges
+    entries whose core column count matches the expected cols. Entries with
+    unknown core column count are left alone; they will not be selected by
+    find_cache() anyway.
+    """
+    if not cache_dir.is_dir():
+        return 0
 
-def find_cache(markers, cols, what):
-    hits = []
-    for d in CACHE.iterdir():
+    removed = 0
+
+    for d in list(cache_dir.iterdir()):
+        if not d.is_dir():
+            continue
+
         mlir = d / "aie.mlir"
-        if not (d.is_dir() and mlir.exists() and (d / "final.xclbin").exists()
-                and (d / "insts.bin").exists()):
+        if not mlir.exists():
             continue
-        text = mlir.read_text(encoding="utf-8", errors="ignore")
-        if not all(x in text for x in markers):
+
+        try:
+            text = mlir.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
             continue
+
+        if not all_markers_match(text, markers):
+            continue
+
         if core_columns(d) != cols:
             continue
+
+        shutil.rmtree(d, ignore_errors=True)
+        removed += 1
+
+    if removed:
+        print(f"  {what}: purged {removed} cache candidate(s)")
+
+    return removed
+
+
+def find_cache(
+    markers: list[re.Pattern[str]],
+    cols: int,
+    what: str,
+    cache_dir: Path,
+) -> Path:
+    """
+    Find exactly one cache entry matching the compiled markers and core cols.
+    """
+    if not cache_dir.is_dir():
+        raise SystemExit(
+            f"{what}: cache directory does not exist: {cache_dir}\n"
+            f"Hint: if you use --per-arch-cache, make sure the toolchain "
+            f"actually honors IRON_CACHE_DIR or remove --per-arch-cache."
+        )
+
+    hits: list[Path] = []
+
+    for d in cache_dir.iterdir():
+        if not d.is_dir():
+            continue
+
+        mlir = d / "aie.mlir"
+        if not (
+            mlir.exists()
+            and (d / "final.xclbin").exists()
+            and (d / "insts.bin").exists()
+        ):
+            continue
+
+        try:
+            text = mlir.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+
+        if not all_markers_match(text, markers):
+            continue
+
+        if core_columns(d) != cols:
+            continue
+
         hits.append(d)
+
     if len(hits) != 1:
-        raise SystemExit(f"{what}: {len(hits)} cache candidates after purge -- "
-                         f"expected exactly 1")
+        raise SystemExit(
+            f"{what}: {len(hits)} cache candidates after purge -- expected exactly 1\n"
+            f"Cache dir: {cache_dir}\n"
+            f"Hint: if building multiple architectures in the same cache, use "
+            f"--per-arch-cache or --require-arch-marker/--arch-marker."
+        )
+
     return hits[0]
 
 
-def purge(markers, cols, what):
-    n = 0
-    for d in list(CACHE.iterdir()):
-        mlir = d / "aie.mlir"
-        if not (d.is_dir() and mlir.exists()):
-            continue
-        text = mlir.read_text(encoding="utf-8", errors="ignore")
-        if all(x in text for x in markers) and core_columns(d) in (cols, None):
-            shutil.rmtree(d)
-            n += 1
-    if n:
-        print(f"  {what}: purged {n} cache candidate(s)")
+def xclbin_identical_mod_uuid(
+    a: bytes,
+    b: bytes,
+    threshold: int,
+) -> tuple[bool, str]:
+    """
+    Original 0029 check: same size and <= threshold differing bytes.
 
-
-def xclbin_identical_mod_uuid(a: bytes, b: bytes):
-    """0029's check: identical size and <= 80 differing bytes (UUID metadata)."""
+    The difference budget is intended to cover UUID and small metadata.
+    If architecture 2 adds more harmless metadata, use --identity-threshold.
+    """
     if len(a) != len(b):
         return False, f"sizes differ: {len(a)} vs {len(b)}"
+
     diffs = sum(1 for x, y in zip(a, b) if x != y)
-    return diffs <= 80, f"{diffs} differing bytes"
+    return diffs <= threshold, f"{diffs} differing bytes"
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default=str(REPO / "runtime" / "artifacts"))
-    ap.add_argument("--batch", type=int, default=128,
-                    help="largest tier; also the buffer sizing")
-    ap.add_argument("--batches", default=None,
-                    help="comma-separated batch tiers, e.g. 4,16,32,128. "
-                         "Defaults to just --batch.")
-    ap.add_argument("--cols", type=int, default=8)
-    ap.add_argument("--hidden", type=int, default=384)
-    ap.add_argument("--intermediate", type=int, default=None,
-                    help="FFN width. Defaults to 4*hidden, which every "
-                         "BERT-family model here happens to satisfy; pass it "
-                         "explicitly for anything else.")
-    ap.add_argument("--qkv-n", type=int, default=None,
-                    help="width of the fused qkv operand. Defaults to "
-                         "3*hidden, which holds whenever num_key_value_heads "
-                         "== num_attention_heads; MQA/GQA models need it "
-                         "stated (EmbeddingGemma-300M: 1536, tasks/0074).")
-    ap.add_argument("--gated-ffn", action="store_true",
-                    help="ffn_up emits BOTH halves of a gated FFN "
-                         "(N = 2*intermediate), as SwiGLU/GeGLU need, while "
-                         "ffn_down still takes K = intermediate. tasks/0069.")
-    ap.add_argument("--seq", type=int, default=DEFAULT_SEQ,
-                    help="sequence length this design is built for. Enters "
-                         "only as M = batch*seq, so it trades against --batch "
-                         "at constant array work: --batch 16 --seq 512 builds "
-                         "the same M=8192 as the shipped --batch 128 --seq 64. "
-                         "Must be a multiple of 8, and the .npue must carry at "
-                         "least this many position embeddings (pack_npue.py "
-                         "--max-seq, default 256). Host attention is O(seq^2) "
-                         "and unmeasured above 64 -- see DEFAULT_SEQ above.")
-    ap.add_argument("-m", type=int, default=64)
-    ap.add_argument("-k", type=int, default=64)
-    ap.add_argument("-n", type=int, default=48)
-    # NPUE-M9 (tasks/0045): narrow C to bf16 on the core, after the fp32 K
-    # reduction, so the C DMA and the host readback move half the bytes.
-    # tasks/0044 measured that readback at 18.8% of a MiniLM encode.
-    # THE DATAPATH FLAG (tasks/0077, 0078). bf16 stays the default and stays
-    # supported; int8 is an alternative artifact set the runtime selects by
-    # reading `a_dtype` out of design.json.
-    ap.add_argument("--int8", action="store_true",
-                    help="build the int8 MMAC datapath (i8 operands, int32 "
-                         "accumulator) instead of bf16. Measured at 5.5-7.7x "
-                         "the bf16 datapath on all four production shapes and "
-                         "BIT-EXACT (tasks/0077). Needs an int8 container: "
-                         "tools/pack_npue.py --int8.")
-    ap.add_argument("--c-bf16", action="store_true",
-                    help="GEMM emits bf16 C (fp32 accumulate, one round at "
-                         "the end). Halves C transport; the runtime reads the "
-                         "dtype from design.json.")
-    # RESEARCH FLAG (T23). The bfp16-emulated MMAC datapath is 2.9x of array
-    # GEMM time (tasks/0049) at 1-cos ~3.5e-03 -- it FAILED the 2e-03 gate in
-    # 0026 and MTEB (0035) is the authority on reopening it. This flag exists
-    # so that MTEB measurement can be taken; it is NOT a production mode.
-    # Cache note: bfp16 and plain-bf16 builds are AMBIGUOUS in aie.mlir (same
-    # buffer dtypes, same sym names) -- correctness rests entirely on
-    # purge-before-build (tasks/0030, fifth fail-open), which removes every
-    # matching candidate before each fresh build. Re-export the plain set
-    # after using this, for the same reason.
-    ap.add_argument("--emulate-bfp16", action="store_true",
-                    help="RESEARCH: build the GEMM on the bfp16-emulated "
-                         "MMAC datapath (T23 accuracy measurement)")
-    args = ap.parse_args()
-    tiers = ([int(x) for x in args.batches.split(",")] if args.batches
-             else [args.batch])
-    tiers = sorted(set(tiers))
-    for b in tiers:
-        if b % 4:
-            raise SystemExit(f"batch {b}: must be a multiple of 4")
-    if max(tiers) != args.batch:
-        raise SystemExit(f"--batch {args.batch} must be the largest tier "
-                         f"(tiers are {tiers})")
+def validate_positive_args(args: argparse.Namespace) -> None:
+    if args.batch <= 0:
+        raise SystemExit("--batch must be positive")
+    if args.cols <= 0:
+        raise SystemExit("--cols must be positive")
+    if args.hidden <= 0:
+        raise SystemExit("--hidden must be positive")
+    if args.seq <= 0:
+        raise SystemExit("--seq must be positive")
+    if args.m <= 0:
+        raise SystemExit("-m must be positive")
+    if args.k <= 0:
+        raise SystemExit("-k must be positive")
+    if args.n <= 0:
+        raise SystemExit("-n must be positive")
+    if args.identity_threshold < 0:
+        raise SystemExit("--identity-threshold must be >= 0")
 
-    # The runtime's own rule on seq (set_design_seq in main.cpp), checked HERE
-    # so a bad value costs a second rather than a full export followed by a
-    # load-time refusal.
-    if args.seq <= 0 or args.seq % 8:
-        raise SystemExit(f"--seq {args.seq}: must be positive and a multiple "
-                         f"of 8 (the runtime refuses anything else)")
-    # M % (m * n_aie_rows) == 0 with 4 rows. gemm_pretiled asserts this, but it
-    # asserts it about M, and someone who just set --seq is thinking in
-    # sequences -- so name the two numbers that produced the M.
-    for b in tiers:
-        if (b * args.seq) % (args.m * 4):
-            raise SystemExit(
-                f"--seq {args.seq} x batch tier {b} gives M = {b * args.seq}, "
-                f"which is not a multiple of m*rows = {args.m * 4}. Pick a "
-                f"tier or a seq whose product divides it.")
-    if args.seq != DEFAULT_SEQ:
-        print(f"  seq        {args.seq} (default {DEFAULT_SEQ}). M = "
-              f"batch*seq, so tiers {tiers} give "
-              f"M {[b * args.seq for b in tiers]}.")
-        print("             Host attention is O(seq^2) and this repo has no "
-              "measurement above seq 64. Treat this design's throughput as "
-              "unknown until it is traced (CLAUDE.md rules 1 and 6).")
+    if args.intermediate is not None and args.intermediate <= 0:
+        raise SystemExit("--intermediate must be positive")
 
-    iron.set_current_device(from_name("npu1", n_cols=None))
+    if args.qkv_n is not None and args.qkv_n <= 0:
+        raise SystemExit("--qkv-n must be positive")
 
-    # Build every (shape, tier). The identity check then covers BOTH axes:
-    # if any of them diverged, the whole one-context story is false and the
-    # export refuses rather than shipping an artifact that lies about it.
-    # THE DATAPATH, decided once and written into design.json (tasks/0078).
-    #
-    # int8 is not a variant of the bf16 path, it is a different MMAC datapath:
-    # `mac_dims` (8,8,8) against bf16's (4,8,8), an int32 accumulator with NO
-    # rounding in the reduction, and 5.5-7.7x the throughput measured on all
-    # four production shapes (tasks/0077). Both stay available -- the runtime
-    # reads which one an artifact set is, exactly as it already reads
-    # `c_dtype`, so a wrong pairing refuses instead of reading the right number
-    # of bytes in the wrong format.
-    if args.int8:
-        if args.emulate_bfp16:
-            raise SystemExit("--int8 and --emulate-bfp16 are both datapath "
-                             "choices; pick one")
-        # --int8 --c-bf16 COMPOSE, and the earlier refusal here was wrong.
-        # It read the two flags as rival answers to "what leaves the core",
-        # but they answer different questions: --int8 picks the MMAC datapath
-        # and the accumulator, --c-bf16 picks the TRANSPORT width of a result
-        # that has already been reduced. tasks/0080 measured the pairing at
-        # 1.333x on the four production dispatches -- larger than the +4.9% the
-        # same flag bought on bf16, because int8 moved the GEMM back into the
-        # traffic-bound regime (0010's model at R2 0.987, against the
-        # iteration-bound 0048 model that governs bf16). Accuracy is free: the
-        # int32 accumulator's low bits sit under the int8 quantisation noise,
-        # measured at 1.178e-03 -> 1.161e-03 with `npuembed --sim-c-bf16`
-        # BEFORE the kernel was written.
-        a_str, acc_str, a_np = "i8", "i32", np.int8
-        c_np = bfloat16 if args.c_bf16 else np.int32
-        c_marker = "bf16" if args.c_bf16 else "i32"
-        c_bytes_out = 2 if args.c_bf16 else 4
+
+def parse_tiers(args: argparse.Namespace) -> list[int]:
+    if args.batches:
+        try:
+            tiers = [int(x) for x in args.batches.split(",") if x.strip()]
+        except ValueError as exc:
+            raise SystemExit(f"--batches must be comma-separated integers: {exc}") from exc
     else:
-        a_str, acc_str, a_np = "bf16", "f32", bfloat16
-        c_np = bfloat16 if args.c_bf16 else np.float32
-        c_marker = "bf16" if args.c_bf16 else "f32"
-        c_bytes_out = 2 if args.c_bf16 else 4
+        tiers = [args.batch]
 
-    dirs = {}
+    tiers = sorted(set(tiers))
+
+    if not tiers:
+        raise SystemExit("no batch tiers specified")
+
+    return tiers
+
+
+def validate_tiers_and_seq(args: argparse.Namespace) -> list[int]:
+    validate_positive_args(args)
+
+    tiers = parse_tiers(args)
+
     for b in tiers:
-        shapes_b = shapes_for(b, args.hidden, args.intermediate, args.gated_ffn,
-                              args.qkv_n, args.seq)
+        if b <= 0:
+            raise SystemExit(f"batch tier {b}: must be positive")
+        if b % 4:
+            raise SystemExit(f"batch tier {b}: must be a multiple of 4")
+
+    if max(tiers) != args.batch:
+        raise SystemExit(
+            f"--batch {args.batch} must be the largest tier; tiers are {tiers}"
+        )
+
+    if args.seq % 8:
+        raise SystemExit(
+            f"--seq {args.seq}: must be positive and a multiple of 8 "
+            f"(the runtime refuses anything else)"
+        )
+
+    # M % (m * rows) == 0
+    for b in tiers:
+        M = b * args.seq
+        if M % (args.m * AIE_ROWS):
+            raise SystemExit(
+                f"--seq {args.seq} x batch tier {b} gives M = {M}, "
+                f"which is not a multiple of m*rows = {args.m * AIE_ROWS}. "
+                f"Pick a tier or a seq whose product divides it."
+            )
+
+    if args.seq != DEFAULT_SEQ:
+        print(
+            f"  seq        {args.seq} (default {DEFAULT_SEQ}). "
+            f"M = batch*seq, so tiers {tiers} give M {[b * args.seq for b in tiers]}."
+        )
+        print(
+            "             Host attention is O(seq^2) and this repo has no "
+            "measurement above seq 64. Treat this design's throughput as "
+            "unknown until it is traced."
+        )
+
+    return tiers
+
+
+def validate_geometry(args: argparse.Namespace, tiers: list[int]) -> None:
+    """
+    Fail early if any shape is not tileable with the requested m/k/n/cols.
+
+    The original script relied on asserts inside pretiled_array. That is fine,
+    but late: it can die after several expensive builds. This check is cheap
+    and gives clearer errors.
+    """
+    for b in tiers:
+        shapes = shapes_for(
+            b,
+            args.hidden,
+            args.intermediate,
+            args.gated_ffn,
+            args.qkv_n,
+            args.seq,
+        )
+
+        for name, sh in shapes.items():
+            M = sh["M"]
+            K = sh["K"]
+            N = sh["N"]
+
+            if M % (args.m * AIE_ROWS):
+                raise SystemExit(
+                    f"batch {b}, stream {name}: M={M} is not divisible by "
+                    f"m*rows={args.m * AIE_ROWS}"
+                )
+
+            if K % args.k:
+                raise SystemExit(
+                    f"batch {b}, stream {name}: K={K} is not divisible by k={args.k}"
+                )
+
+            if N % (args.n * args.cols):
+                raise SystemExit(
+                    f"batch {b}, stream {name}: N={N} is not divisible by "
+                    f"n*cols={args.n * args.cols}"
+                )
+
+
+def cache_dir_for(args: argparse.Namespace, arch: str) -> Path:
+    root = Path(args.cache_root).expanduser()
+    if args.per_arch_cache:
+        return root / f"arch{arch}"
+    return root
+
+
+def extra_markers_for_arch(
+    args: argparse.Namespace,
+    arch: str,
+    device: str,
+) -> list[str]:
+    """
+    Optional architecture markers.
+
+    By default we do not require an architecture string inside aie.mlir,
+    because the exact MLIR spelling is toolchain-dependent. If you know your
+    MLIR contains a stable target marker, use --require-arch-marker or
+    --arch-marker.
+    """
+    extra = list(args.arch_marker or [])
+
+    if args.require_arch_marker:
+        # Accept either npu1/npu2 or the configured device name.
+        extra.append(rf"\bnpu{arch}\b|\b{re.escape(device)}\b")
+
+    return extra
+
+
+def export_arch(args: argparse.Namespace, arch: str) -> int:
+    device = ARCH_DEVICES.get(arch)
+    if not device:
+        raise SystemExit(f"unknown architecture: {arch}")
+
+    cache_dir = cache_dir_for(args, arch)
+
+    # If per-arch cache is requested, set the environment before importing the
+    # AIE/IRON stack. This only helps if the toolchain honors IRON_CACHE_DIR.
+    if args.per_arch_cache:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        os.environ["IRON_CACHE_DIR"] = str(cache_dir)
+
+    # Heavy imports are deferred until after architecture/cache setup.
+    import aie.iron as iron
+    from aie.iron.device import from_name
+    from gemm_pretiled import pretiled_array
+    from npue import gemm_b_layout, layout_hash
+    from toolchain_provenance import write_toolchain_json
+
+    print(f"[arch {arch}] device={device} cache_dir={cache_dir}")
+
+    iron.set_current_device(from_name(device, n_cols=None))
+
+    tiers = validate_tiers_and_seq(args)
+    validate_geometry(args, tiers)
+
+    dp = datapath_from_args(args)
+    extra_markers = extra_markers_for_arch(args, arch, device)
+
+    dirs: dict[tuple[str, int], Path] = {}
+    shapes_by_batch: dict[int, dict[str, dict[str, int]]] = {}
+
+    for b in tiers:
+        shapes_b = shapes_for(
+            b,
+            args.hidden,
+            args.intermediate,
+            args.gated_ffn,
+            args.qkv_n,
+            args.seq,
+        )
+        shapes_by_batch[b] = shapes_b
+
         for name in STREAM_ORDER:
             sh = shapes_b[name]
-            mk = markers_for(sh, args.m, args.k, args.n, c_marker, a_str)
-            purge(mk, args.cols, f"{name}@b{b}")
-            M, K, N = sh["M"], sh["K"], sh["N"]
-            A = iron.zeros((M, K), dtype=a_np)
-            B = iron.zeros((K, N), dtype=a_np)
-            C = iron.zeros(M * N, dtype=c_np)
-            pretiled_array(A, B, C, M=M, K=K, N=N, m=args.m, k=args.k,
-                           n=args.n, n_aie_cols=args.cols,
-                           dtype_in_str=a_str, dtype_out_str=acc_str,
-                           emulate_bf16_mmul_with_bfp16=args.emulate_bfp16,
-                           pretiled=True, trace_config=None, rtp=True,
-                           c_bf16=args.c_bf16)
-            dirs[(name, b)] = find_cache(mk, args.cols, f"{name}@b{b}")
-            print(f"  b{b:<4} {name:<9} {str([M, K, N]):>20} -> "
-                  f"{dirs[(name, b)].name}")
+            M = sh["M"]
+            K = sh["K"]
+            N = sh["N"]
 
+            mk = markers_for(
+                sh,
+                args.m,
+                args.k,
+                args.n,
+                dp.c_marker,
+                dp.a_str,
+                extra_markers,
+            )
+
+            purge(mk, args.cols, f"{name}@b{b}", cache_dir)
+
+            A = iron.zeros((M, K), dtype=dp.a_np)
+            B = iron.zeros((K, N), dtype=dp.a_np)
+            C = iron.zeros(M * N, dtype=dp.c_np)
+
+            pretiled_array(
+                A,
+                B,
+                C,
+                M=M,
+                K=K,
+                N=N,
+                m=args.m,
+                k=args.k,
+                n=args.n,
+                n_aie_cols=args.cols,
+                dtype_in_str=dp.a_str,
+                dtype_out_str=dp.acc_str,
+                emulate_bf16_mmul_with_bfp16=args.emulate_bfp16,
+                pretiled=True,
+                trace_config=None,
+                rtp=True,
+                c_bf16=args.c_bf16,
+            )
+
+            dirs[(name, b)] = find_cache(mk, args.cols, f"{name}@b{b}", cache_dir)
+
+            print(
+                f"  b{b:<4} {name:<9} {str([M, K, N]):>20} -> "
+                f"{dirs[(name, b)].name}"
+            )
+
+    # All shapes/tiers must share the same static xclbin modulo UUID metadata.
     ref_key = ("qkv", max(tiers))
     base = (dirs[ref_key] / "final.xclbin").read_bytes()
+
     for key, d in dirs.items():
         if key == ref_key:
             continue
-        ok, detail = xclbin_identical_mod_uuid(base, (d / "final.xclbin").read_bytes())
-        print(f"  identity {ref_key[0]}@b{ref_key[1]} vs "
-              f"{key[0]}@b{key[1]:<4} {detail}  {'OK' if ok else 'DIVERGED'}")
+
+        ok, detail = xclbin_identical_mod_uuid(
+            base,
+            (d / "final.xclbin").read_bytes(),
+            args.identity_threshold,
+        )
+
+        print(
+            f"  identity {ref_key[0]}@b{ref_key[1]} vs "
+            f"{key[0]}@b{key[1]:<4} {detail}  {'OK' if ok else 'DIVERGED'}"
+        )
+
         if not ok:
             raise SystemExit(
                 "static configurations diverged -- the streams do NOT share "
-                "an xclbin, refusing to export a lying artifact")
+                "an xclbin, refusing to export a lying artifact\n"
+                "If this is only extra harmless metadata on a new architecture, "
+                "inspect the xclbins and raise --identity-threshold."
+            )
 
     out = Path(args.out) / "gemm_rtp"
     out.mkdir(parents=True, exist_ok=True)
-    for f in out.glob("insts_*.bin"):
-        f.unlink()                        # never leave a stale tier behind
-    shutil.copy(dirs[ref_key] / "final.xclbin", out / "final.xclbin")
-    shutil.copy(dirs[ref_key] / "insts.bin", out / "insts.bin")
 
-    # Slots 1..N in load order; slot 0 is insts.bin and is never bound to an
-    # op, so the mapping stays explicit rather than depending on which stream
-    # happened to be copied first.
+    # Remove stale per-stream instruction files. Do not remove arbitrary files.
+    for f in out.glob("insts_*.bin"):
+        try:
+            f.unlink()
+        except OSError:
+            pass
+
+    shutil.copy2(dirs[ref_key] / "final.xclbin", out / "final.xclbin")
+    shutil.copy2(dirs[ref_key] / "insts.bin", out / "insts.bin")
+
+    slot0_meta = {
+        "file": "insts.bin",
+        "op": "qkv",
+        "batch": max(tiers),
+        "src": dirs[ref_key].name,
+        "arch": int(arch),
+    }
+
     slot = 0
     stream_meta = []
+
     for b in tiers:
         for name in STREAM_ORDER:
             slot += 1
             fn = f"insts_{name}_b{b}.bin"
-            shutil.copy(dirs[(name, b)] / "insts.bin", out / fn)
-            sh = shapes_for(b, args.hidden, args.intermediate, args.gated_ffn,
-                              args.qkv_n, args.seq)[name]
-            stream_meta.append({"op": name, "batch": b, "slot": slot,
-                                "file": fn, "M": sh["M"], "K": sh["K"],
-                                "N": sh["N"],
-                                "src": dirs[(name, b)].name})
+            shutil.copy2(dirs[(name, b)] / "insts.bin", out / fn)
 
-    biggest = shapes_for(max(tiers), args.hidden, args.intermediate,
-                        args.gated_ffn, args.qkv_n, args.seq)
-    c_bytes = c_bytes_out
-    a_bytes = np.dtype(a_np).itemsize
-    b_layout = gemm_b_layout(args.k, args.n,
-                             dtype="I8" if args.int8 else "BF16")
+            sh = shapes_by_batch[b][name]
+
+            stream_meta.append(
+                {
+                    "op": name,
+                    "batch": b,
+                    "slot": slot,
+                    "file": fn,
+                    "M": sh["M"],
+                    "K": sh["K"],
+                    "N": sh["N"],
+                    "src": dirs[(name, b)].name,
+                    "arch": int(arch),
+                }
+            )
+
+    biggest_batch = max(tiers)
+    biggest = shapes_by_batch[biggest_batch]
+
+    a_bytes = np.dtype(dp.a_np).itemsize
+    c_bytes = dp.c_bytes_out
+
+    b_dtype = "I8" if args.int8 else "BF16"
+    b_layout = gemm_b_layout(args.k, args.n, dtype=b_dtype)
+
     meta = {
-        "name": "gemm_rtp", "kind": "gemm_rtp", "kernel": "MLIR_AIE",
-        "M": biggest["qkv"]["M"],        # batch inference in the runtime
-        "buffers": [max(sh["M"] * sh["K"] * a_bytes for sh in biggest.values()),
-                    max(sh["K"] * sh["N"] * a_bytes for sh in biggest.values()),
-                    max(sh["M"] * sh["N"] * c_bytes for sh in biggest.values())],
-        # The runtime must READ this, never assume it. An artifact that is
-        # bf16 and says nothing looks exactly like an fp32 one to a parser
-        # that defaults -- the eighth fail-open in CLAUDE.md is a literal that
-        # should have been data.
-        "c_dtype": c_marker,
-        # The A/B operand type. Absent in every artifact exported before
-        # tasks/0078, and every one of those is bf16 -- so the runtime reads
-        # silence as "bf16" rather than defaulting blindly.
-        "a_dtype": a_str,
-        # THE MMAC DATAPATH (tasks/0104, T23). True when this design's matmul
-        # was built with emulate_bf16_mmul_with_bfp16 -- a DIFFERENT MMAC
-        # precision on the SAME bf16-shaped operands, so it changes neither
-        # a_dtype/c_dtype nor b_layout_hash (gemm_b_layout() only sees
-        # dtype="BF16" either way, tasks/0080's own comment on int8 makes the
-        # same point about geometry not being enough once there is more than
-        # one datapath). Without this field a bfp16 design and a plain-bf16
-        # design at the same geometry are byte-for-byte indistinguishable to
-        # design_fits(), and bge-small -- the one model T23 did NOT clear for
-        # bfp16 -- shares MiniLM's hidden-384 geometry. Absent (every export
-        # before this field existed) means false, which is correct: every one
-        # of those builds predates --emulate-bfp16 ever landing in a shipped
-        # artifact.
+        "name": "gemm_rtp",
+        "kind": "gemm_rtp",
+        "kernel": "MLIR_AIE",
+
+        # Architecture metadata. The runtime should read this and refuse a
+        # mismatching xclbin instead of assuming a default.
+        "arch": int(arch),
+        "device": device,
+
+        "M": biggest["qkv"]["M"],
+
+        "buffers": [
+            max(sh["M"] * sh["K"] * a_bytes for sh in biggest.values()),
+            max(sh["K"] * sh["N"] * a_bytes for sh in biggest.values()),
+            max(sh["M"] * sh["N"] * c_bytes for sh in biggest.values()),
+        ],
+
+        "c_dtype": dp.c_marker,
+        "a_dtype": dp.a_str,
+
+        # Datapath description, explicit rather than inferred.
+        "int8": bool(args.int8),
+        "c_bf16": bool(args.c_bf16),
         "emulate_bfp16": bool(args.emulate_bfp16),
+
         "b_layout_hash": layout_hash(b_layout),
         "b_layout": b_layout,
-        "cols": args.cols, "batch": max(tiers), "tiers": tiers,
-        # The sequence length these designs were compiled for. It is a
-        # property of the DESIGN, not of the model: the container's
-        # max_seq_len is how many position embeddings were packed (256),
-        # which is a different and larger number.
+
+        "cols": args.cols,
+        "batch": biggest_batch,
+        "tiers": tiers,
         "seq": args.seq,
-        # NPUE-M13 (tasks/0069, thread T31). The geometry this design was built
-        # FOR, stated rather than inferred. `design_fits()` used to ask only
-        # whether `hidden` appeared as some "K" in this file -- which is true of
-        # any design at the same width, whatever its FFN looks like. nomic's K
-        # set {768, 3072} is IDENTICAL to bge-base's while its gated ffn_up is
-        # N=6144 against bge-base's 3072, so that check passes and the runtime
-        # would dispatch a stream built for half the output width, silently.
-        # With these three keys the match can be exact.
+
         "hidden": args.hidden,
-        "intermediate": (4 * args.hidden if args.intermediate is None
-                         else args.intermediate),
+        "intermediate": (
+            4 * args.hidden if args.intermediate is None else args.intermediate
+        ),
         "gated_ffn": args.gated_ffn,
-        # tasks/0074: qkv's width joins the other three as DATA. design_fits()
-        # derived it as 3*hidden, which is exactly the shape of the T31
-        # fail-open one field to the left -- an MQA model's fused qkv is
-        # narrower, and a design built for 2304 would silently serve a model
-        # needing 1536.
         "qkv_n": biggest["qkv"]["N"],
-        "tile": {"m": args.m, "k": args.k, "n": args.n},
+
+        "tile": {
+            "m": args.m,
+            "k": args.k,
+            "n": args.n,
+        },
+
+        # slot 0 is the default/largest qkv stream copied as insts.bin.
+        # It may be unused by some runtimes, but recording it avoids ambiguity.
+        "slot0": slot0_meta,
+        "slot_count": len(stream_meta) + 1,
+
         "streams": stream_meta,
     }
-    (out / "design.json").write_text(json.dumps(meta, indent=2),
-                                     encoding="utf-8")
-    # T39 (tasks/0106): record which toolchain built this. Sidecar, not a
-    # key in design.json above -- see toolchain_provenance.py's header.
-    tc = write_toolchain_json(out)
-    print(f"  toolchain  mlir_aie {tc['mlir_aie_version']}, "
-          f"peano {tc['peano_version']}, "
-          f"mlir-aie HEAD {tc['mlir_aie_git_head']}")
-    print(f"\n  wrote {out} -- ONE xclbin, {len(stream_meta)} streams "
-          f"({len(STREAM_ORDER)} shapes x {len(tiers)} batch tiers)")
+
+    (out / "design.json").write_text(
+        json.dumps(meta, indent=2),
+        encoding="utf-8",
+    )
+
+    try:
+        tc = write_toolchain_json(out) or {}
+        print(
+            f"  toolchain  mlir_aie {tc.get('mlir_aie_version', 'unknown')}, "
+            f"peano {tc.get('peano_version', 'unknown')}, "
+            f"mlir-aie HEAD {tc.get('mlir_aie_git_head', 'unknown')}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  warning: toolchain provenance failed: {exc}", file=sys.stderr)
+
+    print(
+        f"\n  wrote {out} -- ONE xclbin, {len(stream_meta)} streams "
+        f"({len(STREAM_ORDER)} shapes x {len(tiers)} batch tiers)"
+    )
+
     return 0
+
+
+def build_child_argv(
+    args: argparse.Namespace,
+    arch: str,
+    outdir: Path,
+) -> list[str]:
+    script = Path(__file__).resolve()
+    exe = sys.executable or "python"
+
+    cmd = [
+        exe,
+        str(script),
+        "--arch", arch,
+        "--out", str(outdir),
+        "--batch", str(args.batch),
+        "--cols", str(args.cols),
+        "--hidden", str(args.hidden),
+        "--seq", str(args.seq),
+        "-m", str(args.m),
+        "-k", str(args.k),
+        "-n", str(args.n),
+        "--identity-threshold", str(args.identity_threshold),
+        "--cache-root", str(args.cache_root),
+    ]
+
+    if args.batches:
+        cmd += ["--batches", args.batches]
+
+    if args.intermediate is not None:
+        cmd += ["--intermediate", str(args.intermediate)]
+
+    if args.qkv_n is not None:
+        cmd += ["--qkv-n", str(args.qkv_n)]
+
+    if args.gated_ffn:
+        cmd.append("--gated-ffn")
+
+    if args.int8:
+        cmd.append("--int8")
+
+    if args.c_bf16:
+        cmd.append("--c-bf16")
+
+    if args.emulate_bfp16:
+        cmd.append("--emulate-bfp16")
+
+    if args.per_arch_cache:
+        cmd.append("--per-arch-cache")
+
+    if args.require_arch_marker:
+        cmd.append("--require-arch-marker")
+
+    for marker in args.arch_marker or []:
+        cmd += ["--arch-marker", marker]
+
+    return cmd
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=(
+            "Export GEMM RTP artifacts for one or more NPU architectures."
+        )
+    )
+
+    ap.add_argument(
+        "--arch",
+        choices=["1", "2", "all"],
+        default="all",
+        help=(
+            "Architecture to export. 'all' exports architecture 1 and 2 in "
+            "separate subprocesses by default. Default: all."
+        ),
+    )
+
+    ap.add_argument("--out", default=str(REPO / "runtime" / "artifacts"))
+
+    ap.add_argument(
+        "--batch",
+        type=int,
+        default=128,
+        help="largest tier; also the buffer sizing",
+    )
+
+    ap.add_argument(
+        "--batches",
+        default=None,
+        help=(
+            "comma-separated batch tiers, e.g. 4,16,32,128. "
+            "Defaults to just --batch."
+        ),
+    )
+
+    ap.add_argument("--cols", type=int, default=8)
+    ap.add_argument("--hidden", type=int, default=384)
+
+    ap.add_argument(
+        "--intermediate",
+        type=int,
+        default=None,
+        help=(
+            "FFN width. Defaults to 4*hidden, which every BERT-family model "
+            "here happens to satisfy; pass it explicitly for anything else."
+        ),
+    )
+
+    ap.add_argument(
+        "--qkv-n",
+        type=int,
+        default=None,
+        help=(
+            "width of the fused qkv operand. Defaults to 3*hidden, which "
+            "holds whenever num_key_value_heads == num_attention_heads; "
+            "MQA/GQA models need it stated."
+        ),
+    )
+
+    ap.add_argument(
+        "--gated-ffn",
+        action="store_true",
+        help=(
+            "ffn_up emits BOTH halves of a gated FFN (N = 2*intermediate), "
+            "as SwiGLU/GeGLU need, while ffn_down still takes K = intermediate."
+        ),
+    )
+
+    ap.add_argument(
+        "--seq",
+        type=int,
+        default=DEFAULT_SEQ,
+        help=(
+            "sequence length this design is built for. Enters only as "
+            "M = batch*seq. Must be a multiple of 8."
+        ),
+    )
+
+    ap.add_argument("-m", type=int, default=64)
+    ap.add_argument("-k", type=int, default=64)
+    ap.add_argument("-n", type=int, default=48)
+
+    ap.add_argument(
+        "--int8",
+        action="store_true",
+        help=(
+            "build the int8 MMAC datapath (i8 operands, int32 accumulator) "
+            "instead of bf16. Needs an int8 container."
+        ),
+    )
+
+    ap.add_argument(
+        "--c-bf16",
+        action="store_true",
+        help=(
+            "GEMM emits bf16 C (fp32 accumulate, one round at the end). "
+            "Halves C transport; the runtime reads the dtype from design.json."
+        ),
+    )
+
+    ap.add_argument(
+        "--emulate-bfp16",
+        action="store_true",
+        help=(
+            "RESEARCH: build the GEMM on the bfp16-emulated MMAC datapath. "
+            "Not a production mode."
+        ),
+    )
+
+    ap.add_argument(
+        "--in-process",
+        action="store_true",
+        help=(
+            "When --arch all, export both architectures in the same process. "
+            "Default is to spawn a subprocess per architecture, which is safer "
+            "against global device/toolchain state."
+        ),
+    )
+
+    ap.add_argument(
+        "--cache-root",
+        default=str(DEFAULT_CACHE_ROOT),
+        help=(
+            "Root directory scanned for JIT cache entries. "
+            f"Default: {DEFAULT_CACHE_ROOT}"
+        ),
+    )
+
+    ap.add_argument(
+        "--per-arch-cache",
+        action="store_true",
+        help=(
+            "Use and export IRON_CACHE_DIR=<cache-root>/arch<N>. Useful only "
+            "if the toolchain actually honors IRON_CACHE_DIR."
+        ),
+    )
+
+    ap.add_argument(
+        "--require-arch-marker",
+        action="store_true",
+        help=(
+            "Require the MLIR text to contain npu<arch> or the configured "
+            "device name. Use only if your toolchain emits such a marker."
+        ),
+    )
+
+    ap.add_argument(
+        "--arch-marker",
+        action="append",
+        default=[],
+        help=(
+            "Additional regex marker that must appear in aie.mlir. Can be "
+            "passed multiple times."
+        ),
+    )
+
+    ap.add_argument(
+        "--identity-threshold",
+        type=int,
+        default=80,
+        help=(
+            "Maximum differing bytes allowed between final.xclbin files while "
+            "still treating them as identical modulo UUID metadata. Default: 80."
+        ),
+    )
+
+    args = ap.parse_args()
+
+    # Validate common arguments early, before launching architecture exports.
+    tiers = validate_tiers_and_seq(args)
+    validate_geometry(args, tiers)
+
+    if args.arch == "all":
+        if args.in_process:
+            if args.per_arch_cache:
+                print(
+                    "warning: --in-process with --per-arch-cache may not work "
+                    "if the IRON cache path is captured at first import.",
+                    file=sys.stderr,
+                )
+
+            for arch in ARCHES:
+                child_args = copy.deepcopy(args)
+                child_args.arch = arch
+                child_args.out = str(Path(args.out) / f"arch{arch}")
+                export_arch(child_args, arch)
+        else:
+            for arch in ARCHES:
+                outdir = Path(args.out) / f"arch{arch}"
+                cmd = build_child_argv(args, arch, outdir)
+
+                print(
+                    "[export] "
+                    + " ".join(shlex.quote(str(x)) for x in cmd)
+                )
+
+                subprocess.run(cmd, check=True)
+
+        return 0
+
+    return export_arch(args, args.arch)
 
 
 if __name__ == "__main__":
