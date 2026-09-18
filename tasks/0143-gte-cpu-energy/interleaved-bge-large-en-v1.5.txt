@@ -1,25 +1,0 @@
---- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\compare_three.py --model bge-large-en-v1.5 --artifacts artifacts_large_bfp16 --rounds 8 --threads 24 --pipeline 4 --out C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0143-gte-cpu-energy\interleaved-bge-large-en-v1.5.json
-Loading weights:   0%|          | 0/391 [00:00<?, ?it/s]Loading weights:  55%|█████▍    | 215/391 [00:00<00:00, 2107.15it/s]Loading weights: 100%|██████████| 391/391 [00:00<00:00, 2149.43it/s]
-model bge-large-en-v1.5, batch 128, seq 64, cls pooling
-  machine: Online / NoSystemBattery / Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
-  torch threads 12, ORT intra_op 12, NPU 24 threads / 4 lanes
-  interleaved, 8 rounds, MEAN reported on every side
-
-npuembed failed:
-x    on the HOST (fp32) -- 24 fewer NPU dispatches
-  layernorm  on the HOST (fp32) -- 49 fewer NPU dispatches
-  bo-align   last data buffer aligned to 131072 B
-  weights    603.98 MB staged on the device once, not per call
-  pipeline   4 concurrent encodes of 128, one NPU mutex, 6 host threads per lane
-
-  !! ANOTHER PROCESS IS USING THE NPU -- 2 Active hw_context(s) that are not ours:
-       pid 16360    WorkloadsSessionHost.exe Active   N/A
-       pid 17144    WorkloadsSessionHost.exe Active   N/A
-     tasks/0044 measured 221.4 seq/s against a true 694.0 in exactly this state
-     (per-dispatch hardware wait 15,541 us against 3,024).
-
-  Refusing to report a throughput. Close the other process, or pass --allow-contention
-  if you actually want a contended number and will label it as one.
-
-
-

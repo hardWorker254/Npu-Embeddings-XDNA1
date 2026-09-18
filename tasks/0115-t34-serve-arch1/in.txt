@@ -1,8 +1,0 @@
-﻿A man is playing a guitar on stage.
-Norwegian fjords were carved by glaciers.
-How do I reset my password?
-The cat sat on the mat.
-Quantum error correction needs many physical qubits.
-Le cafe coute 5 euros a Paris.
-Embedding models map text to vectors.
-The AMD Ryzen AI NPU accelerates encoders.

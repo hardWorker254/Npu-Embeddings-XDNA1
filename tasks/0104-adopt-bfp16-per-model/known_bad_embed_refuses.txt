@@ -1,1 +1,0 @@
-error: no NPU design for hidden 384 intermediate 1536, datapath bf16 under ../tasks/0104-adopt-bfp16-per-model/guard_test_root -- this release carries designs for the geometries it was built with; export one with tools/export_gemm_rtp.py --hidden 384 --intermediate 1536

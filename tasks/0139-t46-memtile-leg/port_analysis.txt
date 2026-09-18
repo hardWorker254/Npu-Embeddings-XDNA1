@@ -1,6 +1,0 @@
-captured span: 1037680 cycles
-  PORT_RUNNING_0    covered   320626 cyc =  30.9%   (425 intervals)
-  PORT_RUNNING_1    covered    38020 cyc =   3.7%   (26 intervals)
-  INSTR_VECTOR      covered   182772 cyc =  17.6%   (62844 intervals)
-  MEMORY_STALL      covered    23985 cyc =   2.3%   (21250 intervals)
-  LOCK_STALL        covered   547726 cyc =  52.8%   (1266 intervals)

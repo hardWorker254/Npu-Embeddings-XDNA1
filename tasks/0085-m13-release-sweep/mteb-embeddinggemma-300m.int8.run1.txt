@@ -1,5 +1,0 @@
---- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\run_mteb.py --model embeddinggemma-300m.int8 --artifacts artifacts_int8c_gemma --threads 24 --pipeline 4 "--cpu-model embeddinggemma-300m" --out C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0085-m13-release-sweep\mteb-embeddinggemma-300m.int8.json
-usage: run_mteb.py [-h] [--tasks TASKS] [--sides SIDES] [--model MODEL]
-                   [--cpu-model CPU_MODEL] [--artifacts ARTIFACTS]
-                   [--threads THREADS] [--pipeline PIPELINE] [--out OUT]
-run_mteb.py: error: unrecognized arguments: --cpu-model embeddinggemma-300m

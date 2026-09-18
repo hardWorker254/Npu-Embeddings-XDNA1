@@ -1,1 +1,0 @@
-The AMD Ryzen AI NPU accelerates transformer encoder models.

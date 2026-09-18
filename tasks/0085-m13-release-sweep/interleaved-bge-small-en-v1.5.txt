@@ -1,23 +1,0 @@
---- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\compare_three.py --model bge-small-en-v1.5 --artifacts artifacts_b128il --rounds 8 --threads 24 --pipeline 4 --out C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0085-m13-release-sweep\interleaved-bge-small-en-v1.5.json
-Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]Loading weights: 100%|##########| 199/199 [00:00<00:00, 4440.54it/s]
-model bge-small-en-v1.5, batch 128, seq 64, cls pooling
-  machine: Online / NoSystemBattery / Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
-  torch threads 12, ORT intra_op 12, NPU 24 threads / 4 lanes
-  interleaved, 8 rounds, MEAN reported on every side
-
-  round 1:  torch   397.0   ort   170.2   npu   502.6 seq/s
-  round 2:  torch   413.3   ort   172.2   npu   502.8 seq/s
-  round 3:  torch   406.9   ort   172.6   npu   502.3 seq/s
-  round 4:  torch   408.5   ort   176.9   npu   502.6 seq/s
-  round 5:  torch   408.9   ort   175.8   npu   501.4 seq/s
-  round 6:  torch   411.3   ort   179.1   npu   502.5 seq/s
-  round 7:  torch   408.4   ort   177.7   npu   499.3 seq/s
-  round 8:  torch   420.2   ort   174.9   npu   502.4 seq/s
-
-  torch        all   409.3   steady(last 4)   412.2   range   397.0-  420.2 seq/s
-  onnxruntime  all   174.9   steady(last 4)   176.9   range   170.2-  179.1 seq/s
-  npu          all   502.0   steady(last 4)   501.4   range   499.3-  502.8 seq/s
-
-  strongest CPU baseline: torch at 412.2 seq/s
-  NPU / strongest CPU   : 1.216x  (steady state, both sides)
-wrote tasks\0085-m13-release-sweep\interleaved-bge-small-en-v1.5.json

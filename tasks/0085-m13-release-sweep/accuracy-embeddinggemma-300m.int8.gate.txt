@@ -1,9 +1,0 @@
---- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tools\verify_gemma_npu_encode.py --npu C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0085-m13-release-sweep\accuracy-embeddinggemma-300m.int8.f32 --cpu C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0074-m13-gemma-on-npu\out_cpu.f32
-  rows            13
-  1-cos  mean     8.421e-04
-  1-cos  worst    1.070e-03  (row 0)
-  gate            2.0e-03
-  nearest-is-self 13/13
-  closest off-diagonal pair  cos 0.3904 (margin 0.6096 -- a corpus that cannot separate its own rows cannot detect a routing bug)
-
-  PASS

@@ -1,5 +1,0 @@
---- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\run_mteb.py --model all-MiniLM-L6-v2.int8 --artifacts artifacts_int8c_mini --threads 24 --pipeline 4 "--cpu-model all-MiniLM-L6-v2" --out C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0085-m13-release-sweep\mteb-all-MiniLM-L6-v2.int8.json
-usage: run_mteb.py [-h] [--tasks TASKS] [--sides SIDES] [--model MODEL]
-                   [--cpu-model CPU_MODEL] [--artifacts ARTIFACTS]
-                   [--threads THREADS] [--pipeline PIPELINE] [--out OUT]
-run_mteb.py: error: unrecognized arguments: --cpu-model all-MiniLM-L6-v2

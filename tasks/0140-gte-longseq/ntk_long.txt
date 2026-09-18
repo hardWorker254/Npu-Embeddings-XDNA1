@@ -1,20 +1,0 @@
-[transformers] You are using a model of type `new` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
-[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
-[transformers] Missing validation function in 'RotaryEmbeddingConfigMixin' for 'rope_type'='ntk'
-[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
-Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
-Loading weights:   0%|          | 0/136 [00:00<?, ?it/s]Loading weights: 100%|##########| 136/136 [00:00<00:00, 1804.22it/s]
-[transformers] [1mNewModel LOAD REPORT[0m from: C:\Users\vegar\Documents\GitHub\NpuEmbeddings\models\gte-multilingual-base
-Key               | Status     |  | 
-------------------+------------+--+-
-classifier.weight | UNEXPECTED |  | 
-classifier.bias   | UNEXPECTED |  | 
-
-Notes:
-- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
-[transformers] `use_return_dict` is deprecated! Use `return_dict` instead!
-[transformers] Detected the usage of `get_extended_attention_mask`: This function is deprecated and will be removed in v5.12.0. Please use the new API in `transformers.masking_utils`
-tokens: 512
-last_hidden relfro 1.157e-05
-CLS         relfro 3.060e-06
-layer0 right relfro 9.945e-07   control theta=20000-plain relfro 4.205e-02

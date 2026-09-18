@@ -1,4 +1,0 @@
-The AMD Ryzen AI NPU accelerates transformer encoder models.
-Rotary position embeddings encode order as phase rather than as an added vector.
-A cargo ship crossed the Atlantic in eleven days despite heavy weather.
-Quantum error correction requires thousands of physical qubits per logical qubit.

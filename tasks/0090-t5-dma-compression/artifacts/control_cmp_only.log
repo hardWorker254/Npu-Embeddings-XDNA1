@@ -1,8 +1,0 @@
-﻿detected arch: npu2
-[               cmp_only] PASS  matches=1024  mismatches=1920  untouched=1152  compressed_to=71.9%(=1.391x)  sha-ok  (252 ms)
-                  raw_in [:8]  = 00000000 01000000 02000000 03000000 04000000 05000000 06000000 07000000
-                  cmp_out[:8]  = 00000000 01000000 02000000 03000000 04000000 05000000 06000000 07000000
-                  cmp_out[2936:2944] (tail of payload) = f00ff10f f20ff30f f40ff50f f60ff70f f80ff90f fa0ffb0f fc0ffd0f fe0fff0f
-                  sha256(out[:2944]) = f947e931d2e3c530be240f4e622d1c3757b2e1d5e23a05be5d21768332420bc5
-
-PASS

@@ -1,3 +1,0 @@
-﻿[bf16_qkv.bin] dispatching cmp_only with out_tap=N=4096 ...
-[bf16_qkv.bin] COMPLETED in 33.3 ms  matches=1024 mismatches=1920 untouched=1152
-[bf16_qkv.bin] some compression occurred but the exact ratio is NOT determined by this probe (out_tap=N only proves compressed length == N when matches==N; a partial/garbled match here would need the low-level BD introspection this task did not attempt)

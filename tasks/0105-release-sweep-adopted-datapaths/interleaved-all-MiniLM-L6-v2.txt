@@ -1,23 +1,0 @@
---- command: "C:\Users\vegar\Documents\GitHub\NpuEmbeddings\.venv-ref\Scripts\python.exe" -u C:\Users\vegar\Documents\GitHub\NpuEmbeddings\experiments\m8-npu-vs-cpu\compare_three.py --model all-MiniLM-L6-v2 --artifacts artifacts_minilm_bfp16 --rounds 8 --threads 24 --pipeline 4 --out C:\Users\vegar\Documents\GitHub\NpuEmbeddings\tasks\0105-release-sweep-adopted-datapaths\interleaved-all-MiniLM-L6-v2.json
-Loading weights:   0%|          | 0/103 [00:00<?, ?it/s]Loading weights: 100%|██████████| 103/103 [00:00<00:00, 6204.77it/s]
-model all-MiniLM-L6-v2, batch 128, seq 64, mean pooling
-  machine: Online / NoSystemBattery / Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
-  torch threads 12, ORT intra_op 12, NPU 24 threads / 4 lanes
-  interleaved, 8 rounds, MEAN reported on every side
-
-  round 1:  torch   736.5   ort   301.6   npu  1072.3 seq/s
-  round 2:  torch   749.7   ort   289.0   npu  1073.1 seq/s
-  round 3:  torch   795.2   ort   295.1   npu  1081.6 seq/s
-  round 4:  torch   745.3   ort   294.4   npu  1083.3 seq/s
-  round 5:  torch   785.9   ort   282.7   npu  1082.3 seq/s
-  round 6:  torch   780.7   ort   291.7   npu  1065.0 seq/s
-  round 7:  torch   689.7   ort   293.8   npu  1065.1 seq/s
-  round 8:  torch   743.1   ort   278.8   npu  1066.2 seq/s
-
-  torch        all   753.3   steady(last 4)   749.8   range   689.7-  795.2 seq/s
-  onnxruntime  all   290.9   steady(last 4)   286.7   range   278.8-  301.6 seq/s
-  npu          all  1073.6   steady(last 4)  1069.7   range  1065.0- 1083.3 seq/s
-
-  strongest CPU baseline: torch at 749.8 seq/s
-  NPU / strongest CPU   : 1.427x  (steady state, both sides)
-wrote tasks\0105-release-sweep-adopted-datapaths\interleaved-all-MiniLM-L6-v2.json
