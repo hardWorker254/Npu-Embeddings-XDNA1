@@ -12,6 +12,9 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <fstream>
+#include <cstdlib>
+#include <cctype>
 #include <string>
 #include <vector>
 
@@ -19,6 +22,7 @@
 #include "design_selection.hpp"
 #include "hub.hpp"
 #include "model_catalog.hpp"
+#include "tokenizer_facade.hpp"
 #include "npue.hpp"
 
 namespace app {
@@ -284,6 +288,51 @@ inline void warn_if_unpinned(const std::string &name) {
   std::printf("  !! Its weights are NOT verified against anything.\n");
   std::printf("  !! To pin it:  npuembeddings add %s <sha256>\n\n",
               e->repo.c_str());
+}
+
+
+// --tokenize <file> [max_len]: one text per line in, one line of token ids
+// out. No NPU, no model encode -- the mode tools/verify_tokenizer.py drives
+// to compare against HuggingFace token for token. Returns true when handled.
+inline bool maybe_tokenize(const std::string &root, int argc, char **argv) {
+  for (int i = 1; i < argc - 1; ++i)
+    if (std::string(argv[i]) == "--tokenize") {
+    const std::string in_path = argv[i + 1];
+    int max_len = 64;
+    if (i + 2 < argc && std::isdigit(static_cast<unsigned char>(argv[i + 2][0])))
+      max_len = std::atoi(argv[i + 2]);
+    const std::string vpath = resolve_model_path(root, argc, argv);
+    npue::File vm(vpath);
+    auto tok = load_tokenizer(vm, vpath);
+    std::ifstream in(in_path, std::ios::binary);
+    if (!in) throw std::runtime_error("cannot open " + in_path);
+    std::string line;
+    // Deliberately NOT an error here, and deliberately not on stdout either.
+    // This mode exists for tools/verify_tokenizer.py to diff against
+    // HuggingFace token for token, and HuggingFace truncates too -- refusing
+    // would make the two incomparable at exactly the lengths worth comparing,
+    // and an extra stdout line would desynchronise the diff. So: the same ids
+    // as before on stdout, and a count on stderr, so a truncating corpus
+    // cannot be mistaken for a clean one.
+    size_t n_lines = 0, n_cut = 0;
+    while (std::getline(in, line)) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      const auto e = tok.encode(line, max_len);
+      ++n_lines;
+      if (e.truncated) ++n_cut;
+      for (size_t k = 0; k < e.input_ids.size(); ++k)
+        std::printf("%s%d", k ? " " : "", e.input_ids[k]);
+      std::printf("\n");
+    }
+    if (n_cut)
+      std::fprintf(stderr,
+                   "  NOTE  %zu of %zu lines exceeded max_len=%d and were "
+                   "truncated. Token-for-token agreement below that cut says "
+                   "nothing about the text past it.\n",
+                   n_cut, n_lines, max_len);
+    return true;
+  }
+  return false;
 }
 
 }  // namespace app

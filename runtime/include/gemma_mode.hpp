@@ -25,6 +25,7 @@
 #include "gemma_encode.hpp"
 #include "gemma_npu_encoder.hpp"
 #include "host_kernels.hpp"
+#include "model_catalog.hpp"
 #include "hub.hpp"
 #include "npu_device.hpp"
 #include "npue.hpp"
@@ -582,6 +583,39 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
               enc.n_dispatch);
   write_out(out, enc.hidden);
   return 0;
+}
+
+
+// Early dispatch for arch=1 containers, resolved BEFORE --artifacts
+// resolution -- which THROWS if no BERT NPU design is found under `root`, a
+// precondition this arch does not share (it has no NPU design at all, by
+// design -- see run_gemma_mode's own comment). Exceptions here are swallowed
+// and reported as -1, so the caller falls through to the original resolution
+// path, which reports the real error (missing model, ambiguous --model, ...)
+// exactly as if this dispatch did not exist. The model is opened via mmap
+// twice in the Gemma case, which is cheap and never touches the BERT path.
+// Returns the process exit code, or -1 when the container is not Gemma.
+inline int maybe_gemma_mode(const std::string &root, int argc, char **argv) {
+  {
+    std::string peek_path;
+    try {
+      peek_path = resolve_model_path(root, argc, argv);
+    } catch (const std::exception &) {
+    }
+    if (!peek_path.empty()) {
+      bool is_gemma = false;
+      try {
+        npue::File peek(peek_path);
+        is_gemma = (peek.config_string("arch") == "gemma3_mqa_rope_geglu");
+      } catch (const std::exception &) {
+      }
+      if (is_gemma) {
+        npue::File gmodel(peek_path);
+        return run_gemma_mode(gmodel, peek_path, root, argc, argv);
+      }
+    }
+  }
+  return -1;
 }
 
 }  // namespace app
