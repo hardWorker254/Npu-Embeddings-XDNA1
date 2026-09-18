@@ -254,7 +254,7 @@ inline std::string pick_artifacts(const std::string &root, int64_t hidden,
   // dependent -- and never by mtime, which a JIT cache hit does not restamp
   // (CLAUDE.md trap 7c).
   std::vector<std::string> cands;
-  for (const fs::path base : {fs::path(root), fs::path(root) / "runtime"})
+  for (const auto &base : {fs::path(root), fs::path(root) / "runtime"})
     for (fs::directory_iterator it(base, ec), end; !ec && it != end;
          it.increment(ec))
       if (it->is_directory(ec)) cands.push_back(it->path().string());

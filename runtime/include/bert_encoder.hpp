@@ -1332,7 +1332,7 @@ struct Encoder {
           const int64_t nv = NV ? NV : g_head_dim / 8;
           const int64_t nz = nv / 2;                  // 512-bit accumulators
           __m512 zacc[(NV ? NV : kMaxHeadVecs) / 2 + 1];
-          __m256 yacc;
+          __m256 yacc{};
           for (int64_t v = 0; v < nz; ++v) zacc[v] = _mm512_setzero_ps();
           const bool tail = (nv & 1) != 0;
           if (tail) yacc = _mm256_setzero_ps();

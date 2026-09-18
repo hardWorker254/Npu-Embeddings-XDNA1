@@ -64,7 +64,7 @@ std::vector<uint8_t> read_file(const std::string &path) {
 // Minimal field extraction from design.json. Same reasoning as the .npue
 // directory scanner: the file is written by our own build step, so a
 // dependency-free reader is the right size of tool for it.
-size_t find_key(const std::string &t, const std::string &key) {
+[[maybe_unused]] size_t find_key(const std::string &t, const std::string &key) {
   size_t i = t.find("\"" + key + "\"");
   if (i == std::string::npos)
     throw std::runtime_error("design.json: missing " + key);
