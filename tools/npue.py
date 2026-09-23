@@ -213,8 +213,9 @@ def gemm_b_layout(tile_k, tile_n, mac_s=8, mac_t=8, dtype="BF16"):
     Every copy of this dict is a chance for two sides to drift, and the drift
     is invisible: `layout_hash` changes, the bytes do not, and the check that
     exists to catch wrong layouts starts reporting a mismatch that is not one.
-    That happened -- tools/export_xclbin.py wrote the dict by hand and omitted
-    `dtype`, so a correct file failed the check. The packer had it twice, too.
+    That happened -- the upstream seven-design exporter wrote the dict by hand
+    and omitted `dtype`, so a correct file failed the check. The packer had it
+    twice, too.
     """
     return {"kind": "block_panel", "tile_k": tile_k, "tile_n": tile_n,
             "order": "k,n,kt,nt", "inner": "s,t",

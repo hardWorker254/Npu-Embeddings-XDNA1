@@ -75,15 +75,16 @@ python -m venv --system-site-packages .venv-ref
 & ".\.venv-ref\Scripts\python.exe" -m pip install mteb openai
 ```
 
-### 2.2 Fetch and pack the model
+### 2.2 Pack the model
 
-```powershell
-python reference\fetch_model.py        # sentence-transformers/all-MiniLM-L6-v2 -> models/
-python reference\make_goldens.py       # per-layer reference tensors from HuggingFace
-python tools\gen_tokenizer_tables.py   # Unicode tables -> runtime/include/
-python tools\pack_npue.py              # -> models/all-MiniLM-L6-v2.npue
-python tools\verify_npue.py            # bit-exact round trip, layout guard, goldens
-python tools\export_validation.py      # golden check vectors for the runtime
+The checkpoint is already fetched into `models/`; this fork has no separate
+fetch step. `pack_npue.py` reads it directly.
+
+```sh
+python tools/gen_tokenizer_tables.py   # Unicode tables -> runtime/include/
+python tools/pack_npue.py              # -> models/all-MiniLM-L6-v2.npue
+python tools/verify_npue.py            # bit-exact round trip, layout guard, goldens
+python tools/export_validation.py      # golden check vectors for the runtime
 ```
 
 `pack_npue.py` produces the `.npue` container: weights converted to bf16 and
@@ -110,21 +111,6 @@ performance mystery later.
 
 Expect this to take a while: it is sixteen full IRON compilations.
 
-<details>
-<summary>Older / alternative design sets</summary>
-
-`tools\export_xclbin.py` builds the seven-design set used before the
-one-xclbin architecture (separate GEMM, GELU, LayerNorm and softmax designs).
-It is still useful for measuring the NPU eltwise kernels in isolation:
-
-```powershell
-python tools\export_xclbin.py --cols 8 --elt-cols 8 --batch 128 `
-                              --out runtime\artifacts_b128e8
-```
-
-The runtime auto-detects which kind of set it was given.
-</details>
-
 ### 2.4 Build the runtime
 
 ```powershell
@@ -147,36 +133,31 @@ demand Boost.
 # the golden check: does the C++ path reproduce the HuggingFace reference?
 runtime\build\npuembed.exe . --artifacts artifacts_b128il --threads 24 --pipeline 2
 
-# tokenizer, against HuggingFace, token for token
-& ".\.venv-ref\Scripts\python.exe" tools\verify_tokenizer.py
-
 # the two model packers must agree BYTE FOR BYTE (Python reference vs the
 # C++ one a release uses) -- a disagreement would be right-sized weights in
 # the wrong order, which no tolerance check catches
 & "C:\Users\vegar\.conda\envs\iron\python.exe" tools\verify_pack_parity.py
 
-# end to end: text in, vectors out, vs sentence-transformers
-& ".\.venv-ref\Scripts\python.exe" tools\verify_embed_e2e.py
+# semantics without a reference: same-topic texts must rank closer than
+# different-topic ones; stdlib only, so it runs on a cold release too
+python tools\verify_semantics.py
+
+# the tail: no single input may come back badly wrong (per-model p99 ratchet)
+python tools\verify_tail.py
 
 # the endpoint, driven by the official OpenAI client
 runtime\build\npuembed.exe . --artifacts artifacts_b128il --pipeline 2 --serve 8420
 & ".\.venv-ref\Scripts\python.exe" tools\verify_endpoint.py --port 8420
 ```
 
-Expected: `1-cos` ≈ 1.086e-05 against the reference, and an exact match on
-every tokenized sequence.
+Expected: `1-cos` ≈ 1.086e-05 against the reference.
 
 ### 2.6 Package a release
 
-```powershell
-.\tools\make_release.ps1 -Version v0.2.0
-.\tools\make_release.ps1 -Version v0.2.0 -Artifacts artifacts_b128il,artifacts_base
-```
-
-Stages `npuembeddings.exe` and one design set **per width** into `dist\`,
-writes a manifest with the sha256 of every file, and zips it (~400 KB). Each
-design's hidden size is read out of its own `design.json`, not taken from the
-directory name.
+Stage the runtime executable and one design set **per width** into `dist\`, and
+write a manifest with the sha256 of every file. Each design's hidden size is
+read out of its own `design.json`, not taken from the directory name. This fork
+ships no packaging script; the staging is done by hand.
 
 **The model is deliberately not in the release.** The user runs
 `npuembeddings serve <model>`, and the executable downloads the checkpoint
@@ -214,12 +195,6 @@ runtime\build\npuembed.exe . --artifacts artifacts_b128il --threads 24 --pipelin
 # where the time goes, per design and per stage
 runtime\build\npuembed.exe . --artifacts artifacts_b128il --bench 5      # prints the split
 runtime\build\npuembed.exe . --probe-design artifacts_b128il/gemm_rtp    # dispatch vs switch
-
-# energy, via the Windows RAPL energy counters
-.\tools\energy_compare.ps1 -Low 20 -High 60 -Threads 24 -Repeats 3
-
-# the accuracy gate
-& ".\.venv-ref\Scripts\python.exe" experiments\m8-npu-vs-cpu\run_mteb.py
 ```
 
 ---

@@ -1,6 +1,6 @@
 # NpuEmbeddings -- pure-Python reference encoder for the XLM-R SentencePiece
-# Unigram tokenizer, reading the XLMRTOK1 blob that
-# tools/gen_xlmr_tokenizer_table.py writes.
+# Unigram tokenizer, reading the XLMRTOK1 blob that the C++ generator
+# (runtime/src/tokenizers/xlmr_tokenizer_gen.cpp) writes.
 # SPDX-License-Identifier: Apache-2.0
 #
 # THIS FILE IS THE EXECUTABLE SPEC for the future C++ port (T52 step 2).

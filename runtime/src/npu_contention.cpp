@@ -25,10 +25,13 @@
 // skipped, and if the whole parse yields nothing we report that as a failure
 // rather than as "no contention". A format change must fail closed too.
 
-#include "npu_contention.hpp"
+#include "runtime/npu_contention.hpp"
+
+#include "common/design_selection.hpp"  // app::running_device
 
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <sstream>
 
 #ifdef _WIN32
@@ -91,6 +94,7 @@ bool all_digits(const std::string &s) {
 const char *kCandidates[] = {
     "C:\\Windows\\System32\\AMD\\xrt-smi.exe",
     "C:\\Xilinx\\XRT\\bin\\xrt-smi.exe",
+    "/opt/xilinx/xrt/bin/xrt-smi",
     "xrt-smi",
 };
 
@@ -152,11 +156,24 @@ ContentionReport survey_contexts() {
       if (!c.empty()) row.memory = c[0];
     }
     r.rows.push_back(row);
-    if (row.status == "Active" && row.pid != me) r.foreign_active.push_back(row);
+    if (row.pid != me) {
+      // A context held by another process consumes a slot whether it is Active
+      // or Idle, so the budget guard needs the whole foreign set; the bench
+      // guard keeps the narrower Active set (tasks/0044).
+      r.foreign.push_back(row);
+      if (row.status == "Active") r.foreign_active.push_back(row);
+    }
     i += 2;  // consumed the record
   }
 
   if (r.rows.empty()) {
+    // An idle device prints this literal line and no table (Linux XRT 2.26).
+    // That is a POSITIVE zero reading, not a parse failure: only this exact
+    // phrase counts, so a format change still fails closed below.
+    if (text.find("No hardware contexts running") != std::string::npos) {
+      r.tool_ran = true;
+      return r;
+    }
     // The tool ran and printed a table we could not read. That is a format
     // change, and it must not read as "nothing is running".
     r.tool_ran = false;
@@ -202,6 +219,108 @@ bool require_exclusive_npu(const ContentionReport &r, bool allow_override) {
               "or pass --allow-contention\n"
               "  if you actually want a contended number and will label it as "
               "one.\n\n");
+  return false;
+}
+
+ContextBudget context_budget() {
+  ContextBudget b;
+  // An explicit override wins: another machine's driver may allow a different
+  // number, and this makes the budget provable in a test without one.
+  if (const char *e = std::getenv("NPU_HWCTX_LIMIT")) {
+    char *end = nullptr;
+    const long v = std::strtol(e, &end, 10);
+    if (end != e && v > 0) {
+      b.limit = static_cast<int>(v);
+      b.source = "NPU_HWCTX_LIMIT environment";
+      return b;
+    }
+  }
+
+  const std::string dev = app::running_device();
+  if (dev.empty() || dev == "npu1") {
+    // Measured on this NPU1 (Ryzen 7 PRO 8845HS, amdxdna 2.26 on Linux): a
+    // SEVENTH concurrent hw_context fails to construct with
+    // `DRM_IOCTL_AMDXDNA_CREATE_HWCTX IOCTL failed (err=-22)`, so the budget is
+    // six. (SUBTASKS.md subtask 4 recorded four; that was measured with other
+    // contexts already resident, and it is the reason a constant is dangerous
+    // -- see the deviation noted in SUBTASKS.md.) The driver's hwctx_limit is
+    // also 6, but XRT exposes no query for either number, so this is a labelled
+    // constant: the guard prints where it came from rather than pretending it
+    // read it.
+    b.limit = 6;
+    b.source = "measured on NPU1 (six concurrent hw_contexts; XRT exposes no "
+               "usable-count query)";
+    return b;
+  }
+  b.limit = 0;
+  b.source = "unknown for device '" + dev +
+             "' -- XRT exposes no usable-count query";
+  return b;
+}
+
+bool require_context_budget(const ContentionReport &r, int requested,
+                            bool allow_override) {
+  const ContextBudget b = context_budget();
+  const size_t foreign = r.foreign.size();
+
+  // A missing data source is not a negative reading: if we cannot see the live
+  // contexts, we cannot claim there is room. Refuse the multi-context run
+  // rather than collide with a leftover process and surface a raw driver error.
+  if (!r.tool_ran) {
+    std::printf("\n");
+    std::printf("  !! CANNOT VERIFY THE NPU CONTEXT BUDGET: %s\n",
+                r.failure.c_str());
+    std::printf("     An absent data source is not a negative reading "
+                "(tasks/0040).\n");
+    if (b.limit)
+      std::printf("     This run needs %d concurrent hw_context(s) of a %d-"
+                  "context budget (%s).\n", requested, b.limit,
+                  b.source.c_str());
+    else
+      std::printf("     This run needs %d concurrent hw_context(s); the budget "
+                  "is %s.\n", requested, b.source.c_str());
+    if (allow_override) {
+      std::printf("  !! --allow-contention given: continuing without being "
+                  "able to check.\n\n");
+      return true;
+    }
+    std::printf("\n  Refusing to build %d hw_context(s) without knowing the "
+                "device has room. Make `xrt-smi examine -r all` work, close "
+                "other NPU\n  processes, or pass --allow-contention to proceed "
+                "anyway.\n\n", requested);
+    return false;
+  }
+
+  // Tool ran. A generation with no known budget (npu2) cannot be compared, so
+  // report the state and proceed rather than invent a limit.
+  if (b.limit == 0) {
+    std::printf("\n  npu        %d requested context(s), %zu foreign; budget "
+                "%s\n", requested, foreign, b.source.c_str());
+    return true;
+  }
+
+  const int total = requested + static_cast<int>(foreign);
+  std::printf("\n  npu        context budget -- %d requested + %zu foreign = "
+              "%d of %d (%s)\n", requested, foreign, total, b.limit,
+              b.source.c_str());
+  if (total <= b.limit) return true;
+
+  std::printf("  !! NPU CONTEXT BUDGET EXCEEDED -- this run needs %d "
+              "hw_context(s), the device allows %d (%s), and %zu are already "
+              "held by other processes:\n",
+              requested, b.limit, b.source.c_str(), foreign);
+  for (const auto &c : r.foreign)
+    std::printf("       pid %-8lu %-24s %-8s %s\n", c.pid, c.process.c_str(),
+                c.status.c_str(), c.memory.c_str());
+
+  if (allow_override) {
+    std::printf("  !! --allow-contention given: continuing anyway. A context "
+                "construction may still fail with a raw driver error.\n\n");
+    return true;
+  }
+  std::printf("\n  Refusing BEFORE any hw_context is built. Close the other "
+              "process(es), or pass\n  --allow-contention to proceed "
+              "anyway.\n\n");
   return false;
 }
 

@@ -638,8 +638,8 @@ def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
         w.add("tokenizer.gemma_table", tb, "U8", "tokenizer", [int(tb.size)])
         print(f"  tokenizer.gemma_table  {tb.size / 1e6:.2f} MB")
     else:
-        print(f"  WARNING: {tok_path} not found (run "
-              f"tools/gen_gemma_tokenizer_table.py) -- .npue will have no "
+        print(f"  WARNING: {tok_path} not found (generate it with the C++ "
+              f"packer, `npuembed --prepare-model`) -- .npue will have no "
               f"tokenizer table")
 
     # ONE emitter for the four per-layer operands, as in the BERT and nomic
@@ -876,8 +876,8 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
           f"{' folded into Q' if fold_scale else ' NOT folded'}")
 
     # This project's OWN choice, not the checkpoint's -- labelled as such in
-    # the container for the same reason tools/gen_gemma_tokenizer_table.py
-    # labels its table (see its lines 63-77):
+    # the container for the same reason the Gemma table generator
+    # (runtime/src/tokenizers/gemma_tokenizer_gen.cpp) labels its table:
     # config_sentence_transformers.json for this checkpoint carries no
     # "prompts" dict at all (verified tasks/0068 sec 4/10), so presenting
     # this table as read-from-the-checkpoint would be a lie in a file other
@@ -922,8 +922,9 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
                           "config_sentence_transformers.json carries no "
                           "'prompts' dict for this checkpoint, so presenting "
                           "this table as the model's own would be a lie in a "
-                          "file other tools read. Same precedent as "
-                          "tools/gen_gemma_tokenizer_table.py:63-77.",
+                          "file other tools read. Same precedent as the "
+                          "Gemma table generator "
+                          "(runtime/src/tokenizers/gemma_tokenizer_gen.cpp).",
         "l2_normalize_note": "sentence-transformers does NOT L2-normalize "
                              "this model (measured output norm 20.93, "
                              "tasks/0068 sec 5b) -- l2_normalize:true here "
@@ -1193,8 +1194,8 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False):
     tok_blob_path = model_dir / "xlmr_tokenizer.bin"
     if not tok_blob_path.exists():
         raise SystemExit(
-            f"{tok_blob_path} not found -- generate it first: "
-            f"python tools/gen_xlmr_tokenizer_table.py (tasks/0127)")
+            f"{tok_blob_path} not found -- generate it first with the C++ "
+            f"packer: `npuembed --prepare-model`")
 
     print(f"packing {model_dir.name} -> {Path(out).name}  (arch=gte_new_rope_geglu)")
     print(f"  hidden={hidden} heads={H} head_dim={head_dim} layers={L} "

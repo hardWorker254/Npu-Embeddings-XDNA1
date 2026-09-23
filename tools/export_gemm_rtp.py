@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
+#
+# One invocation writes a complete, self-describing design set per NPU
+# generation. The output convention is one name everywhere:
+#
+#   <out>/artifacts_npu1/gemm_rtp   (arch 1, device npu1)
+#   <out>/artifacts_npu2/gemm_rtp   (arch 2, device npu2)
+#
+# where <out> defaults to runtime/. That is the same path the README and the
+# runtime's --artifacts flag name, so the tool and the documents agree.
+#
 # Usage:
-#   python tools/export_gemm_rtp_multiarch.py --arch all --batch 128 --cols 8 \
-#       --out runtime/artifacts_b128il
-#
-#   python tools/export_gemm_rtp_multiarch.py --arch 1 --batch 128 --cols 8 \
-#       --out runtime/artifacts_b128il
-#
-#   python tools/export_gemm_rtp_multiarch.py --arch 2 --batch 128 --cols 8 \
-#       --out runtime/artifacts_b128il
+#   python tools/export_gemm_rtp.py --arch all --batch 128 --cols 8
+#   python tools/export_gemm_rtp.py --arch 1   --batch 128 --cols 8
+#   python tools/export_gemm_rtp.py --arch 2   --batch 128 --cols 8
 
 from __future__ import annotations
 
@@ -29,7 +34,6 @@ from ml_dtypes import bfloat16
 
 
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "experiments" / "m5-pretiled-gemm"))
 sys.path.insert(0, str(REPO / "tools"))
 
 
@@ -498,6 +502,14 @@ def cache_dir_for(args: argparse.Namespace, arch: str) -> Path:
     return root
 
 
+def arch_out_dir(base: str | Path, arch: str) -> Path:
+    """
+    The one output convention: one directory per generation, each holding a
+    `gemm_rtp` design set. `base` is the artifacts root (default runtime/).
+    """
+    return Path(base) / f"artifacts_npu{arch}"
+
+
 def extra_markers_for_arch(
     args: argparse.Namespace,
     arch: str,
@@ -770,6 +782,16 @@ def export_arch(args: argparse.Namespace, arch: str) -> int:
         f"({len(STREAM_ORDER)} shapes x {len(tiers)} batch tiers)"
     )
 
+    if args.with_eltwise:
+        # Same generation root, alongside gemm_rtp: the runtime's
+        # --npu-eltwise flag resolves these by name. Build them in the same
+        # invocation so the two sets never drift apart by a rebuild.
+        import export_eltwise  # noqa: E402  (tools/ is on sys.path)
+        export_eltwise.export_arch(
+            Path(args.out), arch, args.batch, args.hidden, args.seq,
+            args.elt_cols, args.gelu_tile, args.ln_variant, args.sm_variant,
+            args.cache_root, args.per_arch_cache)
+
     return 0
 
 
@@ -821,6 +843,15 @@ def build_child_argv(
     if args.per_arch_cache:
         cmd.append("--per-arch-cache")
 
+    if args.with_eltwise:
+        cmd += [
+            "--with-eltwise",
+            "--elt-cols", str(args.elt_cols),
+            "--gelu-tile", str(args.gelu_tile),
+            "--ln-variant", args.ln_variant,
+            "--sm-variant", args.sm_variant,
+        ]
+
     if args.require_arch_marker:
         cmd.append("--require-arch-marker")
 
@@ -847,7 +878,14 @@ def main() -> int:
         ),
     )
 
-    ap.add_argument("--out", default=str(REPO / "runtime" / "artifacts"))
+    ap.add_argument(
+        "--out",
+        default=str(REPO / "runtime"),
+        help=(
+            "artifacts root. Each generation is written to "
+            "<out>/artifacts_npu<N>/gemm_rtp. Default: runtime/"
+        ),
+    )
 
     ap.add_argument(
         "--batch",
@@ -950,6 +988,48 @@ def main() -> int:
     )
 
     ap.add_argument(
+        "--with-eltwise",
+        action="store_true",
+        help=(
+            "also build the gelu/layernorm/softmax design directories for the "
+            "same generation, alongside gemm_rtp. The runtime only uses them "
+            "when --npu-eltwise is given; the host path stays the default."
+        ),
+    )
+
+    ap.add_argument(
+        "--elt-cols",
+        type=int,
+        default=1,
+        help=(
+            "AIE columns for the eltwise designs built by --with-eltwise. "
+            "LayerNorm and softmax refuse above 2 (see tools/export_eltwise.py)."
+        ),
+    )
+
+    ap.add_argument(
+        "--gelu-tile",
+        type=int,
+        default=1024,
+        choices=[1024, 4096],
+        help="elements per GELU DMA transaction for --with-eltwise.",
+    )
+
+    ap.add_argument(
+        "--ln-variant",
+        default="il4",
+        choices=["base", "il4", "rne", "il4_rne"],
+        help="LayerNorm kernel variant for --with-eltwise.",
+    )
+
+    ap.add_argument(
+        "--sm-variant",
+        default="poly_il4",
+        choices=["lib", "poly", "poly_il4", "poly_rne", "poly_il4_rne"],
+        help="softmax kernel variant for --with-eltwise.",
+    )
+
+    ap.add_argument(
         "--cache-root",
         default=str(DEFAULT_CACHE_ROOT),
         help=(
@@ -1003,6 +1083,21 @@ def main() -> int:
     validate_geometry(args, tiers)
 
     if args.arch == "all":
+        # Two generations compiled in one run MUST NOT share a JIT cache: with
+        # no architecture marker in the MLIR (the default) their shape markers
+        # are identical, so find_cache() would see two candidates and refuse.
+        # Per-arch caches are the existing mechanism for that separation, so
+        # turn them on for the multi-arch case unless the caller already gave
+        # an architecture marker.
+        if (not args.per_arch_cache and not args.require_arch_marker
+                and not args.arch_marker):
+            print(
+                "[export] --arch all: enabling --per-arch-cache so the two "
+                "generations do not collide in one JIT cache",
+                file=sys.stderr,
+            )
+            args.per_arch_cache = True
+
         if args.in_process:
             if args.per_arch_cache:
                 print(
@@ -1014,11 +1109,11 @@ def main() -> int:
             for arch in ARCHES:
                 child_args = copy.deepcopy(args)
                 child_args.arch = arch
-                child_args.out = str(Path(args.out) / f"arch{arch}")
+                child_args.out = str(arch_out_dir(args.out, arch))
                 export_arch(child_args, arch)
         else:
             for arch in ARCHES:
-                outdir = Path(args.out) / f"arch{arch}"
+                outdir = arch_out_dir(args.out, arch)
                 cmd = build_child_argv(args, arch, outdir)
 
                 print(
@@ -1030,6 +1125,7 @@ def main() -> int:
 
         return 0
 
+    args.out = str(arch_out_dir(args.out, args.arch))
     return export_arch(args, args.arch)
 
 

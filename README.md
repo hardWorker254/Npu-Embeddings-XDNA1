@@ -16,9 +16,12 @@ source /opt/xilinx/xrt/setup.sh # Or your cutom path
 export PEANO_INSTALL_DIR=/home/prof/.local/lib/python3.14/site-packages/llvm-aie # Or your path to llvm-aie
 export XRT_INCLUDE_DIR=/opt/xilinx/xrt/include
 
-python tools/export_gemm_rtp.py --batch 16 --batches 4,8,16 --cols 4     --hidden 768 --intermediate 3072 --gated-ffn --qkv-n 2304     --emulate-bfp16 --c-bf16     --out runtime/artifacts_npu1 # For gte-multilimgual-base
+# --out is the artifacts root; each generation lands in
+# <out>/artifacts_npu<N>/gemm_rtp. Default --arch all writes npu1 and npu2.
 
-python tools/export_gemm_rtp.py --batch 16 --batches 4,8,16 --cols 4     --emulate-bfp16 --c-bf16 --out runtime/artifacts_npu1 # For all-MiniLM-L6-v2
+python tools/export_gemm_rtp.py --batch 16 --batches 4,8,16 --cols 4     --hidden 768 --intermediate 3072 --gated-ffn --qkv-n 2304     --emulate-bfp16 --c-bf16     --out runtime # For gte-multilimgual-base
+
+python tools/export_gemm_rtp.py --batch 16 --batches 4,8,16 --cols 4     --emulate-bfp16 --c-bf16 --out runtime # For all-MiniLM-L6-v2
 
 cd runtime
 cmake --build build --config Release
@@ -434,8 +437,7 @@ research/       open questions, prior art
 - **[tasks/](tasks/README.md)** — the day-by-day log; the failures are the
   valuable part
 
-This repository is the public subset of a larger working one, assembled by
-[`tools/sync_public_repo.py`](tools/sync_public_repo.py). What is not here is an
+This repository is its own public tree. What is not here is an
 indexed literature review — summaries written to be usable *instead of* the
 papers, which makes them exactly the thing not to republish. Everything else
 ships, so a document referring to `research/papers/` is describing that private

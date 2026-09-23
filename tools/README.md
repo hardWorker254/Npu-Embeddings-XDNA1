@@ -1,66 +1,65 @@
 # tools/ — build-time tooling
 
-Offline weight transformation. Runs once, before anything touches the NPU.
-Built in M4 ([`tasks/0006`](../tasks/0006-m4-npue-pretiling/TASK.md)).
+Python used before anything touches the NPU: packing the model container,
+exporting the IRON designs, and verifying both. Nothing here ships — Python is
+build-time and prototyping only.
 
-numpy only, so everything here runs in the **iron** env. Nothing here ships —
-Python is build-time and prototyping only.
+Runs in the **iron** environment, except the gates marked `.venv-ref` below.
+Everything is invoked from the repository root.
 
-| | |
-|---|---|
-| `npue.py` | The `.npue` container: header, JSON directory, tiling, reader, writer. **This is the reference the C++ loader in M7 must match.** |
-| `pack_npue.py` | HuggingFace checkpoint → pre-tiled, pre-fused `.npue`. |
-| `verify_npue.py` | **The M4 gate.** Spec conformance, bit-exact round-trip, the stale-layout guard, and the encoder run off packed weights against the M3 goldens. |
+## Inventory
 
-Spec: [`docs/04-model/npue-format.md`](../docs/04-model/npue-format.md).
+| File | Role | Invoked by |
+|---|---|---|
+| `npue.py` | The `.npue` container: header, JSON directory, tiling, reader, writer. Reference the C++ loader must match. | Imported by `pack_npue.py`, `export_gemm_rtp.py`, `gemm_pretiled_research.py` and the `verify_*` gates. |
+| `pack_npue.py` | HuggingFace checkpoint → pre-tiled, pre-fused `.npue`. | `BUILD.md` §2.2; `verify_npue.py`, `verify_pack_parity.py`. |
+| `export_gemm_rtp.py` | Builds the unified `gemm_rtp` design set (`final.xclbin` + instruction streams) into `runtime/artifacts_npu*`. | `BUILD.md` §2.3; fork `README.md`. |
+| `gemm_pretiled.py` | The production GEMM design library (`pretiled_array()`). | Imported by `export_gemm_rtp.py`; research driver in `gemm_pretiled_research.py`. |
+| `gemm_pretiled_research.py` | Research driver for that library: presets, traces, wall-clock benchmarks, `--arch`/`--dev` selection. | Run by hand. |
+| `toolchain_provenance.py` | Writes the `toolchain.json` sidecar next to each `design.json`. | Imported by `export_gemm_rtp.py`. |
+| `export_validation.py` | Dumps the runtime's golden check vectors to `runtime/artifacts/validation/`. | `BUILD.md` §2.2. |
+| `gen_tokenizer_tables.py` | Emits `runtime/include/tokenizers/bert_unicode_tables.hpp` from Python's `unicodedata`. | `BUILD.md` §2.2. |
+| `gen_xlmr_unicode_tables.py` | Emits `runtime/include/tokenizers/xlmr_unicode_tables.hpp` the same way. | Run by hand when the XLM-R tokenizer changes. |
+| `make_tail_reference.py` | Generates the fp32 reference JSON `verify_tail.py` gates against. Needs torch. | Run by hand in `.venv-ref`; `verify_tail.py` points at its output. |
+| `xlmr_tokenizer_ref.py` | Pure-Python executable spec for the C++ XLM-R tokenizer. | Reference for the C++ port; run by hand. |
+| `verify_npue.py` | `.npue` gate: spec conformance, bit-exact round-trip, stale-layout guard, goldens. | `BUILD.md` §2.5. |
+| `verify_npue_nomic.py` | arch=2 gate for the nomic `.npue`. | Run by hand. |
+| `verify_pack_parity.py` | The Python and C++ packers must agree byte for byte. | `BUILD.md` §2.5. |
+| `verify_endpoint.py` | Drives `--serve` with the official OpenAI client and checks the numbers. Needs `.venv-ref`. | `BUILD.md` §2.5. |
+| `verify_semantics.py` | Near/far ordering gate — no reference, no tolerance. Stdlib only, so it runs against a cold release. | Run by hand / release gate. |
+| `verify_tail.py` | Per-model, per-datapath p99 tail gate. Stdlib only. | Run by hand / release gate. |
+| `semantic_corpus.json` | The shared near/far corpus (data, not a tool). | Read by `verify_semantics.py` and `make_tail_reference.py`. |
 
 ## Why the weights are transformed offline
 
 The runtime must not transpose, convert dtypes, concatenate or re-tile — all are
 pure functions of the weights. What is left at load time is `mmap` and pointer
-arithmetic.
-
-> **Corrected by M5** ([`tasks/0007`](../tasks/0007-m5-pretiled-gemm-on-npu/TASK.md)).
-> This directory originally also claimed pre-tiling was the only way to express
-> `ffn_down` (the 10-bit, max-1023 DMA BD size field) and the main performance
-> lever. On hardware, **neither holds for the whole-array design**: it already
-> expresses `ffn_down` fine, and pre-tiling measures as a ±9% end-to-end wash
-> with worse per-core stability. The BD failure was a property of the
-> single-core design. The reasons above — no runtime transposes, conversions or
-> concatenations — are real and are why the container stays.
+arithmetic. The layout descriptor is **data, not code**: to try different tile
+dimensions, repack rather than editing a loader. `layout_hash` makes a stale file
+fail loudly instead of producing plausible garbage embeddings.
 
 ## Run
 
-```powershell
-& "C:\Users\vegar\.conda\envs\iron\python.exe" tools\pack_npue.py
-& "C:\Users\vegar\.conda\envs\iron\python.exe" tools\verify_npue.py
+```sh
+python tools/pack_npue.py             # -> models/all-MiniLM-L6-v2.npue
+python tools/verify_npue.py           # bit-exact round trip, layout guard, goldens
+python tools/export_validation.py     # golden check vectors for the runtime
 ```
 
-The `.npue` (68.79 MB) is gitignored — a deterministic derivative of the
-sha256-pinned checkpoint, which travels inside the file as `source_sha256`.
+Retuning the tiling repacks instead of editing the loader:
 
-## Retuning the tiling
-
-The layout descriptor is **data, not code**. To try different tile dimensions,
-repack rather than editing a loader:
-
-```powershell
-& "C:\Users\vegar\.conda\envs\iron\python.exe" tools\pack_npue.py --tile-n 32 --out models\minilm_n32.npue
+```sh
+python tools/pack_npue.py --tile-n 32 --out models/minilm_n32.npue
 ```
 
-`layout_hash` makes a stale file fail loudly instead of producing plausible
-garbage embeddings.
+The `.npue` is gitignored — a deterministic derivative of the sha256-pinned
+checkpoint, which travels inside the file as `source_sha256`.
 
-> `tile_n = 48` is the default because M2's winning `tile_n = 32` is **illegal at
-> 8 columns** for MiniLM's N dims (`1152/(32·8) = 4.5`). It would have run fine
-> at 4 columns, which is where M2 measured.
+## Design export
 
-## Status
+`export_gemm_rtp.py` builds each (shape × batch tier) design, then refusing
+unless every design shares one static configuration (they must differ only in
+UUID metadata). The commands for this fork's two served models are in
+[`README.md`](../README.md)'s `Operations:` block.
 
-**Gate passed.** Round-trip bit-exact — 0 of 10,616,832 bf16 elements differ —
-and the encoder running off packed weights lands at 0.92× M3's end-to-end bf16
-baseline, so the fusions cost nothing beyond the number format.
-
-**On hardware (M5):** `tile_n = 48` confirmed at 8 columns for all four MiniLM
-GEMMs, and baking the sub-tile order into the file is free. Pre-tiling itself
-does not improve throughput — see the correction above.
+Spec: [`docs/04-model/npue-format.md`](../docs/04-model/npue-format.md).
