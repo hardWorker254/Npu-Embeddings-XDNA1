@@ -674,9 +674,13 @@ NpuEmbeddings/
 ├── tools/                    BUILD-TIME Python (never at runtime)
 │   ├── pack_npue.py          HuggingFace → .npue
 │   ├── npue.py               reader/writer + gemm_b_layout()/layout_hash()
-│   ├── verify_npue.py        round-trip check
-│   ├── export_xclbin.py      IRON designs → runtime/artifacts*/
-│   └── export_validation.py  golden check vectors → artifacts/validation/
+│   ├── export_gemm_rtp.py    IRON GEMM designs → runtime/artifacts_npu*/
+│   ├── gemm_pretiled.py      the production GEMM design (imported by the exporter)
+│   ├── export_validation.py  golden check vectors → runtime/artifacts/validation/
+│   ├── gen_tokenizer_tables.py / gen_xlmr_unicode_tables.py
+│   │                         Unicode tables → runtime/include/tokenizers/
+│   ├── verify_*.py           .npue, parity, endpoint, semantics and tail gates
+│   └── README.md             full inventory: role and invoker of every tool
 ├── runtime/                  THE PRODUCT — C++ + XRT, no Python
 │   ├── CMakeLists.txt
 │   ├── include/npue.hpp      mmap reader for .npue

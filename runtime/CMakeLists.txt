@@ -41,32 +41,62 @@ endif()
 
 add_executable(npuembed
   src/main.cpp
-  src/npue.cpp
-  src/tokenizer.cpp
-  src/npue_pack.cpp
-  src/npu_device.cpp
+  src/runtime.cpp
+  # Subtask 1: core infrastructure (device/design/model/pool).
+  src/device.cpp
+  src/design.cpp
+  src/model.cpp
+  src/pool.cpp
+  # Subtask 10: shared utilities under common/.
+  src/common/npue_pack.cpp
   src/npu_contention.cpp
-  src/hub.cpp
+  src/common/hub.cpp
+  # Subtask 2: tokenizer system (base interface + WordPiece + XLM-R + Gemma).
+  # The old src/tokenizer*.cpp were dropped with their headers; WordPiece is
+  # now npue::WordPiece in tokenizers/wordpiece.cpp.
+  src/tokenizers/tokenizer.cpp
+  src/tokenizers/wordpiece.cpp
   # arch=1 (EmbeddingGemma family, tasks/0061/0063/00XX): all three are
   # standalone and XRT-free (see their own file headers) -- added here only
   # so main.cpp's run_gemma_mode() can call them. Nothing in them touches
-  # npu_device.hpp/XRT.
-  src/tokenizer_gemma.cpp
-  src/gemma_kernels.cpp
-  src/gemma_encode.cpp
+  # runtime/device.hpp or XRT.
+  src/tokenizers/gemma.cpp
+  src/encoders/gemma_kernels.cpp
   # C++ port of tools/gen_gemma_tokenizer_table.py (tasks/0067): a
   # dependency-free JSON DOM parser and the table generator built on it.
   # Both are XRT-free like the arch=1 files above; json_min is generic and
   # not itself EmbeddingGemma-specific.
-  src/json_min.cpp
-  src/gemma_tokenizer_gen.cpp
+  src/common/json_min.cpp
+  src/tokenizers/gemma_tokenizer_gen.cpp
   # arch=3 (XLM-R family, T52, tasks/0127/0133): SentencePiece Unigram
   # tokenizer + the C++ port of tools/gen_xlmr_tokenizer_table.py. Both
   # XRT-free like the gemma pair above; not yet wired into main.cpp (the
   # arch-3 integration is a later task) -- compiled in so the packer-side
   # generator ships with the binary, same rationale as gemma's.
-  src/tokenizer_xlmr.cpp
-  src/xlmr_tokenizer_gen.cpp
+  src/tokenizers/xlmr.cpp
+  src/tokenizers/xlmr_tokenizer_gen.cpp
+  # Subtask 3: Model system
+  src/models/model_loader.cpp
+  src/models/bert_model.cpp
+  src/models/gemma_model.cpp
+  src/models/stt_model.cpp
+  # Subtask 7: STT extension. The tokenizer stub lives with the other
+  # tokenizers but is grouped here with the rest of the STT placeholders.
+  src/tokenizers/stt.cpp
+  src/stt/stt_engine.cpp
+  src/stt/whisper.cpp
+  # Subtask 4: Encoder system
+  src/encoders/bert_encoder.cpp
+  src/encoders/gemma_npu_encoder.cpp
+  src/encoders/gemma_host_encoder.cpp
+  src/encoder.cpp
+  # Subtask 5: server system (server.hpp is header-only; these are the two
+  # translation units that were previously inline in main.cpp/run_execute.hpp).
+  src/server/embed_backend.cpp
+  src/server/embed_service.cpp
+  # Subtask 6: CLI system
+  src/cli/cli.cpp
+  src/cli/subcommand.cpp
 )
 
 target_include_directories(npuembed PRIVATE include "${XRT_INCLUDE_DIR}")
