@@ -1,0 +1,29 @@
+{
+  "_doc": "Single source of truth for per-model NPU export geometry. Consumed by tools/export_gemm_rtp.py (S2+). Geometry MUST match runtime/src/common/hub.cpp (catalog table lines 52-142 and the bfp16 adoption list lines 161-168); tools/verify_targets.py (S7) enforces parity. Mapping rules: datapath 'bfp16' -> --emulate-bfp16 --c-bf16; datapath 'bf16' -> --c-bf16 only; qkv_n null -> --qkv-n omitted (means 3*hidden); model.overrides.* beats defaults.* for that model; arches[N] supplies --cols/--batch/--batches; max_batch is a hard per-arch ceiling. datapath flag mapping lives in code (S2), not here, to avoid duplication.",
+  "schema": 1,
+  "defaults": {
+    "seq": 64,
+    "tile_m": 64,
+    "tile_k": 64,
+    "tile_n": 48,
+    "identity_threshold": 80,
+    "c_bf16": true
+  },
+  "arches": {
+    "1": { "device": "npu1", "cols": 4, "batch": 16, "batches": [4, 8, 16], "max_batch": 16 },
+    "2": { "device": "npu2", "cols": 8, "batch": 128, "batches": [4, 16, 32, 128], "max_batch": null }
+  },
+  "models": {
+    "all-MiniLM-L6-v2":       { "hidden": 384,  "intermediate": 1536, "gated_ffn": false, "qkv_n": null, "datapath": "bfp16" },
+    "bge-small-en-v1.5":      { "hidden": 384,  "intermediate": 1536, "gated_ffn": false, "qkv_n": null, "datapath": "bf16"  },
+    "bge-base-en-v1.5":       { "hidden": 768,  "intermediate": 3072, "gated_ffn": false, "qkv_n": null, "datapath": "bfp16" },
+    "bge-large-en-v1.5":      { "hidden": 1024, "intermediate": 4096, "gated_ffn": false, "qkv_n": null, "datapath": "bfp16", "overrides": { "tile_n": 32 } },
+    "nomic-embed-text-v1.5":  { "hidden": 768,  "intermediate": 3072, "gated_ffn": true,  "qkv_n": null, "datapath": "bfp16" },
+    "embeddinggemma-300m":    { "hidden": 768,  "intermediate": 1152, "gated_ffn": true,  "qkv_n": 1536, "datapath": "bfp16" },
+    "gte-multilingual-base":  { "hidden": 768,  "intermediate": 3072, "gated_ffn": true,  "qkv_n": 2304, "datapath": "bfp16" }
+  },
+  "kinds": {
+    "gemm_rtp": { "exporter": "export_gemm_rtp", "streams": ["qkv", "attn_out", "ffn_up", "ffn_down"] },
+    "stt": { "exporter": null, "streams": [] }
+  }
+}

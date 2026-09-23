@@ -9,7 +9,7 @@
 #include "cli/cli.hpp"
 #include "cli/subcommand.hpp"
 #include "runtime/runtime.hpp"
-#include "models/model_loader.hpp"
+#include "embed_models/model_loader.hpp"
 
 #include <exception>
 

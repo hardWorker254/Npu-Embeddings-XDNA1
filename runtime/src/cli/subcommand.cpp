@@ -11,7 +11,7 @@
 #include "common/design_selection.hpp"
 #include "common/hub.hpp"
 #include "common/model_catalog.hpp"
-#include "models/model_loader.hpp"
+#include "embed_models/model_loader.hpp"
 #include "runtime/runtime.hpp"
 
 #include <cstdio>
@@ -168,7 +168,8 @@ int run_add(int argc, char **argv) {
     std::printf("  %-10s tile_n %lld%s\n", "tiling", (long long)e.tile_n,
                 pad_note.c_str());
     const std::string art =
-        pick_artifacts(root, e.hidden, e.ffn, e.gated_ffn, e.qkv_n);
+        pick_artifacts(root, e.hidden, e.ffn, e.gated_ffn, e.qkv_n, "", "",
+                       e.name);
     std::printf("  %-10s %s\n", "design",
                 art.empty()
                     ? "NONE INSTALLED for this geometry -- `serve` will "

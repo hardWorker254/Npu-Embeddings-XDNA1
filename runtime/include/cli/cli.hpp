@@ -143,7 +143,7 @@ inline void print_usage() {
         "                      instead of the host. Requires the sibling\n"
         "                      gelu/, layernorm/ and softmax/ design sets next\n"
         "                      to gemm_rtp (tools/export_gemm_rtp.py\n"
-        "                      --with-eltwise, or tools/export_eltwise.py);\n"
+        "                      --npu-eltwise, or tools/export_eltwise.py);\n"
         "                      a missing one is refused by name, never silently\n"
         "                      run on the host. OFF by default: the host path is\n"
         "                      the measured-faster one, so this flag can LOWER\n"
@@ -220,7 +220,7 @@ inline void print_catalog(const std::string &root) {
         const ModelEntry *m = is_installed(e.name);
         const bool have_design =
             !pick_artifacts(root, e.hidden, e.ffn, e.gated_ffn, e.qkv_n, "",
-                            e.datapath).empty();
+                            e.datapath, e.name).empty();
         const char *state = !m                              ? "available"
                             : !encoder_implemented(m->arch) ? "no encoder"
                             : m->gemm_layout == "host"      ? "cpu"
@@ -252,7 +252,7 @@ inline void print_catalog(const std::string &root) {
                     !encoder_implemented(m.arch)              ? "no encoder"
                     : m.gemm_layout == "host"                 ? "cpu"
                     : pick_artifacts(root, m.hidden, m.ffn, m.gated_ffn,
-                                     m.qkv_n, "", "bf16").empty()
+                                     m.qkv_n, "", "bf16", m.name).empty()
                         ? "no design" : "ready",
                     (long long)m.layers, (long long)m.hidden, m.pooling.c_str(),
                     m.mb, m.repo.c_str());

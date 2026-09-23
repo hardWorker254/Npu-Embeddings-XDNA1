@@ -75,16 +75,17 @@ add_executable(npuembed
   # generator ships with the binary, same rationale as gemma's.
   src/tokenizers/xlmr.cpp
   src/tokenizers/xlmr_tokenizer_gen.cpp
-  # Subtask 3: Model system
-  src/models/model_loader.cpp
-  src/models/bert_model.cpp
-  src/models/gemma_model.cpp
-  src/models/stt_model.cpp
-  # Subtask 7: STT extension. The tokenizer stub lives with the other
-  # tokenizers but is grouped here with the rest of the STT placeholders.
-  src/tokenizers/stt.cpp
-  src/stt/stt_engine.cpp
-  src/stt/whisper.cpp
+  # Subtask 3: Embedding model system
+  src/embed_models/model_loader.cpp
+  src/embed_models/bert_model.cpp
+  src/embed_models/gemma_model.cpp
+  # Subtask 7: STT extension (Whisper). The tokenizer stub lives with the
+  # other tokenizers but is grouped here with the rest of the Whisper
+  # placeholders.
+  src/tokenizers/whisper.cpp
+  src/whisper/whisper_model.cpp
+  src/whisper/stt_engine.cpp
+  src/whisper/whisper.cpp
   # Subtask 4: Encoder system
   src/encoders/bert_encoder.cpp
   src/encoders/gemma_npu_encoder.cpp

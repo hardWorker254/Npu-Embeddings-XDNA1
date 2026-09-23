@@ -32,6 +32,16 @@ int Runtime::run(int argc, char **argv) {
         if (std::string(argv[i]) == "--dev")
             app::set_running_device(argv[i + 1]);
 
+    // --artifacts may arrive either from the constructor (the flag-form path
+    // parses it in main.cpp) or, for the `serve`/`embed` subcommands, only in
+    // argv: launch() constructs this Runtime with an empty art and forwards
+    // the flag verbatim, so without this the subcommand silently ignored it
+    // and always auto-selected. Reading it here fixes that and stays
+    // consistent with --dev/--bench/--bo-mode, which are also read off argv.
+    for (int i = 1; i < argc - 1; ++i)
+        if (std::string(argv[i]) == "--artifacts")
+            art_ = argv[i + 1];
+
     // arch=1 (EmbeddingGemma) containers own a completely different pipeline
     // (no seven-design selection, a host-only --cpu control, MQA) and are
     // dispatched before the BERT design resolution, exactly as the old main()
@@ -77,16 +87,24 @@ int Runtime::run(int argc, char **argv) {
             return std::ifstream(d + "/gemm_rtp/design.json").good() ||
                    std::ifstream(d + "/qkv/design.json").good();
         };
-        const std::vector<std::string> candidates = {
-            art_, root_ + "/" + art_, root_ + "/runtime/" + art_};
+        // The candidate list lives in design_selection.hpp so the BERT and
+        // arch=1 (EmbeddingGemma) paths cannot drift. It now includes the
+        // per-model layout's <name>/artifacts_npu<arch>, which is what makes
+        // `--artifacts <model>` work one level deeper than before.
+        const std::vector<std::string> candidates =
+            artifacts_candidates(root_, art_);
         std::string found;
         for (const auto &c : candidates)
             if (has_design(c)) { found = c; break; }
-        if (found.empty())
+        if (found.empty()) {
+            std::string looked;
+            for (size_t i = 0; i < candidates.size(); ++i)
+                looked += (i ? ", " : "") + candidates[i];
             throw std::runtime_error(
                 "no design set found for --artifacts '" + art_ +
                 "'; looked for gemm_rtp/design.json or qkv/design.json under " +
-                candidates[0] + ", " + candidates[1] + " and " + candidates[2]);
+                looked);
+        }
         art_ = found;
     }
 
@@ -101,7 +119,7 @@ int Runtime::run(int argc, char **argv) {
         art_ = pick_artifacts(root_, g_hidden,
                                  ctx.model->config_int("intermediate"),
                                  config_flag(*ctx.model, "gated_ffn", false), qkv_n,
-                                 layout, want_datapath);
+                                 layout, want_datapath, g_model_name);
         if (art_.empty())
             throw std::runtime_error(
                 "no NPU design set matches " + g_model_name + " (hidden " +

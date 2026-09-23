@@ -1,8 +1,8 @@
-//===- bert_model.hpp --------------------------------------------------*- C++ -*-===//
+//===- whisper_model.hpp -----------------------------------------------*- C++ -*-===//
 //
-// NpuEmbeddings -- BERT model wrapper. Loads a .npue container with
-// arch "bert_abs_gelu_postln" or "nomic_bert_rope_swiglu" and
-// provides factory methods for the BERT encoder and WordPiece tokenizer.
+// NpuEmbeddings -- Whisper model wrapper. Placeholder for future Whisper
+// integration. Loads a .npue container and provides factory methods for the
+// Whisper tokenizer and encoder.
 // SPDX-License-Identifier: Apache-2.0
 //===----------------------------------------------------------------------===//
 
@@ -12,16 +12,14 @@
 #include <memory>
 #include <string>
 
-#include "models/model_loader.hpp"
+#include "embed_models/model_loader.hpp"
 #include "runtime/model.hpp"
-#include "tokenizers/wordpiece.hpp"
-#include "encoders/bert_encoder.hpp"
 
 namespace npue {
 
-class BertModel : public Model {
+class WhisperModel : public Model {
 public:
-  explicit BertModel(const std::string &path);
+  explicit WhisperModel(const std::string &path);
 
   std::unique_ptr<Tokenizer> make_tokenizer() override;
   int64_t hidden() const override;
@@ -36,7 +34,7 @@ private:
   std::string name_;
 };
 
-class BertModelLoader : public ModelLoader {
+class WhisperModelLoader : public ModelLoader {
 public:
   bool handles(const std::string &arch) const override;
   std::unique_ptr<Model> load(const std::string &path) override;

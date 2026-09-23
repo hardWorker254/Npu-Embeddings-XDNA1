@@ -12,7 +12,7 @@
 #include <memory>
 #include <string>
 
-#include "models/model_loader.hpp"
+#include "embed_models/model_loader.hpp"
 #include "runtime/model.hpp"
 #include "tokenizers/gemma.hpp"
 #include "encoders/gemma_npu_encoder.hpp"

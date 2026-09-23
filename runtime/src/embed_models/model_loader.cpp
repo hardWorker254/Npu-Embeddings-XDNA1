@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //===----------------------------------------------------------------------===//
 
-#include "models/model_loader.hpp"
+#include "embed_models/model_loader.hpp"
 
 // The registry functions and inline methods are defined in the header.
 // This translation unit exists so that model_loader.hpp can be included

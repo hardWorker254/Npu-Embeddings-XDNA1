@@ -1,6 +1,6 @@
-//===- stt.hpp -----------------------------------------------------------*- C++ -*-===//
+//===- whisper.hpp -------------------------------------------------------*- C++ -*-===//
 //
-// NpuEmbeddings -- STT tokenizer stub. Placeholder for future Whisper
+// NpuEmbeddings -- Whisper tokenizer stub. Placeholder for future Whisper
 // integration. SPDX-License-Identifier: Apache-2.0
 //===----------------------------------------------------------------------===//
 
@@ -14,7 +14,7 @@
 
 namespace npue {
 
-class STTTokenizer : public Tokenizer {
+class WhisperTokenizer : public Tokenizer {
 public:
   Encoded encode(const std::string &text, int max_len) const override;
   size_t vocab_size() const override { return 0; }

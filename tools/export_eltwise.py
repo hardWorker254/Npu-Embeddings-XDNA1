@@ -26,7 +26,7 @@
 #   python tools/export_eltwise.py --arch 1   --batch 128
 #
 # The eltwise designs are normally emitted alongside the GEMM set by
-# `tools/export_gemm_rtp.py --with-eltwise`; this tool exists so they can be
+# `tools/export_gemm_rtp.py --npu-eltwise`; this tool exists so they can be
 # rebuilt on their own.
 
 import argparse

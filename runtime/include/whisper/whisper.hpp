@@ -9,7 +9,7 @@
 
 #pragma once
 
-#include "stt/stt_engine.hpp"
+#include "whisper/stt_engine.hpp"
 
 namespace npue {
 

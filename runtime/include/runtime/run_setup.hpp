@@ -104,7 +104,7 @@ inline void load_designs(RunContext &ctx) {
               "--npu-eltwise asks for " + std::string(op) +
               " on the array, but " + dir + "/design.json does not exist -- "
               "build it with tools/export_eltwise.py (or "
-              "tools/export_gemm_rtp.py --with-eltwise), or drop the flag and "
+              "tools/export_gemm_rtp.py --npu-eltwise), or drop the flag and "
               "run the host path, which is the measured-faster one");
         dst = std::make_unique<npu::Design>(*ctx.dev, dir);
         const auto &inf = dst->info();

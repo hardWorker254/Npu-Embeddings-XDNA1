@@ -6,7 +6,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //===----------------------------------------------------------------------===//
 
-#include "models/gemma_model.hpp"
+#include "embed_models/gemma_model.hpp"
 
 #include <memory>
 #include <stdexcept>

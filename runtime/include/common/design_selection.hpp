@@ -55,6 +55,64 @@ inline int64_t device_arch(const std::string &device) {
   return 0;
 }
 
+// WHERE A MODEL'S DESIGN SET LIVES IN THE PER-MODEL LAYOUT (subtask 4).
+//
+// tools/export_gemm_rtp.py --target writes <out>/<model>/artifacts_npu<N>/,
+// so a design set is two levels below the root; the old one-level layouts
+// (<root>/gemm_rtp, <root>/<set>/gemm_rtp) still ship and still win when the
+// root itself is a set. These are candidates, not answers: pick_artifacts
+// tests each with design_fits, so a wrong generation is rejected by the
+// design's own record rather than by the name. <arch> comes from the running
+// device (npu1->1), so only this generation's directory is proposed first.
+inline std::vector<std::string> model_set_candidates(
+    const std::string &root, const std::string &model_name,
+    const std::string &device = "") {
+  std::vector<std::string> out;
+  if (model_name.empty()) return out;
+  namespace fs = std::filesystem;
+  const std::string dev = device.empty() ? running_device() : device;
+  const int64_t arch = device_arch(dev);
+  const fs::path r(root);
+  auto add = [&](const fs::path &p) {
+    const std::string s = p.string();
+    for (const auto &e : out)
+      if (e == s) return;
+    out.push_back(s);
+  };
+  if (arch > 0) {
+    const std::string sub = "artifacts_npu" + std::to_string(arch);
+    add(r / "runtime" / model_name / sub);
+    add(r / model_name / sub);
+  }
+  add(r / "runtime" / model_name);
+  add(r / model_name);
+  return out;
+}
+
+// The candidate directory LIST for an explicit --artifacts NAME-or-PATH,
+// shared by the BERT and arch=1 (EmbeddingGemma) paths so the two cannot
+// drift. `art` is tried verbatim (an absolute path), then under <root>, then
+// under <root>/runtime -- the three places this runtime ships. The per-model
+// layout adds <name>/artifacts_npu<arch> under both roots, which is what makes
+// `--artifacts <model>` work now that export writes one level deeper.
+inline std::vector<std::string> artifacts_candidates(
+    const std::string &root, const std::string &art,
+    const std::string &device = "") {
+  std::vector<std::string> out;
+  if (art.empty()) return out;
+  const std::string dev = device.empty() ? running_device() : device;
+  const int64_t arch = device_arch(dev);
+  out.push_back(art);
+  out.push_back(root + "/" + art);
+  out.push_back(root + "/runtime/" + art);
+  if (arch > 0) {
+    const std::string sub = "artifacts_npu" + std::to_string(arch);
+    out.push_back(root + "/" + art + "/" + sub);
+    out.push_back(root + "/runtime/" + art + "/" + sub);
+  }
+  return out;
+}
+
 // First string / integer field of a flat top-level JSON object. Enough for the
 // two scalar keys this header reads, and tolerant of formatting.
 inline std::string json_field_string(const std::string &js, const char *key) {
@@ -150,11 +208,19 @@ inline std::string default_root(const char *argv0) {
   // self-contained; the search only starts when there is nothing here.
   auto has_design = [&](const fs::path &d) {
     if (fs::exists(d / "gemm_rtp", ec)) return true;
-    // Several widths: one design set per subdirectory.
+    // Several widths: one design set per subdirectory. And one level deeper
+    // for the per-model layout (<d>/<model>/artifacts_npu<N>/gemm_rtp), which
+    // is what a self-contained export of a single model looks like.
     for (fs::directory_iterator it(d, ec), end; !ec && it != end;
-         it.increment(ec))
-      if (it->is_directory(ec) && fs::exists(it->path() / "gemm_rtp", ec))
-        return true;
+         it.increment(ec)) {
+      if (!it->is_directory(ec)) continue;
+      if (fs::exists(it->path() / "gemm_rtp", ec)) return true;
+      std::error_code ec2;
+      for (fs::directory_iterator jt(it->path(), ec2), jend;
+           !ec2 && jt != jend; jt.increment(ec2))
+        if (jt->is_directory(ec2) && fs::exists(jt->path() / "gemm_rtp", ec2))
+          return true;
+    }
     return false;
   };
   if (has_design(start) || fs::exists(start / "models", ec))
@@ -324,13 +390,25 @@ inline std::string pick_artifacts(const std::string &root, int64_t hidden,
                            int64_t intermediate, bool gated_ffn,
                            int64_t qkv_n = 0,
                            const std::string &want_layout = "",
-                           const std::string &want_datapath = "") {
+                           const std::string &want_datapath = "",
+                           const std::string &model_name = "") {
   namespace fs = std::filesystem;
   if (hidden <= 0 || intermediate <= 0) return "";
   std::error_code ec;
   if (design_fits(root, hidden, intermediate, gated_ffn, qkv_n, want_layout,
                   want_datapath))
     return root;
+
+  // THE PER-MODEL LAYOUT FIRST (subtask 4), by name rather than by scan: the
+  // model's own directory is the authoritative place for its design set, and
+  // naming it avoids a sibling model's set being chosen when widths coincide.
+  // Candidates are tested with design_fits like every other candidate, so a
+  // set built for the other generation is still refused.
+  if (!model_name.empty())
+    for (const auto &c : model_set_candidates(root, model_name))
+      if (design_fits(c, hidden, intermediate, gated_ffn, qkv_n, want_layout,
+                      want_datapath))
+        return c;
 
   // Sorted, so the choice is reproducible rather than filesystem-order
   // dependent -- and never by mtime, which a JIT cache hit does not restamp

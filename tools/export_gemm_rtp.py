@@ -10,7 +10,14 @@
 # where <out> defaults to runtime/. That is the same path the README and the
 # runtime's --artifacts flag name, so the tool and the documents agree.
 #
+# With --target <model> the model name becomes a subfolder so several models
+# can share one artifacts root without overwriting each other:
+#
+#   <out>/<model>/artifacts_npu1/gemm_rtp
+#   <out>/<model>/artifacts_npu2/gemm_rtp
+#
 # Usage:
+#   python tools/export_gemm_rtp.py --target gte-multilingual-base --arch 1
 #   python tools/export_gemm_rtp.py --arch all --batch 128 --cols 8
 #   python tools/export_gemm_rtp.py --arch 1   --batch 128 --cols 8
 #   python tools/export_gemm_rtp.py --arch 2   --batch 128 --cols 8
@@ -39,6 +46,29 @@ sys.path.insert(0, str(REPO / "tools"))
 
 DEFAULT_SEQ = 64
 STREAM_ORDER = ["qkv", "attn_out", "ffn_up", "ffn_down"]
+
+# Fallbacks for a fully manual invocation without --target. These mirror the
+# historic argparse defaults; with --target the values come from
+# tools/npu_targets.json instead.
+FALLBACK_BATCH = 128
+FALLBACK_COLS = 8
+FALLBACK_COLS_BY_ARCH = {
+    "1": 4,
+    "2": 8,
+}
+FALLBACK_HIDDEN = 384
+FALLBACK_M = 32
+FALLBACK_K = 32
+FALLBACK_N = 48
+FALLBACK_IDENTITY_THRESHOLD = 80
+
+DEFAULT_TARGETS_FILE = Path(__file__).resolve().parent / "npu_targets.json"
+
+TARGETS_SCHEMA = 1
+KNOWN_DEFAULT_KEYS = {
+    "seq", "tile_m", "tile_k", "tile_n", "identity_threshold", "c_bf16",
+}
+KNOWN_DATAPATHS = {"bf16", "bfp16"}
 
 # In the original design M tiling assumes 4 AIE rows.
 AIE_ROWS = 4
@@ -502,12 +532,36 @@ def cache_dir_for(args: argparse.Namespace, arch: str) -> Path:
     return root
 
 
-def arch_out_dir(base: str | Path, arch: str) -> Path:
+def arch_out_dir(base: str | Path, arch: str, target: str | None = None) -> Path:
     """
     The one output convention: one directory per generation, each holding a
     `gemm_rtp` design set. `base` is the artifacts root (default runtime/).
+
+    Without `target` this is the historic `<base>/artifacts_npu<arch>`. With a
+    `--target` model the model name is inserted, so
+    `<base>/<model>/artifacts_npu<arch>` is the per-model design set.
+
+    The function is idempotent: if `base` already IS the generation root
+    (`.../artifacts_npu<arch>`), it is returned unchanged. That keeps the
+    subprocess path correct, where the parent hands the resolved set-dir to
+    the child as `--out`.
     """
-    return Path(base) / f"artifacts_npu{arch}"
+    base = Path(base)
+    if base.name == f"artifacts_npu{arch}":
+        return base
+    if target:
+        return base / target / f"artifacts_npu{arch}"
+    return base / f"artifacts_npu{arch}"
+
+
+def set_out_dir(args: argparse.Namespace, arch: str) -> Path:
+    """
+    Single source of truth for where an architecture's design set is written.
+
+    Both `--arch all` branches (in-process and subprocess) and the single-arch
+    path go through here, so the layout cannot drift between them.
+    """
+    return arch_out_dir(args.out, arch, getattr(args, "target", None))
 
 
 def extra_markers_for_arch(
@@ -782,7 +836,7 @@ def export_arch(args: argparse.Namespace, arch: str) -> int:
         f"({len(STREAM_ORDER)} shapes x {len(tiers)} batch tiers)"
     )
 
-    if args.with_eltwise:
+    if args.npu_eltwise:
         # Same generation root, alongside gemm_rtp: the runtime's
         # --npu-eltwise flag resolves these by name. Build them in the same
         # invocation so the two sets never drift apart by a rebuild.
@@ -845,7 +899,7 @@ def build_child_argv(
 
     if args.with_eltwise:
         cmd += [
-            "--with-eltwise",
+            "--npu-eltwise",
             "--elt-cols", str(args.elt_cols),
             "--gelu-tile", str(args.gelu_tile),
             "--ln-variant", args.ln_variant,
@@ -859,6 +913,341 @@ def build_child_argv(
         cmd += ["--arch-marker", marker]
 
     return cmd
+
+
+def _require_int(
+    obj: dict,
+    key: str,
+    ctx: str,
+    minimum: int = 1,
+    allow_none: bool = False,
+) -> int | None:
+    if key not in obj:
+        raise SystemExit(f"{ctx}: missing '{key}'")
+    value = obj[key]
+    if value is None and allow_none:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+        raise SystemExit(
+            f"{ctx}: '{key}' must be an integer >= {minimum}, got {value!r}"
+        )
+    return value
+
+
+def load_targets(path: str | Path) -> dict:
+    """
+    Read and validate tools/npu_targets.json.
+
+    Validation is structural only: schema version, known keys and value types.
+    Parity with the C++ catalog in runtime/src/common/hub.cpp is a separate
+    check (tools/verify_targets.py, S7).
+    """
+    p = Path(path).expanduser()
+    if not p.is_file():
+        raise SystemExit(f"targets file not found: {p}")
+
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{p}: invalid JSON: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise SystemExit(f"{p}: top level must be an object")
+
+    schema = data.get("schema")
+    if schema != TARGETS_SCHEMA:
+        raise SystemExit(
+            f"{p}: unsupported schema {schema!r}; expected {TARGETS_SCHEMA}"
+        )
+
+    defaults = data.get("defaults")
+    arches = data.get("arches")
+    models = data.get("models")
+    kinds = data.get("kinds")
+
+    if not isinstance(defaults, dict):
+        raise SystemExit(f"{p}: missing or invalid 'defaults' object")
+    if not isinstance(arches, dict) or not arches:
+        raise SystemExit(f"{p}: missing or empty 'arches' object")
+    if not isinstance(models, dict) or not models:
+        raise SystemExit(f"{p}: missing or empty 'models' object")
+    if kinds is not None and not isinstance(kinds, dict):
+        raise SystemExit(f"{p}: 'kinds' must be an object")
+
+    unknown_defaults = set(defaults) - KNOWN_DEFAULT_KEYS
+    if unknown_defaults:
+        raise SystemExit(
+            f"{p}: unknown defaults keys: {sorted(unknown_defaults)}"
+        )
+    for key in ("seq", "tile_m", "tile_k", "tile_n", "identity_threshold"):
+        _require_int(defaults, key, f"{p}: defaults")
+    if "c_bf16" in defaults and not isinstance(defaults["c_bf16"], bool):
+        raise SystemExit(f"{p}: defaults.c_bf16 must be a boolean")
+
+    for arch, spec in arches.items():
+        ctx = f"{p}: arches[{arch!r}]"
+        if not isinstance(spec, dict):
+            raise SystemExit(f"{ctx}: must be an object")
+        if not str(arch).isdigit():
+            raise SystemExit(f"{ctx}: architecture key must be numeric")
+        _require_int(spec, "cols", ctx)
+        _require_int(spec, "batch", ctx)
+        if "batches" in spec:
+            batches = spec["batches"]
+            if (
+                not isinstance(batches, list)
+                or not batches
+                or any(
+                    not isinstance(b, int) or isinstance(b, bool) or b <= 0
+                    for b in batches
+                )
+            ):
+                raise SystemExit(
+                    f"{ctx}: 'batches' must be a non-empty list of "
+                    f"positive integers"
+                )
+        _require_int(spec, "max_batch", ctx, allow_none=True)
+
+    for name, spec in models.items():
+        ctx = f"{p}: models[{name!r}]"
+        if not isinstance(spec, dict):
+            raise SystemExit(f"{ctx}: must be an object")
+        _require_int(spec, "hidden", ctx)
+        _require_int(spec, "intermediate", ctx)
+        if not isinstance(spec.get("gated_ffn"), bool):
+            raise SystemExit(f"{ctx}: 'gated_ffn' must be a boolean")
+        _require_int(spec, "qkv_n", ctx, allow_none=True)
+        datapath = spec.get("datapath")
+        if datapath is not None and datapath not in KNOWN_DATAPATHS:
+            raise SystemExit(
+                f"{ctx}: 'datapath' must be one of {sorted(KNOWN_DATAPATHS)}"
+            )
+        overrides = spec.get("overrides")
+        if overrides is not None:
+            if not isinstance(overrides, dict):
+                raise SystemExit(f"{ctx}: 'overrides' must be an object")
+            unknown = set(overrides) - KNOWN_DEFAULT_KEYS
+            if unknown:
+                raise SystemExit(
+                    f"{ctx}: unknown overrides keys: {sorted(unknown)}"
+                )
+            for key, value in overrides.items():
+                if (
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value < 0
+                ):
+                    raise SystemExit(
+                        f"{ctx}: overrides[{key!r}] must be a non-negative "
+                        f"integer"
+                    )
+
+    return data
+
+
+def _pick(*candidates: object) -> object:
+    """First candidate that is not None (CLI beats overrides beats arch/default)."""
+    for candidate in candidates:
+        if candidate is not None:
+            return candidate
+    return None
+
+
+def apply_datapath(
+    ns: argparse.Namespace,
+    datapath: str | None,
+    defaults: dict | None = None,
+) -> argparse.Namespace:
+    """
+    Derive the datapath flags from a target's `datapath` field.
+
+    Mapping: 'bfp16' -> --emulate-bfp16 --c-bf16; 'bf16' -> --c-bf16 only.
+    Flags explicitly passed on the command line are never overwritten.
+    """
+    default_c = None if defaults is None else defaults.get("c_bf16")
+
+    if datapath == "bfp16":
+        if ns.emulate_bfp16 is None:
+            ns.emulate_bfp16 = True
+        if ns.c_bf16 is None:
+            ns.c_bf16 = True if default_c is None else bool(default_c)
+    elif datapath == "bf16":
+        if ns.c_bf16 is None:
+            ns.c_bf16 = True if default_c is None else bool(default_c)
+    elif datapath is not None:
+        raise SystemExit(
+            f"unknown datapath {datapath!r}; expected one of "
+            f"{sorted(KNOWN_DATAPATHS)}"
+        )
+
+    if ns.c_bf16 is None:
+        ns.c_bf16 = bool(default_c)
+
+    return ns
+
+
+@dataclass
+class ResolvedArch:
+    """One architecture with every compile argument resolved to a value."""
+
+    arch: str
+    args: argparse.Namespace
+
+
+def resolve_args(args: argparse.Namespace) -> list[ResolvedArch]:
+    """
+    Resolve concrete compile arguments per architecture.
+
+    Priority for every field: explicit CLI value, then model.overrides, then
+    arches[arch], then defaults. Without --target the historic fallbacks are
+    used, so a fully manual invocation is unchanged.
+    """
+    arches = list(ARCHES) if args.arch == "all" else [args.arch]
+
+    targets: dict | None = None
+    model_spec: dict | None = None
+    if args.target:
+        targets = load_targets(args.targets_file)
+        model_spec = targets["models"].get(args.target)
+        if model_spec is None:
+            known = ", ".join(sorted(targets["models"]))
+            raise SystemExit(
+                f"--target {args.target!r} is not defined in "
+                f"{args.targets_file}\nKnown targets: {known}"
+            )
+
+    resolved: list[ResolvedArch] = []
+
+    for arch in arches:
+        if arch not in ARCH_DEVICES:
+            raise SystemExit(f"unknown architecture: {arch}")
+
+        ns = copy.deepcopy(args)
+        ns.arch = arch
+
+        if targets is None:
+            ns.batch = FALLBACK_BATCH if args.batch is None else args.batch
+            ns.cols = FALLBACK_COLS_BY_ARCH.get(arch, FALLBACK_COLS) if args.cols is None else args.cols
+            ns.hidden = FALLBACK_HIDDEN if args.hidden is None else args.hidden
+            ns.seq = DEFAULT_SEQ if args.seq is None else args.seq
+            ns.m = FALLBACK_M if args.m is None else args.m
+            ns.k = FALLBACK_K if args.k is None else args.k
+            ns.n = FALLBACK_N if args.n is None else args.n
+            ns.identity_threshold = (
+                FALLBACK_IDENTITY_THRESHOLD
+                if args.identity_threshold is None
+                else args.identity_threshold
+            )
+            ns.gated_ffn = bool(args.gated_ffn)
+            ns.int8 = bool(args.int8)
+            ns.c_bf16 = bool(args.c_bf16)
+            ns.emulate_bfp16 = bool(args.emulate_bfp16)
+            resolved.append(ResolvedArch(arch, ns))
+            continue
+
+        assert targets is not None and model_spec is not None
+        defaults = targets["defaults"]
+        arch_spec = targets["arches"].get(arch)
+        if arch_spec is None:
+            raise SystemExit(
+                f"--target {args.target!r}: architecture {arch} is not defined "
+                f"in {args.targets_file}"
+            )
+        overrides = model_spec.get("overrides") or {}
+
+        ns.batch = _pick(
+            args.batch, overrides.get("batch"), arch_spec.get("batch"),
+            FALLBACK_BATCH,
+        )
+        batches = _pick(
+            args.batches, overrides.get("batches"), arch_spec.get("batches"),
+        )
+        if isinstance(batches, (list, tuple)):
+            batches = ",".join(str(int(b)) for b in batches)
+        ns.batches = batches
+        ns.cols = _pick(
+            args.cols, overrides.get("cols"), arch_spec.get("cols"),
+            FALLBACK_COLS,
+        )
+        ns.hidden = _pick(
+            args.hidden, overrides.get("hidden"), model_spec.get("hidden"),
+            defaults.get("hidden"), FALLBACK_HIDDEN,
+        )
+        ns.intermediate = _pick(
+            args.intermediate, overrides.get("intermediate"),
+            model_spec.get("intermediate"),
+        )
+        ns.qkv_n = _pick(
+            args.qkv_n, overrides.get("qkv_n"), model_spec.get("qkv_n"),
+        )
+        ns.gated_ffn = (
+            args.gated_ffn
+            if args.gated_ffn is not None
+            else bool(model_spec.get("gated_ffn"))
+        )
+        ns.seq = _pick(
+            args.seq, overrides.get("seq"), defaults.get("seq"), DEFAULT_SEQ,
+        )
+        ns.m = _pick(
+            args.m, overrides.get("tile_m"), defaults.get("tile_m"), FALLBACK_M,
+        )
+        ns.k = _pick(
+            args.k, overrides.get("tile_k"), defaults.get("tile_k"), FALLBACK_K,
+        )
+        ns.n = _pick(
+            args.n, overrides.get("tile_n"), defaults.get("tile_n"), FALLBACK_N,
+        )
+        ns.identity_threshold = _pick(
+            args.identity_threshold, overrides.get("identity_threshold"),
+            defaults.get("identity_threshold"), FALLBACK_IDENTITY_THRESHOLD,
+        )
+
+        # int8 is never implied by a datapath; only an explicit flag sets it.
+        ns.int8 = bool(args.int8)
+        ns.c_bf16 = args.c_bf16
+        ns.emulate_bfp16 = args.emulate_bfp16
+        apply_datapath(ns, model_spec.get("datapath"), defaults)
+
+        tiers = parse_tiers(ns)
+        max_batch = arch_spec.get("max_batch")
+        if max_batch is not None:
+            offenders = sorted(
+                {t for t in tiers if t > max_batch}
+                | ({ns.batch} if ns.batch > max_batch else set())
+            )
+            if offenders:
+                raise SystemExit(
+                    f"--target {args.target} --arch {arch}: batch tier(s) "
+                    f"{offenders} exceed arches[{arch}].max_batch={max_batch} "
+                    f"(device {arch_spec.get('device')}).\n"
+                    f"Lower --batch or --batches, or export with --arch 2."
+                )
+
+        resolved.append(ResolvedArch(arch, ns))
+
+    return resolved
+
+
+def print_targets(targets: dict) -> None:
+    print(f"targets file (schema {targets['schema']})")
+    print("arches:")
+    for arch, spec in sorted(targets["arches"].items()):
+        print(
+            f"  {arch}: device={spec.get('device')} cols={spec.get('cols')} "
+            f"batch={spec.get('batch')} batches={spec.get('batches')} "
+            f"max_batch={spec.get('max_batch')}"
+        )
+    print("models:")
+    for name in sorted(targets["models"]):
+        spec = targets["models"][name]
+        qkv = spec.get("qkv_n")
+        print(
+            f"  {name}: hidden={spec.get('hidden')} "
+            f"intermediate={spec.get('intermediate')} "
+            f"gated_ffn={spec.get('gated_ffn')} "
+            f"qkv_n={'3*hidden' if qkv is None else qkv} "
+            f"datapath={spec.get('datapath')}"
+        )
 
 
 def main() -> int:
@@ -883,15 +1272,53 @@ def main() -> int:
         default=str(REPO / "runtime"),
         help=(
             "artifacts root. Each generation is written to "
-            "<out>/artifacts_npu<N>/gemm_rtp. Default: runtime/"
+            "<out>/artifacts_npu<N>/gemm_rtp, or with --target to "
+            "<out>/<model>/artifacts_npu<N>/gemm_rtp. Default: runtime/"
+        ),
+    )
+
+    ap.add_argument(
+        "--target",
+        default=None,
+        help=(
+            "Named model in the targets file. Selects the model geometry and "
+            "the per-arch compile policy. Explicit CLI arguments always win "
+            "over the config."
+        ),
+    )
+
+    ap.add_argument(
+        "--targets-file",
+        default=str(DEFAULT_TARGETS_FILE),
+        help=(
+            "JSON file of per-model targets. Default: "
+            f"{DEFAULT_TARGETS_FILE}"
+        ),
+    )
+
+    ap.add_argument(
+        "--list-targets",
+        action="store_true",
+        help="Print the known targets and architectures, then exit.",
+    )
+
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Resolve and print the compile command(s) without invoking the "
+            "toolchain."
         ),
     )
 
     ap.add_argument(
         "--batch",
         type=int,
-        default=128,
-        help="largest tier; also the buffer sizing",
+        default=None,
+        help=(
+            "largest tier; also the buffer sizing. Without --target defaults "
+            f"to {FALLBACK_BATCH}."
+        ),
     )
 
     ap.add_argument(
@@ -903,8 +1330,8 @@ def main() -> int:
         ),
     )
 
-    ap.add_argument("--cols", type=int, default=8)
-    ap.add_argument("--hidden", type=int, default=384)
+    ap.add_argument("--cols", type=int, default=None)
+    ap.add_argument("--hidden", type=int, default=None)
 
     ap.add_argument(
         "--intermediate",
@@ -930,6 +1357,7 @@ def main() -> int:
     ap.add_argument(
         "--gated-ffn",
         action="store_true",
+        default=None,
         help=(
             "ffn_up emits BOTH halves of a gated FFN (N = 2*intermediate), "
             "as SwiGLU/GeGLU need, while ffn_down still takes K = intermediate."
@@ -939,20 +1367,21 @@ def main() -> int:
     ap.add_argument(
         "--seq",
         type=int,
-        default=DEFAULT_SEQ,
+        default=None,
         help=(
             "sequence length this design is built for. Enters only as "
-            "M = batch*seq. Must be a multiple of 8."
+            f"M = batch*seq. Must be a multiple of 8. Default: {DEFAULT_SEQ}."
         ),
     )
 
-    ap.add_argument("-m", type=int, default=64)
-    ap.add_argument("-k", type=int, default=64)
-    ap.add_argument("-n", type=int, default=48)
+    ap.add_argument("-m", type=int, default=None)
+    ap.add_argument("-k", type=int, default=None)
+    ap.add_argument("-n", type=int, default=None)
 
     ap.add_argument(
         "--int8",
         action="store_true",
+        default=None,
         help=(
             "build the int8 MMAC datapath (i8 operands, int32 accumulator) "
             "instead of bf16. Needs an int8 container."
@@ -962,6 +1391,7 @@ def main() -> int:
     ap.add_argument(
         "--c-bf16",
         action="store_true",
+        default=None,
         help=(
             "GEMM emits bf16 C (fp32 accumulate, one round at the end). "
             "Halves C transport; the runtime reads the dtype from design.json."
@@ -971,6 +1401,7 @@ def main() -> int:
     ap.add_argument(
         "--emulate-bfp16",
         action="store_true",
+        default=None,
         help=(
             "RESEARCH: build the GEMM on the bfp16-emulated MMAC datapath. "
             "Not a production mode."
@@ -988,7 +1419,7 @@ def main() -> int:
     )
 
     ap.add_argument(
-        "--with-eltwise",
+        "--npu-eltwise",
         action="store_true",
         help=(
             "also build the gelu/layernorm/softmax design directories for the "
@@ -1002,7 +1433,7 @@ def main() -> int:
         type=int,
         default=1,
         help=(
-            "AIE columns for the eltwise designs built by --with-eltwise. "
+            "AIE columns for the eltwise designs built by --npu-eltwise. "
             "LayerNorm and softmax refuse above 2 (see tools/export_eltwise.py)."
         ),
     )
@@ -1012,21 +1443,21 @@ def main() -> int:
         type=int,
         default=1024,
         choices=[1024, 4096],
-        help="elements per GELU DMA transaction for --with-eltwise.",
+        help="elements per GELU DMA transaction for --npu-eltwise.",
     )
 
     ap.add_argument(
         "--ln-variant",
         default="il4",
         choices=["base", "il4", "rne", "il4_rne"],
-        help="LayerNorm kernel variant for --with-eltwise.",
+        help="LayerNorm kernel variant for --npu-eltwise.",
     )
 
     ap.add_argument(
         "--sm-variant",
         default="poly_il4",
         choices=["lib", "poly", "poly_il4", "poly_rne", "poly_il4_rne"],
-        help="softmax kernel variant for --with-eltwise.",
+        help="softmax kernel variant for --npu-eltwise.",
     )
 
     ap.add_argument(
@@ -1069,18 +1500,19 @@ def main() -> int:
     ap.add_argument(
         "--identity-threshold",
         type=int,
-        default=80,
+        default=None,
         help=(
             "Maximum differing bytes allowed between final.xclbin files while "
-            "still treating them as identical modulo UUID metadata. Default: 80."
+            "still treating them as identical modulo UUID metadata. "
+            f"Without --target defaults to {FALLBACK_IDENTITY_THRESHOLD}."
         ),
     )
 
     args = ap.parse_args()
 
-    # Validate common arguments early, before launching architecture exports.
-    tiers = validate_tiers_and_seq(args)
-    validate_geometry(args, tiers)
+    if args.list_targets:
+        print_targets(load_targets(args.targets_file))
+        return 0
 
     if args.arch == "all":
         # Two generations compiled in one run MUST NOT share a JIT cache: with
@@ -1088,7 +1520,8 @@ def main() -> int:
         # are identical, so find_cache() would see two candidates and refuse.
         # Per-arch caches are the existing mechanism for that separation, so
         # turn them on for the multi-arch case unless the caller already gave
-        # an architecture marker.
+        # an architecture marker. Applied before resolve so each per-arch copy
+        # inherits it.
         if (not args.per_arch_cache and not args.require_arch_marker
                 and not args.arch_marker):
             print(
@@ -1098,6 +1531,22 @@ def main() -> int:
             )
             args.per_arch_cache = True
 
+    resolved = resolve_args(args)
+
+    # Validate each architecture against its own resolved values: the npu1
+    # batch ceiling must never be compared against npu2 numbers.
+    for ra in resolved:
+        tiers = validate_tiers_and_seq(ra.args)
+        validate_geometry(ra.args, tiers)
+
+    if args.dry_run:
+        for ra in resolved:
+            outdir = set_out_dir(ra.args, ra.arch)
+            cmd = build_child_argv(ra.args, ra.arch, outdir)
+            print("[dry-run] " + " ".join(shlex.quote(str(x)) for x in cmd))
+        return 0
+
+    if args.arch == "all":
         if args.in_process:
             if args.per_arch_cache:
                 print(
@@ -1106,15 +1555,13 @@ def main() -> int:
                     file=sys.stderr,
                 )
 
-            for arch in ARCHES:
-                child_args = copy.deepcopy(args)
-                child_args.arch = arch
-                child_args.out = str(arch_out_dir(args.out, arch))
-                export_arch(child_args, arch)
+            for ra in resolved:
+                ra.args.out = str(set_out_dir(ra.args, ra.arch))
+                export_arch(ra.args, ra.arch)
         else:
-            for arch in ARCHES:
-                outdir = arch_out_dir(args.out, arch)
-                cmd = build_child_argv(args, arch, outdir)
+            for ra in resolved:
+                outdir = set_out_dir(ra.args, ra.arch)
+                cmd = build_child_argv(ra.args, ra.arch, outdir)
 
                 print(
                     "[export] "
@@ -1125,8 +1572,9 @@ def main() -> int:
 
         return 0
 
-    args.out = str(arch_out_dir(args.out, args.arch))
-    return export_arch(args, args.arch)
+    ra = resolved[0]
+    ra.args.out = str(set_out_dir(ra.args, ra.arch))
+    return export_arch(ra.args, ra.arch)
 
 
 if __name__ == "__main__":

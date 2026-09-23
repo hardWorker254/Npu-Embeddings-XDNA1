@@ -130,16 +130,22 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
   // exit code as a contention refusal.
   std::string art = flag_val("--artifacts", "");
   if (!art.empty()) {
-    const std::vector<std::string> cands = {art, root + "/" + art,
-                                            root + "/runtime/" + art};
+    // Same shared candidate list as the BERT path (design_selection.hpp), now
+    // including the per-model <name>/artifacts_npu<arch> layout. Only
+    // gemm_rtp/design.json counts here: this arch loads gemm_rtp and nothing
+    // else, unlike the BERT path which also accepts a qkv/ set.
+    const std::vector<std::string> cands = artifacts_candidates(root, art);
     std::string found;
     for (const auto &c : cands)
       if (std::ifstream(c + "/gemm_rtp/design.json").good()) { found = c; break; }
-    if (found.empty())
+    if (found.empty()) {
+      std::string looked;
+      for (size_t i = 0; i < cands.size(); ++i)
+        looked += (i ? ", " : "") + cands[i];
       throw std::runtime_error(
           "no design set found for --artifacts '" + art + "'; looked for "
-          "gemm_rtp/design.json under " + cands[0] + ", " + cands[1] +
-          " and " + cands[2]);
+          "gemm_rtp/design.json under " + looked);
+    }
     art = found;
   }
   if (art.empty() && layout == "pretiled_bf16") {
@@ -155,7 +161,7 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
     const auto *ce = npue::hub::find(mname);
     art = pick_artifacts(root, model.config_int("hidden"),
                          model.config_int("intermediate"), true, qn, "",
-                         ce ? ce->datapath : "bf16");
+                         ce ? ce->datapath : "bf16", mname);
   }
   const bool use_npu = !force_cpu && layout == "pretiled_bf16" && !art.empty();
 

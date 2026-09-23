@@ -6,7 +6,7 @@
 // transcribe() throws until Whisper integration is implemented.
 //===----------------------------------------------------------------------===//
 
-#include "stt/whisper.hpp"
+#include "whisper/whisper.hpp"
 
 #include <stdexcept>
 
