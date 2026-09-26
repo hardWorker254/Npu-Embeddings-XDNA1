@@ -58,8 +58,16 @@ inline std::vector<ModelEntry> discover_models(const std::string &root) {
     try {
       npue::File f(m.path);
       m.repo = f.config_string("source_repo");
-      m.pooling = f.config_string("pooling");
       m.arch = f.config_string("arch");
+      // `pooling` is an embedder's field. An arch=4 container answers "text
+      // for audio" and has no pooling mode at all, so asking for the key was
+      // what printed whisper containers as UNREADABLE -- a model that opens
+      // fine, listed as broken, and unreachable by name.
+      m.pooling = "n/a";
+      try {
+        m.pooling = f.config_string("pooling");
+      } catch (const std::exception &) {
+      }
       m.layers = f.config_int("num_layers");
       m.hidden = f.config_int("hidden");
       m.heads = f.config_int("num_heads");

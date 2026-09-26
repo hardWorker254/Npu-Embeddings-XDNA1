@@ -184,7 +184,23 @@ inline bool encoder_implemented(const std::string &arch) {
          // encoder deltas -- RoPE from rope_inv_freq, exact-erf GELU on the
          // gate half, real biases, XLM-R Unigram tokenizer -- are all
          // data-driven off the container (tasks/0134-0136).
-         arch == "gte_new_rope_geglu";
+         arch == "gte_new_rope_geglu" ||
+         // arch=4, Whisper. It has a forward pass of its own -- two design
+         // sets, an audio front end and an autoregressive decoder -- and it is
+         // NOT an embedder, so `list` shows it as present-but-different rather
+         // than "no encoder", which is what the absence of this case used to
+         // print for a model that transcribes perfectly well. What it needs
+         // instead is BOTH design sets, which pick_artifacts() does not know
+         // how to look for; the state column says "stt" and the notes line
+         // below the table says what to export.
+         arch == "whisper_encdec_gelu";
+}
+
+// True for a container this build runs through a mode of its own rather than
+// through the embedding pipeline. `list` and the usage text both need the
+// distinction, and it is a property of the architecture, not of the model.
+inline bool is_stt_arch(const std::string &arch) {
+  return arch == "whisper_encdec_gelu";
 }
 
 inline bool config_flag(const npue::File &f, const char *key, bool fallback) {

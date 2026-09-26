@@ -29,6 +29,7 @@
 
 #include "runtime/model.hpp"
 #include "tokenizers/gemma.hpp"
+#include "tokenizers/whisper.hpp"
 #include "tokenizers/tokenizer.hpp"
 #include "tokenizers/wordpiece.hpp"
 #include "tokenizers/xlmr.hpp"
@@ -52,20 +53,39 @@ struct AnyTokenizer : npue::Tokenizer {
   std::unique_ptr<npue::WordPiece> wordpiece;
   std::unique_ptr<npue::XlmrTokenizer> xlmr;
   std::unique_ptr<npue::GemmaTokenizer> gemma;
+  // arch=4. An STT container's tokenizer is only ever asked to turn ids back
+  // into text, and `encode` (text -> ids) is not a thing this runtime asks of
+  // it -- so the base class's text-in method is refused rather than answered.
+  std::unique_ptr<npue::WhisperTokenizer> whisper;
 
   size_t vocab_size() const override {
     if (wordpiece) return wordpiece->vocab_size();
     if (xlmr) return xlmr->vocab_size();
+    if (whisper) return whisper->vocab_size();
     return gemma->vocab_size();
   }
 
   std::vector<std::string> tokenize(const std::string &text) const override {
+    if (whisper) return whisper->tokenize(text);
     if (wordpiece) return wordpiece->tokenize(text);
     if (xlmr) return xlmr->tokenize(text);
     return gemma->tokenize(text);
   }
 
+  // Ids -> text. Only the Whisper family has a use for this direction, and it
+  // is the reason it is here: an STT container is handed ids and owes a string.
+  std::string decode(const std::vector<int32_t> &ids) const {
+    if (whisper) return whisper->decode(ids);
+    throw std::runtime_error(
+        "decode(ids) is only implemented for the Whisper tokenizer; this "
+        "container is an embedder, whose ids never come back out of the model");
+  }
+
   npue::Encoded encode(const std::string &text, int max_len) const override {
+    if (whisper)
+      throw std::runtime_error(
+          "this container is a speech-to-text model: its tokenizer turns the "
+          "DECODER's ids into text, and there is no text-in path to encode");
     if (wordpiece) return wordpiece->encode(text, max_len);
     // Gemma BPE: the concrete GemmaTokenizer::encode already applies its own
     // <bos> + prefix + text + <eos> padding, so forward through the base
@@ -119,6 +139,12 @@ inline AnyTokenizer load_tokenizer(npue::File &model,
     t.gemma = std::make_unique<npue::GemmaTokenizer>(
         npue::GemmaTokenizer::from_table_bytes(
             reinterpret_cast<const char *>(v.data), v.bytes));
+    return t;
+  }
+  if (arch == "whisper_encdec_gelu") {
+    auto v = model.raw("tokenizer.whisper_table");
+    AnyTokenizer t;
+    t.whisper = std::make_unique<npue::WhisperTokenizer>(v.data, v.bytes);
     return t;
   }
   if (arch == "gte_new_rope_geglu") {
