@@ -82,7 +82,7 @@ fetch step. `pack_npue.py` reads it directly.
 
 ```sh
 python tools/gen_tokenizer_tables.py   # Unicode tables -> runtime/include/
-python tools/pack_npue.py              # -> models/all-MiniLM-L6-v2.npue
+python tools/pack_npue.py --device npu1   # -> models/all-MiniLM-L6-v2.npue
 python tools/verify_npue.py            # bit-exact round trip, layout guard, goldens
 python tools/export_validation.py      # golden check vectors for the runtime
 ```
@@ -94,6 +94,23 @@ the tokenizer vocabulary carried along as bytes. `verify_npue.py` checks the
 round trip is bit-exact and that the layout hash matches what the designs
 expect — a mismatched layout would otherwise produce confidently wrong
 embeddings.
+
+**`--device` is not optional in practice.** The B panel's order inside a tile is
+the MMAC sub-tile, and the sub-tile is **not** the same on both boards: npu1
+(aie2) consumes `(s=8, t=4)`, npu2 (aie2p) consumes `(8, 8)`. So `--device`
+selects the pair, the exporter picks the matching one from `--arch`, and the
+two are compared by the layout hash that already existed. A container packed
+for the other generation is not rejected by that check — it was derived from
+the same wrong constant on both sides — it is merely wrong, everywhere, with
+plausible numbers. It now hashes differently and *is* rejected. Run the
+exporter and the packer for the same generation, and re-pack when you switch
+`--dev`.
+
+```sh
+# both generations, both implementations, byte for byte
+python tools/verify_pack_parity.py --device npu1
+python tools/verify_pack_parity.py --device npu2
+```
 
 ### 2.3 Compile the NPU designs
 
@@ -137,6 +154,47 @@ runtime\build\npuembed.exe . --artifacts artifacts_b128il --threads 24 --pipelin
 # C++ one a release uses) -- a disagreement would be right-sized weights in
 # the wrong order, which no tolerance check catches
 & "C:\Users\vegar\.conda\envs\iron\python.exe" tools\verify_pack_parity.py
+
+# the Whisper audio front end against transformers: samples, log-mel, the mel
+# filter bank, both convolutions, and the four refusals (stereo, 8-bit, wrong
+# rate, not-audio). Needs ffmpeg for the conversion case
+python tools\verify_whisper_features.py
+
+# the Whisper tokenizer three ways: C++, the reference, HuggingFace
+python tools\verify_whisper_tokenizer.py
+
+# the Whisper NPU stacks against transformers: the encoder's hidden states, one
+# teacher-forced decoder step at a time (state AND logits AND top-1), the greedy
+# argmax chain against transformers' OWN generate(), the text those ids decode
+# to, that 16 workers give the same bytes as 1, and two refusals. Needs the NPU,
+# the container, the design set and the checkpoint. This is the gate that says
+# the two stacks COMPUTE the model rather than merely dispatching
+#   NOTE: for a whisper checkpoint do NOT pass --max-seq. The default is per
+#   family (256 for embedders, the checkpoint's own max_source_positions for
+#   whisper), and a whisper value shorter than one 30 s window writes a
+#   container that refuses every request. The packer refuses it by name.
+python tools\verify_whisper_model.py
+
+# the same thing one level up, where a request sees it: the `transcribe` CLI and
+# POST /v1/audio/transcriptions against transformers' generate() per window and
+# its own merge -- the long-form window schedule, the per-window text, the
+# merged text, and ten refusals. Needs a BUILT runtime (runtime\build\npuembed
+# by default; --exe to point at another)
+python tools\verify_whisper_cli.py
+
+# the ANSWER, not another program's opinion: word error rate against a HUMAN
+# transcript, with transformers' WER on the same audio printed beside ours so a
+# regression is distinguishable from a bad reference. No audio is committed --
+# the corpus lives outside the tree:
+#   python tools\verify_whisper.py --audio C:\clips\a.wav --ref "the words"
+#   python tools\verify_whisper.py --corpus C:\speech-corpus --max-wer 0.20
+
+# does the design set COMPUTE what it claims to? random matrices through the
+# exported instruction streams, compared with numpy. Needs the NPU, and needs
+# no model: this is the only check that sees a B operand packed for the wrong
+# generation, because it does not involve a container at all. Add
+# `--npue models/<m>.npue --tensor qkv=<tensor>` to also stage real weights
+python tools\verify_design_numerics.py
 
 # semantics without a reference: same-topic texts must rank closer than
 # different-topic ones; stdlib only, so it runs on a cold release too

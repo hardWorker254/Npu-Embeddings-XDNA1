@@ -17,6 +17,7 @@ the other generation is refused rather than loaded.
 - [How a request is executed](#how-a-request-is-executed)
 - [Where each operation runs](#where-each-operation-runs)
 - [Command-line reference](#command-line-reference)
+- [Speech to text](#speech-to-text)
 - [Models](#models)
 - [Building design sets](#building-design-sets)
 - [Accuracy](#accuracy)
@@ -86,10 +87,12 @@ python tools/export_gemm_rtp.py --target all-MiniLM-L6-v2 --arch 1 --out runtime
 
 This writes `runtime/all-MiniLM-L6-v2/artifacts_npu1/gemm_rtp/`.
 
-Add `--npu-eltwise` to also build `gelu/`, `layernorm/` and `softmax/` beside
-it. Only needed for `--npu-eltwise` at run time; see
-[Where each operation runs](#where-each-operation-runs) for why you probably
-do not want it.
+Add `--npu-extra-ops CODES` to also build the elementwise designs beside it:
+`gelu`, `layn` (LayerNorm), `softm` (softmax), comma-separated, and only the
+ones you name. Build only what the runtime's `--npu-ops` will ask for — each is
+a compile, an xclbin, and one more `hw_context`. See
+[Where each operation runs](#where-each-operation-runs) for why you probably do
+not want any of them.
 
 Preview what would be built, without invoking the toolchain:
 
@@ -160,13 +163,13 @@ texts
 embedding
 ```
 
-`*` = on the array instead when `--npu-eltwise` is given.
+`*` = on the array instead when its op is named in `--npu-ops`.
 
 The array does the four GEMMs per layer; attention and the elementwise ops run
 on the host by default because they were **measured faster on the host** — the
 elementwise designs pay a fixed per-dispatch cost that a 384-wide row-wise op
-does not amortise. `--npu-eltwise` exists to make that an explicit,
-measurable choice, not because it is the default.
+does not amortise. `--npu-ops` exists to make that an explicit, measurable
+choice, not because it is the default.
 
 **`--pipeline N`** splits one request into right-sized chunks and runs `N` of
 them concurrently, each in its own thread with its own host-side buffers and
@@ -179,20 +182,26 @@ array work, not more array throughput.
 
 ## Where each operation runs
 
-| Operation | Default | With `--npu-eltwise` |
+| Operation | Default | On the array when |
 |---|---|---|
-| QKV / attention-out / FFN-up / FFN-down GEMM | array | array |
-| LayerNorm | host | array |
-| softmax | host | array |
-| GELU | host | array |
+| QKV / attention-out / FFN-up / FFN-down GEMM | array | always |
+| LayerNorm | host | `--npu-ops layn` |
+| softmax | host | `--npu-ops softm` |
+| GELU | host | `--npu-ops gelu` |
 
-`--host-ln`, `--host-sm`, `--host-gelu` force an individual op back onto the
-host even when `--npu-eltwise` is given.
+One flag, and an op is on the host exactly when it is **not** listed — so
+`--npu-ops layn,softm` is "LayerNorm and softmax on the array, GELU on the
+host", and there is no inverse flag to drift against it. This replaces
+`--npu-eltwise` (all three or none) and `--host-ln/--host-sm/--host-gelu`; the
+old names are now **refused by name**, so a stale command line cannot look like
+it worked.
 
-`--npu-eltwise` requires all three sibling design sets (`gelu/`, `layernorm/`,
-`softmax/`) next to `gemm_rtp/`. A missing one is **refused by name** — it never
-silently falls back to the host, because a flag whose whole point is "put this
-on the array" must not quietly not do that.
+`--npu-ops` needs one sibling design set per named op next to `gemm_rtp/`
+(`layernorm/`, `softmax/`, `gelu/`), built by
+`tools/export_gemm_rtp.py --npu-extra-ops CODES`. A missing one is **refused by
+name** — it never silently falls back to the host, because a flag whose whole
+point is "put this on the array" must not quietly not do that. Each op also
+costs one more `hw_context` out of six.
 
 It also costs four `hw_context`s instead of one. Before allocating any, the
 runtime asks `xrt-smi` how many contexts the device allows and refuses by name
@@ -212,8 +221,15 @@ from a contended run is not an NPU performance claim.
 | `list` | every model this build can run, and which are installed |
 | `serve <model>` | OpenAI-shaped `POST /v1/embeddings`; downloads the model if needed |
 | `embed <model> <in.txt> [out.f32]` | embed a text file, one text per line |
+| `transcribe <model> <audio.wav>` | transcribe 16 kHz audio with a Whisper model; the transcript alone on stdout |
 | `add <org/model> [<sha256>]` | register a model this build does not know (a finetune) |
 | `tokenize` | tokenizer round-trip, for debugging |
+
+`serve` and `transcribe` are the same command for two different architectures:
+a Whisper container is served by the STT mode off the same flags, answers
+`POST /v1/audio/transcriptions` instead of `/v1/embeddings`, and refuses
+`--npu-ops` rather than ignoring it. The mode is picked by the container's
+`arch`, never by a flag.
 
 ### Options for `serve` / `embed`
 
@@ -224,8 +240,7 @@ from a contended run is not an NPU performance claim.
 | `--threads N` | host thread budget (`serve`/`embed` pass 24) |
 | `--pipeline N` | concurrent encode lanes (`serve`/`embed` pass 4) |
 | `--artifacts DIR` | override the design set |
-| `--npu-eltwise` | run GELU, LayerNorm and softmax on the array |
-| `--host-ln` / `--host-sm` / `--host-gelu` | force one op back to the host |
+| `--npu-ops CODES` | send the named ops to the array: `gelu`, `layn`, `softm` |
 | `--dev npu1\|npu2` | NPU generation; a design built for the other is refused |
 | `--root DIR` | override where models/ and designs live |
 | `--token VALUE` | HuggingFace token for a gated model (else `$HF_TOKEN`) |
@@ -247,6 +262,137 @@ in the body.
   (`--seq` to the exporter, default 64).
 - **`--bind` defaults to localhost.** There is no authentication on this
   endpoint.
+
+---
+
+## Speech to text
+
+An `openai/whisper-*` container is a **speech-to-text** model, not an embedder:
+it answers "text for audio", it has no pooling mode, and it runs through a mode
+of its own. `npuembeddings list` shows those rows as `stt`.
+
+### What a user has to download
+
+**Only `model.safetensors`.** Everything else a Whisper container is built from
+is committed: `config.json` (geometry), `preprocessor_config.json` (the audio
+constants), `generation_config.json` (the decoding policy) and the byte-level
+BPE table as `vocab.json` + `merges.txt` + `added_tokens.json` — 1.5 MB per
+model against a 3 GB checkpoint, identical for everyone.
+
+Two of those cannot be guessed, and that is why they are in the repository
+rather than in the download: a `generation_config.json` without its
+`suppress_tokens` list yields a container that transcribes *differently* from
+`transformers` while looking perfectly healthy, and a
+`preprocessor_config.json` without its constants yields a spectrogram of the
+wrong audio. The packer refuses a checkpoint that lacks either, which is a
+good refusal — but it would leave anyone holding the weights with a dead end.
+
+So the flow is: download the weights, drop them in `models/<name>/`, and run
+the three commands below.
+
+### Three steps, once per model
+
+```bash
+# 1. the container. --max-seq is NOT needed and should not be passed: the
+#    default is per family, and for whisper it is the checkpoint's own
+#    max_source_positions (1500). The embedder default (256) writes a container
+#    whose position table is shorter than one audio window, and the packer
+#    refuses that by name rather than writing it.
+python tools/pack_npue.py --model-dir models/whisper-base \
+    --out models/whisper-base.npue --device npu1
+
+# 2. the design sets -- BOTH, and one invocation writes both, because a Whisper
+#    target resolves to an encoder pass and a decoder pass (their M differs by
+#    8x, so one xclbin cannot serve both).
+python tools/export_gemm_rtp.py --target whisper-base --arch 1 --out runtime
+
+# 3. transcribe.
+./runtime/build/npuembeddings transcribe whisper-base recording.wav
+```
+
+**`--max-seq` has two defaults, and that is the point.** An embedder's position
+table is its own `max_position_embeddings` (256 for MiniLM). A whisper encoder
+always sees `max_source_positions` rows — 1500, one 30 s window — so a whisper
+container sliced shorter cannot transcribe anything and refuses at the first
+request. Omit the flag and each family gets its own default; pass a value the
+model cannot use and the packer says so, naming the number.
+
+`generation_config.json` is **required** by the packer: it carries the
+checkpoint's decoding policy (`suppress_tokens`, `begin_suppress_tokens`), which
+decides which token a greedy step picks. Without it a raw argmax is not the
+reference implementation's step, and a container packed without the policy is
+refused at run time rather than quietly answering something else.
+
+### What runs where
+
+| | on the NPU | on the host |
+|---|---|---|
+| audio → log-mel, 3001 FFTs of 400 points | | yes |
+| conv1, conv2, GELU, the permute into 1500 rows | | yes |
+| every GEMM: qkv, attention-out, ffn-up, ffn-down, cross-q, cross-K\|V | **yes** | |
+| LayerNorm, GELU, softmax, attention | | yes |
+| the tied-embedding logit projection and argmax | | yes |
+| token ids → text, and the long-form merge | | yes |
+
+Only GEMMs are on the array. The elementwise ops could be (see
+[Where each operation runs](#where-each-operation-runs)) but these design sets
+declare no eltwise streams, and a row-wise op of this width is measured faster
+on the host. The two convolutions are host work and grow as d², which is what
+dominates the runtime on `whisper-large-v3`.
+
+### Long form
+
+Audio longer than 30 s is transcribed in 30 s windows with a 5 s stride on
+**each** side, so consecutive windows start 20 s apart, and the texts are merged
+by the same longest-common-sequence over token ids that `transformers` uses
+without timestamps. A clip shorter than 30 s is zero-padded, and one longer than
+30 s is cut.
+
+### Options
+
+`--language` names the language the decoder is primed with; there is no
+detection, and an assumed language is printed as `ASSUMED` on stderr and in
+`/health`. A code the model's tokenizer has no token for is refused by name.
+`--convert` ingests through ffmpeg. `--max-new N` caps generated tokens per
+window, `--chunk-seconds` / `--stride-seconds` move the window schedule (a window
+longer than the model's position table allows is refused), and `--json` prints
+the OpenAI-shaped object with one segment per window.
+
+`tokenizer.json`, `tokenizer_config.json` and `special_tokens_map.json` are
+**not** needed and are not committed: nothing in the packing path opens them.
+If you clone the upstream repository wholesale you will have them anyway; the
+commit list is the minimum, and the network fetch list matches it.
+
+### The endpoint
+
+```
+POST /v1/audio/transcriptions        multipart/form-data: file, model,
+                                     language, task, response_format
+```
+
+`json`, `verbose_json` and `text` are answered; word and segment timings are
+refused with a 400 that says why (no timestamps are decoded), as are a
+non-zero `temperature` (this build is greedy only) and a `prompt` (not
+implemented, and accepting one while ignoring it would return a transcription of
+the audio alone).
+
+### The NPU's power mode
+
+XRT exposes a performance mode, and it is **not** on by default:
+
+```bash
+xrt-smi validate                  # "Power Mode: default" -- no admin needed
+sudo xrt-smi validate             # "Power Mode: performance"
+```
+
+On this device (RyzenAI-npu1, firmware 1.5.5.391, XRT 2.26.0) it makes no
+measurable difference: `validate` reports **100.0 us latency in both modes** and
+**33679 vs 33720 op/s throughput** — a 0.1% difference, inside the run-to-run
+noise of the benchmark itself. So it is not where the time goes on this box, and
+chasing it before the host-side passes is the wrong order. It is documented here
+because "the NPU is in default power mode" is a real answer to "why is this
+slow", and because setting it requires `sudo`, which no run in this repository
+does on your behalf.
 
 ---
 
@@ -308,7 +454,7 @@ Per-generation defaults:
 | `--arch 1\|2\|all` | NPU generation |
 | `--out DIR` | artifact root (usually `runtime`) |
 | `--batches a,b,c` | batch tiers to emit an instruction stream for |
-| `--npu-eltwise` | also build `gelu/`, `layernorm/`, `softmax/` |
+| `--npu-extra-ops CODES` | also build the named elementwise designs |
 | `--elt-cols N` | array columns for the eltwise designs (LayerNorm/softmax cap at 2) |
 | `--seq N` | sequence length to build for |
 | `--cache-root DIR` | IRON JIT cache (default `~/.npu/cache`) |
@@ -404,7 +550,8 @@ goldens directly — see [Known defects](#known-defects).
 
 ### LayerNorm on the array used the previous layer's parameters — fixed
 
-**Symptom.** With `--npu-eltwise`, the LayerNorm result was not reproducible and
+**Symptom.** With the LayerNorm design loaded (`--npu-ops layn`), the LayerNorm
+result was not reproducible and
 was not correct. Consecutive requests for the same input answered differently
 (cos ≈ 0.38 against ≈ 0.68), and mixing batch tiers inside one request made it
 worse. The host LayerNorm path — the default — was never affected.
@@ -459,6 +606,55 @@ are gitignored, so the corrected `layernorm/final.xclbin` is **not** in this
 repository. Anyone building from source must re-run the exporter; a stale
 artifact directory still carries the bug.
 
+### Containers were packed in the other board's byte order — fixed
+
+**Symptom.** On npu1, every GEMM was numerically wrong, and nothing said so.
+The byte count was right, the shapes were right, and the layout hash matched on
+both sides of the only check that exists for this — because the design exporter
+and the model packer derived it from the same constant. The embeddings were
+unit-length, stable, and wrong: measured against numpy, the operand was read
+with the columns of every 64×32 panel permuted (`1 - cos` ≈ 0.87, where the gate
+is 2e-3).
+
+**Root cause.** The B panel's byte order inside a tile *is* the MMAC sub-tile,
+and the sub-tile is not the same on both generations. Measured with
+`aie.iron.kernels.mm(...).mac_dims`, which returns `(r, s, t)`:
+
+| device | `mac_dims` | B panel order |
+|---|---|---|
+| `npu2` (aie2p) | `(8, 8, 8)` | `(s=8, t=8)` |
+| `npu1` (aie2) | `(4, 8, 4)` | `(s=8, t=4)` |
+
+`npue.gemm_b_layout` defaulted to `(8, 8)` — correct for npu2 — and the packers
+passed that default straight through, so every container was written in npu2's
+order. The comment above the constant recorded the (correct) observation that
+plain bf16 and bfp16-emulated agree, which is why it was never questioned: the
+datapath does not change the sub-tile, and the *board* does.
+
+**Fix.** The sub-tile is resolved from the target device in one place
+(`npue.MAC_BY_DEVICE`, mirrored in `exporters/common/consts.py` and
+`npue_pack.cpp`), threaded into every operand by both packers
+(`pack_npue.py --device`, `packers/whisper.py`) and taken by every C++
+`prepare_model*`, and printed in every build log. The exporter picks the pair
+from `--arch`, so `design.json`'s `b_layout_hash` now means what it says: a
+container packed for the other generation hashes differently and the runtime's
+existing check refuses it.
+
+**Verification.** `tools/verify_design_numerics.py`, added for this: it feeds
+random matrices through the exported instruction streams and compares C with
+numpy. Before the fix, 37 of 37 whisper and MiniLM streams failed at
+`1 - cos` ≈ 0.87; after it, all 37 pass at `≤ 8.4e-06`, and the same check with
+the real containers staged verbatim (`--npue ... --tensor ...`) passes too.
+`verify_pack_parity.py --device` now compares the two packers for **both**
+generations, 78/78 tensors byte-identical each, and the npu2 output is
+bit-identical to what shipped before the change.
+
+**Consequence for artifacts.** Both halves of the pair are derived, not stored:
+the containers are gitignored and the design sets are gitignored. Both were
+regenerated for npu1 here, but anyone building from source must pack **and**
+export for the generation they intend to run on, or the runtime will now refuse
+the pair it is given — loudly, which is the point.
+
 ### Roadmap items not yet done
 
 Listed under [Roadmap](#roadmap).
@@ -481,11 +677,12 @@ below are the ones that actually decide the number.
   `--allow-contention`.
 - **Per-dispatch cost is fixed and not small** (~150 µs measured). A design set
   is loaded once and kept precisely to avoid paying it per dispatch — which is
-  also why the elementwise ops default to the host, and why `--npu-eltwise` can
+  also why the elementwise ops default to the host, and why `--npu-ops` can
   *lower* throughput rather than raise it.
 - **Batch tiers are right-sized, not padded.** A request is split into the
   largest tier that fits; the design set carries an instruction stream per tier.
-- **`--npu-eltwise` costs four `hw_context`s** instead of one, against a
+- **`--npu-ops` costs one `hw_context` per named op** on top of the unified
+  one, so all three is four, against a
   measured budget of six on this driver. XRT exposes no usable-count query, so
   the budget is a labelled constant and the source of the number is printed
   beside it rather than hardcoded silently.
@@ -521,9 +718,9 @@ export PYTHONPATH=/opt/xilinx/xrt/python:$PYTHONPATH
 export NPU_RUNTIME=xrt
 ```
 
-**`--npu-eltwise asks for <op> on the array, but <dir>/design.json does not
-exist`** — the sibling eltwise design sets were not built. Re-run the exporter
-with `--npu-eltwise`, or drop the flag.
+**`--npu-ops <code> asks for it on the array, but <dir>/design.json does not
+exist`** — that sibling design set was not built. Re-run the exporter with
+`--npu-extra-ops <code>`, or drop the code from the list.
 
 **`--artifacts '<name>': no design set found`** — the path resolved to a
 directory with no `gemm_rtp/design.json` and no `qkv/design.json`. The error
@@ -561,7 +758,9 @@ runtime/
   include/server/          HTTP server, embedding service
   include/cli/             argument parsing and subcommand dispatch
   include/common/          app state, host kernels, JSON, hub, packer helpers
-  include/whisper/         Whisper model wrapper + the speech-to-text engine
+  include/whisper/         Whisper: geometry, the NPU encoder and decoder
+                           stacks, the audio front end, the transcription
+                           session
   src/                     implementations, mirroring include/
                            (cli/ common/ embed_models/ encoders/ server/
                             tokenizers/ whisper/ + the top-level units)
@@ -610,10 +809,12 @@ Carried over from the deleted planning notes:
 2. **`tools/verify_targets.py`.** Assert that `npu_targets.json` and the
    catalogue in `src/common/hub.cpp` agree. The catalogue already holds the
    authoritative geometry; two copies of it will drift.
-3. **Whisper (STT) extension point.** `npu_targets.json` has a `kinds` table
-   with an `stt` entry whose `exporter` is `null` and whose `streams` are empty.
-   `--target` should fail with a clear "no exporter for kind=stt" rather than
-   something incidental.
+3. **Whisper (STT) design sets for the sizes that have none.** The `stt` kind
+   in `npu_targets.json` exports `gemm_rtp` and `gemm_rtp_dec`, and whisper-tiny
+   has both. Nothing else does: `transcribe` on whisper-base or larger is
+   refused by name until its two sets are exported, and that refusal is the
+   right one — a Whisper that transcribes from the encoder stack alone is not a
+   degraded mode, it is nothing.
 
 ---
 

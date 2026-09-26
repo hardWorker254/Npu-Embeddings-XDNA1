@@ -66,6 +66,12 @@ def main() -> int:
     # that only ever checked 48 would not have covered the packer's newest
     # parameter -- which is exactly where two implementations drift.
     ap.add_argument("--tile-n", type=int, default=48)
+    # The B panel's sub-tile is per-generation, so the two packers can only be
+    # compared for a STATED one. Run it for both: the default (npu2) is what
+    # every container shipped before this was packed with, and npu1 is the pair
+    # its designs actually consume. A packer that quietly kept the old constant
+    # on one path passes one of these two and fails the other.
+    ap.add_argument("--device", default="npu2", choices=("npu1", "npu2"))
     args = ap.parse_args()
 
     model_dir = Path(args.model_dir)
@@ -107,13 +113,18 @@ def main() -> int:
 
         r = subprocess.run([sys.executable, str(REPO / "tools" / "pack_npue.py"),
                             "--model-dir", str(model_dir), "--out", str(py_out),
-                            "--tile-n", str(args.tile_n)],
+                            "--tile-n", str(args.tile_n),
+                            "--device", args.device],
                            capture_output=True, text=True)
         if r.returncode != 0:
             print(f"pack_npue.py failed:\n{r.stdout}\n{r.stderr}")
             return 2
 
-        r = subprocess.run([args.exe, "--prepare-model", str(model_dir),
+        # --dev is what the C++ packer resolves its sub-tile from: it is the
+        # same generation name the design set is built for, read before the
+        # pack path runs.
+        r = subprocess.run([args.exe, "--dev", args.device,
+                            "--prepare-model", str(model_dir),
                             str(cc_out), "--tile-n", str(args.tile_n)],
                            capture_output=True, text=True)
         if r.returncode != 0:
@@ -123,7 +134,8 @@ def main() -> int:
         a, b = sha256(py_out), sha256(cc_out)
         arch_note = " (arch=1 gemma)" if is_gemma else \
                    " (arch=2 nomic_bert)" if is_nomic else " (arch=0 bert)"
-        print(f"  tile_n {args.tile_n}, model {model_dir.name}{arch_note}")
+        print(f"  tile_n {args.tile_n}, device {args.device}, "
+              f"model {model_dir.name}{arch_note}")
         print(f"  pack_npue.py    {describe(py_out)}")
         print(f"  --prepare-model {describe(cc_out)}")
         print(f"\n  python : {a}")

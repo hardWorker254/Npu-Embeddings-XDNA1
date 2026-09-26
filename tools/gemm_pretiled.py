@@ -74,8 +74,32 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
                   emulate_bf16_mmul_with_bfp16, trace_config, trace_row, trace_col,
                   trace_egress_col=0, pretiled=True, tile_order="k,n", inner_st=True,
                   rtp=False, c_bf16=False,
-                  b_l1_depth=2, fifo_depth=2):
-    n_aie_rows = 4
+                  b_l1_depth=2, fifo_depth=2, n_aie_rows=4, tb_n_rows=0):
+    # n_aie_rows was the literal 4 for the whole life of this file, and every
+    # shipping design set was built with it. It is now a parameter DEFAULTING TO
+    # 4, so nothing that exists changes: same default, same program, same
+    # xclbin. The reason it had to become a parameter is Whisper's DECODER,
+    # whose GEMM has M = 1 (one token per greedy step) instead of
+    # batch*seq: with rows pinned at 4 the smallest expressible M is m*4 = 256,
+    # which would run 256 rows of arithmetic to consume one, and large-v3's 32
+    # decoder layers would turn that into tens of seconds of pure waste per
+    # utterance. rows=1 with m=8 gives M=8, a 32x reduction, at the cost of a
+    # core grid one row tall -- a regime no shipped design has exercised, so it
+    # is verified against a host oracle before it is trusted.
+    # tb_n_rows: how many AIE row-blocks the C path ping-pongs over. 0 means
+    # "derive it" (the historical behaviour). It is a knob because the derived
+    # value only tiles M when the row-block COUNT is a multiple of the ping-pong
+    # stride, and Whisper's encoder is the first design whose M is not:
+    # m=64, rows=4, tb_n_rows=2 gives a stride of 4 row-blocks, i.e. M must be a
+    # multiple of 1024. The shipped designs sit on 256 and 1024 and never showed
+    # it; seq 1536 is 6 row-blocks, the C-drain walk then issues drains for tiles
+    # no core will produce, and the kernel dies with
+    # ERT_CMD_STATE_TIMEOUT -- a timeout, not a wrong number, so nothing in the
+    # output would have said why.
+    #
+    # Forcing tb_n_rows=1 halves the stride to 2 row-blocks, which 6 divides. The
+    # cost is prefetch distance on the C path (see the DEPTH IS THE PREFETCH
+    # DISTANCE note below), so it is a measured trade, not a free fix.
     n_aie_cores = n_aie_rows * n_aie_cols
 
     dtype_in = str_to_dtype(dtype_in_str)
@@ -224,7 +248,13 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
         _acc_tag = "i32" if dtype_out is np.int32 else "f32"
         # 4096 (tile_n=64) exists only on the int8 side -- at bf16's 2-byte
         # operands that tile needs 65,536 B of a 63 KB L1 (tasks/0081).
-        _ok = (1024, 2048, 3072, 4096) if _acc_tag == "i32" else (1024, 2048, 3072)
+        # 512 is Whisper's decoder: m=16, n=32 -> 512. Every other reachable
+        # geometry uses m=64, so this entry point is the only reason the set has
+        # a member that is not a multiple of 1024. It was added ADDITIVELY to
+        # both narrow kernels -- a design that does not declare the symbol links
+        # nothing new, so every shipping xclbin is unaffected.
+        _ok = ((512, 1024, 2048, 3072, 4096) if _acc_tag == "i32"
+               else (512, 1024, 2048, 3072))
         _narrow_src = str(REPO / "kernels" / f"narrow_{_acc_tag}_bf16.cc")
         # narrow_f32_bf16.cc ALWAYS writes bf16 -- use a dedicated bf16 type
         # for the second arg rather than the outer C_l1_ty, which is only
@@ -359,7 +389,8 @@ def _build_design(dev, M, K, N, m, k, n, n_aie_cols, dtype_in_str, dtype_out_str
     # exactly 2 row blocks. MiniLM's real single-sequence shape is M=256 -- ONE
     # row block -- and the C tiler then rejects the design outright
     # ("tensor does not divide evenly into tile groups in dimension 0").
-    tb_n_rows = min(tb_max_n_rows // 2, M // m // n_aie_rows)
+    tb_n_rows = min(tb_max_n_rows // 2, M // m // n_aie_rows) if not tb_n_rows \
+        else min(tb_n_rows, M // m // n_aie_rows)
     # NPUE-M7 (research/notes/0005 section 5b): the C-drain tap repeats over row
     # blocks with stride m*n_aie_rows*N elements, and the DMA stride field is
     # 20 bits ([1:1048576], INCLUSIVE -- measured: N=4096 at exactly 2^20
@@ -499,6 +530,8 @@ def pretiled_array(
     c_bf16: CompileTime[bool] = False,
     b_l1_depth: CompileTime[int] = 2,
     fifo_depth: CompileTime[int] = 2,
+    n_aie_rows: CompileTime[int] = 4,
+    tb_n_rows: CompileTime[int] = 0,
 ):
     return _build_design(iron.get_current_device(), M, K, N, m, k, n, n_aie_cols,
                          dtype_in_str, dtype_out_str,
@@ -506,4 +539,5 @@ def pretiled_array(
                          trace_config, trace_row, trace_col, trace_egress_col,
                          pretiled, tile_order, inner_st, rtp=rtp,
                          c_bf16=c_bf16,
-                         b_l1_depth=b_l1_depth, fifo_depth=fifo_depth)
+                         b_l1_depth=b_l1_depth, fifo_depth=fifo_depth,
+                         n_aie_rows=n_aie_rows, tb_n_rows=tb_n_rows)

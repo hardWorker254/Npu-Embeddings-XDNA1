@@ -1,0 +1,5 @@
+{
+  "repo_id": "openai/whisper-large-v3-turbo",
+  "file": "model.safetensors",
+  "sha256": "542566a422ae4f3fd23f1ba11add198fca01bbf82e66e6a2857b3f608b1eb9d1"
+}

@@ -1,0 +1,5 @@
+{
+  "repo_id": "openai/whisper-base",
+  "file": "model.safetensors",
+  "sha256": "07cadb9f25677c8d50df603e66a98fbd842cce45047139baeb16e6219a1e807b"
+}

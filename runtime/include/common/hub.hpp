@@ -76,6 +76,7 @@ struct CatalogEntry {
   // route through the Gemma fetch/pack path just because it shares `gated`.
   bool gemma = false;
 
+
   // GATED_FFN means SwiGLU/GeGLU: `ffn_up` emits BOTH halves, so its N is
   // 2*ffn rather than ffn. It exists here because `list` has to decide whether
   // a design set serves this model BEFORE the model is downloaded, and the
@@ -126,6 +127,21 @@ struct CatalogEntry {
   // own "emulate_bfp16" disagrees; an explicit --artifacts always overrides,
   // same precedent as a mismatched int8 pairing (tasks/0080's own comment).
   std::string datapath = "bf16";
+
+  // STT selects the Whisper fetch list and, at pack time, the REFUSAL: there is
+  // no C++ packer for arch=4, so ensure_model() downloads and verifies the
+  // checkpoint and then names the command that packs it. Kept separate from
+  // `gemma` and `gte` for the same reason those are separate: same file list?
+  // No. Different packer? No. A flag that merely meant "some other family" would
+  // route a whisper checkpoint through a BERT packer that reads tensors which do
+  // not exist and writes a container with no decoder in it.
+  //
+  // LAST in the struct on purpose: every catalogue row initialises these fields
+  // POSITIONALLY, so a new field inserted in the middle silently reinterprets
+  // every row after it -- which is exactly what happened the first time this
+  // was written, and it showed up as a narrowing error three rows away from the
+  // change.
+  bool stt = false;
 };
 
 // True when this row's weights are NOT checksum-verified. Only ever true for

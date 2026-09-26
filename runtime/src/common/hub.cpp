@@ -15,6 +15,7 @@
 
 #include "common/json_min.hpp"
 #include "common/npue_pack.hpp"
+#include "common/design_selection.hpp"  // app::running_device()
 
 #ifdef _WIN32
 #include <windows.h>
@@ -139,7 +140,53 @@ const std::vector<CatalogEntry> &table() {
        "same array designs as bge-base/nomic",
        /*gated=*/false, /*gemma=*/false, /*gated_ffn=*/true,
        /*qkv_n=*/2304, /*gte=*/true},
+      // arch=4, Whisper (speech to text). NOT an embedder: `pooling` is "n/a"
+      // because there is no pooling mode, and `tile_n` is 32 rather than 48
+      // because Whisper's geometry forces (64, 32) for all six sizes -- d and
+      // 4d both tile with no padding at 48 except d=1280 (5120/48 is not
+      // whole), which would force a per-size repack and a per-size design set.
+      // The sha256 pins are the model.safetensors digests recorded in each
+      // models/<name>/CHECKPOINT.json: measured against the bytes this machine
+      // holds, not quoted from a repository page. `hidden`/`layers`/`heads`/
+      // `ffn` are the ENCODER stack's, because that is the half whose GEMM
+      // shape an embedder shares.
+      //
+      // Each needs BOTH design sets (gemm_rtp and gemm_rtp_dec) exported with
+      // --target <name> --arch 1, and `list` says so per row: a set carrying
+      // only the encoder half cannot transcribe anything, and a decoder-only
+      // set cannot encode anything.
+      {"whisper-tiny", "openai/whisper-tiny",
+       "7ebd0e69e78190ffe1438491fa05cc1f5c1aa3a4c4db3bc1723adbb551ea2395",
+       "n/a", 384, 4, 6, 1536, 32, 151.0,
+       "smallest Whisper: 4+4 layers, 80 mel bins; greedy, no timestamps",
+       /*gated=*/false, /*gemma=*/false, /*gte=*/false, /*stt=*/true},
+      {"whisper-base", "openai/whisper-base",
+       "07cadb9f25677c8d50df603e66a98fbd842cce45047139baeb16e6219a1e807b",
+       "n/a", 512, 6, 8, 2048, 32, 290.0,
+       "6+6 layers; clearly better than tiny on real speech",
+       /*gated=*/false, /*gemma=*/false, /*gte=*/false, /*stt=*/true},
+      {"whisper-small", "openai/whisper-small",
+       "1d7734884874f1a1513ed9aa760a4f8e97aaa02fd6d93a3a85d27b2ae9ca596b",
+       "n/a", 768, 12, 12, 3072, 32, 968.0,
+       "12+12 layers; the first size where quality clearly beats base",
+       /*gated=*/false, /*gemma=*/false, /*gte=*/false, /*stt=*/true},
+      {"whisper-medium", "openai/whisper-medium",
+       "62f73550fa6db24b0c6f6c5962bd0dae80fa644e93cde9cd9c3792971b47fd28",
+       "n/a", 1024, 24, 16, 4096, 32, 3100.0,
+       "24+24 layers; 4x the dispatches of base for a modest gain",
+       /*gated=*/false, /*gemma=*/false, /*gte=*/false, /*stt=*/true},
+      {"whisper-large-v3", "openai/whisper-large-v3",
+       "a8e94b85976e5864ba3e9525c7e6c83b2a1eca42d4b797a0c7c24d778e40fd95",
+       "n/a", 1280, 32, 20, 5120, 32, 3100.0,
+       "32+32 layers, 128 mel bins; the audio frontend dominates its runtime",
+       /*gated=*/false, /*gemma=*/false, /*gte=*/false, /*stt=*/true},
+      {"whisper-large-v3-turbo", "openai/whisper-large-v3-turbo",
+       "542566a422ae4f3fd23f1ba11add198fca01bbf82e66e6a2857b3f608b1eb9d1",
+       "n/a", 1280, 32, 20, 5120, 32, 1620.0,
+       "large-v3's encoder with a 4-layer decoder: ~4x the speed, some cost",
+       /*gated=*/false, /*gemma=*/false, /*gte=*/false, /*stt=*/true},
     };
+
     // THE bfp16 ADOPTION (tasks/0104, T23), set by NAME rather than by
     // rewriting every row's positional initialiser above -- the struct's
     // trailing fields (gated/gemma/gated_ffn/qkv_n) are themselves positional
@@ -226,6 +273,31 @@ const Want kFilesGte[] = {
     {"special_tokens_map.json", true},
     {"1_Pooling/config.json", true},
     {"modules.json", true},
+};
+
+// Whisper's file set (arch=4), and it is EXACTLY what tools/packers/whisper.py
+// opens: config.json (geometry), preprocessor_config.json (the audio constants),
+// vocab.json + merges.txt + added_tokens.json (the byte-level BPE table), and
+// generation_config.json (REQUIRED -- it carries the decoding policy
+// suppress_tokens / begin_suppress_tokens that decides which token a greedy step
+// picks, and the packer refuses a checkpoint without it rather than inventing
+// one).
+//
+// tokenizer.json, tokenizer_config.json, special_tokens_map.json and vocab.txt
+// are deliberately NOT in this list. The packer never opens them, and
+// tokenizer.json alone is 2.5 MB per model: fetching it would cost 15 MB across
+// the six sizes to build a container that does not contain it. Those four files
+// ARE committed to the repository (they are what makes a checkout runnable), and
+// the entry is here only for a model directory that genuinely lacks them -- the
+// case where a user has just the weights.
+const Want kFilesWhisper[] = {
+    {"model.safetensors", true},
+    {"config.json", true},
+    {"generation_config.json", true},
+    {"preprocessor_config.json", true},
+    {"vocab.json", true},
+    {"added_tokens.json", true},
+    {"merges.txt", true},
 };
 
 #ifdef _WIN32
@@ -614,7 +686,14 @@ void download(const std::string &url, const std::string &dest,
   curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
-  curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+  // NOPROGRESS ON, not off. With it off libcurl draws its OWN progress meter
+  // on stderr through a FILE* of its own, beside this program's C++ streams --
+  // and the result is a hard crash mid-download:
+  //     Fatal error: glibc detected an invalid stdio handle
+  // which is what a fetch of any HuggingFace model did here. We already have a
+  // progress callback (prog_cb below), so the meter is both redundant and the
+  // thing that kills the process.
+  curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
   curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, prog_cb);
   curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
   curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
@@ -705,11 +784,15 @@ std::string json_str(const std::string &s, const std::string &key) {
 void verify_config(const CatalogEntry &e, const std::filesystem::path &dir) {
   const std::string cfg = slurp_text(dir / "config.json");
   struct Check { const char *key; int64_t want; };
+  // Whisper names its geometry differently (d_model, encoder_layers,
+  // encoder_attention_heads, encoder_ffn_dim), and the catalogue's hidden /
+  // layers / heads / ffn hold THOSE for an STT row -- the encoder stack, which
+  // is the half that shares the GEMM shape with an embedder.
   const Check checks[] = {
-      {"hidden_size", e.hidden},
-      {"num_hidden_layers", e.layers},
-      {"num_attention_heads", e.heads},
-      {"intermediate_size", e.ffn},
+      {e.stt ? "d_model" : "hidden_size", e.hidden},
+      {e.stt ? "encoder_layers" : "num_hidden_layers", e.layers},
+      {e.stt ? "encoder_attention_heads" : "num_attention_heads", e.heads},
+      {e.stt ? "encoder_ffn_dim" : "intermediate_size", e.ffn},
   };
   std::string bad;
   for (const auto &c : checks) {
@@ -725,6 +808,11 @@ void verify_config(const CatalogEntry &e, const std::filesystem::path &dir) {
         " is not the model this build has catalogued:" + bad +
         "\n  Refusing to pack it. The repository's contents changed, or the "
         "catalogue entry is wrong.");
+
+  // A speech-to-text model has no pooling mode and no 1_Pooling/config.json, so
+  // there is nothing to agree about. Skipping it is the whole check, not a
+  // weakened one: the file's absence IS the statement.
+  if (e.stt) return;
 
   // Pooling is read from the checkpoint, never assumed -- 0038 made this a
   // rule after `mean` had been a literal. The catalogue's value only has to
@@ -932,6 +1020,8 @@ std::string ensure_model(const std::string &root, const std::string &name,
       return std::vector<Want>(std::begin(kFilesGemma), std::end(kFilesGemma));
     if (e->gte)
       return std::vector<Want>(std::begin(kFilesGte), std::end(kFilesGte));
+    if (e->stt)
+      return std::vector<Want>(std::begin(kFilesWhisper), std::end(kFilesWhisper));
     return std::vector<Want>(std::begin(kFiles), std::end(kFiles));
   }();
   for (const auto &w : fetch_list) {
@@ -1004,17 +1094,48 @@ std::string ensure_model(const std::string &root, const std::string &name,
   }
 
   if (log) log("  pack  " + container.filename().string());
+  // The container is packed for the generation this process is running on,
+  // because that is the design set that will be dispatched against it. The two
+  // sub-tiles differ (npu1 s8/t4, npu2 s8/t8) and a mismatch is not detectable
+  // from the file -- it used to be exactly that undetectable, which is why the
+  // packer hardcoded npu2's pair and every npu1 deployment read permuted
+  // panels. Now it does not match: the runtime compares layout_hash and
+  // refuses, so switching --dev after a download is a re-pack, not a silently
+  // wrong embedding.
+  const MacGeom mac = mac_for_device(app::running_device());
+  if (log)
+    log(std::string("  B panel  mac (s=") + std::to_string(mac.s) + ", t=" +
+        std::to_string(mac.t) + ") for " + app::running_device());
+  if (e->stt || json_str(slurp_text(dir / "config.json"), "model_type") ==
+                     "whisper") {
+    // The checkpoint is downloaded and its sha256 verified at this point, and
+    // CHECKPOINT.json is written. What is missing is a packer: arch=4 has no C++
+    // one, and adding a python dependency to an executable whose whole pitch is
+    // "one binary, one dependency (XRT)" is a bigger decision than this flag
+    // should smuggle in. So: name the command, and say what is already done so
+    // the user does not fetch it twice.
+    throw std::runtime_error(
+        e->name + ": the checkpoint is downloaded and verified (CHECKPOINT.json "
+        "written), but a whisper container is packed by tools/pack_npue.py -- "
+        "there is no C++ packer for arch=4. Run:\n"
+        "    python tools/pack_npue.py --model-dir " + dir.string() +
+        "\n        --out " + container.string() + " --device " +
+        app::running_device() + " --max-seq 1500\n"
+        "  (--max-seq 1500 is the model's own max_source_positions; the "
+        "default of 256 produces a container the encoder refuses.)");
+  }
   if (e->gemma) {
-    prepare_model_gemma(dir.string(), container.string(), e->repo, nullptr);
+    prepare_model_gemma(dir.string(), container.string(), e->repo, nullptr,
+                        64, 48, false, mac);
   } else if (json_str(slurp_text(dir / "config.json"), "model_type") ==
             "nomic_bert") {
     // arch=2 (tasks/0071): read from the CHECKPOINT's own config.json, not
     // from `gated_ffn` -- see the comment on that field in hub.hpp and on
     // this catalogue row above.
-    const Layout layout = gemm_b_layout(64, e->tile_n);
+    const Layout layout = gemm_b_layout(64, e->tile_n, mac.s, mac.t);
     prepare_model_nomic(dir.string(), e->pooling, e->repo, container.string(),
                         layout.json, layout.hash, 64, e->tile_n, 256,
-                        nullptr);
+                        nullptr, mac);
   } else if (json_str(slurp_text(dir / "config.json"), "model_type") ==
             "new") {
     // arch=3 (tasks/0135-0138): same dispatch rule as the nomic branch --
@@ -1023,17 +1144,17 @@ std::string ensure_model(const std::string &root, const std::string &name,
     // to (tasks/0135 packed --max-seq 64): under RoPE the position table is
     // zeros, so max_seq only caps request length, and the shipped designs
     // and goldens for this model are seq-64.
-    const Layout layout = gemm_b_layout(64, e->tile_n);
+    const Layout layout = gemm_b_layout(64, e->tile_n, mac.s, mac.t);
     prepare_model_gte(dir.string(), e->pooling, e->repo, container.string(),
                       layout.json, layout.hash, 64, e->tile_n, 64,
-                      nullptr);
+                      nullptr, mac);
   } else {
-    const Layout layout = gemm_b_layout(64, e->tile_n);
+    const Layout layout = gemm_b_layout(64, e->tile_n, mac.s, mac.t);
     prepare_model((dir / "model.safetensors").string(),
                   (dir / "vocab.txt").string(),
                   (dir / "config.json").string(), e->pooling, e->repo,
                   container.string(), got, layout.json, layout.hash, 64,
-                  e->tile_n, 256, nullptr);
+                  e->tile_n, 256, nullptr, mac);
   }
 
   if (log) {
