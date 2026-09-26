@@ -23,6 +23,25 @@ models/**
 !models/
 !models/*/
 !models/*/CHECKPOINT.json
+# A whisper model needs SIX small files besides the weights -- config.json
+# (geometry), preprocessor_config.json (the audio constants), generation_config.json
+# (the decoding policy: suppress_tokens / begin_suppress_tokens), and the
+# byte-level BPE table as vocab.json + merges.txt + added_tokens.json. They are
+# the same for everyone and 1.5 MB against a 3 GB checkpoint, and committing them
+# is what lets a user download model.satetensors, drop it into models/<name>/ and
+# run. tokenizer.json, tokenizer_config.json and special_tokens_map.json are NOT
+# committed: nothing in the packing path opens them (see kFilesWhisper in
+# runtime/src/common/hub.cpp), and tokenizer.json alone is 2.5 MB per model.
+# Scoped to the whisper directories on purpose: an embedder's geometry is
+# already pinned by its CHECKPOINT.json and is re-read from the checkpoint at
+# pack time, so committing its config.json too would be a second copy of a
+# number that has one owner.
+!models/whisper-*/config.json
+!models/whisper-*/generation_config.json
+!models/whisper-*/preprocessor_config.json
+!models/whisper-*/vocab.json
+!models/whisper-*/merges.txt
+!models/whisper-*/added_tokens.json
 
 # Full intermediate tap dump (~54 MB): a deterministic, CPU-only derivative of
 # the pinned checkpoint. The committed *_boundary.safetensors is the contract.
