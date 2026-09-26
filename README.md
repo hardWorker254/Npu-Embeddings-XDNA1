@@ -1,463 +1,631 @@
-# FORK DETAILS
-
-I have added support for NPU1 and Linux. Some command are not working, but ./runtime/build/npuembeddings.exe serve works. NPU1 can only load 1 .xclbin
-Operations:
-QKV projection NPU
-Attention output NPU
-FFN up NPU
-FFN down NPU
-LayerNorm CPU
-Softmax CPU
-GELU CPU
-
-In the beginning you need to compile artifacts:
-
-source /opt/xilinx/xrt/setup.sh # Or your cutom path
-export PEANO_INSTALL_DIR=/home/prof/.local/lib/python3.14/site-packages/llvm-aie # Or your path to llvm-aie
-export XRT_INCLUDE_DIR=/opt/xilinx/xrt/include
-
-# --out is the artifacts root; each generation lands in
-# <out>/artifacts_npu<N>/gemm_rtp. Default --arch all writes npu1 and npu2.
-
-python tools/export_gemm_rtp.py --batch 16 --batches 4,8,16 --cols 4     --hidden 768 --intermediate 3072 --gated-ffn --qkv-n 2304     --emulate-bfp16 --c-bf16     --out runtime # For gte-multilimgual-base
-
-python tools/export_gemm_rtp.py --batch 16 --batches 4,8,16 --cols 4     --emulate-bfp16 --c-bf16 --out runtime # For all-MiniLM-L6-v2
-
-cd runtime
-cmake --build build --config Release
-
-#Run the model
-./runtime/build/npuembeddings.exe serve gte-multilingual-base --root . --artifacts runtime/artifacts_npu1 --threads 16 --pipeline 4
-
-
-You will see something like this:
-NpuEmbeddings C++ runtime -- full encode
-  bo-mode    host_only (data-buffer allocation)
-  model      gte-multilingual-base: 150 tensors, 1000.91 MB, checkpoint f5a35a10faa54da7
-  shape      Alibaba-NLP/gte-multilingual-base: 12 layers, hidden 768, 12 heads x 64, ffn 3072, CLS pooling
-  designs    ONE xclbin, 12 streams (3 batch tiers), one hw_context
-  datapath   bfp16-emulated MMAC, C as bf16
-  toolchain  mlir_aie 1.4.2, peano 22.0.0.2026090701+3e93bf7b, mlir-aie HEAD unavailable
-  shape      batch 16 x seq 64  (M = 1024)
-  tiers      4, 8, 16  (requests are right-sized, not padded)
-  gelu       on the HOST (fp32) -- 12 fewer NPU dispatches
-  softmax    on the HOST (fp32) -- 12 fewer NPU dispatches
-  layernorm  on the HOST (fp32) -- 25 fewer NPU dispatches
-  bo-align   last data buffer aligned to 16384 B
-  weights    226.49 MB staged on the device once, not per call
-  pipeline   4 concurrent encodes of 16, one NPU mutex, 4 host threads per lane
-  tokenizer  250002 tokens, from the .npue
-
-  serving http://127.0.0.1:8080/v1/embeddings   (model gte-multilingual-base-npu, seq 64)
-  POST {"input": "text" | ["a","b"], "encoding_format": "float"|"base64"}
-
-
 # NpuEmbeddings
 
-Sentence embeddings on the **XDNA2 NPU** in AMD Ryzen AI processors, on native
-Windows. The AI Engine kernels are written directly against the array with
-[MLIR-AIE / IRON](https://github.com/Xilinx/mlir-aie) — not through ONNX
-Runtime, not through a vendor overlay — and the shipped runtime is C++ and XRT.
+Sentence embeddings for BERT-family models on an AMD NPU, with the host CPU as
+a fallback path. Runs `serve` (an OpenAI-shaped HTTP endpoint) and `embed` (a
+file in, a file out).
 
-Seven models, four architectures — including a multilingual one. An
-OpenAI-compatible endpoint, one executable, no Python at runtime.
-
-**The point is not to beat the CPU.** It is to get embedding work *off* the CPU
-cores — a background job behind a search index should not take the machine
-hostage — without losing throughput or quality.
-
-This is a learning project, openly. Every number has a task log with the exact
-command and the stored artifact behind it, several conclusions in here were
-overturned by later measurements and the reversals are kept in place, and the
-open questions are written down rather than tidied away. **Issues, ideas and
-code are all very welcome** — see [Contributing](#contributing).
+This tree targets **XDNA1 / `npu1` on Linux**. The generation is selected with
+`--dev`; the design set records which one it was built for and a set built for
+the other generation is refused rather than loaded.
 
 ---
 
-## Install
+## Contents
 
-Grab the latest `npuembeddings-*-win-x64.zip` from
-[**Releases**](../../releases) and unzip it anywhere. No installer, no Python,
-nothing written outside the folder.
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [How a request is executed](#how-a-request-is-executed)
+- [Where each operation runs](#where-each-operation-runs)
+- [Command-line reference](#command-line-reference)
+- [Models](#models)
+- [Building design sets](#building-design-sets)
+- [Accuracy](#accuracy)
+- [Known defects](#known-defects)
+- [Performance notes](#performance-notes)
+- [Troubleshooting](#troubleshooting)
+- [Repository layout](#repository-layout)
+- [Roadmap](#roadmap)
 
-You need:
+---
 
-| | |
+## Requirements
+
+**Runtime** (building and running the C++ binary):
+
+- Linux with an AMD NPU exposed at `/dev/accel0` and the `amdxdna` driver
+- XRT, e.g. `/opt/xilinx/xrt` — found via `XRT_ROOT`, `XILINX_XRT`, or the
+  default `/opt/xilinx/xrt`
+- A C++17 compiler, CMake ≥ 3.20, `libcurl` (used to download model weights)
+
+**Artifacts** (one-time, per model *and* per NPU generation):
+
+- Python with MLIR-AIE / IRON
+- **Peano** (the `llvm-aie` package) — required. `kernels/*.cc` are compiled as
+  AIE *external functions*, so aiecc cannot build a design without Peano's
+  `clang++`. A missing Peano surfaces as
+  `RuntimeError: Invalid Peano install directory: peano_not_found`.
+
+Check the device:
+
+```bash
+source /opt/xilinx/xrt/setup.sh
+xrt-smi examine          # expect RyzenAI-npu1
+ls /dev/accel0
+```
+
+Environment for the artifact build (bundle it in a local helper script if you
+like — this is what such a script should contain):
+
+```bash
+source /opt/xilinx/xrt/setup.sh
+export XRT_INCLUDE_DIR=/opt/xilinx/xrt/include
+export PEANO_INSTALL_DIR="$HOME/.local/lib/python3.14/site-packages/llvm-aie"
+```
+
+The runtime build reads `XRT_ROOT`/`XILINX_XRT`; `XILINX_XRT` pointing at a
+Windows path does not break it, because `CMakeLists.txt` accepts either and
+falls back to `/opt/xilinx/xrt` on Linux.
+
+---
+
+## Quick start
+
+Three steps. Steps 1 and 2 are needed once per machine; step 1 is additionally
+needed once per model.
+
+### 1. Build the design set
+
+A *design set* is a compiled `xclbin` plus its instruction streams, specialised
+for one model geometry, one NPU generation and one batch tiering. Nothing runs
+without it.
+
+```bash
+# unified GEMM set — this is the mandatory one
+python tools/export_gemm_rtp.py --target all-MiniLM-L6-v2 --arch 1 --out runtime
+```
+
+This writes `runtime/all-MiniLM-L6-v2/artifacts_npu1/gemm_rtp/`.
+
+Add `--npu-eltwise` to also build `gelu/`, `layernorm/` and `softmax/` beside
+it. Only needed for `--npu-eltwise` at run time; see
+[Where each operation runs](#where-each-operation-runs) for why you probably
+do not want it.
+
+Preview what would be built, without invoking the toolchain:
+
+```bash
+python tools/export_gemm_rtp.py --target all-MiniLM-L6-v2 --arch 1 --out runtime --dry-run
+```
+
+### 2. Build the runtime
+
+```bash
+cmake -S runtime -B runtime/build -DCMAKE_BUILD_TYPE=Release
+cmake --build runtime/build -j"$(nproc)"
+```
+
+Produces `runtime/build/npuembeddings` (and a copy named `npuembed`).
+
+### 3. Run it
+
+```bash
+# what is installed, and what can run
+runtime/build/npuembeddings list
+
+# OpenAI-shaped endpoint on 127.0.0.1:8080
+runtime/build/npuembeddings serve all-MiniLM-L6-v2
+
+# batch: one text per line -> raw fp32 matrix
+runtime/build/npuembeddings embed all-MiniLM-L6-v2 texts.txt out.f32
+```
+
+`serve` downloads and verifies the weights on first use. Test it:
+
+```bash
+curl -s -X POST http://127.0.0.1:8080/v1/embeddings \
+  -H 'Content-Type: application/json' \
+  -d '{"input": ["hello world"]}'
+```
+
+Models with a prompt table (`nomic-embed-text-v1.5`, `gte-multilingual-base`)
+require `"prompt_name"` in the body; `GET /health` lists the accepted values.
+A request without it is a 400 — a wrongly-prefixed vector is correctly shaped
+and correctly normed, so nothing downstream could detect it.
+
+---
+
+## How a request is executed
+
+```
+texts
+  │  tokenize (WordPiece / XLM-R Unigram / SentencePiece)
+  │  embed: word + position + token_type
+  ▼
+┌─ per encoder layer (6 for MiniLM, 24 for bge-large) ──────────────┐
+│  LayerNorm                                                host    │
+│  QKV projection                                           NPU    │
+│  RoPE (where the model uses it)                            host    │
+│  Q·Kᵀ + attention mask                                    host    │
+│  softmax                                                  host*   │
+│  A·V                                                      host    │
+│  output projection                                        NPU    │
+│  residual + LayerNorm                                      host*   │
+│  FFN up (+ GeGLU/SwiGLU)                                   NPU     │
+│  GELU                                                      host*   │
+│  FFN down                                                 NPU    │
+│  residual + LayerNorm                                      host*   │
+└────────────────────────────────────────────────────────────────────┘
+  │  mean-pool over unmasked tokens, then L2-normalise
+  ▼
+embedding
+```
+
+`*` = on the array instead when `--npu-eltwise` is given.
+
+The array does the four GEMMs per layer; attention and the elementwise ops run
+on the host by default because they were **measured faster on the host** — the
+elementwise designs pay a fixed per-dispatch cost that a 384-wide row-wise op
+does not amortise. `--npu-eltwise` exists to make that an explicit,
+measurable choice, not because it is the default.
+
+**`--pipeline N`** splits one request into right-sized chunks and runs `N` of
+them concurrently, each in its own thread with its own host-side buffers and
+its own device A/C slots. `serve` and `embed` pass `--pipeline 4`; a later
+`--pipeline` on the command line wins, so `--pipeline 1` disables pipelining.
+The NPU itself serialises dispatches, so the win is overlapping *host* work with
+array work, not more array throughput.
+
+---
+
+## Where each operation runs
+
+| Operation | Default | With `--npu-eltwise` |
+|---|---|---|
+| QKV / attention-out / FFN-up / FFN-down GEMM | array | array |
+| LayerNorm | host | array |
+| softmax | host | array |
+| GELU | host | array |
+
+`--host-ln`, `--host-sm`, `--host-gelu` force an individual op back onto the
+host even when `--npu-eltwise` is given.
+
+`--npu-eltwise` requires all three sibling design sets (`gelu/`, `layernorm/`,
+`softmax/`) next to `gemm_rtp/`. A missing one is **refused by name** — it never
+silently falls back to the host, because a flag whose whole point is "put this
+on the array" must not quietly not do that.
+
+It also costs four `hw_context`s instead of one. Before allocating any, the
+runtime asks `xrt-smi` how many contexts the device allows and refuses by name
+if the total would not fit. `--allow-contention` overrides; a throughput number
+from a contended run is not an NPU performance claim.
+
+---
+
+## Command-line reference
+
+`npuembeddings --help` is authoritative and kept in sync with this section.
+
+### Subcommands
+
+| Command | What it does |
 |---|---|
-| **A Ryzen AI machine** | XDNA2 NPU — Strix Point (Ryzen AI 300 series) or newer |
-| **AMD NPU driver + XRT** | ships with [AMD Ryzen AI Software](https://ryzenai.docs.amd.com/en/latest/inst.html); the runtime loads `xrt_coreutil.dll` from it |
-| **MSVC 2015–2022 redistributable** | [download](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) — most machines already have it |
+| `list` | every model this build can run, and which are installed |
+| `serve <model>` | OpenAI-shaped `POST /v1/embeddings`; downloads the model if needed |
+| `embed <model> <in.txt> [out.f32]` | embed a text file, one text per line |
+| `add <org/model> [<sha256>]` | register a model this build does not know (a finetune) |
+| `tokenize` | tokenizer round-trip, for debugging |
 
-Check the NPU is present and idle:
+### Options for `serve` / `embed`
 
-```cmd
-C:\Windows\System32\AMD\xrt-smi.exe examine
+| Flag | Meaning |
+|---|---|
+| `--port N` | listen port (default 8080) |
+| `--bind ADDR` | interface (default `127.0.0.1`, localhost only) |
+| `--threads N` | host thread budget (`serve`/`embed` pass 24) |
+| `--pipeline N` | concurrent encode lanes (`serve`/`embed` pass 4) |
+| `--artifacts DIR` | override the design set |
+| `--npu-eltwise` | run GELU, LayerNorm and softmax on the array |
+| `--host-ln` / `--host-sm` / `--host-gelu` | force one op back to the host |
+| `--dev npu1\|npu2` | NPU generation; a design built for the other is refused |
+| `--root DIR` | override where models/ and designs live |
+| `--token VALUE` | HuggingFace token for a gated model (else `$HF_TOKEN`) |
+| `--prefix NAME` | task prefix, `embed` only; required for models with a prompt table |
+| `--allow-truncation` | embed the first `seq` tokens instead of refusing |
+| `--allow-contention` | proceed despite other processes holding NPU contexts |
+
+`serve` **rejects** `--prefix`: its prompt is per request, via `"prompt_name"`
+in the body.
+
+### Why the safe defaults are the way they are
+
+- **Truncation is an error, not a warning.** A truncated text still returns a
+  correctly shaped, correctly normed vector, so nothing downstream can tell the
+  answer is wrong — and inputs sharing a preamble truncate to *identical*
+  vectors. Without `--allow-truncation` such an input is an error naming its
+  real token count.
+- **This build runs at the sequence length its design was exported for**
+  (`--seq` to the exporter, default 64).
+- **`--bind` defaults to localhost.** There is no authentication on this
+  endpoint.
+
+---
+
+## Models
+
+From `npuembeddings list` on this machine. `npu_targets.json` is the exporter's
+source of truth for geometry; the catalogue in `src/common/hub.cpp` is the
+runtime's.
+
+| Model | Layers | Hidden | Pooling | Size | Notes |
+|---|---|---|---|---|---|
+| `all-MiniLM-L6-v2` | 6 | 384 | mean | 91 MB | smallest and fastest; head_dim 32 keeps attention off the array |
+| `bge-small-en-v1.5` | 12 | 384 | cls | 134 MB | MiniLM's width at twice the depth |
+| `bge-base-en-v1.5` | 12 | 768 | cls | 438 MB | best geometric fit for this NPU: head_dim 64, every N a multiple of 384 |
+| `bge-large-en-v1.5` | 24 | 1024 | cls | 1340 MB | highest quality; N=1024 forces `tile_n 32`, 24 layers cost dispatches |
+| `embeddinggemma-300m` | 24 | 768 | mean | 1155 MB | MQA + RoPE + GeGLU on the array (4 GEMMs/layer); gated |
+| `nomic-embed-text-v1.5` | 12 | 768 | mean | 547 MB | RoPE + gated SwiGLU; needs `--prefix` |
+| `gte-multilingual-base` | 12 | 768 | cls | 582 MB | multilingual, XLM-R tokenizer; NTK RoPE + gated GeGLU |
+
+`list` also reports a *state* per model — `ready`, `available`, `cpu`,
+`no design`, `no encoder` — which says whether `serve` can actually run it here.
+
+Registering a model this build does not know:
+
+```bash
+npuembeddings add org/finetune-name <sha256>
 ```
 
-> `XILINX_XRT` must **not** be set in your environment — it breaks Windows XRT
-> builds. Use `XRT_ROOT` if you need to point at an install.
+Without the sha256 the weights are **not** verified; that is allowed and warned
+about on every run.
 
-**Building from source** additionally needs MLIR-AIE (IRON), the Peano LLVM-AIE
-compiler and a C++ toolchain. → **[BUILD.md](BUILD.md)**
+---
 
-## Run
+## Building design sets
 
-```cmd
-npuembeddings list
-npuembeddings serve bge-base-en-v1.5
+### `tools/npu_targets.json`
+
+Single source of truth for model geometry, per-generation defaults, and the
+stream list per `kind`. Inspect it:
+
+```bash
+python tools/export_gemm_rtp.py --list-targets
 ```
 
-The first run fetches the weights — **they are not redistributed here** —
-verifies them against a checksum built into the executable, cross-checks the
-model's own `config.json`, and packs everything into one `models/<name>.npue`.
-A checksum or config mismatch **stops** rather than running weights nobody
-verified. All of it happens inside the executable: no `curl`, no download
-script.
+Per-generation defaults:
 
-Then use any OpenAI client:
+| arch | device | cols | batch | tiers |
+|---|---|---|---|---|
+| 1 | `npu1` | 4 | 16 | 4, 8, 16 |
+| 2 | `npu2` | 8 | 128 | 4, 16, 32, 128 |
+
+### Exporter flags worth knowing
+
+| Flag | Meaning |
+|---|---|
+| `--target NAME` | take the model's geometry from `npu_targets.json` |
+| `--list-targets` | print the catalogue and exit |
+| `--dry-run` | print the resolved argv, call no toolchain |
+| `--arch 1\|2\|all` | NPU generation |
+| `--out DIR` | artifact root (usually `runtime`) |
+| `--batches a,b,c` | batch tiers to emit an instruction stream for |
+| `--npu-eltwise` | also build `gelu/`, `layernorm/`, `softmax/` |
+| `--elt-cols N` | array columns for the eltwise designs (LayerNorm/softmax cap at 2) |
+| `--seq N` | sequence length to build for |
+| `--cache-root DIR` | IRON JIT cache (default `~/.npu/cache`) |
+
+### Two output layouts
+
+`--target` puts designs under a per-model subdirectory:
+
+```
+runtime/<model>/artifacts_npu<N>/gemm_rtp/
+```
+
+Without `--target` the older flat layout is used:
+
+```
+runtime/artifacts_npu<N>/gemm_rtp/
+```
+
+The runtime searches both (`artifacts_candidates()` in
+`include/common/design_selection.hpp`), so either works. Manual flags override
+values from the config.
+
+### A design set is not portable between machines
+
+`design.json` records the `arch`, `device` and the toolchain that built it. A
+set built for `npu2` is **refused** by `npu1`, not loaded and misread. Rebuild
+per generation.
+
+### Rebuilding is idempotent, artifacts are gitignored
+
+`export_eltwise.py` purges matching JIT-cache entries before rebuilding and then
+requires exactly one candidate, because a cache hit does not restamp a directory
+and neither the symbol nor the buffer size distinguishes two column counts.
+
+`final.xclbin` is not byte-reproducible (the container embeds build paths), so
+a rebuild legitimately changes its hash while `insts.bin` may not change at all
+— a change in the *core program* moves the xclbin and leaves the host-side BDO
+stream alone.
+
+---
+
+## Accuracy
+
+The runtime compares its output against HuggingFace goldens on every default run
+(no `--bench`, no `--serve`, no `--embed`), per row, with no Python in the
+process. The gate is `worst 1 - cos ≤ 2e-3` across **all** rows.
+
+Recorded results for the shipped datapatbs, from
+[`docs/CURRENT_STATUS.md`](docs/CURRENT_STATUS.md) — measured on the project's
+reference machine, **not** on this one:
+
+| model | datapath | worst `1 - cos` | p99 tail |
+|---|---|---:|---:|
+| `all-MiniLM-L6-v2` | bfp16 | 3.406e-04 | 9.7e-04 |
+| `bge-small-en-v1.5` | bf16 | 8.348e-06 | 1.2e-05 |
+| `bge-base-en-v1.5` | bfp16 | 2.284e-04 | 3.7e-04 |
+| `bge-large-en-v1.5` | bfp16 | 2.626e-04 | 6.6e-03 (waived) |
+| `nomic-embed-text-v1.5` | bfp16 | 1.402e-03 | 1.6e-03 |
+| `gte-multilingual-base` | bfp16 | 4.608e-04 | 5.2e-04 |
+| `embeddinggemma-300m` | bfp16 | differential | 4.2e-04 |
+
+`embeddinggemma-300m` is arch=1 and has no HuggingFace golden, so it is checked
+*differentially* against the bf16 NPU encode instead.
+
+**What this gate is and is not.** `1 - cos` is a fidelity check on the
+arithmetic, not a quality gate. On the int8 containers `bge-large-en-v1.5`
+measured `2.968e-03` — a FAIL against the `2e-3` gate — while passing MTEB at
+mean −0.05. It is still the check that caught every real bug it was pointed at,
+precisely because it is sensitive to what MTEB averages away. Quality claims
+come from MTEB; this is the regression alarm.
+
+Notes on the check itself:
+
+- The goldens are batch 4. Larger batches are tiled by **rotating** which base
+  sequence lands in which row, with the expected output rotated identically.
+  Plain tiling would make every physical copy byte-identical, and a row-indexing
+  or cross-row aliasing bug would then be invisible to a content comparison.
+- Every output row is compared, not just the first four.
+- A non-finite check runs alongside the tolerance check. `std::max(0.0, NaN)`
+  returns `0.0`, so a NaN-producing kernel would otherwise score a *perfect*
+  `1 - cos` and pass a test whose failure mode is a perfect score.
+- The fixtures are matched by **checkpoint sha256**, not by model name, so a
+  renamed directory cannot silently validate against the wrong goldens.
+- `--pipeline > 1` additionally requires every lane to reproduce lane 0
+  **bitwise**; a disagreement is reported as cross-lane corruption.
+
+The array LayerNorm path is verified against the *host* path rather than against
+goldens directly — see [Known defects](#known-defects).
+
+---
+
+## Known defects
+
+### LayerNorm on the array used the previous layer's parameters — fixed
+
+**Symptom.** With `--npu-eltwise`, the LayerNorm result was not reproducible and
+was not correct. Consecutive requests for the same input answered differently
+(cos ≈ 0.38 against ≈ 0.68), and mixing batch tiers inside one request made it
+worse. The host LayerNorm path — the default — was never affected.
+
+**Root cause.** A `defect class` in the IRON program, not in the C++ runtime.
+In `tools/export_eltwise.py`, the LayerNorm worker acquired its gamma|beta
+object once and **never released it**:
 
 ```python
-from openai import OpenAI
-
-client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="not-needed")
-r = client.embeddings.create(
-    model="bge-base-en-v1.5-npu",
-    input=["a man is playing a guitar", "someone plays guitar at a concert"],
-)
-print(len(r.data[0].embedding))     # 768
+def core_fn(a, pm, c, ln):
+    ep = pm.acquire(1)          # a and c are balanced; pm was not
+    for _ in range_(per_core):
+        ...
+    pm.release(1)               # <-- the fix
 ```
 
-Supported: `POST /v1/embeddings` (`input` as string or array, `encoding_format`
-`float` or `base64`), `GET /v1/models`, `GET /health`. Requests carrying
-token-id arrays instead of text are rejected rather than guessed at, and so is
-any input longer than the design's sequence length — see
-[Input length](#input-length--read-this-before-embedding-documents), which you
-will hit on the first real document.
+`sequence()` issues exactly one `fill(P, ...)` per program run, so a run consumed
+one object and returned none. The L1-forwarded params buffer (`depth=1`) was
+therefore still occupied when the program ended, and the next dispatch's
+`acquire` could be served by the previous run's leftover instead of waiting for
+its own fill. **Every array LayerNorm computed with the previous site's
+gamma/beta.**
 
-Or embed a file directly — one text per line in, `[n_texts, hidden]`
-little-endian fp32 out, L2-normalised, in input order:
+GELU and softmax were never affected: their workers have no params fifo at all,
+which is exactly what the isolation measurements showed (12 runs per
+configuration, LayerNorm on the array was the only broken one).
 
-```cmd
-npuembeddings embed bge-base-en-v1.5 texts.txt out.f32
+**Effect on accuracy.** Against the host path, before and after:
+
+| | cos |
+|---|---|
+| before | 0.8987 |
+| after | **0.9999** |
+
+**Fix and verification.** One line, plus a rebuild of the design set. Verified:
+12 runs per configuration across every batch-tier mix, all producing a single
+bit-identical answer, and `--pipeline 1` and `--pipeline 4` now agree bitwise on
+all of them.
+
+**A second, independent defect fixed alongside it.** The `--pipeline` lanes
+shared one `npu::Design` per operation, and the eltwise designs — unlike the
+GEMM design — gave their lanes no private input/output buffers, while
+`layer_norm()` and `eltwise()` took no dispatch mutex at all. Lanes overwrote
+each other's rows. Each lane now gets its own A and C slots and the whole
+bind → sync → dispatch → sync_from window is taken under the same `npu_mu` that
+`gemm()` already used. This was a real race, but on its own it accounted for
+only part of the damage (10/12 → 6/12 distinct answers); the IRON imbalance
+above was the rest.
+
+**Consequence for artifacts.** The fix lives in the exporter, and design sets
+are gitignored, so the corrected `layernorm/final.xclbin` is **not** in this
+repository. Anyone building from source must re-run the exporter; a stale
+artifact directory still carries the bug.
+
+### Roadmap items not yet done
+
+Listed under [Roadmap](#roadmap).
+
+---
+
+## Performance notes
+
+**Measure before believing any number, and measure on this machine.** The
+throughput table in [`docs/CURRENT_STATUS.md`](docs/CURRENT_STATUS.md) was
+recorded on the project's reference machine for the reference NPU; it is a
+baseline to compare against, not a claim about your hardware. The mechanisms
+below are the ones that actually decide the number.
+
+- **The array is shared.** Wall clock is never an NPU performance claim on its
+  own. A leftover process holding an `Active` `hw_context` was measured reading
+  221 seq/s against a true 694 on the same binary, minutes apart. `xrt-smi
+  examine -r all` is the tool that knows who holds what; the runtime refuses a
+  timed run when the array is not exclusively its own, unless you pass
+  `--allow-contention`.
+- **Per-dispatch cost is fixed and not small** (~150 µs measured). A design set
+  is loaded once and kept precisely to avoid paying it per dispatch — which is
+  also why the elementwise ops default to the host, and why `--npu-eltwise` can
+  *lower* throughput rather than raise it.
+- **Batch tiers are right-sized, not padded.** A request is split into the
+  largest tier that fits; the design set carries an instruction stream per tier.
+- **`--npu-eltwise` costs four `hw_context`s** instead of one, against a
+  measured budget of six on this driver. XRT exposes no usable-count query, so
+  the budget is a labelled constant and the source of the number is printed
+  beside it rather than hardcoded silently.
+- **`--pipeline N` divides the host thread budget.** `--threads 8 --pipeline 4`
+  gives each lane 2. Requesting more lanes than there are chunks in a request
+  buys nothing.
+
+The timed path prints its own breakdown — wall, host threads busy, per-phase
+costs (bf16 conversion, sync to device, dispatch + wait, sync from device, read
+out + bias, host attention), and per-design wait time — so a regression can be
+attributed to a phase rather than guessed at.
+
+---
+
+## Troubleshooting
+
+**`DRM_IOCTL_AMDXDNA_CREATE_HWCTX IOCTL failed (err=-22)`** — the device's
+`hw_context` budget is full: another NPU process, or an earlier run of yours
+that was killed before releasing its contexts. `xrt-smi examine -r all` lists
+the holders. Close them, or pass `--allow-contention` if the contention is
+intended.
+
+**`Invalid Peano install directory: peano_not_found`** — Peano is not
+installed. `kernels/*.cc` compile as AIE external functions and need Peano's
+`clang++`. Set `PEANO_INSTALL_DIR` to the `llvm-aie` package directory.
+
+**`Unsupported device: npu`** from the exporters — the NPU tensor backend fell
+back to CPU-only. Put XRT's Python bindings on the path and select the XRT
+backend:
+
+```bash
+export PYTHONPATH=/opt/xilinx/xrt/python:$PYTHONPATH
+export NPU_RUNTIME=xrt
 ```
 
-```python
-import numpy as np
-v = np.fromfile("out.f32", dtype=np.float32).reshape(-1, 768)
-```
+**`--npu-eltwise asks for <op> on the array, but <dir>/design.json does not
+exist`** — the sibling eltwise design sets were not built. Re-run the exporter
+with `--npu-eltwise`, or drop the flag.
 
-### Input length — read this before embedding documents
+**`--artifacts '<name>': no design set found`** — the path resolved to a
+directory with no `gemm_rtp/design.json` and no `qkv/design.json`. The error
+lists every directory that was tried.
 
-**The shipped designs run at a sequence length of 64 tokens, and an input
-longer than that is refused rather than shortened.**
+**`this design set records no sequence length`** — the `design.json` predates
+the field. Re-export it.
 
-```
-$ curl ... -d '{"input": "<a 123-token document>"}'
-HTTP 400
-{"error":{"message":"input 0 is 123 tokens, but this runtime is running at
-sequence length 64. Split the text into shorter pieces, or run a design
-exported for a longer sequence (tools/export_gemm_rtp.py --seq N)...",
-"type":"invalid_request_error"}}
-```
+**Throughput collapsed between two runs of the same command** — check for a
+leftover NPU process first (`xrt-smi examine -r all`), then `--bo-mode`, then
+whether the two runs used the same batch tiering. A timed run prints its
+`bo-mode`, tiers and alignment for exactly this reason.
 
-That refusal is deliberate, and it is newer than the cap. Until `tasks/0110`
-the runtime **quietly embedded the first 64 tokens instead**, which is a much
-worse failure than an error: a truncated text still returns a
-correctly-shaped, correctly-normed, perfectly deterministic vector, so nothing
-downstream can tell that the answer is wrong. The pathological case is
-documents that share a preamble — cut them all at the same point and their
-vectors become **byte-identical**, and retrieval between them degrades to a
-coin flip wearing a similarity score. We measured exactly that on real
-municipal records before fixing it.
+**`--pipeline N` results are slower than `--pipeline 1`** — possible when the
+request is smaller than `N` chunks, so lanes idle; and `--pipeline` divides the
+host thread budget, so `--threads 8 --pipeline 4` gives each lane 2.
 
-So: **chunk your text on the caller's side**, embed the pieces, and mean-pool
-plus renormalise if you need one vector per document. Roughly 64 tokens is
-~140–160 characters of English or Norwegian prose; measure against your own
-corpus rather than trusting that ratio.
+---
 
-`--allow-truncation` restores the old cut-and-continue behaviour if you
-genuinely want it. It warns once per run on stderr and its vectors mean "the
-first 64 tokens of this text", not "this text".
-
-**Why 64, and what longer costs — now measured.** Sequence length is not a
-hardware limit and it is not baked into the kernels. It enters a design only as
-`M = batch × seq`, and the instruction streams know just `M`, `K` and `N`, so
-`batch 128 × seq 64` and `batch 16 × seq 512` are the same `M = 8192` and the
-same array work. `tools/export_gemm_rtp.py --seq N` builds a long-sequence
-design; the seq-256 and seq-512 sets serve both `nomic-embed-text-v1.5` and
-`gte-multilingual-base` (they share their array geometry exactly, which is
-why the multilingual model cost zero new NPU designs).
-
-They were exported and measured. **Across an 8× sequence range the array does
-not move: −2.0% on identical `M` and identical dispatch counts.** Everything
-longer sequences cost is host-side, because attention runs on the host at
-O(seq²) per sequence — O(seq) per token — while array work at constant `M` is
-flat:
-
-| nomic, constant `M = 8192` | seq 64 | seq 256 | seq 512 |
-|---|---:|---:|---:|
-| array, share of wall clock | **76.3%** | 62.0% | **46.6%** |
-| host attention, share of wall | 16.5% | 33.6% | **52.1%** |
-| cost per token | 1.000× | 1.221× | **1.605×** |
-
-**Host attention overtakes the whole array at seq ≈ 470.** So the widely-quoted
-"attention is only 2–5% of the work" is a **seq-64 number and must not be
-quoted above it** — that is the single most useful thing to know before asking
-for long sequences.
-
-Two practical caveats if you build one. The 256 cap on the BERT-family models
-is the container's `max_seq_len` **config field**, not the position table, so a
-repack is needed above 256 like everything else. And a long-sequence design is
-a **bad instrument for short requests**: tier selection rounds up, so the
-smallest tier's token footprint is what bites — measured at **5.8×** for a
-single short text on a seq-512 design. Run the design that matches your
-traffic.
-
-### Which model
-
-| model | hidden | layers | notes |
-|---|---:|---:|---|
-| `all-MiniLM-L6-v2` | 384 | 6 | smallest and fastest |
-| `bge-small-en-v1.5` | 384 | 12 | MiniLM's width, twice the depth |
-| `bge-base-en-v1.5` | 768 | 12 | **the geometry that fits this NPU best** — a good default |
-| `bge-large-en-v1.5` | 1024 | 24 | highest quality, slowest |
-| `nomic-embed-text-v1.5` | 768 | 12 | RoPE + gated SwiGLU; **needs a task prompt** |
-| `embeddinggemma-300m` | 768 | 24 | MQA + RoPE + GeGLU; needs a task prompt; gated, needs `HF_TOKEN` |
-| `gte-multilingual-base` | 768 | 12 | **multilingual** (XLM-R vocab, 70+ languages); RoPE + gated GELU; no prompt |
-
-### Task prompts
-
-`nomic-embed-text-v1.5` and `embeddinggemma-300m` need a **task prompt** —
-`search_document` for documents and `search_query` for queries on nomic, one of
-14 sentence-transformers names on Gemma. Getting it wrong costs retrieval
-quality and **no similarity check can detect it**: a wrongly-prompted embedding
-comes back correctly shaped, correctly normed and deterministic. So the runtime
-never picks one for you.
-
-**Serving, it is a per-request field.** A RAG deployment needs queries and
-documents embedded differently in the same session, so the choice cannot be a
-process-wide flag:
-
-```jsonc
-POST /v1/embeddings
-{ "input": ["what is XDNA2?"], "prompt_name": "search_query" }
-
-// omit it on a model that has prompts and you get, instead of a guess:
-// 400 {"error":{"message":"this model requires 'prompt_name'; valid names:
-//      [classification, clustering, search_document, search_query], ...",
-//      "type":"invalid_request_error"}}
-```
-
-`GET /health` lists the names, so a client never has to provoke the 400 to
-learn them. `"prompt_name": ""` means no prompt at all. Passing the field to a
-model that has no prompts (the four BERT models, and `gte-multilingual-base`)
-is also a 400 — a client
-sweeping one config across the whole catalogue should break loudly rather than
-quietly return unprompted vectors.
-
-OpenAI's own `/v1/embeddings` has no such field, because its embedding models
-are symmetric. Among servers that host asymmetric models the name is not
-standardised — Cohere requires `input_type`, vLLM accepts `input_type`, and
-HuggingFace TEI uses `prompt_name` on its native route. This project uses
-`prompt_name` because EmbeddingGemma's table holds sentence-transformers names
-like `STS` and `BitextMining`, which are not "input types".
-
-**Batch (`embed`) still takes `--prefix NAME`**, because a file of texts has no
-per-request anything. It is **required** there for a model with prompts — there
-is no default — and `--prefix ""` means none. `serve` rejects the flag.
-
-### Flags
+## Repository layout
 
 ```
-npuembeddings                       what this is, and what it can run
-npuembeddings list
-npuembeddings serve <model> [--port N] [--bind ADDR]
-npuembeddings embed <model> <in.txt> [out.f32] [--prefix NAME]
-
-  --port N          listen port (default 8080)
-  --bind ADDR       interface (default 127.0.0.1, localhost only)
-  --threads N       host thread budget (default 24)
-  --pipeline N      concurrent encode lanes (default 4)
-  --prefix NAME     task prompt, for `embed` only and REQUIRED for a
-                    model that has one. `serve` rejects it -- send
-                    "prompt_name" per request instead
-  --allow-truncation
-                    embed the first 64 tokens of an over-long input
-                    instead of refusing it. Off by default; see
-                    "Input length" above for why that default is
-                    the safe one
-  --artifacts DIR   override the design set
-  --root DIR        override where models/ and the design live
-  --token VALUE     HuggingFace token for gated repos (or set HF_TOKEN)
+tools/                     Python: exporters, packer, verifiers (no C++ at run time)
+  export_gemm_rtp.py       unified GEMM design set, per arch and batch tier
+  export_eltwise.py        gelu / layernorm / softmax design sets
+  npu_targets.json         model geometry + per-arch defaults (exporter's source of truth)
+  pack_npue.py             build the .npue container
+  verify_*.py              correctness gates
+kernels/                   AIE device code (C++), compiled by aiecc via Peano
+runtime/
+  include/runtime/         device, design, model container, encoder, pool, run_*
+  include/encoders/        BertEncoder (BERT family)
+  include/embed_models/    model wrappers and the loader registry
+  include/tokenizers/      WordPiece, XLM-R Unigram, SentencePiece, Whisper
+  include/server/          HTTP server, embedding service
+  include/cli/             argument parsing and subcommand dispatch
+  include/common/          app state, host kernels, JSON, hub, packer helpers
+  include/whisper/         Whisper model wrapper + the speech-to-text engine
+  src/                     implementations, mirroring include/
+                           (cli/ common/ embed_models/ encoders/ server/
+                            tokenizers/ whisper/ + the top-level units)
+docs/                      research notes and the running status log
+models/                    vendored checkpoints (large)
 ```
 
-A single text takes ~15 ms: the design carries instruction streams for several
-batch sizes, so a 3-text request runs a 4-sequence encode rather than padding
-to 128.
+**Design rules the tree follows**, so a change does not violate them by accident:
 
-## Performance
+- `main.cpp` is thin: parse, construct, run. No encode logic.
+- The C++ runtime compiles nothing. Every xclbin and instruction stream comes
+  from `tools/`.
+- `Design` owns one xclbin, its instruction streams and its buffers; the xclbin
+  is loaded once and kept.
+- **Shared mutable state on a `Design` is either per-lane or under `npu_mu`.**
+  `--pipeline` runs several encoders against the *same* `Design` objects, so
+  every dispatch site holds `npu_mu` across bind → sync-to → dispatch →
+  sync-from, and every buffer a lane writes concurrently has a lane-private
+  slot. `gemm()`, `eltwise()` and `layer_norm()` all do this.
+- **`Model` never builds encoders.** A `BertEncoder` cannot be constructed
+  without seven live `npu::Design &`, and those only exist after the device is
+  opened and a design set is selected — so `Runtime` owns encoder construction,
+  because it is the component that already does both. `Model` exposes geometry
+  and the tokenizer only, and there is deliberately no `make_encoder()`; if a
+  design-aware context is ever needed it belongs on `Runtime`, not `Model`.
+- **The `Encoder` interface is text-in only** (`encode`, `hidden`, `seq`). The
+  raw pre-embedded forward pass that the benchmark and golden-check paths need
+  is a concrete second method on `BertEncoder`,
+  `run(const std::vector<float> &emb_in)` — not on the base interface.
+- **Model types plug in through a registry**, not a switch: a loader declares
+  which container `arch` it handles, and `load_model()` asks each in turn.
+  Adding an architecture is a new loader plus a new tokenizer, with no existing
+  code edited.
+- Fail loudly by name. A missing design, a wrong generation, a full context
+  budget and an unpinned prefix are all errors, never silent fallbacks.
 
-Ryzen AI 9 HX 370, sequence 64. One whole-catalogue sweep, one machine state,
-one protocol — because a row-by-row patchwork misleads even when no row lies.
-CPU comparisons are measured **interleaved in one session**, round-robin in one
-process, because wall clock on a shared machine drifts enough that numbers taken
-minutes apart compare the machine rather than the code.
+---
 
-| model | datapath | **NPU** | vs 0.4.0 ¹ | **NPU / best CPU** | energy ² | worst `1 − cos` | **p99 tail** ³ | MTEB Δ mean / worst ⁴ |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| `all-MiniLM-L6-v2` | bfp16 | **1461** | 1.00× | **1.855×** | 3.42× better | 3.406e-04 | 9.7e-04 | +0.12 / −0.07 |
-| `bge-small-en-v1.5` | bf16 | **630** | 1.00× | 1.589× | 2.64× | 8.348e-06 | 1.2e-05 | −0.10 / **−0.5010** |
-| `bge-base-en-v1.5` | bfp16 | **324** | 1.00× | **2.713×** | 4.52× | 2.284e-04 | 3.7e-04 | −0.06 / −0.19 |
-| `bge-large-en-v1.5` | bfp16 | **95.2** | 1.00× | 2.607× | 4.89× | 2.626e-04 | **6.6e-03** ⁵ | +0.13 / −0.01 |
-| `nomic-embed-text-v1.5` | bfp16 | **262** | 1.00× | **3.494×** | 6.55× | 1.402e-03 | 1.6e-03 | +0.01 / −0.25 |
-| `embeddinggemma-300m` | bfp16 | **181** | 1.01× | 1.271× | 3.72× ⁶ | PASS ⁷ | 4.2e-04 | +0.16 / −0.02 |
-| `gte-multilingual-base` | bfp16 | **255** | new | — ⁸ | — ⁸ | 4.608e-04 | 5.2e-04 | **+0.06 / −0.06** ⁹ |
+## Roadmap
 
-¹ against 0.4.0's sweep, **same harness, same stage, same statistic**. The six
-carried-over models reproducing 0.4.0 to within ±1% is itself the release's
-regression check passing: 0.5.0 changed no array code for them, and the column
-says so. ² joules per 1000 sequences, differential RAPL, **re-measured this
-sweep**; the ratio moves with the CPU side, which drifts more between sessions
-than the NPU side does (nomic read 4.01× in 0.4.0 and 6.55× here — treat the
-column as indicative, not as a constant of nature). ³ **new in 0.5.0**: p99 of
-per-text `1 − cos` over 224 varied inputs, single words included — the gate
-that sees what a mean hides. ⁴ from the symmetric gate runs (bfp16 adoption for
-the six, task 0137 for gte); still valid because everything since is
-bit-identical, verified by hash. ⁵ bge-large's tail is real, ~100× its median,
-carried as a register-linked waiver (T51) rather than rounded away — its
-median-regime accuracy is the 2.626e-04 column. ⁶ carried from 0.4.0: this
-sweep's gemma NPU energy arm produced a degenerate differential (Δt ≈ 0
-between the low and high runs — the harness limitation is recorded in the task
-log) and a wrong number reported confidently is worse than a carried one
-labelled. ⁷ arch 1 has no HF-reference golden; its gate is differential
-against the host-only control. ⁸ **deliberately absent**: both need a CPU
-reference arm, and gte's `trust_remote_code` model is unusable without buffer
-repairs (an unrepaired run is silently position-scrambled) — so the NPU figure
-stands alone and labelled, per this project's measurement rules. ⁹ the
-cleanest MTEB verdict in the catalogue, clustering cell positive; multilingual
-STS evidence (29 language subsets within [−0.30, +0.20]) is in the release
-note.
+Carried over from the deleted planning notes:
 
-Sequences per second, end to end, wall clock — **that is a throughput figure,
-not an NPU kernel performance claim**; per-kernel numbers in this project come
-from hardware traces only. The `1 − cos` gate is 2e-03, the tail gate is p99
-against a per-model ceiling, and the MTEB gate is `|mean| ≤ 0.5` with no task
-worse than −0.5.
+1. **End-to-end verification of the per-model layout.** Walk every model in
+   `npu_targets.json` through export → serve → compare against goldens, and make
+   it a gate rather than a manual pass.
+2. **`tools/verify_targets.py`.** Assert that `npu_targets.json` and the
+   catalogue in `src/common/hub.cpp` agree. The catalogue already holds the
+   authoritative geometry; two copies of it will drift.
+3. **Whisper (STT) extension point.** `npu_targets.json` has a `kinds` table
+   with an `stt` entry whose `exporter` is `null` and whose `streams` are empty.
+   `--target` should fail with a clear "no exporter for kind=stt" rather than
+   something incidental.
 
-**The `datapath` column is read from the runtime's own status line**, not
-restated from a table — a design and the intention behind it are different
-things, and only one of them is evidence.
+---
 
-**Rows worth stopping on.** `bge-small-en-v1.5` stays on plain bf16: it failed
-the bfp16 accuracy gate at **−0.5010** against a −0.5 line, bit-reproducibly,
-and we did not round that away. `bge-large-en-v1.5` carries the catalogue's
-one real accuracy tail — same five single words atop the tail on two
-arithmetically unrelated datapaths, so it is a property of the model × input,
-not of the number format (task 0129). And `gte-multilingual-base` runs on the
-**same NPU design set as nomic** — its geometry matches bit for bit, so the
-seventh model cost zero new array designs; every cost was host-side (a third
-tokenizer family and a fourth encoder architecture).
+## Further reading
 
-**And the memory system is measured now, not inferred.** The bandwidth roof is
-**45.5 GB/s on the array's own clock** (trace-derived dispatch time agreeing
-with wall clock to 0.4%), four instruments concur, and the mem-tile↔L1 leg is
-two-thirds idle while the cores wait on locks — the DRAM leg is the one that
-binds. B-reuse, the biggest priced lever, re-priced on those measurements at
-1.72× array / 1.31× end-to-end and is parked behind a funded C-join re-plumb.
+| Document | What is in it |
+|---|---|
+| `docs/CURRENT_STATUS.md` | the running status log: measured numbers, rejected hypotheses, known walls |
+| `docs/00-overview.md` | system overview and design |
+| `docs/01-hardware/` … `docs/06-performance.md` | hardware, toolchain, kernels, model, measurement methodology, performance |
+| `docs/history.md` | chronological history of the project |
+| `tools/README.md` | exporter and packer reference |
 
-**→ [docs/06-performance.md](docs/06-performance.md) has the caveats**, and
-they matter more than the table: how the numbers were taken, which reproduce
-and which do not, and what we could not explain.
-
-## Contributing
-
-**Issues, ideas and code are the most useful things anyone can bring.** Open an
-issue for anything — a question, a result that looks wrong, a machine where it
-does not work, a direction worth trying.
-
-If you want somewhere to start,
-[`research/OPEN-THREADS.md`](research/OPEN-THREADS.md) is every question this
-project has written down and not answered, with a status, ordered by what it
-would change. Threads leave that file only by being answered, retired or
-superseded — never by being quietly forgotten. Some need this exact hardware;
-several do not:
-
-- **A byte-level BPE tokenizer**
-  ([T43](research/OPEN-THREADS.md#t43)) — this is the gate on nearly every
-  encoder released since 2024. We ship WordPiece, Gemma's SentencePiece BPE
-  and (since 0.5.0) XLM-R's SentencePiece Unigram, but nothing byte-level,
-  which blocks the whole ModernBERT, Qwen and Mistral family at once. The
-  Unigram build is the template: a table generator, a C++ port, and a
-  byte-exact test against HuggingFace — it went from filed to 343/343 in a
-  day. **This one needs no NPU.**
-- **Which encoder joins the catalogue next**
-  ([T44](research/OPEN-THREADS.md#t44)) — four candidates are already priced
-  against this project's own geometry gates, with the arithmetic shown.
-- **Fold attention onto the array for long-sequence designs**
-  ([T42](research/OPEN-THREADS.md#t42)) — filed with a price and an explicit
-  trigger. The geometry blocker is gone (mem-tile padding is proven exact on
-  all 8 columns); what is not settled is whether it is worth it.
-- **Does the NPU have a case for LLM *decode* at all?**
-  ([T55](research/OPEN-THREADS.md#t55)) — a side workstream took the same
-  hardware knowledge to a decoder (`granite-4.2-3B`, a W4A16 GEMV kernel
-  written from scratch) and got a **negative**: a 24-thread AVX2 CPU baseline
-  is 2.4× faster, at 89% of its own memory bandwidth. Decode is bandwidth-bound
-  and both devices sustain ~47 GB/s. The two cases left are **energy** and
-  **prefill**, and neither has been measured. None of that code is in this
-  repository, but the question and the numbers are.
-
-Those are filed with a price and a trigger rather than as open questions
-about the hardware — the register ran to 20 threads a fortnight ago and 51 of
-the 60 are now closed, each by a measurement or a build rather than by a
-decision to stop caring. **How** they were settled is in
-[`research/CLOSED-THREADS.md`](research/CLOSED-THREADS.md), verbatim, because
-the refuted claims and the measurements that killed them are the valuable part.
-
-If you disagree with a measurement, the task logs record the command and the
-artifact for every number, so disagreements can be settled rather than argued.
-
-## Where things live
-
-```
-runtime/        the product: C++ + XRT, no Python
-experiments/    IRON designs and AIE kernels (Python at build time only)
-tools/          pack the model, export designs, verify everything
-docs/           how it works, and the measurement rules
-tasks/          what happened, day by day, failures included
-reference/      the numpy oracle everything is validated against
-research/       open questions, prior art
-```
-
-- **[docs/00-overview.md](docs/00-overview.md)** — how it works and why it is
-  built this way
-- **[docs/CURRENT_STATUS.md](docs/CURRENT_STATUS.md)** — what runs today, what
-  does not, what was tried and failed
-- **[docs/05-measurement/](docs/05-measurement/README.md)** — the measurement
-  doctrine, including why wall clock is never an NPU performance claim
-- **[tasks/](tasks/README.md)** — the day-by-day log; the failures are the
-  valuable part
-
-This repository is its own public tree. What is not here is an
-indexed literature review — summaries written to be usable *instead of* the
-papers, which makes them exactly the thing not to republish. Everything else
-ships, so a document referring to `research/papers/` is describing that private
-material; the papers themselves are cited by arXiv id.
-
-## Related work
-
-[jyatesdotdev/npu-embeddings](https://github.com/jyatesdotdev/npu-embeddings)
-takes the same idea down a different path: INT8 rather than bf16, Linux rather
-than native Windows, Strix Halo rather than Strix Point. Worth reading alongside
-this one; the two make different trades and neither is the obvious answer.
-
-## Licence
-
-**Apache-2.0.** Five files began as MLIR-AIE examples and remain Apache-2.0
-WITH LLVM-exception, keeping their original headers and stating what changed.
-[`THIRD-PARTY.md`](THIRD-PARTY.md) lists them and is *generated* by
-[`tools/audit_third_party.py`](tools/audit_third_party.py) rather than
-maintained by hand — attribution rots as files are rewritten, so the audit
-measures shared code against an mlir-aie checkout and fails if anything
-substantial lacks a header.
-
-This is an independent implementation, not affiliated with or endorsed by AMD.
+`docs/CURRENT_STATUS.md` is the place to look for *why* something is the way it
+is; this README is the place to look for *how to run it*.

@@ -141,6 +141,13 @@ runtime/build_gemma_encode/
 #   python tools\export_xclbin.py --cols N --elt-cols M --batch B --out runtime\artifactsX
 #   python experiments\m7-switch-cost\build_passthrough.py
 runtime/artifacts*/
+# ...and the same in the PER-MODEL layout, which is what the exporters write
+# now: `runtime/<model>/artifacts_npu<N>/{gemm_rtp,gelu,layernorm,softmax}`.
+# The pattern above is anchored at runtime/, so it cannot see one level down --
+# which is why a per-model design set was committable.
+#   python tools\export_gemm_rtp.py --npu-eltwise --out runtime\<model>
+#   python tools\export_eltwise.py --arch all --out runtime\<model>
+runtime/*/artifacts*/
 
 # Release staging (tools/make_release.ps1)
 dist/
@@ -160,3 +167,44 @@ externalrepos/
 # MLIR (experiments/m5-pretiled-gemm/artifacts/mlir_pretiled_kn_st_4c_*).
 # Regenerate with cfg.trace_to_json(mlir, out) or re-run the traced dispatch.
 tasks/0130-t45-traced-roof/trace.json
+
+# ---------------------------------------------------------------------------
+# Linux in-source CMake build at runtime/.
+#
+# The .gitignore already covers the two OUT-of-source layouts -- /build/ at the
+# root and runtime/build/ -- because those are what the documented commands use.
+# An in-source `cmake -S runtime -B runtime` (or a stray `cd runtime && cmake
+# .`) drops the same generated tree next to the sources, and nothing caught it.
+# Named file by file rather than globbed: runtime/ also holds hand-maintained
+# content, and `runtime/Testing/`-style patterns have a habit of swallowing more
+# than they mean to.
+#   cmake -S runtime -B runtime -DCMAKE_BUILD_TYPE=Release && cmake --build runtime
+runtime/CMakeCache.txt
+runtime/CMakeFiles/
+runtime/cmake_install.cmake
+runtime/Makefile
+# The two executables that in-source build leaves in runtime/. CMakeLists.txt
+# POST_BUILD copies npuembed -> npuembeddings beside the target, so an
+# in-source build puts both in runtime/ while an out-of-source one puts them
+# under runtime/build/ (already ignored above).
+runtime/npuembed
+runtime/npuembeddings
+
+# Model download cache (src/common/hub.cpp writes <name>/<file>.part while a
+# fetch is in flight and renames on completion). The CHECKPOINTS themselves are
+# committed under the top-level models/ -- this is runtime/models/, a different
+# path, anchored so the vendored tree above can never be caught by it.
+runtime/models/
+
+# Scratch output of ad-hoc harness scripts that write into the CWD they were
+# launched from -- runtime/bisect.py posts to a local server and saves the
+# responses as res<N>.json here. Real fix is the script writing into a
+# temporary directory; ignored until then so a test loop cannot commit noise.
+runtime/res*.json
+
+# Agent/tooling config, local to this checkout. AGENTS.md carries the
+# code-index instructions the agent runs on, and opencode.jsonc is opencode's
+# own project config; neither is project documentation and neither belongs in
+# the shared history.
+AGENTS.md
+opencode.jsonc

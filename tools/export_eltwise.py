@@ -277,6 +277,22 @@ def _arrays():
         k = _extern_kernel(iron, symbol, src, [tile_ty, vec_ty, tile_ty], None)
 
         def core_fn(a, pm, c, ln):
+            # The params object is acquired ONCE, outside the loop, because it
+            # is the same gamma|beta for all `per_core` blocks -- so it MUST be
+            # released once at the end to balance that acquire.
+            #
+            # It was not, and the imbalance is a correctness bug, not a leak.
+            # `sequence()` issues exactly one `p_prods[c].fill(P, ...)` per
+            # program run, so a run consumes 1 and returns 0: the L1-forwarded
+            # buffer `lnp_l1_c` (depth 1) still holds an object when the program
+            # ends. The next dispatch restarts the program, and the core's
+            # `pm.acquire(1)` can then be satisfied by THAT leftover before the
+            # new fill lands -- so a LayerNorm computes with the PREVIOUS
+            # dispatch's gamma|beta. Measured as the same request answering
+            # 0.38 and 0.68 on successive calls, and only ever on LayerNorm:
+            # the GELU and softmax core_fn below have no params fifo at all and
+            # are balanced. Releasing here leaves the buffer empty at exit, so
+            # the next acquire blocks until its own fill arrives.
             ep = pm.acquire(1)
             for _ in range_(per_core):
                 ea = a.acquire(1)
@@ -284,6 +300,7 @@ def _arrays():
                 ln(ea, ep, ec)
                 a.release(1)
                 c.release(1)
+            pm.release(1)
 
         n_rows_grid = 4
         l2_ty = np.ndarray[(n_rows_grid * blk,), np.dtype[bfloat16]]

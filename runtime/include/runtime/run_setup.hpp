@@ -489,6 +489,24 @@ inline int setup_encoder(RunContext &ctx) {
       // lane 0 keeps the base slots.
       e2.slot_a = ctx.d_qkv().stage_alloc(0, ctx.d_qkv().info().buffer_bytes[0]);
       e2.slot_c = ctx.d_qkv().stage_alloc(2, ctx.d_qkv().info().buffer_bytes[2]);
+      // ...and the same for the eltwise designs, but ONLY for the ops that
+      // actually run on the array. Each of them has exactly ONE A and ONE C
+      // buffer, so without this every lane overwrote the rows the others were
+      // still feeding and read back the others' results -- and which lane won
+      // was thread-scheduling dependent, so the same request answered
+      // differently from one call to the next. host_ln/host_gelu/host_sm mean
+      // the op never touches that design, and in unified mode those accessors
+      // alias the GEMM design, whose A and C this lane already owns slots for
+      // just above -- allocating again there would only burn device memory.
+      auto elt_slots = [](npu::Design &d) {
+        npue::BertEncoder::EltSlots s;
+        s.a = d.stage_alloc(0, d.info().buffer_bytes[0]);
+        s.c = d.stage_alloc(d.output_index(), d.info().buffer_bytes.back());
+        return s;
+      };
+      if (!e2.host_gelu) e2.slots_gelu = elt_slots(ctx.d_gelu());
+      if (!e2.host_ln)   e2.slots_ln   = elt_slots(ctx.d_ln());
+      if (!e2.host_sm)   e2.slots_sm   = elt_slots(ctx.d_sm());
       e2.npu_mu = &npu_mutex;
     }
     for (const auto &lp : ctx.lanes) {

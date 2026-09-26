@@ -12,6 +12,9 @@
 #include "encoders/gemma_kernels.hpp"
 #include "runtime/model.hpp"
 #include "tokenizers/tokenizer_facade.hpp"
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 
 using namespace app;
 
@@ -155,21 +158,43 @@ double BertEncoder::lap(double t0, double &bucket) {
   return t;
 }
 
-void BertEncoder::eltwise(npu::Design &d, float *x, size_t n) {
+void BertEncoder::eltwise(npu::Design &d, const EltSlots &slots, float *x,
+                          size_t n) {
   double t0 = now_s();
+  // The A buffer is this lane's own, so the conversion runs unlocked and in
+  // parallel. It is the dispatch window below that has to be exclusive.
+  auto *in_bf16 = static_cast<uint16_t *>(d.slot_ptr(0, slots.a));
   par(n, [&](size_t lo, size_t hi) {
-    bf16_fill(static_cast<uint16_t *>(d.host_ptr(0)) + lo, x + lo, hi - lo);
+    bf16_fill(in_bf16 + lo, x + lo, hi - lo);
   });
+  const size_t cap_elems = d.info().buffer_bytes[0] / sizeof(uint16_t);
+  if (n < cap_elems)
+      std::memset(in_bf16 + n, 0, (cap_elems - n) * sizeof(uint16_t));
   t0 = lap(t0, t_conv);
-  d.sync_to_device(0);
-  t0 = lap(t0, t_in);
-  d.dispatch_only();
-  t0 = lap(t0, t_disp);
-  d.sync_from_device(1);
-  t0 = lap(t0, t_out);
+  // ONE mutex, exactly as gemm() takes it, because the thing being protected is
+  // the same thing gemm() protects: Design's `active` slot table is shared
+  // mutable state, so two lanes binding and dispatching one Design concurrently
+  // read a torn binding and each other's buffers. Previously only gemm() took
+  // it -- and gelu/softmax/layernorm, which have no per-lane weight slot to
+  // hide behind, silently raced here.
+  {
+    std::unique_lock<std::mutex> lk;
+    if (npu_mu) lk = std::unique_lock<std::mutex>(*npu_mu);
+    d.bind(0, slots.a);
+    d.bind(1, slots.c);
+    d.sync_to_device(0, cap_elems * sizeof(uint16_t));
+    t0 = lap(t0, t_in);
+    d.dispatch_only();
+    t0 = lap(t0, t_disp);
+    d.sync_from_device(d.output_index(), cap_elems * sizeof(uint16_t));
+    t0 = lap(t0, t_out);
+  }
+  // Read back through slot_ptr, not host_ptr: an explicit slot touches neither
+  // the shared binding table nor the lock, and the C buffer is this lane's own.
+  const auto *out_bf16 = static_cast<const uint16_t *>(
+      d.slot_ptr(d.output_index(), slots.c));
   par(n, [&](size_t lo, size_t hi) {
-    bf16_read(x + lo, static_cast<const uint16_t *>(d.host_ptr(1)) + lo,
-              hi - lo);
+    bf16_read(x + lo, out_bf16 + lo, hi - lo);
   });
   lap(t0, t_conv);
   ++n_dispatch;
@@ -178,22 +203,37 @@ void BertEncoder::eltwise(npu::Design &d, float *x, size_t n) {
 void BertEncoder::layer_norm(std::vector<float> &x, size_t slot) {
   if (host_ln) { layer_norm_cpu(x, slot - 1); return; }
   double t0 = now_s();
-  layernorm_.bind(1, slot);
+  auto *in_bf16 = static_cast<uint16_t *>(
+      layernorm_.slot_ptr(0, slots_ln.a));
   par(x.size(), [&](size_t lo, size_t hi) {
-    bf16_fill(static_cast<uint16_t *>(layernorm_.host_ptr(0)) + lo,
-              x.data() + lo, hi - lo);
+    bf16_fill(in_bf16 + lo, x.data() + lo, hi - lo);
   });
+  const size_t cap_elems = layernorm_.info().buffer_bytes[0] / sizeof(uint16_t);
+  if (x.size() < cap_elems)
+      std::memset(in_bf16 + x.size(), 0, (cap_elems - x.size()) * sizeof(uint16_t));
   t0 = lap(t0, t_conv);
-  layernorm_.sync_to_device(0);
-  t0 = lap(t0, t_in);
-  layernorm_.dispatch_only();
-  t0 = lap(t0, t_disp);
-  layernorm_.sync_from_device(2);
-  t0 = lap(t0, t_out);
+  // Same window, same reason, same mutex as eltwise() and gemm(). `slot` is the
+  // gamma|beta site, and lanes sit at DIFFERENT sites at the same instant -- so
+  // an unlocked bind(1, slot) handed this dispatch another layer's parameters,
+  // which is the larger half of the corruption.
+  {
+    std::unique_lock<std::mutex> lk;
+    if (npu_mu) lk = std::unique_lock<std::mutex>(*npu_mu);
+    layernorm_.bind(0, slots_ln.a);
+    layernorm_.bind(1, slot);
+    layernorm_.bind(2, slots_ln.c);
+    layernorm_.sync_to_device(0, cap_elems * sizeof(uint16_t));
+    t0 = lap(t0, t_in);
+    layernorm_.dispatch_only();
+    t0 = lap(t0, t_disp);
+    layernorm_.sync_from_device(layernorm_.output_index(),
+                                cap_elems * sizeof(uint16_t));
+    t0 = lap(t0, t_out);
+  }
+  const auto *out_bf16 = static_cast<const uint16_t *>(
+      layernorm_.slot_ptr(layernorm_.output_index(), slots_ln.c));
   par(x.size(), [&](size_t lo, size_t hi) {
-    bf16_read(x.data() + lo,
-              static_cast<const uint16_t *>(layernorm_.host_ptr(2)) + lo,
-              hi - lo);
+    bf16_read(x.data() + lo, out_bf16 + lo, hi - lo);
   });
   lap(t0, t_conv);
   ++n_dispatch;
@@ -1126,7 +1166,7 @@ std::vector<float> BertEncoder::run(const std::vector<float> &emb_in) {
       softmax_cpu(scores);
     } else {
       add_additive_mask(scores);
-      eltwise(softmax_, scores.data(), scores.size());
+      eltwise(softmax_, slots_sm, scores.data(), scores.size());
     }
 
     ta = now_s();
@@ -1194,7 +1234,7 @@ std::vector<float> BertEncoder::run(const std::vector<float> &emb_in) {
       if (host_gelu)
         gelu_cpu(up);
       else
-        eltwise(gelu_, up.data(), up.size());
+        eltwise(gelu_, slots_gelu, up.data(), up.size());
       gemm(ffn_down_, is_fd, up, s_fd[L], b_fd[L], down, g_hidden,
            i8w(ws_fd, L), i8w(as_fd, L));
     }

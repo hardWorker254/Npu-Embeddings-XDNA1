@@ -79,6 +79,21 @@ public:
   size_t lane_id = 0;
   size_t n_lanes = 1;
 
+  // Per-lane input/output buffers on the three eltwise designs.
+  //
+  // A Design owns ONE A buffer and ONE C buffer, and --pipeline runs several
+  // BertEncoders against the SAME Design objects (setup_encoder). Lane 0 uses
+  // the base slots (0); every extra lane gets its own, exactly as d_qkv() got
+  // one per lane. Without this the lanes write each other's rows and read each
+  // other's results, and which lane wins the race is thread-scheduling
+  // dependent -- which is why the answer changed between two identical
+  // requests (bert_encoder.cpp::layer_norm, T-eltwise-shared-buffer).
+  struct EltSlots {
+    size_t a = 0;
+    size_t c = 0;
+  };
+  EltSlots slots_gelu, slots_ln, slots_sm;
+
   // Members below are public because setup_encoder() stages the weights and
   // the pipeline lanes copy them, and run_bench_or_check() reads the timers --
   // exactly the access the old aggregate Encoder offered. There is no owner
@@ -126,7 +141,12 @@ public:
   double lap(double t0, double &bucket);
 
   // NPU dispatch helpers.
-  void eltwise(npu::Design &d, float *x, size_t n);
+  //
+  // Both of these run on a design that --pipeline lanes SHARE, so both take
+  // npu_mu around the bind/dispatch window. The host-side conversion is
+  // outside that window, which is only sound because the A and C buffers are
+  // per-lane (EltSlots above) -- the same arrangement gemm() already has.
+  void eltwise(npu::Design &d, const EltSlots &slots, float *x, size_t n);
   void layer_norm(std::vector<float> &x, size_t slot);
 
   // Host-side passes.

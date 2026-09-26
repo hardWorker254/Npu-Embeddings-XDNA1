@@ -897,7 +897,7 @@ def build_child_argv(
     if args.per_arch_cache:
         cmd.append("--per-arch-cache")
 
-    if args.with_eltwise:
+    if args.npu_eltwise:
         cmd += [
             "--npu-eltwise",
             "--elt-cols", str(args.elt_cols),

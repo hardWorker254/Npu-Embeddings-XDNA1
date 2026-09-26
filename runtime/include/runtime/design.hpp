@@ -59,6 +59,11 @@ public:
 
   const DesignInfo &info() const { return info_; }
 
+  // Index of the output (C) argument: the last buffer, for every design in
+  // this project. Public because a --pipeline lane has to bind its OWN output
+  // buffer on a shared design, which means naming that argument (setup_encoder).
+  size_t output_index() const { return output_index_; }
+
   double t_submit = 0.0, t_wait = 0.0;
   int n_dispatch = 0;
 

@@ -112,7 +112,8 @@ inline std::string resolve_prefix(int argc, char **argv) {
 
 inline void print_usage() {
     std::printf(
-        "NpuEmbeddings -- BERT embeddings on the AMD Ryzen AI NPU (XDNA2)\n"
+        "NpuEmbeddings -- BERT-family embeddings on the AMD NPU (XDNA1/npu1,\n"
+        "XDNA2/npu2; --dev selects the generation)\n"
         "\n"
         "  npuembeddings list\n"
         "        every model this build can run, and which are installed\n"
@@ -137,7 +138,9 @@ inline void print_usage() {
         "    --port N          listen port (default 8080)\n"
         "    --bind ADDR       interface (default 127.0.0.1, localhost only)\n"
         "    --threads N       host thread budget (default 24 for these)\n"
-        "    --pipeline N      concurrent encode lanes (default 2)\n"
+        "    --pipeline N      concurrent encode lanes (serve/embed pass 4;\n"
+        "                      1 lane = no pipelining. A later --pipeline on the\n"
+        "                      command line wins, so --pipeline 1 disables it)\n"
         "    --artifacts DIR   override the design set\n"
         "    --npu-eltwise     run GELU, LayerNorm and softmax on the array\n"
         "                      instead of the host. Requires the sibling\n"
