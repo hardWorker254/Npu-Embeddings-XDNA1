@@ -41,15 +41,58 @@ sys.path.insert(0, str(REPO / "reference"))
 # here, so pack_npue.py has not run since that refactor -- the shipped .npue
 # predates it and nothing repacked. Found while adding the vocabulary, 0036.
 from npue import (ARCH_GEMMA3_MQA_ROPE_GEGLU, ARCH_GTE_NEW_ROPE_GEGLU,  # noqa: E402
-                  ARCH_NOMIC_ROPE_SWIGLU, Writer,
-                  gemm_b_layout, layout_hash, tile_b, to_bf16_bits)
-from safetensors_io import load                              # noqa: E402
+                  ARCH_NOMIC_ROPE_SWIGLU, MAC_BY_DEVICE, MAC_DEFAULT_DEVICE,
+                  Writer, gemm_b_layout, layout_hash, mac_for_device, tile_b,
+                  to_bf16_bits)
+
+
+def load(path):
+    """Read a .safetensors into a plain dict of numpy arrays.
+
+    The historical import was module-level:
+
+        from safetensors_io import load
+
+    from reference/, a tree THIS FORK DOES NOT CARRY. A module-level import of
+    a module that does not exist makes the whole file unimportable, so
+    pack_npue.py could not run for ANY architecture here, not just the ones
+    that needed the reference encoders -- the arch=4 dispatch below was
+    unreachable behind an ImportError. The import is therefore inside this
+    function, and the fallback is tools/safetensors_mmap.py, which is in-tree.
+
+    Both return {name: ndarray}; the reference reader returns a
+    (dict, metadata) pair and every call site in this file discards the
+    metadata, so the fallback returns the same shape with an empty meta.
+
+    The .copy() is not optional. SafeTensors.array() may hand back a view into
+    the mapping when the dtype already matches, and close() below releases that
+    mapping -- a dict of views into a closed mmap segfaults on first use, which
+    is exactly what it did.
+    """
+    try:
+        from safetensors_io import load as _ref_load
+    except ImportError:
+        from safetensors_mmap import SafeTensors
+        st = SafeTensors(path)
+        try:
+            return {k: st.array(k).copy() for k in st.keys()}, {}
+        finally:
+            st.close()
+    return _ref_load(path)
 
 # From M2's traced results: mac_dims are (r,s,t) = (4,8,8) for plain bf16 on
 # npu2 and (8,8,8) with bfp16 emulation. Only s and t affect the B operand
 # layout, and BOTH configurations give s=t=8 -- so the pre-tiled B layout is
 # the same either way, and the bf16/bfp16 decision does not force a repack.
-MAC_S, MAC_T = 8, 8
+#
+# That is all true of npu2 and silent about npu1, whose mac_dims are (4,8,4):
+# there the B panel's sub-tile is t=4. A container packed with the npu2 pair is
+# not refused by the runtime, it is misread -- same bytes count, same shapes,
+# same layout_hash computed from the same wrong constant on both sides, and
+# products that look like embeddings. So the pair is a per-device value
+# (--device, defaulting to the npu2 behaviour) threaded into every operand
+# rather than a module constant.
+MAC_DEFAULT = MAC_BY_DEVICE[MAC_DEFAULT_DEVICE]
 
 # tile_n=48, not M2's winning 32. At 8 columns the design requires
 # N % (tile_n * n_cols) == 0, and MiniLM's N dims are 384 / 1152 / 1536:
@@ -94,15 +137,18 @@ def read_pooling(model_dir):
                      f"the checkpoint asks for {modes or 'nothing'}")
 
 
-def add_gemm_b(w, name, mat, tile_k, tile_n, fold=None):
-    """Stage a [K,N] GEMM operand: optional scale fold, bf16, pre-tile."""
+def add_gemm_b(w, name, mat, tile_k, tile_n, fold=None, mac=MAC_DEFAULT):
+    """Stage a [K,N] GEMM operand: optional scale fold, bf16, pre-tile.
+
+    `mac` is the target device's (mac_s, mac_t) -- see MAC_DEFAULT.
+    """
     mat = np.ascontiguousarray(mat, dtype=np.float32)
     if fold is not None:
         mat = mat * fold
     K, N = mat.shape
-    layout = gemm_b_layout(tile_k, tile_n, MAC_S, MAC_T)
+    layout = gemm_b_layout(tile_k, tile_n, mac[0], mac[1])
     bits = to_bf16_bits(mat)
-    flat = tile_b(bits, tile_k, tile_n, MAC_S, MAC_T)
+    flat = tile_b(bits, tile_k, tile_n, mac[0], mac[1])
     return w.add(name, flat, "BF16", "gemm_b", [K, N], layout=layout)
 
 
@@ -278,7 +324,8 @@ def pathlib_read_lines(p):
     return Path(p).read_text(encoding="utf-8").split("\n")
 
 
-def add_gemm_b_int8(w, name, mat, tile_k, tile_n, fold=None, asmooth=None):
+def add_gemm_b_int8(w, name, mat, tile_k, tile_n, fold=None, asmooth=None,
+                  mac=MAC_DEFAULT):
     """Stage a [K,N] GEMM operand as INT8, per-output-channel symmetric.
 
     THE SCHEME, and why this one (tasks/0078).
@@ -336,8 +383,8 @@ def add_gemm_b_int8(w, name, mat, tile_k, tile_n, fold=None, asmooth=None):
     scale = np.where(scale > 0, scale, np.float32(1.0)).astype(np.float32)
     q = np.rint(mat / scale[None, :]).clip(-127, 127).astype(np.int8)
 
-    layout = gemm_b_layout(tile_k, tile_n, MAC_S, MAC_T, dtype="I8")
-    flat = tile_b(q, tile_k, tile_n, MAC_S, MAC_T)
+    layout = gemm_b_layout(tile_k, tile_n, mac[0], mac[1], dtype="I8")
+    flat = tile_b(q, tile_k, tile_n, mac[0], mac[1])
     w.add(name, flat, "I8", "gemm_b", [K, N], layout=layout)
     w.add(name + ".wscale", scale, "F32", "quant_scale", [N])
     # Ships even when it is all ones, so the runtime has ONE code path and
@@ -409,7 +456,8 @@ def gemma_qkv_blocks(hidden, head_dim, kv_heads, tile_n, n_cols=8):
 
 def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
                tile_n=None, host_only=False,
-               int8=False, smooth_alpha=0.5, smooth_texts=128):
+               int8=False, smooth_alpha=0.5, smooth_texts=128,
+               mac=MAC_DEFAULT):
     """Pack an EmbeddingGemma-300M-shaped checkpoint (arch=1).
 
     Deliberately NOT the BERT path above, reused only via helpers (Writer,
@@ -599,7 +647,7 @@ def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
     if not host_only:
         config.update({
             "tile_k": tile_k, "tile_n": tile_n,
-            "mac_s": MAC_S, "mac_t": MAC_T,
+            "mac_s": mac[0], "mac_t": mac[1],
             "gated_ffn": True,
             "geglu_halves": "gate|up",
             # qkv's width is DATA. It is 1536 here and 3*hidden nowhere.
@@ -658,10 +706,11 @@ def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
 
     def emit(name, mat, layer, op):
         if not int8 or host_only:
-            add_gemm_b(w, name, mat, tile_k, tile_n)
+            add_gemm_b(w, name, mat, tile_k, tile_n, mac=mac)
             return
         qerr.append((name, add_gemm_b_int8(w, name, mat, tile_k, tile_n,
-                                           asmooth=smooth.get((layer, op)))))
+                                           asmooth=smooth.get((layer, op)),
+                                           mac=mac)))
     n_tiled = 0
     for i in range(L):
         p = f"layers.{i}."
@@ -776,13 +825,14 @@ def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
     print(f"  source     : {src_sha[:16]}...")
     if not host_only:
         print(f"  layout_hash: "
-              f"{layout_hash(gemm_b_layout(tile_k, tile_n, MAC_S, MAC_T, dtype='I8' if (int8 and not host_only) else 'BF16'))[:16]}..."
+              f"{layout_hash(gemm_b_layout(tile_k, tile_n, mac[0], mac[1], dtype='I8' if (int8 and not host_only) else 'BF16'))[:16]}..."
               f"{'  (i8 operands)' if (int8 and not host_only) else ''}")
     return 0
 
 
 def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
-               int8=False, smooth_alpha=0.5, smooth_texts=128):
+               int8=False, smooth_alpha=0.5, smooth_texts=128,
+               mac=MAC_DEFAULT):
     """Pack a nomic-embed-text-v1.5-shaped checkpoint (arch=2).
 
     Emits the SAME tensor names and the SAME emission order as the BERT
@@ -871,7 +921,7 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
     print(f"packing {model_dir.name} -> {Path(out).name}  (arch=nomic_bert_rope_swiglu)")
     print(f"  hidden={hidden} heads={H} head_dim={head_dim} layers={L} "
           f"inter={inter} rope_theta={theta}")
-    print(f"  tile ({tile_k}, {tile_n}), mac (s={MAC_S}, t={MAC_T}), "
+    print(f"  tile ({tile_k}, {tile_n}), mac (s={mac[0]}, t={mac[1]}), "
           f"1/sqrt({head_dim}) = {scale:.17g}"
           f"{' folded into Q' if fold_scale else ' NOT folded'}")
 
@@ -915,7 +965,7 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
         "position_embedding_type": "rope",
         "rope_theta": theta,
         "attention_bias": False, "mlp_bias": False,
-        "tile_k": tile_k, "tile_n": tile_n, "mac_s": MAC_S, "mac_t": MAC_T,
+        "tile_k": tile_k, "tile_n": tile_n, "mac_s": mac[0], "mac_t": mac[1],
         "prompts": prompts,
         "prompt_default": "search_document",
         "prompts_source": "npuembeddings, NOT from the checkpoint -- "
@@ -1001,10 +1051,11 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
 
     def emit(name, mat, layer, op):
         if not int8:
-            add_gemm_b(w, name, mat, tile_k, tile_n)
+            add_gemm_b(w, name, mat, tile_k, tile_n, mac=mac)
             return
         qerr.append((name, add_gemm_b_int8(w, name, mat, tile_k, tile_n,
-                                           asmooth=smooth.get((layer, op)))))
+                                           asmooth=smooth.get((layer, op)),
+                                           mac=mac)))
     n_tiled = 0
     for i in range(L):
         p = f"encoder.layers.{i}."   # plural upstream, unlike BERT's "layer."
@@ -1081,12 +1132,13 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
     # tensors reports the intention rather than the value -- the same shape as
     # tasks/0042's `tile (64, 32)` and 0078's banner, both of which cost time.
     print(f"  layout_hash: "
-          f"{layout_hash(gemm_b_layout(tile_k, tile_n, MAC_S, MAC_T, dtype='I8' if int8 else 'BF16'))[:16]}..."
+          f"{layout_hash(gemm_b_layout(tile_k, tile_n, mac[0], mac[1], dtype='I8' if int8 else 'BF16'))[:16]}..."
           f"{'  (i8 operands)' if int8 else ''}")
     return 0
 
 
-def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False):
+def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
+             mac=MAC_DEFAULT):
     """Pack a gte-multilingual-base-shaped checkpoint (arch=3, model_type
     "new" -- the NewModel trust_remote_code implementation).
 
@@ -1200,7 +1252,7 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False):
     print(f"packing {model_dir.name} -> {Path(out).name}  (arch=gte_new_rope_geglu)")
     print(f"  hidden={hidden} heads={H} head_dim={head_dim} layers={L} "
           f"inter={inter} rope=ntk(20000 x 8.0, 32 baked inv_freq)")
-    print(f"  tile ({tile_k}, {tile_n}), mac (s={MAC_S}, t={MAC_T}), "
+    print(f"  tile ({tile_k}, {tile_n}), mac (s={mac[0]}, t={mac[1]}), "
           f"1/sqrt({head_dim}) = {scale:.17g}"
           f"{' folded into Q (weights AND bias)' if fold_scale else ' NOT folded'}")
 
@@ -1236,7 +1288,7 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False):
                      "alone is wrong by 1.9e-02 relfro at layer 0.",
         "attention_bias": True,
         "mlp_bias": "down_only -- up_gate_proj is genuinely bias-free",
-        "tile_k": tile_k, "tile_n": tile_n, "mac_s": MAC_S, "mac_t": MAC_T,
+        "tile_k": tile_k, "tile_n": tile_n, "mac_s": mac[0], "mac_t": mac[1],
         "fusions": {
             "qkv_fused": True,
             "transposed_to_kn": True,
@@ -1292,13 +1344,13 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False):
             qkv = qkv.copy()
             qkv[:, :hidden] *= scale
             qkv_b[:hidden] *= scale
-        add_gemm_b(w, f"layer.{i}.qkv", qkv, tile_k, tile_n)
+        add_gemm_b(w, f"layer.{i}.qkv", qkv, tile_k, tile_n, mac=mac)
         w.add(f"layer.{i}.qkv.bias", qkv_b, "F32", "bias", [3 * hidden])
         n_tiled += 1
 
         add_gemm_b(w, f"layer.{i}.attn_out",
                    np.ascontiguousarray(src[at + "o_proj.weight"].T),
-                   tile_k, tile_n)
+                   tile_k, tile_n, mac=mac)
         w.add(f"layer.{i}.attn_out.bias", src[at + "o_proj.bias"],
               "F32", "bias", [hidden])
         w.add(f"layer.{i}.ln1.weight", src[p + "attn_ln.weight"],
@@ -1312,13 +1364,13 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False):
         # cols [inter, 2*inter) -- the lo/hi order of `lo * act(hi)`.
         add_gemm_b(w, f"layer.{i}.ffn_up",
                    np.ascontiguousarray(src[p + "mlp.up_gate_proj.weight"].T),
-                   tile_k, tile_n)
+                   tile_k, tile_n, mac=mac)
         w.add(f"layer.{i}.ffn_up.bias", np.zeros(2 * inter, dtype=np.float32),
               "F32", "bias", [2 * inter])
 
         add_gemm_b(w, f"layer.{i}.ffn_down",
                    np.ascontiguousarray(src[p + "mlp.down_proj.weight"].T),
-                   tile_k, tile_n)
+                   tile_k, tile_n, mac=mac)
         w.add(f"layer.{i}.ffn_down.bias", src[p + "mlp.down_proj.bias"],
               "F32", "bias", [hidden])
         w.add(f"layer.{i}.ln2.weight", src[p + "mlp_ln.weight"],
@@ -1346,7 +1398,7 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False):
     print(f"  file       : {total/1e6:.2f} MB")
     print(f"  source     : {src_sha[:16]}...")
     print(f"  layout_hash: "
-          f"{layout_hash(gemm_b_layout(tile_k, tile_n, MAC_S, MAC_T))[:16]}...")
+          f"{layout_hash(gemm_b_layout(tile_k, tile_n, mac[0], mac[1]))[:16]}...")
     return 0
 
 
@@ -1356,8 +1408,30 @@ def main():
     ap.add_argument("--out", default=str(REPO / "models" / "all-MiniLM-L6-v2.npue"))
     ap.add_argument("--tile-k", type=int, default=DEFAULT_TILE_K)
     ap.add_argument("--tile-n", type=int, default=DEFAULT_TILE_N)
-    ap.add_argument("--max-seq", type=int, default=256,
-                    help="pre-slice position embeddings to this (MiniLM: 256)")
+    # WHICH BOARD THIS CONTAINER IS FOR. The B panel's sub-tile is the MMAC
+    # geometry, and it differs per generation: npu1 (aie2) is (s=8, t=4),
+    # npu2 (aie2p) is (8, 8). A container packed for one and read by a design
+    # built for the other is not rejected -- the byte count, the shapes and the
+    # layout_hash all agree, because both sides used the same wrong constant --
+    # it just produces wrong numbers. So the target is stated, and the default
+    # is the generation the shipped containers were packed for.
+    ap.add_argument("--device", default=MAC_DEFAULT_DEVICE,
+                    choices=sorted(MAC_BY_DEVICE),
+                    help="target generation for the B panel order "
+                         "(default %(default)s)")
+    ap.add_argument("--max-seq", type=int, default=None,
+                    help=(
+                        "pre-slice the position table to this many rows. "
+                        "DEFAULT IS PER FAMILY, because one number cannot be "
+                        "right for both: an embedder's is its own "
+                        "max_position_embeddings (256 for MiniLM), while a "
+                        "whisper encoder always sees max_source_positions "
+                        "rows -- 1500, one 30 s window -- so slicing it "
+                        "shorter writes a container that refuses every "
+                        "request. Omit it and each family gets its own "
+                        "default; the packer refuses a value its model cannot "
+                        "use."
+                    ))
     ap.add_argument("--no-fold-scale", action="store_true",
                     help="do NOT fold 1/sqrt(head_dim) into Q")
     # THE DATAPATH FLAG (tasks/0077, 0078). bf16 stays the default. int8 needs
@@ -1383,7 +1457,16 @@ def main():
                          "for the CPU-only GemmaEncoder, as tasks/0064-0065 "
                          "shipped. The default is now the pre-tiled bf16 NPU "
                          "container (tasks/0074); this rebuilds the control.")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="arch=4 only: report the tensor inventory and the "
+                         "geometry, write nothing. The packing itself is cheap "
+                         "and the checks in it are the point, so this exists to "
+                         "inspect a checkpoint before committing the output.")
     args = ap.parse_args()
+
+    # Resolved once, here, and printed by every branch: a container whose B
+    # order is a guess is a container nobody can debug later.
+    mac = mac_for_device(args.device)
 
     model_dir = Path(args.model_dir)
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
@@ -1401,21 +1484,24 @@ def main():
         return pack_gemma(model_dir, out, tile_k=args.tile_k,
                           tile_n=args.tile_n, host_only=args.gemma_host_only,
                           int8=args.int8, smooth_alpha=args.smooth_alpha,
-                          smooth_texts=args.smooth_texts)
+                          smooth_texts=args.smooth_texts, mac=mac)
 
     # arch=2 branch (tasks/0069-m13-nomic-arch2-container): nomic_bert is
     # RoPE + gated SwiGLU rather than BERT's absolute-position + GELU, so it
     # gets its own function -- same reasoning as the gemma3_text branch
     # above. Unlike Gemma, its GEMM operands DO get pre-tiled (see
     # pack_nomic's docstring), so --tile-k/--tile-n/--max-seq are forwarded.
+    # Embedder-family default, named once: MiniLM's max_position_embeddings.
+    max_seq_embedder = 256 if args.max_seq is None else args.max_seq
+
     if cfg.get("model_type") == "nomic_bert":
         out = args.out
         if out == str(REPO / "models" / "all-MiniLM-L6-v2.npue"):
             out = str(model_dir.parent / (model_dir.name + ".npue"))
         return pack_nomic(model_dir, out, args.tile_k, args.tile_n,
-                          args.max_seq, not args.no_fold_scale,
+                          max_seq_embedder, not args.no_fold_scale,
                           int8=args.int8, smooth_alpha=args.smooth_alpha,
-                          smooth_texts=args.smooth_texts)
+                          smooth_texts=args.smooth_texts, mac=mac)
 
     # arch=3 branch (0.5.0, tasks/0134/0135): model_type "new" is the
     # NewModel family (gte-multilingual-base). Same routing rule as the two
@@ -1426,7 +1512,47 @@ def main():
         if out == str(REPO / "models" / "all-MiniLM-L6-v2.npue"):
             out = str(model_dir.parent / (model_dir.name + ".npue"))
         return pack_gte(model_dir, out, args.tile_k, args.tile_n,
-                        args.max_seq, not args.no_fold_scale, int8=args.int8)
+                        max_seq_embedder, not args.no_fold_scale, int8=args.int8,
+                        mac=mac)
+
+    # arch=4 branch: model_type "whisper" (openai/whisper-*). Speech-to-text,
+    # so this one carries a conv frontend, a positional table, TWO stacks and a
+    # tokenizer table -- a completely different container, routed to its own
+    # module for the same reason the three branches above are routed. Same
+    # detection rule: the checkpoint's own config.json, never the directory
+    # name.
+    if cfg.get("model_type") == "whisper":
+        from packers.whisper import pack_whisper
+        out = args.out
+        if out == str(REPO / "models" / "all-MiniLM-L6-v2.npue"):
+            out = str(model_dir.parent / (model_dir.name + ".npue"))
+        # --tile-k/--tile-n are NOT forwarded: (64, 32) is forced by Whisper's
+        # geometry for all six sizes, and honouring a flag here would let a
+        # caller write a container whose layout_hash no design set matches.
+        #
+        # --int8 is REFUSED rather than ignored. The int8 path needs a
+        # SmoothQuant calibration over activations, and the corpora it was
+        # written for are text; a whisper container's activations are log-mel
+        # frames and a decoder state. Silently writing a bf16 container for an
+        # --int8 request is the worst outcome available: the caller believes the
+        # weights are 4x smaller than they are.
+        if args.int8:
+            raise SystemExit(
+                "--int8 is not available for a whisper container: the int8 "
+                "path needs SmoothQuant scales calibrated on activations, and "
+                "the corpora tools/pack_npue.py was written for are text, not "
+                "log-mel frames and decoder states. Unquantised, the weights "
+                "are bf16, and the array's native bfloat16 path was measured "
+                "on this stack to be neither faster nor less accurate than "
+                "the emulation npu_targets.json pins -- so there is no cheap "
+                "precision trade to offer here, and offering one would be "
+                "selling a flag that does nothing."
+            )
+        # None here is the point: pack_whisper() then takes the checkpoint's own
+        # max_source_positions, and refuses anything shorter.
+        return pack_whisper(model_dir, out, max_seq=args.max_seq,
+                            fold_scale=not args.no_fold_scale,
+                            dry_run=args.dry_run, device=args.device)
 
     src, _ = load(model_dir / "model.safetensors")
     src_sha = sha256(model_dir / "model.safetensors")
@@ -1439,7 +1565,7 @@ def main():
 
     tk, tn = args.tile_k, args.tile_n
     print(f"packing {model_dir.name} -> {Path(args.out).name}")
-    print(f"  tile ({tk}, {tn}), mac (s={MAC_S}, t={MAC_T}), "
+    print(f"  tile ({tk}, {tn}), mac (s={mac[0]}, t={mac[1]}), "
           f"1/sqrt({head_dim}) = {scale:.17g}"
           f"{' NOT folded' if args.no_fold_scale else ' folded into Q'}")
 
@@ -1452,10 +1578,10 @@ def main():
         "intermediate": cfg["intermediate_size"],
         "layer_norm_eps": cfg["layer_norm_eps"],
         "vocab_size": cfg["vocab_size"],
-        "max_seq_len": args.max_seq,
+        "max_seq_len": max_seq_embedder,
         "pooling": read_pooling(model_dir), "l2_normalize": True,
         "activation": "gelu_erf_exact",
-        "tile_k": tk, "tile_n": tn, "mac_s": MAC_S, "mac_t": MAC_T,
+        "tile_k": tk, "tile_n": tn, "mac_s": mac[0], "mac_t": mac[1],
         # The operand datapath. Absent in every container packed before
         # tasks/0078, and every one of those is bf16 -- so the runtime reads
         # silence as "bf16" rather than defaulting blindly.
@@ -1466,7 +1592,7 @@ def main():
             "qk_scale_folded_into_q": not args.no_fold_scale,
             "gemm_operands_bf16": True,
             "biases_and_layernorm_fp32": True,
-            "position_embeddings_presliced_to": args.max_seq,
+            "position_embeddings_presliced_to": max_seq_embedder,
         },
         "not_implemented": ["pooler.dense (unused by sentence-transformers)"],
     }
@@ -1479,8 +1605,8 @@ def main():
     w.add("embeddings.word", src["embeddings.word_embeddings.weight"],
           "F32", "embedding", [cfg["vocab_size"], hidden])
     w.add("embeddings.position",
-          src["embeddings.position_embeddings.weight"][:args.max_seq],
-          "F32", "embedding", [args.max_seq, hidden])
+          src["embeddings.position_embeddings.weight"][:max_seq_embedder],
+          "F32", "embedding", [max_seq_embedder, hidden])
     w.add("embeddings.token_type", src["embeddings.token_type_embeddings.weight"],
           "F32", "embedding", [cfg["type_vocab_size"], hidden])
     w.add("embeddings.ln.weight", src["embeddings.LayerNorm.weight"],
@@ -1507,10 +1633,11 @@ def main():
     qerr = []
     def emit(name, mat, layer, op):
         if not args.int8:
-            add_gemm_b(w, name, mat, tk, tn)
+            add_gemm_b(w, name, mat, tk, tn, mac=mac)
             return
         qerr.append((name, add_gemm_b_int8(w, name, mat, tk, tn,
-                                           asmooth=smooth.get((layer, op)))))
+                                           asmooth=smooth.get((layer, op)),
+                                           mac=mac)))
 
     n_tiled = 0
     for i in range(L):
@@ -1598,7 +1725,7 @@ def main():
     # "tile (64, 32)" banner over a tile-48 pack. Build the descriptor the same
     # way the emitter does.
     print(f"  layout_hash: "
-          f"{layout_hash(gemm_b_layout(tk, tn, MAC_S, MAC_T, dtype='I8' if args.int8 else 'BF16'))[:16]}..."
+          f"{layout_hash(gemm_b_layout(tk, tn, mac[0], mac[1], dtype='I8' if args.int8 else 'BF16'))[:16]}..."
           f"  ({'i8' if args.int8 else 'bf16'} operands)")
     return 0
 

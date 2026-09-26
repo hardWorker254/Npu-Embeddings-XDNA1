@@ -107,4 +107,20 @@ void narrow_1024_f32_bf16(const float *restrict acc, bfloat16 *restrict out) {
   narrow_impl<1024>(acc, out);
 }
 
+// ADDED FOR WHISPER'S DECODER, AND PURELY ADDITIVE: no existing entry point is
+// touched, and a design that does not declare this symbol links nothing new, so
+// every shipping xclbin is unaffected.
+//
+// Whisper's decoder runs one token per greedy step, so its M is 1 -- but the
+// matmul kernel's m dimension is 8 under bfp16 emulation (mac_dims r=8), so M=8
+// is the smallest this kernel family can express and 8 is the floor. Reaching
+// it needs m*n = 8*32 = 256, which the three original entry points (1024,
+// 2048, 3072, all reached with m=64) do not provide. Without this the smallest
+// usable decoder design would be m=32, n=32 -> M=32, four times the arithmetic
+// for one token.
+
+void narrow_512_f32_bf16(const float *restrict acc, bfloat16 *restrict out) {
+  narrow_impl<512>(acc, out);
+}
+
 }  // extern "C"

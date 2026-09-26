@@ -121,4 +121,9 @@ void narrow_1024_i32_bf16(const int32_t *restrict acc, bfloat16 *restrict out) {
   narrow_impl<1024>(acc, out);
 }
 
+
+void narrow_512_i32_bf16(const int32_t *restrict acc, bfloat16 *restrict out) {
+  narrow_impl<512>(acc, out);
+}
+
 }  // extern "C"

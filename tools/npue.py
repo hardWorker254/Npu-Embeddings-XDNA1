@@ -102,6 +102,42 @@ ARCH_NOMIC_ROPE_SWIGLU = 2
 # to the shipping nomic design set, b_layout_hash included.
 ARCH_GTE_NEW_ROPE_GEGLU = 3
 
+# Whisper (openai/whisper-*): speech-to-text, so this arch carries BOTH halves
+# of an encoder-decoder in one container -- there is no text embedding path to
+# fall back on, and a decoder that cannot see its encoder is not a model.
+#
+# What is different from arch=0/2/3, in the order the runtime meets it:
+#
+#  * NO TOKEN IDS reach the encoder. The input is a 30 s log-mel spectrogram
+#    (up to 3000 frames, 80 mel bins for tiny..medium and 128 for large-v3 and
+#    large-v3-turbo) that goes through conv1 (mel x d x 3, stride 1) and conv2
+#    -- the checkpoint's `conv2` is Whisper's `conv1_pos` -- both with GELU.
+#    The absolute position table is FIXED and sinusoidal, not learned per
+#    checkpoint in the BERT sense: it is carried as `embeddings.position` so
+#    the encoder's add is the same add the BERT path already does.
+#  * NO token_type tensor, and no token embedding on the encoder side at all.
+#  * k_proj HAS NO BIAS in every one of the 3*layers projections, while
+#    q_proj, v_proj and out_proj do. The fused Q|K|V therefore carries a bias
+#    whose K segment is ZERO-FILLED: k = x*Wk is then reproduced exactly, not
+#    approximated, and the array still sees one GEMM per attention instead of
+#    three. The decoder's cross-attention splits differently, because its Q
+#    comes from the decoder state and its K|V from the encoder output: two
+#    operands, `cross_q` [d,d] and `cross_kv` [d,2d], the latter with a
+#    zero-filled K half for the same reason.
+#  * pre-LN, GELU, three LayerNorms per decoder layer (self-attn,
+#    cross-attn, FFN) against BERT's two.
+#  * There is NO proj_out: the checkpoint ties the decoder's output projection
+#    to the token embedding, so the logits are `h @ embed_tokens.T`. The
+#    container records `tied_embeddings` rather than shipping a second copy of
+#    a 51866 x d matrix.
+#  * Tiling is (tile_k 64, tile_n 32) for ALL SIX sizes, which is a fact about
+#    the geometry rather than a preference: every K is d or 4d and every N is d,
+#    2d, 3d or 4d, and d/32 is a multiple of 4 for d in {384, 512, 768, 1024,
+#    1280}, so N % (32 * 4 columns) == 0 with no padding anywhere. tile_n 48,
+#    which every BERT-family container uses, does NOT divide 5120 (large-v3's
+#    FFN) and would force a repack per size.
+ARCH_WHISPER_ENC_DEC_GELU = 4
+
 FLAG_PRETILED = 1 << 0
 
 HEADER_FORMAT = "<4sIII QQQQ 16s"      # see SPEC CORRECTION above
@@ -216,10 +252,53 @@ def gemm_b_layout(tile_k, tile_n, mac_s=8, mac_t=8, dtype="BF16"):
     That happened -- the upstream seven-design exporter wrote the dict by hand
     and omitted `dtype`, so a correct file failed the check. The packer had it
     twice, too.
+
+    The (8, 8) default is the npu2 sub-tile and NOT a safe default for npu1 --
+    see `mac_for_device` and pass what the target generation consumes.
     """
     return {"kind": "block_panel", "tile_k": tile_k, "tile_n": tile_n,
             "order": "k,n,kt,nt", "inner": "s,t",
             "mac_s": mac_s, "mac_t": mac_t, "dtype": dtype}
+
+
+# The B panel's byte order inside one (tile_k, tile_n) tile is the MMAC
+# sub-tile, and the MMAC sub-tile is not the same on both boards. MEASURED with
+# `aie.iron.kernels.mm(...).mac_dims`, which returns (r, s, t):
+#
+#     npu2 / aie2p : (8, 8, 8)      npu1 / aie2 : (4, 8, 4)
+#
+# and `tile_b`'s (s, t) is (mac_s, mac_t) here. A container packed with npu2's
+# pair and read by an npu1 design has every 64x32 panel's columns permuted: the
+# byte count is right, the shapes agree, both sides derive the same
+# `layout_hash` from the same wrong constant, and every product is plausible.
+# Nothing in the loader can see it, which is why it is resolved from the
+# target device in one place and printed by every packer.
+MAC_BY_DEVICE = {"npu1": (8, 4), "npu2": (8, 8)}
+MAC_DEFAULT_DEVICE = "npu2"  # what an unstated target means, and what shipped
+
+
+def mac_for_device(device=None, mac_s=None, mac_t=None):
+    """(mac_s, mac_t) for `device`, with explicit values overriding it.
+
+    An unknown device is refused rather than defaulted: the whole point of the
+    table is that a wrong guess is invisible, and a typo'd --device must not
+    fall back to a layout that produces wrong numbers quietly.
+    """
+    if mac_s is not None and mac_t is not None:
+        return (int(mac_s), int(mac_t))
+    dev = device or MAC_DEFAULT_DEVICE
+    if dev not in MAC_BY_DEVICE:
+        raise SystemExit(
+            f"unknown device {dev!r}: the B panel's sub-tile is per-generation "
+            f"({', '.join(f'{k}={v}' for k, v in MAC_BY_DEVICE.items())}). "
+            f"Pass one of those, or --mac-s/--mac-t if you know better.")
+    return MAC_BY_DEVICE[dev]
+
+
+def gemm_b_layout_for_device(device, tile_k, tile_n, dtype="BF16",
+                             mac_s=None, mac_t=None):
+    s, t = mac_for_device(device, mac_s, mac_t)
+    return gemm_b_layout(tile_k, tile_n, s, t, dtype)
 
 
 def layout_hash(layout):
