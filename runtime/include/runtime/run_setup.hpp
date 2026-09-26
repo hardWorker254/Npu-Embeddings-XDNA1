@@ -5,6 +5,7 @@
 #include "common/app_state.hpp"
 #include "encoders/bert_encoder.hpp"
 #include "common/design_selection.hpp"
+#include "common/npu_ops_flag.hpp"
 #include "runtime/npu_contention.hpp"
 #include "runtime/pool.hpp"
 #include "common/host_kernels.hpp"
@@ -12,6 +13,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <set>
 #include <sstream>
 #include <string>
@@ -39,10 +41,10 @@ inline void load_designs(RunContext &ctx) {
   // run skips this: the default path must not require a contention tool.
   int want_contexts = 0;
   if (unified) {
-    want_contexts = 1 + (ctx.npu_eltwise
-                             ? (ctx.host_gelu ? 0 : 1) + (ctx.host_ln ? 0 : 1) +
-                                   (ctx.host_sm ? 0 : 1)
-                             : 0);
+    // One context for the unified GEMM design plus one per op --npu-ops sends to
+    // the array. Counted from the request, not from what got loaded, so the
+    // guard refuses BEFORE any Design is built (the point of the whole check).
+    want_contexts = 1 + static_cast<int>(ctx.npu_ops.size());
   } else {
     want_contexts = 7;   // legacy per-op set: one xclbin per design
   }
@@ -89,35 +91,39 @@ inline void load_designs(RunContext &ctx) {
                   "one hw_context\n", ctx.streams.size(), tset.size());
     }
 
-    // --npu-eltwise: the unified xclbin carries only the four GEMM streams, so
-    // the three elementwise ops come from sibling directories, one Design
-    // each. Refuse by NAME when one is missing -- falling back to the host
-    // after the flag asked for the array is the fail-open this project keeps
-    // meeting, and the flag's whole point is to make that impossible.
-    if (ctx.npu_eltwise) {
-      auto need = [&](const char *op, std::unique_ptr<npu::Design> &dst,
-                      bool host_forced) {
-        if (host_forced) return;   // --host-<op>: the host path was asked for
-        const std::string dir = ctx.art + "/" + op;
-        if (!std::ifstream(dir + "/design.json").good())
-          throw std::runtime_error(
-              "--npu-eltwise asks for " + std::string(op) +
-              " on the array, but " + dir + "/design.json does not exist -- "
-              "build it with tools/export_eltwise.py (or "
-              "tools/export_gemm_rtp.py --npu-eltwise), or drop the flag and "
-              "run the host path, which is the measured-faster one");
-        dst = std::make_unique<npu::Design>(*ctx.dev, dir);
-        const auto &inf = dst->info();
-        if (inf.device_recorded && !inf.device.empty() &&
-            !running_device().empty() && inf.device != running_device())
-          throw std::runtime_error(
-              std::string("--npu-eltwise: ") + dir + " was built for device " +
-              inf.device + ", but this process runs on " + running_device() +
-              " -- rebuild it for this generation or drop the flag");
-      };
-      need("gelu", ctx.ld_gelu, ctx.host_gelu);
-      need("layernorm", ctx.ld_ln, ctx.host_ln);
-      need("softmax", ctx.ld_sm, ctx.host_sm);
+    // --npu-ops: the unified xclbin carries only the four GEMM streams, so each
+    // op sent to the array comes from a sibling directory, one Design each.
+    // Refuse by NAME when one is missing -- falling back to the host after the
+    // flag asked for the array is the fail-open this project keeps meeting, and
+    // the flag's whole point is to make that impossible. An op that is not
+    // listed loads nothing, which is why this loop is over the REQUEST and not
+    // over the three names.
+    for (const char *code : {"gelu", "layn", "softm"}) {
+      if (!ctx.on_array(code)) continue;
+      const NpuOp *op = find_npu_op(code);
+      std::unique_ptr<npu::Design> *dst =
+          std::strcmp(code, "gelu") == 0   ? &ctx.ld_gelu
+          : std::strcmp(code, "layn") == 0 ? &ctx.ld_ln
+                                            : &ctx.ld_sm;
+      const std::string dir = ctx.art + "/" + op->design;
+      if (!std::ifstream(dir + "/design.json").good())
+        throw std::runtime_error(
+            std::string("--npu-ops ") + code + " (" + op->long_name +
+            ") asks for it on the array, but " + dir +
+            "/design.json does not exist -- build it with "
+            "tools/export_gemm_rtp.py --npu-extra-ops " + code +
+            " (or tools/export_eltwise.py --extra-ops " + code +
+            "), or drop it from the list and run the host path, which is the "
+            "measured-faster one");
+      *dst = std::make_unique<npu::Design>(*ctx.dev, dir);
+      const auto &inf = (*dst)->info();
+      if (inf.device_recorded && !inf.device.empty() &&
+          !running_device().empty() && inf.device != running_device())
+        throw std::runtime_error(
+            std::string("--npu-ops ") + code + ": " + dir +
+            " was built for device " + inf.device + ", but this process runs on " +
+            running_device() +
+            " -- rebuild it for this generation or drop it from the list");
     }
   } else {
     ctx.ld_qkv = std::make_unique<npu::Design>(*ctx.dev, ctx.art + "/qkv");
@@ -281,23 +287,35 @@ inline std::vector<float> pool_normalise(const RunContext &ctx,
 }
 
 inline void setup_flags_pools(RunContext &ctx) {
+  // A value flag in the LAST position used to be invisible: the loops below
+  // stopped at argc-1 because they read argv[i+1], so `--npu-ops gelu` as the
+  // final two arguments parsed as nothing and the run quietly did the default.
+  // That is the project's worst failure shape -- a flag the user typed that has
+  // no effect and no error -- so the bound is argc and a flag with no value
+  // after it is refused instead.
+  auto value_after = [&](int i, const char *flag) -> const char * {
+    if (i + 1 >= ctx.argc)
+      throw std::runtime_error(std::string(flag) +
+                               " is the last thing on the command line and has "
+                               "no value after it");
+    return ctx.argv[i + 1];
+  };
   ctx.nthreads = 1;
-  for (int i = 2; i < ctx.argc - 1; ++i)
-    if (std::string(ctx.argv[i]) == "--threads") ctx.nthreads = std::atoi(ctx.argv[i + 1]);
-  ctx.host_ln = false;
   for (int i = 2; i < ctx.argc; ++i)
-    if (std::string(ctx.argv[i]) == "--host-ln") ctx.host_ln = true;
-  ctx.host_sm = false;
+    if (std::string(ctx.argv[i]) == "--threads")
+      ctx.nthreads = std::atoi(value_after(i, "--threads"));
+  refuse_removed_op_flags(ctx.argc, ctx.argv);
+  // Which ops go on the array. The DEFAULT is the empty list -- all three on the
+  // host, which is the measured-faster path -- and a repeated flag replaces the
+  // previous one rather than adding to it, the same as --artifacts and --model:
+  // the last one on the line is the one that counts, and `--npu-ops ""` clears.
+  ctx.npu_ops.clear();
   for (int i = 2; i < ctx.argc; ++i)
-    if (std::string(ctx.argv[i]) == "--host-sm") ctx.host_sm = true;
-  ctx.host_gelu = false;
-  for (int i = 2; i < ctx.argc; ++i)
-    if (std::string(ctx.argv[i]) == "--host-gelu") ctx.host_gelu = true;
-  // Positive opt-in for array eltwise. Without it the unified set keeps all
-  // three ops on the host, exactly as before. --host-* still wins per op.
-  ctx.npu_eltwise = false;
-  for (int i = 2; i < ctx.argc; ++i)
-    if (std::string(ctx.argv[i]) == "--npu-eltwise") ctx.npu_eltwise = true;
+    if (std::string(ctx.argv[i]) == "--npu-ops")
+      ctx.npu_ops = parse_npu_ops(value_after(i, "--npu-ops"));
+  ctx.host_ln = !ctx.on_array("layn");
+  ctx.host_sm = !ctx.on_array("softm");
+  ctx.host_gelu = !ctx.on_array("gelu");
   // The one override for a full or unreadable hw_context budget (subtask 7).
   ctx.allow_contention = false;
   for (int i = 2; i < ctx.argc; ++i)
@@ -344,7 +362,10 @@ inline int setup_encoder(RunContext &ctx) {
     // three ops run on the host. --npu-eltwise is the positive opt-in that
     // load_designs() already used to require the sibling directories, so with
     // it the host_* flags are left exactly as the CLI set them.
-    if (!ctx.npu_eltwise)
+    // The legacy per-op set has all three resident and its own dispatch path, so
+    // the list does not apply to it: ctx.unified is the switch, and on the
+    // seven-design path every eltwise design is loaded whether or not it runs.
+    if (!ctx.unified)
       ctx.host_ln = ctx.host_sm = ctx.host_gelu = true;
     ctx.enc->unified = true;
     ctx.enc->is_qkv = 0;
@@ -406,13 +427,20 @@ inline int setup_encoder(RunContext &ctx) {
   // Where each op ACTUALLY runs, read off the design the encoder will call --
   // never off the flag that led here. A host-forced op prints the host line; an
   // array op names the resolved design and the generation it was built for.
-  auto where = [](const char *op, bool host, const npu::Design &d,
+  // The op's CODE is printed, not its long name: the code is what --npu-ops
+  // takes, and a status line that names something you cannot type is one more
+  // thing to translate at the terminal.
+  auto where = [](const char *code, bool host, const npu::Design &d,
                   const char *host_note) {
+    const NpuOp *op = find_npu_op(code);
     if (host) {
-      std::printf("  %-10s on the HOST (fp32) -- %s\n", op, host_note);
+      std::printf("  %-6s %-10s on the HOST (fp32) -- %s\n", code,
+                  op ? op->long_name : "?", host_note);
     } else {
-      std::printf("  %-10s on the ARRAY (%s, arch %lld%s%s)\n", op,
-                  d.info().name.empty() ? op : d.info().name.c_str(),
+      std::printf("  %-6s %-10s on the ARRAY (%s, arch %lld%s%s)\n", code,
+                  op ? op->long_name : "?",
+                  d.info().name.empty() ? d.info().kind.c_str()
+                                       : d.info().name.c_str(),
                   (long long)d.info().arch,
                   d.info().device.empty() ? "" : " ",
                   d.info().device.c_str());
@@ -427,8 +455,8 @@ inline int setup_encoder(RunContext &ctx) {
     std::snprintf(ln_note, sizeof ln_note,
                   "%lld fewer NPU dispatches", (long long)(1 + 2 * g_layers));
     where("gelu", ctx.host_gelu, ctx.d_gelu(), gelu_note);
-    where("softmax", ctx.host_sm, ctx.d_sm(), sm_note);
-    where("layernorm", ctx.host_ln, ctx.d_ln(), ln_note);
+    where("softm", ctx.host_sm, ctx.d_sm(), sm_note);
+    where("layn", ctx.host_ln, ctx.d_ln(), ln_note);
   }
   const size_t staged = ctx.enc->stage_all();
   // What the allocation mode actually bought, in addresses. Printed

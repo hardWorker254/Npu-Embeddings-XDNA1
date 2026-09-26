@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -81,14 +82,13 @@ struct RunContext {
 
   // --- host-side policy flags ---------------------------------------------
   int nthreads = 1;
-  bool host_ln = false, host_sm = false, host_gelu = false;
-  // --npu-eltwise opts GELU/LayerNorm/softmax OFF the host and onto the array.
-  // Only meaningful for the unified gemm_rtp set, which has no eltwise designs
-  // of its own: the flag makes load_designs resolve the sibling gelu/,
-  // layernorm/ and softmax/ directories, and setup_encoder then stops forcing
-  // host execution. Absent the flag the behaviour is the shipped one -- host
-  // eltwise, which is the measured-faster path.
-  bool npu_eltwise = false;
+  // Which ops go on the array: --npu-ops. The three host_* booleans are DERIVED
+  // from it by setup_flags_pools, because they are the encoder's contract and
+  // because "on the host" is exactly "not in the list" -- one setting, one
+  // meaning, and no inverse flag to drift against it.
+  bool host_ln = true, host_sm = true, host_gelu = true;
+  std::set<std::string> npu_ops;   // empty = all three on the host
+  bool on_array(const char *code) const { return npu_ops.count(code) != 0; }
   bool sim_c_bf16 = false;
   bool no_fuse_ffn = false;
   // --allow-contention: the only override for a run whose hw_context budget is
@@ -112,20 +112,19 @@ struct RunContext {
   npu::Design &d_ao() const { return unified ? *ud : *ld_ao; }
   npu::Design &d_fu() const { return unified ? *ud : *ld_fu; }
   npu::Design &d_fd() const { return unified ? *ud : *ld_fd; }
-  // The three eltwise accessors prefer their own design when --npu-eltwise
-  // loaded one and it is actually going to run on the array; otherwise they
-  // alias the unified GEMM design so a host-forced op still gets a valid
-  // reference. `ld_*` is non-null exactly when load_designs resolved it and
-  // the op is not forced back onto the host.
-  npu::Design &d_gelu() const {
-    return (unified && !(npu_eltwise && ld_gelu)) ? *ud : *ld_gelu;
-  }
-  npu::Design &d_ln() const {
-    return (unified && !(npu_eltwise && ld_ln)) ? *ud : *ld_ln;
-  }
-  npu::Design &d_sm() const {
-    return (unified && !(npu_eltwise && ld_sm)) ? *ud : *ld_sm;
-  }
+  // The three eltwise accessors hand back the sibling design when the op is
+  // going to run on the array, and otherwise alias the unified GEMM design so a
+  // host-side op still gets a valid reference. `ld_*` is non-null exactly when
+  // load_designs resolved it, which happens exactly when the op is listed in
+  // --npu-ops.
+  // `!host_*` and `ld_* != nullptr` are the same condition -- load_designs opens
+  // a sibling design exactly for the ops in --npu-ops -- and both are checked,
+  // because getting this backwards does not fail: it hands an op a Design that
+  // has no stream for it, and the dispatch that follows computes the wrong
+  // thing without an error.
+  npu::Design &d_gelu() const { return !host_gelu && ld_gelu ? *ld_gelu : *ud; }
+  npu::Design &d_ln() const { return !host_ln && ld_ln ? *ld_ln : *ud; }
+  npu::Design &d_sm() const { return !host_sm && ld_sm ? *ld_sm : *ud; }
 
   // The golden check vector -- see need_goldens call sites below.
   void need_goldens() const {

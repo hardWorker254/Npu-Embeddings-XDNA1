@@ -48,7 +48,15 @@ namespace npue {
 namespace {
 
 constexpr uint32_t kAlign = 4096;
-constexpr int kMacS = 8, kMacT = 8;      // bf16 MMAC sub-tile on aie2p
+
+// npu1 (aie2) and npu2 (aie2p), the two boards' MMAC sub-tiles. WHY this is a
+// per-device value and not a constant: the B panel's byte order inside a
+// (tile_k, tile_n) tile IS the sub-tile, and a container packed with the other
+// board's pair is not refused by anything -- same byte count, same shapes, and
+// the same layout_hash on both sides, because both sides used the same wrong
+// constant. It is only ever wrong NUMBERS. See npue_pack.hpp.
+constexpr MacGeom kMacNpu2{8, 8};
+constexpr MacGeom kMacNpu1{8, 4};
 
 // --- safetensors ----------------------------------------------------------
 // The format is deliberately simple: 8 bytes of little-endian header length,
@@ -302,7 +310,7 @@ inline uint16_t bf16_rne(float x) {
 // Both re-layouts the runtime design would otherwise do at load time are
 // absorbed here, which is the whole point of the format.
 std::vector<uint16_t> tile_b(const float *mat, int64_t K, int64_t N,
-                             int64_t tk, int64_t tn) {
+                             int64_t tk, int64_t tn, MacGeom mac = kMacNpu2) {
   if (K % tk || N % tn)
     throw std::runtime_error(
         "operand [" + std::to_string(K) + "," + std::to_string(N) +
@@ -314,12 +322,12 @@ std::vector<uint16_t> tile_b(const float *mat, int64_t K, int64_t N,
   size_t w = 0;
   for (int64_t kb = 0; kb < kb_n; ++kb)
     for (int64_t nb = 0; nb < nb_n; ++nb)
-      for (int64_t si = 0; si < tk / kMacS; ++si)
-        for (int64_t ti = 0; ti < tn / kMacT; ++ti)
-          for (int64_t s = 0; s < kMacS; ++s)
-            for (int64_t t = 0; t < kMacT; ++t) {
-              const int64_t r = kb * tk + si * kMacS + s;
-              const int64_t c = nb * tn + ti * kMacT + t;
+      for (int64_t si = 0; si < tk / mac.s; ++si)
+        for (int64_t ti = 0; ti < tn / mac.t; ++ti)
+          for (int64_t s = 0; s < mac.s; ++s)
+            for (int64_t t = 0; t < mac.t; ++t) {
+              const int64_t r = kb * tk + si * mac.s + s;
+              const int64_t c = nb * tn + ti * mac.t + t;
               out[w++] = bf16_rne(mat[r * N + c]);
             }
   return out;
@@ -427,6 +435,20 @@ std::vector<uint8_t> slurp(const std::string &path) {
 
 }  // namespace
 
+// Out of the anonymous namespace on purpose: the pack path in src/hub.cpp
+// resolves the target device and hands the result to prepare_model*(), so this
+// has to be the same MacGeom the header declares. A device nobody recognises
+// throws here rather than falling back, because the fallback is a container
+// that is wrong in a way no later check can see.
+MacGeom mac_for_device(const std::string &device) {
+  if (device == "npu1") return kMacNpu1;
+  if (device == "npu2" || device.empty()) return kMacNpu2;
+  throw std::runtime_error(
+      "unknown device '" + device +
+      "': the B panel's sub-tile is per-generation (npu1 = s8/t4, npu2 = "
+      "s8/t8), and a wrong guess is undetectable from the packed file.");
+}
+
 // The one C++ SHA-256, exposed. The downloader must verify a checkpoint with
 // EXACTLY the implementation that later records `source_sha256` into the
 // container -- a second copy is how the Python side ended up with four.
@@ -451,7 +473,7 @@ std::string sha256_file(const std::string &path) {
 static void add_gemm_b(Writer &w, const std::string &name, const Tensor &t,
                        int64_t tk, int64_t tn, const std::string &layout_json,
                        const std::string &layout_hash, float fold = 1.0f,
-                       int64_t fold_cols = 0) {
+                       int64_t fold_cols = 0, MacGeom mac = kMacNpu2) {
   const int64_t N = t.rows(), K = t.cols();     // checkpoint stores [out, in]
   std::vector<float> m(static_cast<size_t>(K) * N);
   const float *src = t.f32();
@@ -461,7 +483,7 @@ static void add_gemm_b(Writer &w, const std::string &name, const Tensor &t,
       if (fold != 1.0f && c < fold_cols) v = v * fold;
       m[r * N + c] = v;
     }
-  const auto tiled = tile_b(m.data(), K, N, tk, tn);
+  const auto tiled = tile_b(m.data(), K, N, tk, tn, mac);
   w.add(name, tiled.data(), tiled.size() * 2, "BF16", "gemm_b", {K, N},
         layout_json, layout_hash);
 }
@@ -499,7 +521,8 @@ static void add_gemm_b_concat_pad(Writer &w, const std::string &name,
                                   const std::vector<const Tensor *> &parts,
                                   int64_t n_padded, int64_t tk, int64_t tn,
                                   const std::string &layout_json,
-                                  const std::string &layout_hash) {
+                                  const std::string &layout_hash,
+                                  MacGeom mac = kMacNpu2) {
   if (parts.empty()) throw std::runtime_error(name + ": no parts to fuse");
   const int64_t K = parts[0]->cols();
   int64_t used = 0;
@@ -520,7 +543,7 @@ static void add_gemm_b_concat_pad(Writer &w, const std::string &name,
         m[r * n_padded + base + c] = s[c * K + r];    // transpose to [K, N]
     base += Np;
   }
-  const auto tiled = tile_b(m.data(), K, n_padded, tk, tn);
+  const auto tiled = tile_b(m.data(), K, n_padded, tk, tn, mac);
   w.add(name, tiled.data(), tiled.size() * 2, "BF16", "gemm_b", {K, n_padded},
         layout_json, layout_hash);
 }
@@ -555,7 +578,7 @@ void prepare_model(const std::string &safetensors, const std::string &vocab,
                    const std::string &layout_json,
                    const std::string &layout_hash,
                    int64_t tile_k, int64_t tile_n, int64_t max_seq,
-                   void (*log)(const std::string &)) {
+                   void (*log)(const std::string &), MacGeom mac) {
   const auto st_buf = slurp(safetensors);
   const auto src = read_safetensors(st_buf);
   std::string sha = source_sha;
@@ -614,7 +637,7 @@ void prepare_model(const std::string &safetensors, const std::string &vocab,
      << ",\"pooling\":\"" << pooling << "\",\"l2_normalize\":true"
      << ",\"activation\":\"gelu_erf_exact\""
      << ",\"tile_k\":" << tile_k << ",\"tile_n\":" << tile_n
-     << ",\"mac_s\":" << kMacS << ",\"mac_t\":" << kMacT
+     << ",\"mac_s\":" << mac.s << ",\"mac_t\":" << mac.t
      // The operand datapath (tasks/0078). This C++ packer only produces bf16
      // -- int8 needs a SmoothQuant calibration pass that runs the numpy
      // oracle, which is build-time Python by design (CLAUDE.md rule 5) -- but
@@ -677,7 +700,7 @@ void prepare_model(const std::string &safetensors, const std::string &vocab,
             if (b == 0) val = val * scale;             // float32 throughout
             m[in * N + b * hidden + o] = val;
           }
-      const auto tiled = tile_b(m.data(), hidden, N, tile_k, tile_n);
+      const auto tiled = tile_b(m.data(), hidden, N, tile_k, tile_n, mac);
       w.add(tag + "qkv", tiled.data(), tiled.size() * 2, "BF16", "gemm_b",
             {hidden, N}, layout_json, layout_hash);
 
@@ -692,7 +715,7 @@ void prepare_model(const std::string &safetensors, const std::string &vocab,
     }
 
     add_gemm_b(w, tag + "attn_out", get(ao + "dense.weight"), tile_k, tile_n,
-               layout_json, layout_hash);
+               layout_json, layout_hash, 1.0f, 0, mac);
     add_f32(tag + "attn_out.bias", get(ao + "dense.bias"), "bias", {hidden});
     add_f32(tag + "ln1.weight", get(ao + "LayerNorm.weight"), "layernorm",
             {hidden});
@@ -700,11 +723,11 @@ void prepare_model(const std::string &safetensors, const std::string &vocab,
             {hidden});
 
     add_gemm_b(w, tag + "ffn_up", get(p + "intermediate.dense.weight"),
-               tile_k, tile_n, layout_json, layout_hash);
+               tile_k, tile_n, layout_json, layout_hash, 1.0f, 0, mac);
     add_f32(tag + "ffn_up.bias", get(p + "intermediate.dense.bias"), "bias",
             {inter});
     add_gemm_b(w, tag + "ffn_down", get(p + "output.dense.weight"),
-               tile_k, tile_n, layout_json, layout_hash);
+               tile_k, tile_n, layout_json, layout_hash, 1.0f, 0, mac);
     add_f32(tag + "ffn_down.bias", get(p + "output.dense.bias"), "bias",
             {hidden});
     add_f32(tag + "ln2.weight", get(p + "output.LayerNorm.weight"),
@@ -734,7 +757,7 @@ void prepare_model(const std::string &safetensors, const std::string &vocab,
 void prepare_model_gemma(const std::string &model_dir, const std::string &out,
                          const std::string &source_repo,
                          void (*log)(const std::string &), int64_t tile_k,
-                         int64_t tile_n, bool host_only) {
+                         int64_t tile_n, bool host_only, MacGeom mac) {
   const auto st_buf = slurp(model_dir + "/model.safetensors");
   const auto src = read_safetensors(st_buf);
   Sha256 sh;
@@ -926,7 +949,7 @@ void prepare_model_gemma(const std::string &model_dir, const std::string &out,
   const int64_t qkv_used = hidden + 2 * kv_w;
   const int64_t gran = tile_n * 8;             // n_aie_cols = 8
   const int64_t qkv_n = ((qkv_used + gran - 1) / gran) * gran;
-  const Layout glay = gemm_b_layout(tile_k, tile_n);
+  const Layout glay = gemm_b_layout(tile_k, tile_n, mac.s, mac.t);
 
   cj += ",\"gemm_layout\":\"";
   cj += host_only ? "host" : "pretiled_bf16";
@@ -934,7 +957,8 @@ void prepare_model_gemma(const std::string &model_dir, const std::string &out,
   if (!host_only) {
     cj += ",\"tile_k\":" + std::to_string(tile_k);
     cj += ",\"tile_n\":" + std::to_string(tile_n);
-    cj += ",\"mac_s\":8,\"mac_t\":8";
+    cj += ",\"mac_s\":" + std::to_string(mac.s) +
+          ",\"mac_t\":" + std::to_string(mac.t);
     cj += ",\"gated_ffn\":true";
     cj += ",\"geglu_halves\":\"gate|up\"";
     cj += ",\"qkv_n\":" + std::to_string(qkv_n);
@@ -1038,7 +1062,8 @@ void prepare_model_gemma(const std::string &model_dir, const std::string &out,
                             {&get(sa + "q_proj.weight"),
                              &get(sa + "k_proj.weight"),
                              &get(sa + "v_proj.weight")},
-                            qkv_n, tile_k, tile_n, glay.json, glay.hash);
+                            qkv_n, tile_k, tile_n, glay.json, glay.hash,
+                            mac);
       add_zero_bias(tag + "qkv.bias", qkv_n);
     }
     {
@@ -1053,7 +1078,7 @@ void prepare_model_gemma(const std::string &model_dir, const std::string &out,
       add_gemm_b_host(w, tag + "o_proj", get(sa + "o_proj.weight"));
     } else {
       add_gemm_b(w, tag + "attn_out", get(sa + "o_proj.weight"), tile_k,
-                 tile_n, glay.json, glay.hash);
+                 tile_n, glay.json, glay.hash, 1.0f, 0, mac);
       add_zero_bias(tag + "attn_out.bias", hidden);
     }
 
@@ -1074,10 +1099,11 @@ void prepare_model_gemma(const std::string &model_dir, const std::string &out,
       add_gemm_b_concat_pad(w, tag + "ffn_up",
                             {&get(mp + "gate_proj.weight"),
                              &get(mp + "up_proj.weight")},
-                            2 * inter, tile_k, tile_n, glay.json, glay.hash);
+                            2 * inter, tile_k, tile_n, glay.json, glay.hash,
+                            mac);
       add_zero_bias(tag + "ffn_up.bias", 2 * inter);
       add_gemm_b(w, tag + "ffn_down", get(mp + "down_proj.weight"), tile_k,
-                 tile_n, glay.json, glay.hash);
+                 tile_n, glay.json, glay.hash, 1.0f, 0, mac);
       add_zero_bias(tag + "ffn_down.bias", hidden);
     }
   }
@@ -1108,7 +1134,8 @@ static void add_gemm_b_concat2(Writer &w, const std::string &name,
                                const Tensor &a, const Tensor &b,
                                int64_t tk, int64_t tn,
                                const std::string &layout_json,
-                               const std::string &layout_hash) {
+                               const std::string &layout_hash,
+                               MacGeom mac = kMacNpu2) {
   const int64_t K = a.cols();               // both share `hidden` as `in`
   if (b.cols() != K)
     throw std::runtime_error(name + ": fc11/fc12 disagree on `in` dim");
@@ -1120,7 +1147,7 @@ static void add_gemm_b_concat2(Writer &w, const std::string &name,
     for (int64_t c = 0; c < Na; ++c) m[r * N + c] = sa[c * K + r];
     for (int64_t c = 0; c < Nb; ++c) m[r * N + Na + c] = sb[c * K + r];
   }
-  const auto tiled = tile_b(m.data(), K, N, tk, tn);
+  const auto tiled = tile_b(m.data(), K, N, tk, tn, mac);
   w.add(name, tiled.data(), tiled.size() * 2, "BF16", "gemm_b", {K, N},
         layout_json, layout_hash);
 }
@@ -1153,7 +1180,7 @@ void prepare_model_nomic(const std::string &model_dir,
                          const std::string &layout_json,
                          const std::string &layout_hash,
                          int64_t tile_k, int64_t tile_n, int64_t max_seq,
-                         void (*log)(const std::string &)) {
+                         void (*log)(const std::string &), MacGeom mac) {
   const auto st_buf = slurp(model_dir + "/model.safetensors");
   const auto src = read_safetensors(st_buf);
   Sha256 sh;
@@ -1318,8 +1345,8 @@ void prepare_model_nomic(const std::string &model_dir,
   cj += ",\"attention_bias\":false,\"mlp_bias\":false";
   cj += ",\"tile_k\":" + std::to_string(tile_k) +
         ",\"tile_n\":" + std::to_string(tile_n) +
-        ",\"mac_s\":" + std::to_string(kMacS) +
-        ",\"mac_t\":" + std::to_string(kMacT);
+        ",\"mac_s\":" + std::to_string(mac.s) +
+        ",\"mac_t\":" + std::to_string(mac.t);
   cj += ",\"prompts\":{\"search_document\":\"search_document: \","
         "\"search_query\":\"search_query: \","
         "\"clustering\":\"clustering: \","
@@ -1409,11 +1436,11 @@ void prepare_model_nomic(const std::string &model_dir,
     // before the GEMM and before RoPE is exact (tools/verify_npue_nomic.py
     // check E). No qkv bias exists to fold.
     add_gemm_b(w, tag + "qkv", get(attn + "Wqkv.weight"), tile_k, tile_n,
-               layout_json, layout_hash, scale, hidden);
+               layout_json, layout_hash, scale, hidden, mac);
     add_zero_bias(tag + "qkv.bias", 3 * hidden);
 
     add_gemm_b(w, tag + "attn_out", get(attn + "out_proj.weight"), tile_k,
-               tile_n, layout_json, layout_hash);
+               tile_n, layout_json, layout_hash, 1.0f, 0, mac);
     add_zero_bias(tag + "attn_out.bias", hidden);
     add_f32(tag + "ln1.weight", get(p + "norm1.weight"), "layernorm",
             {hidden});
@@ -1425,11 +1452,11 @@ void prepare_model_nomic(const std::string &model_dir,
     // per layer, not five.
     add_gemm_b_concat2(w, tag + "ffn_up", get(mp + "fc11.weight"),
                        get(mp + "fc12.weight"), tile_k, tile_n, layout_json,
-                       layout_hash);
+                       layout_hash, mac);
     add_zero_bias(tag + "ffn_up.bias", 2 * inter);
 
     add_gemm_b(w, tag + "ffn_down", get(mp + "fc2.weight"), tile_k, tile_n,
-               layout_json, layout_hash);
+               layout_json, layout_hash, 1.0f, 0, mac);
     add_zero_bias(tag + "ffn_down.bias", hidden);
     add_f32(tag + "ln2.weight", get(p + "norm2.weight"), "layernorm",
             {hidden});
@@ -1516,7 +1543,7 @@ void prepare_model_gte(const std::string &model_dir,
                        const std::string &layout_json,
                        const std::string &layout_hash,
                        int64_t tile_k, int64_t tile_n, int64_t max_seq,
-                       void (*log)(const std::string &)) {
+                       void (*log)(const std::string &), MacGeom mac) {
   const auto st_buf = slurp(model_dir + "/model.safetensors");
   const auto src = read_safetensors(st_buf);   // widens this checkpoint's
                                                // F16 to F32 at read time
@@ -1782,8 +1809,8 @@ void prepare_model_gte(const std::string &model_dir,
   cj += ",\"mlp_bias\":\"down_only -- up_gate_proj is genuinely bias-free\"";
   cj += ",\"tile_k\":" + std::to_string(tile_k) +
         ",\"tile_n\":" + std::to_string(tile_n) +
-        ",\"mac_s\":" + std::to_string(kMacS) +
-        ",\"mac_t\":" + std::to_string(kMacT);
+        ",\"mac_s\":" + std::to_string(mac.s) +
+        ",\"mac_t\":" + std::to_string(mac.t);
   cj += ",\"fusions\":{\"qkv_fused\":true,\"transposed_to_kn\":true,"
         "\"qk_scale_folded_into_q\":true,"
         "\"qk_scale_folded_into_q_bias\":true,"
@@ -1847,7 +1874,7 @@ void prepare_model_gte(const std::string &model_dir,
     // Unlike nomic, gte HAS a qkv bias, so its Q third scales too:
     // (xW + b)*s == x(Ws) + (bs).
     add_gemm_b(w, tag + "qkv", get(at + "qkv_proj.weight"), tile_k, tile_n,
-               layout_json, layout_hash, scale, hidden);
+               layout_json, layout_hash, scale, hidden, mac);
     {
       const Tensor &b = get(at + "qkv_proj.bias");
       std::vector<float> bias(b.f32(), b.f32() + b.count());
@@ -1858,7 +1885,7 @@ void prepare_model_gte(const std::string &model_dir,
     }
 
     add_gemm_b(w, tag + "attn_out", get(at + "o_proj.weight"), tile_k,
-               tile_n, layout_json, layout_hash);
+               tile_n, layout_json, layout_hash, 1.0f, 0, mac);
     add_f32(tag + "attn_out.bias", get(at + "o_proj.bias"), "bias", {hidden});
     add_f32(tag + "ln1.weight", get(p + "attn_ln.weight"), "layernorm",
             {hidden});
@@ -1869,7 +1896,7 @@ void prepare_model_gte(const std::string &model_dir,
     // [0, inter), gate columns [inter, 2*inter) -- the lo/hi order of
     // `lo * act(hi)`. Genuinely bias-free upstream -- zero-filled.
     add_gemm_b(w, tag + "ffn_up", get(p + "mlp.up_gate_proj.weight"),
-               tile_k, tile_n, layout_json, layout_hash);
+               tile_k, tile_n, layout_json, layout_hash, 1.0f, 0, mac);
     {
       std::vector<float> z(static_cast<size_t>(2 * inter), 0.f);
       w.add(tag + "ffn_up.bias", z.data(), z.size() * 4, "F32", "bias",
@@ -1877,7 +1904,7 @@ void prepare_model_gte(const std::string &model_dir,
     }
 
     add_gemm_b(w, tag + "ffn_down", get(p + "mlp.down_proj.weight"), tile_k,
-               tile_n, layout_json, layout_hash);
+               tile_n, layout_json, layout_hash, 1.0f, 0, mac);
     add_f32(tag + "ffn_down.bias", get(p + "mlp.down_proj.bias"), "bias",
             {hidden});
     add_f32(tag + "ln2.weight", get(p + "mlp_ln.weight"), "layernorm",

@@ -44,6 +44,29 @@ struct Layout {
 Layout gemm_b_layout(int64_t tile_k, int64_t tile_n, int64_t mac_s = 8,
                      int64_t mac_t = 8);
 
+// The B panel's sub-tile, per generation. It is the MMAC geometry
+// (`kernels.mm(...).mac_dims` = (r, s, t)), and it is NOT the same on both
+// boards: npu1/aie2 gives (4, 8, 4), npu2/aie2p gives (8, 8, 8). Only s and t
+// reach the layout, so that is what this carries.
+//
+// A container packed for one board and read by a design built for the other is
+// not rejected anywhere: same byte count, same shapes, and the same
+// layout_hash on both sides, because both sides used the same wrong constant.
+// It is only ever wrong NUMBERS. So the packer takes the target device's pair
+// as an argument, the design exporter records the same one, and the two are
+// compared by the hash that already exists -- which is only a real check while
+// both sides derive it from the device.
+struct MacGeom {
+  int64_t s, t;
+};
+
+// "npu1" -> (8, 4), "npu2" or "" -> (8, 8). Anything else throws: a typo must
+// not fall back to a layout that is wrong without saying so.
+MacGeom mac_for_device(const std::string &device);
+// The default target, so a caller that has no opinion keeps the behaviour every
+// container shipped before this was per-device.
+constexpr MacGeom kMacDefault{8, 8};
+
 // The one C++ SHA-256. Exposed so the downloader (src/hub.cpp) verifies a
 // checkpoint with exactly the implementation that records `source_sha256`
 // into the container. Streams the file; safe on the 438 MB checkpoints.
@@ -57,7 +80,8 @@ void prepare_model(const std::string &safetensors, const std::string &vocab,
                    const std::string &layout_json,
                    const std::string &layout_hash,
                    int64_t tile_k, int64_t tile_n, int64_t max_seq,
-                   void (*log)(const std::string &) = nullptr);
+                   void (*log)(const std::string &) = nullptr,
+                   MacGeom mac = kMacDefault);
 
 // arch=1 (EmbeddingGemma / Gemma3 MQA+RoPE+GeGLU) mirror of
 // tools/pack_npue.py's pack_gemma(). `model_dir` must hold
@@ -78,7 +102,8 @@ void prepare_model_gemma(const std::string &model_dir, const std::string &out,
                          const std::string &source_repo,
                          void (*log)(const std::string &) = nullptr,
                          int64_t tile_k = 64, int64_t tile_n = 48,
-                         bool host_only = false);
+                         bool host_only = false,
+                         MacGeom mac = kMacDefault);
 
 // arch=2 (nomic-embed-text-v1.5 / RoPE + gated SwiGLU) mirror of
 // tools/pack_npue.py's pack_nomic() (tasks/0069, tasks/0070, tasks/0071).
@@ -104,7 +129,8 @@ void prepare_model_nomic(const std::string &model_dir,
                          const std::string &layout_json,
                          const std::string &layout_hash,
                          int64_t tile_k, int64_t tile_n, int64_t max_seq,
-                         void (*log)(const std::string &) = nullptr);
+                         void (*log)(const std::string &) = nullptr,
+                         MacGeom mac = kMacDefault);
 
 // arch=3 (gte-multilingual-base / NTK RoPE + gated GeGLU, model_type "new")
 // mirror of tools/pack_npue.py's pack_gte() (tasks/0135, tasks/0138). Same
@@ -136,6 +162,7 @@ void prepare_model_gte(const std::string &model_dir,
                        const std::string &layout_json,
                        const std::string &layout_hash,
                        int64_t tile_k, int64_t tile_n, int64_t max_seq,
-                       void (*log)(const std::string &) = nullptr);
+                       void (*log)(const std::string &) = nullptr,
+                       MacGeom mac = kMacDefault);
 
 }  // namespace npue
