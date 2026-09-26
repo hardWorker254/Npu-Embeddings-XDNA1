@@ -87,8 +87,44 @@ REQUIRED_FLAGS_ELT = ("--arch", "--out", "--batch", "--seq", "--hidden",
                       "--extra-ops")
 
 
-def build_reference(rev, root):
-    """Materialise the pre-split tools/ at `rev` into root.
+def reference_rev(entry: str) -> tuple[str, str]:
+    """The newest revision at which `entry` was still a MONOLITH, and a note.
+
+    "Still a monolith" is decided by reading the file, not by asking when the
+    package appeared, because the two do not answer the same question: at one
+    commit in this history tools/export_eltwise.py was already a shim importing
+    `exporters.eltwise.main` while the package it imported had never been
+    committed. Diffing against that shim compares a shim with itself, or -- since
+    the reference tree does not have the package -- crashes it on a missing
+    import and reports the traceback as a behavioural difference.
+
+    So: walk the file's history newest-first and take the first revision whose
+    blob does not mention the package. `--rev` still wins when given.
+    """
+    revs = subprocess.run(
+        ["git", "log", "--format=%H", "--", f"tools/{entry}"],
+        capture_output=True, text=True).stdout.split()
+    for rev in revs:
+        blob = subprocess.run(["git", "show", f"{rev}:tools/{entry}"],
+                              capture_output=True)
+        if blob.returncode != 0:
+            continue
+        if b"exporters" in blob.stdout:
+            continue    # a shim onto the split package
+        short = subprocess.run(["git", "rev-parse", "--short", rev],
+                               capture_output=True, text=True).stdout.strip()
+        subject = subprocess.run(["git", "log", "-1", "--format=%s", rev],
+                                 capture_output=True,
+                                 text=True).stdout.strip()
+        skipped = len(revs) - revs.index(rev) - 1
+        return rev, (f"{entry}: newest monolith is {short} ({subject})"
+                     + (f"; {skipped} later revision(s) are shims onto the "
+                        f"split" if skipped else ""))
+    return "HEAD", f"{entry}: no monolith in history, diffing against HEAD"
+
+
+def build_reference(revs: dict, root):
+    """Materialise the pre-split tools/ into root, per tool at its own rev.
 
     Returns (tools dir, targets file). The targets file is the rev's own, and
     BOTH sides are pointed at it: the split's npu_targets.json has gained keys
@@ -100,12 +136,15 @@ def build_reference(rev, root):
     ref = root / "ref"
     (ref / "tools").mkdir(parents=True)
     for name in MONOLITHS + ("npu_targets.json",):
+        rev = revs[name.split(".")[0].replace("export_", "")] \
+            if name.endswith(".py") else revs["targets"]
         blob = subprocess.run(["git", "-C", str(REPO), "show", f"{rev}:tools/{name}"],
                               capture_output=True)
         if blob.returncode != 0:
-            raise SystemExit(f"git show {rev}:tools/{name} failed -- is the "
-                             f"split committed already? Then this gate compares "
-                             f"the split against itself and proves nothing.")
+            raise SystemExit(
+                f"git show {rev}:tools/{name} failed. That revision does not "
+                f"hold a monolith for it, so there is nothing to diff against; "
+                f"pass --rev with a commit that does.")
         (ref / "tools" / name).write_bytes(blob.stdout)
     for name in SHARED:
         src = TOOLS / name
@@ -123,13 +162,51 @@ def run(cwd, script, args):
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Diff the split exporters against the monoliths in git.")
-    ap.add_argument("--rev", default="HEAD",
-                    help="git rev holding the monoliths (default %(default)s)")
+    ap.add_argument("--rev", default=None,
+                    help=(
+                        "git rev to diff BOTH tools against. Omit it and each "
+                        "tool is diffed against its own pre-split revision, "
+                        "resolved from history -- the two halves of this "
+                        "exporter were split in different commits, so a single "
+                        "rev cannot serve both."))
     args = ap.parse_args()
 
+    if args.rev:
+        revs = {k: args.rev for k in ("gemm_rtp", "eltwise", "targets")}
+        notes = [f"both tools diffed against {args.rev}"]
+    else:
+        revs, notes = {}, []
+        for pkg, entry in (("gemm_rtp", "export_gemm_rtp.py"),
+                           ("eltwise", "export_eltwise.py")):
+            rev, note = reference_rev(entry)
+            revs[pkg] = rev
+            if note:
+                notes.append(note)
+        # The targets file must come from the SAME era as the monoliths, and
+        # from the OLDEST of them when they differ: the monolith's validator is
+        # strict, and it rejects override keys the split has since learned
+        # (per-model `batches`, and the STT entries). Pointing one side at HEAD's
+        # targets file turns a behaviour comparison into a comparison of a
+        # refusal against a listing -- which is what this file's own header says
+        # must not happen.
+        def _when(rev):
+            out = subprocess.run(["git", "show", "-s", "--format=%ct", rev],
+                                 capture_output=True, text=True).stdout.strip()
+            return int(out) if out else 0
+        revs["targets"] = min(revs["gemm_rtp"], revs["eltwise"], key=_when)
+        _t_short = subprocess.run(
+            ["git", "rev-parse", "--short", revs["targets"]],
+            capture_output=True, text=True).stdout.strip()
+        notes.append(f"both tools' targets file: {_t_short} (the older of the "
+                     f"two, for the strict validator's sake)")
+
     bad = 0
+    for n in notes:
+        print(f"reference: {n}")
+    if notes:
+        print()
     with tempfile.TemporaryDirectory(prefix="exporter-parity-") as tmp:
-        ref_tools, targets = build_reference(args.rev, Path(tmp))
+        ref_tools, targets = build_reference(revs, Path(tmp))
         new_tools = TOOLS
 
         for case in CASES:
