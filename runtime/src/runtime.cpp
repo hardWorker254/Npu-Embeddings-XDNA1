@@ -10,6 +10,7 @@
 #include "runtime/run_execute.hpp"
 #include "runtime/run_probes.hpp"
 #include "runtime/gemma_mode.hpp"
+#include "runtime/stt_mode.hpp"
 #include "runtime/model.hpp"
 #include <cstdio>
 #include <cstdlib>
@@ -48,6 +49,14 @@ int Runtime::run(int argc, char **argv) {
     // did. Returns -1 when the container is not Gemma.
     if (int gemma_r = app::maybe_gemma_mode(root_, argc, argv); gemma_r >= 0)
         return gemma_r;
+
+    // arch=4 (Whisper) is the other architecture with a pipeline of its own:
+    // two design sets, an audio front end, an autoregressive decoder, and none
+    // of the embedding machinery. It is dispatched here, beside the Gemma mode
+    // and before the BERT design resolution, and returns -1 for every other
+    // container. --artifacts is read above, so the same flag works for both.
+    if (int stt_r = app::maybe_stt_mode(root_, argc, argv, model_path_); stt_r >= 0)
+        return stt_r;
 
     RunContext ctx;
     ctx.argc = argc;

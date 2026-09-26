@@ -51,6 +51,16 @@ std::string ensure(const std::string &root, const std::string &name,
 
 void forward_common(const char *const *argv, int argc,
                     std::vector<std::string> &store) {
+    // A REMOVED flag is refused here rather than dropped by the whitelist below.
+    // This function is the gate: whatever it does not forward, Runtime::run
+    // never sees, so a flag the user typed that silently disappears is exactly
+    // the failure the whitelist exists to prevent -- and a removed flag is the
+    // case where it is most likely, because the command line is old.
+    {
+      std::vector<std::string> args;
+      for (int i = 0; i < argc; ++i) args.emplace_back(argv[i]);
+      refuse_removed_op_flags(args);
+    }
     for (int i = 3; i < argc; ++i) {
         const std::string a = argv[i];
         // Every no-argument policy flag the runtime reads off raw argv must be
@@ -61,13 +71,20 @@ void forward_common(const char *const *argv, int argc,
         // That fail-open is what the flag exists to prevent (SUBTASKS.md
         // subtask 4), so the list is the runtime's flag set, not an arbitrary
         // subset.
-        if (a == "--cpu" || a == "--allow-truncation" || a == "--npu-eltwise" ||
-            a == "--host-ln" || a == "--host-sm" || a == "--host-gelu" ||
+        if (a == "--cpu" || a == "--allow-truncation" ||
             a == "--sim-c-bf16" || a == "--no-fuse-ffn" ||
-            a == "--allow-contention")
+            a == "--allow-contention" ||
+            // the STT mode's own no-argument flags. They are listed here for
+            // the same reason as the rest: a flag the whitelist drops is a flag
+            // the runtime never sees, and `serve <whisper> --convert` would
+            // then transcribe with a WAV reader that refuses every mp3.
+            a == "--convert" || a == "--json")
             store.push_back(a);
         else if ((a == "--threads" || a == "--pipeline" || a == "--prefix" ||
-                  a == "--artifacts" || a == "--dev" || a == "--bo-mode") &&
+                  a == "--artifacts" || a == "--dev" || a == "--bo-mode" ||
+                  a == "--npu-ops" ||
+                  a == "--language" || a == "--task" || a == "--max-new" ||
+                  a == "--chunk-seconds" || a == "--stride-seconds") &&
                  i + 1 < argc) {
             store.push_back(a);
             store.push_back(argv[++i]);
@@ -108,6 +125,11 @@ int run_serve(int argc, char **argv) {
         "--serve", std::to_string(port)};
     forward_common(argv, argc, store);
     return launch(argv[0], root, store);
+    // A Whisper container is served by the STT mode off the same flags: it
+    // reads --serve and --bind and ignores --threads/--pipeline in favour of
+    // its own pool, and it answers POST /v1/audio/transcriptions instead of
+    // /v1/embeddings. The two modes never meet: the mode is picked by the
+    // container's arch, not by a flag.
 }
 
 int run_embed(int argc, char **argv) {
@@ -129,6 +151,38 @@ int run_embed(int argc, char **argv) {
     std::vector<std::string> store = {"--model", container,
         "--threads", "24", "--pipeline", "4", "--embed", argv[3]};
     if (argc > 4 && argv[4][0] != '-') store.push_back(argv[4]);
+    forward_common(argv, argc, store);
+    return launch(argv[0], root, store);
+}
+
+// `transcribe` for a speech-to-text model. The audio file is written to the
+// flag form, which Runtime::run then dispatches by the container's arch -- one
+// code path for `npuembeddings transcribe ...` and
+// `npuembeddings <root> --model ... --transcribe ...`.
+int run_transcribe(int argc, char **argv) {
+    std::string root = default_root(argv[0]);
+    std::string cli_token;
+    for (int i = 2; i < argc; ++i) {
+        if (std::string(argv[i]) == "--root") root = argv[i + 1];
+        if (std::string(argv[i]) == "--token") cli_token = argv[i + 1];
+    }
+    if (argc < 3 || argv[2][0] == '-')
+        throw std::runtime_error("`transcribe` needs a model name");
+    const std::string model_name = argv[2];
+    if (argc < 4 || argv[3][0] == '-')
+        throw std::runtime_error(
+            "`transcribe` needs an audio file:\n"
+            "    npuembeddings transcribe <model> <audio.wav> [--language en]\n"
+            "  (--convert ingests through ffmpeg, for mp3/m4a/webm and for WAVs "
+            "the reader refuses)");
+    warn_if_unpinned(model_name);
+    const std::string container = ensure(root, model_name, cli_token);
+    // No --threads/--pipeline defaults here: the STT mode splits host work over
+    // one pool and knows its own shape, and `serve`'s "24 threads, 4 lanes" is
+    // an embedding-lane statement that means nothing to an autoregressive
+    // decoder.
+    std::vector<std::string> store = {"--model", container, "--transcribe",
+                                      argv[3]};
     forward_common(argv, argc, store);
     return launch(argv[0], root, store);
 }
@@ -257,6 +311,7 @@ void register_default_subcommands(SubcommandDispatcher &dispatcher) {
     dispatcher.register_handler("embed", run_embed);
     dispatcher.register_handler("add", run_add);
     dispatcher.register_handler("tokenize", run_tokenize);
+    dispatcher.register_handler("transcribe", run_transcribe);
 }
 
 }  // namespace app

@@ -86,6 +86,22 @@ add_executable(npuembed
   src/whisper/whisper_model.cpp
   src/whisper/stt_engine.cpp
   src/whisper/whisper.cpp
+  # P3: the audio front end. XRT-free like the tokenizer above -- the log-mel
+  # spectrogram and the two convolutions are pure host code, and tools/
+  # verify_whisper_features.py holds both against transformers.
+  src/whisper/features.cpp
+  src/whisper/audio.cpp
+  # P4: the Whisper NPU stacks -- the shared GEMM/layernorm/GELU/attention layer
+  # and the two stacks on top of it. Not reached from Runtime::run yet (the STT
+  # branch lands with P5), but compiled in so arch=4 is built and type-checked
+  # by the same build that serves every other architecture, rather than only by
+  # the gate's own g++ line.
+  src/whisper/npu_ops.cpp
+  src/whisper/encoder.cpp
+  src/whisper/decoder.cpp
+  # P5: the transcription session (device, both design sets, long-form, the
+  # merge) and the OpenAI-shaped /v1/audio/transcriptions endpoint.
+  src/whisper/transcribe.cpp
   # Subtask 4: Encoder system
   src/encoders/bert_encoder.cpp
   src/encoders/gemma_npu_encoder.cpp
@@ -95,6 +111,7 @@ add_executable(npuembed
   # translation units that were previously inline in main.cpp/run_execute.hpp).
   src/server/embed_backend.cpp
   src/server/embed_service.cpp
+  src/server/stt_backend.cpp
   # Subtask 6: CLI system
   src/cli/cli.cpp
   src/cli/subcommand.cpp

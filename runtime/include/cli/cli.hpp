@@ -20,6 +20,7 @@
 #include "common/app_state.hpp"
 #include "common/design_selection.hpp"
 #include "common/hub.hpp"
+#include "common/npu_ops_flag.hpp"
 #include "common/model_catalog.hpp"
 #include "runtime/model.hpp"
 #include "tokenizers/tokenizer_facade.hpp"
@@ -35,6 +36,10 @@ struct CLIArgs {
     bool allow_truncation = false;
     bool cpu = false;
     std::string artifacts;
+    // Which elementwise ops go on the array; empty = none of them. Parsed and
+    // validated where it is used (setup_flags_pools), because the RunContext
+    // owns the derived host_* booleans and the encoder's contract.
+    std::string npu_ops;
     std::string model;
     bool serve = false;
     int port = 8080;
@@ -125,6 +130,13 @@ inline void print_usage() {
         "  npuembeddings embed <model> <in.txt> [out.f32]\n"
         "        embed a text file, one text per line\n"
         "\n"
+        "  npuembeddings transcribe <model> <audio.wav> [--language en]\n"
+        "        transcribe 16 kHz audio with a Whisper model. The transcript\n"
+        "        goes to stdout on its own and the status block to stderr, so\n"
+        "        it pipes. --json prints the OpenAI-shaped object instead,\n"
+        "        with one segment per 30 s window. --convert ingests through\n"
+        "        ffmpeg (mp3, m4a, webm, or a WAV the reader refuses).\n"
+        "\n"
         "  npuembeddings add <org/model> [<sha256>]\n"
         "        teach this installation about a model that is not built in --\n"
         "        typically a finetune of one that is. Reads the repository's\n"
@@ -142,21 +154,26 @@ inline void print_usage() {
         "                      1 lane = no pipelining. A later --pipeline on the\n"
         "                      command line wins, so --pipeline 1 disables it)\n"
         "    --artifacts DIR   override the design set\n"
-        "    --npu-eltwise     run GELU, LayerNorm and softmax on the array\n"
-        "                      instead of the host. Requires the sibling\n"
-        "                      gelu/, layernorm/ and softmax/ design sets next\n"
-        "                      to gemm_rtp (tools/export_gemm_rtp.py\n"
-        "                      --npu-eltwise, or tools/export_eltwise.py);\n"
-        "                      a missing one is refused by name, never silently\n"
-        "                      run on the host. OFF by default: the host path is\n"
-        "                      the measured-faster one, so this flag can LOWER\n"
-        "                      throughput. --host-ln/--host-sm/--host-gelu\n"
-        "                      still force an individual op back onto the host.\n"
-        "                      Because it needs gemm_rtp plus the three eltwise\n"
-        "                      designs (four hw_contexts), it uses much of the\n"
-        "                      device's context budget; the run is refused by\n"
-        "                      name if another process owns enough contexts\n"
-        "                      (see --allow-contention).\n"
+        "    --npu-ops CODES    send the listed elementwise ops to the ARRAY\n"
+        "                      instead of the host: gelu (GELU), layn\n"
+        "                      (LayerNorm), softm (softmax), comma-separated.\n"
+        "                      An op not listed runs on the host, so there is\n"
+        "                      no inverse flag. The default -- nothing listed --\n"
+        "                      is the measured-faster host path for all three.\n"
+        "                      Needs the sibling design sets (gelu/, layernorm/,\n"
+        "                      softmax/) next to gemm_rtp, which cost one extra\n"
+        "                      hw_context EACH: tools/export_gemm_rtp.py\n"
+        "                      --npu-extra-ops CODES, or tools/export_eltwise.py\n"
+        "                      --extra-ops CODES. A missing one is refused by\n"
+        "                      name, never silently run on the host -- and\n"
+        "                      because it is one context per op, this uses much\n"
+        "                      of the device's budget; a run that would exceed\n"
+        "                      it is refused before any context is built unless\n"
+        "                      --allow-contention says the contention is\n"
+        "                      intended (see below).\n"
+        "                      Replaces --npu-eltwise and --host-ln/--host-sm/\n"
+        "                      --host-gelu, which are now refused by name so a\n"
+        "                      stale command line cannot look like it worked.\n"
         "    --allow-contention\n"
         "                      proceed even though another process holds NPU\n"
         "                      hw_contexts. Without it, a run that would exceed\n"
@@ -168,6 +185,31 @@ inline void print_usage() {
         "                      design set built for the other generation is\n"
         "                      refused, not loaded. Defaults to NPU_DEVICE, or\n"
         "                      NPU2=1, or npu1\n"
+        "    --language CODE   transcribe: the language to prime the decoder\n"
+        "                      with (en, de, ru, ...). There is no detection\n"
+        "                      and no default worth having: an assumed language\n"
+        "                      is a fluent transcript of the wrong language, so\n"
+        "                      it defaults to en and says so on stderr. A code\n"
+        "                      the model's tokenizer has no token for is\n"
+        "                      refused, never approximated.\n"
+        "    --task NAME      transcribe: 'transcribe' (default) or\n"
+        "                      'translate' -- English output either way\n"
+        "    --convert        transcribe: ingest through ffmpeg instead of the\n"
+        "                      WAV reader. The reader refuses what it cannot\n"
+        "                      represent (a second channel, 8-bit, 44.1 kHz)\n"
+        "                      by name; this is the way in for those\n"
+        "    --max-new N      transcribe: cap on generated tokens per window\n"
+        "                      (default: the model's own position bound, 448)\n"
+        "    --chunk-seconds N  transcribe: window length, default 30 -- the\n"
+        "                      model's own. Longer is refused: the encoder has\n"
+        "                      weights for a fixed number of positions and a\n"
+        "                      cut window is a transcript of the first 30 s\n"
+        "                      presented as the whole recording\n"
+        "    --stride-seconds N transcribe: overlap on EACH side of a window,\n"
+        "                      default 5 (transformers' own), so windows start\n"
+        "                      chunk - 2*stride apart and the merge\n"
+        "                      de-duplicates the overlap\n"
+        "    --json           transcribe: print {\"text\", \"segments\", ...}\n"
         "    --root DIR        override where models/ and the design live\n"
         "    --token VALUE     HuggingFace access token for a GATED model\n"
         "                      (falls back to the HF_TOKEN env var if omitted)\n"
@@ -207,6 +249,23 @@ inline void print_usage() {
         "\n");
 }
 
+// A speech-to-text model needs BOTH design sets, and `pick_artifacts` only knows
+// how to find an embedder-shaped one. Reporting an STT row as installed on the
+// strength of its container alone would say "ready" for a model whose decoder
+// design does not exist -- and the refusal then arrives 0.2 s into a request
+// instead of in the table a reader checks first.
+inline int stt_design_sets(const std::string &root, const std::string &name) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    for (const char *sub : {"artifacts_npu1", "artifacts_npu2"}) {
+        const fs::path d = fs::path(root) / "runtime" / name / sub;
+        if (std::ifstream(d / "gemm_rtp" / "design.json").good() &&
+            std::ifstream(d / "gemm_rtp_dec" / "design.json").good())
+            return 1;
+    }
+    return 0;
+}
+
 inline void print_catalog(const std::string &root) {
     const auto installed = discover_models(root);
     auto is_installed = [&](const std::string &n) -> const ModelEntry * {
@@ -226,6 +285,13 @@ inline void print_catalog(const std::string &root) {
                             e.datapath, e.name).empty();
         const char *state = !m                              ? "available"
                             : !encoder_implemented(m->arch) ? "no encoder"
+                            // An STT row is ready only with BOTH of its design
+                            // sets; one of them cannot transcribe anything, and
+                            // the container being present says nothing about
+                            // either.
+                            : is_stt_arch(m->arch) && m->arch == "whisper_encdec_gelu"
+                                ? (stt_design_sets(root, e.name) ? "ready"
+                                                                 : "no design")
                             : m->gemm_layout == "host"      ? "cpu"
                             : have_design                   ? "ready"
                                                             : "no design";
@@ -253,6 +319,7 @@ inline void print_catalog(const std::string &root) {
         }
         std::printf("  %-20s %-9s %6lld %6lld %8s %6.0f MB  %s\n", m.name.c_str(),
                     !encoder_implemented(m.arch)              ? "no encoder"
+                    : is_stt_arch(m.arch)                    ? "stt"
                     : m.gemm_layout == "host"                 ? "cpu"
                     : pick_artifacts(root, m.hidden, m.ffn, m.gated_ffn,
                                      m.qkv_n, "", "bf16", m.name).empty()
@@ -271,6 +338,13 @@ inline void print_catalog(const std::string &root) {
         "  no encoder installed, and a design may match, but this build has no\n"
         "             forward pass for the architecture -- it will refuse rather\n"
         "             than return embeddings for the wrong model\n"
+        "  stt        installed, and it is a SPEECH-TO-TEXT model: no pooling,\n"
+        "             and it needs TWO design sets -- gemm_rtp for the encoder\n"
+        "             stack and gemm_rtp_dec for the decoder. `transcribe` and\n"
+        "             `serve` are how it runs; `embed` is not. A whisper row says\n"
+        "             `no design` until BOTH are exported, which is one command:\n"
+        "               python tools/export_gemm_rtp.py --target <name> \\\n"
+        "                   --arch 1 --out runtime\n"
         "\n  npuembeddings serve <model>\n\n");
 }
 

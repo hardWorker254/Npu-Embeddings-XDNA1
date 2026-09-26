@@ -67,6 +67,11 @@ extern volatile std::sig_atomic_t g_server_stop;
 
 struct Request {
   std::string method, path, body;
+  // The request's Content-Type, lowercased. Needed by anything that is not
+  // JSON: /v1/audio/transcriptions is multipart/form-data, and the boundary
+  // lives in this header, so a parser that only sees the body cannot even tell
+  // what it was handed. Empty when the client sent none.
+  std::string content_type;
 };
 
 // --- JSON: only what the API needs ----------------------------------------
@@ -375,6 +380,19 @@ private:
     const size_t cl = lower.find("content-length:");
     if (cl != std::string::npos)
       clen = static_cast<size_t>(std::stoull(lower.substr(cl + 15)));
+    const size_t ct = lower.find("content-type:");
+    if (ct != std::string::npos) {
+      size_t v = ct + 14;
+      while (v < lower.size() && (lower[v] == ' ' || lower[v] == '\t')) ++v;
+      const size_t eol = lower.find_first_of("\r\n", v);
+      // From `head`, not from `lower`: the header NAME is case-insensitive but
+      // its parameter values are not, and one of them is the multipart
+      // boundary -- an opaque byte string that has to match the body exactly.
+      // Folding the case here made every boundary containing an uppercase
+      // letter unmatchable, and the failure looked like a corrupt upload rather
+      // than like a header this server rewrote.
+      req.content_type = head.substr(v, eol - v);
+    }
 
     req.body = buf.substr(header_end + 4);
     while (req.body.size() < clen) {
