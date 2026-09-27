@@ -67,7 +67,19 @@ public:
   void run(size_t instr, const float *a, int64_t n_real, int64_t rows, int64_t k,
            size_t wslot, const float *bias, int64_t n, float *out);
 
+  // acc[n_real, n] += A[n_real, k] @ B, with no bias and no epilogue.
+  //
+  // This is the accumulate form, and it exists because of Whisper's audio front
+  // end: a 3-tap convolution is three partial dot products over the same output
+  // row, and C comes back in bf16, so summing the taps in fp32 on the host is
+  // both cheaper and more accurate than one dispatch over a fused K. The bias is
+  // deliberately not added here -- a caller adding it per dispatch would add it
+  // once per tap.
+  void run_accum(size_t instr, const float *a, int64_t n_real, int64_t rows,
+                 int64_t k, size_t wslot, int64_t n, float *acc);
+
   npu::Design &design() { return d_; }
+  const npu::Design &design() const { return d_; }
   size_t slot_a = 0, slot_c = 0;
   std::mutex *npu_mu = nullptr;
   int64_t n_dispatch = 0;
@@ -121,5 +133,23 @@ void attention(const float *q, int64_t q_stride, const float *kv,
                int64_t kv_stride, int64_t n_q, int64_t n_kv, int64_t d_model,
                int64_t heads, int64_t head_dim, float scale, float *out,
                float *scores, app::Pool &pool);
+
+// The pre-tiled B panel, built on the host from an [K, N] fp32 matrix.
+//
+// Same layout and the same order as tools/npue.py's tile_b(order="k,n") and
+// tools/exporters/... the C++ packer's tile_b, which is what the container's
+// own GEMM operands are stored in:
+//
+//   [K,N] -> [K/tile_k][N/tile_n][tile_k/mac_s][tile_n/mac_t][s][t]
+//
+// The four numbers come from the DESIGN's own b_layout, never from constants
+// here: mac_s/mac_t differ per generation (npu1 8/4, npu2 8/8) and tile_n is
+// per model, so a hard-coded pair is right on exactly one board of one model.
+// This is the one function in the tree that turns a matrix into an operand the
+// MMAC can DMA, and a mistake in it is invisible -- the byte count, the shapes
+// and the layout_hash all agree, and only the products are wrong.
+std::vector<uint16_t> tile_b_panel(const float *mat, int64_t K, int64_t N,
+                                  int64_t tile_k, int64_t tile_n, int64_t mac_s,
+                                  int64_t mac_t);
 
 }  // namespace npue::whisper

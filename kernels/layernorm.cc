@@ -41,9 +41,24 @@
 
 using namespace aie;
 
+// THE WIDTH AND THE EPSILON ARE THE EXPORTER'S, NOT OURS.
+//
+// Both were compiled in for MiniLM: 384 columns and 1e-12. A Whisper LayerNorm
+// is 384, 512, 768, 1024 or 1280 columns wide and its epsilon is 1e-5, and the
+// epsilon sits INSIDE a square root, so a design compiled for the other one is
+// not a rounding difference but a different number. So all three macros are
+// overridable with -DLN_COLS/-DLN_EPS at compile time, and a design that uses
+// the defaults compiles byte-for-byte what it always did.
+#ifndef LN_COLS
 #define LN_COLS 384
-#define LN_VECS (LN_COLS / 16)
+#endif
+#ifndef LN_EPS
 #define LN_EPS 1e-12f
+#endif
+#ifndef LN_ROWS
+#define LN_ROWS 16
+#endif
+#define LN_VECS (LN_COLS / 16)
 #define LN_INV_COLS (1.0f / (float)LN_COLS)
 
 // Fast approximate inverse square root without sqrtf (bare-metal compatible)
@@ -276,9 +291,30 @@ extern "C" {
 // only the core's schedule differs. Needs the 0x2000 worker stack: the
 // interleaved body keeps ~16 vectors live, and 0xD00 corrupts silently
 // (tasks/0026, tasks/0030 section 5a -- third time this trap has bitten).
-void layernorm_il4_bf16(bfloat16 *restrict input, float *restrict params,
+void layernorm_il4_bf16(bfloat16 *restrict input, float *params,
                         bfloat16 *restrict output) {
-  layernorm_il4_impl(input, params, output, 16);
+  layernorm_il4_impl(input, params, output, LN_ROWS);
+}
+
+// FEWER ROWS PER CALL, FOR A WIDER ROW.
+//
+// L1 is 64 KB and the ping-pong buffers are 2 * (rows * cols * 2 B), so a block
+// of rows x cols elements has to satisfy 4 * rows * cols <= 64 KB: sixteen rows
+// of 384 fit in 48 KB, sixteen rows of 1280 need 160 KB and the placer spills
+// or fails. The exporter therefore picks the widest row count whose block still
+// fits (16, 8 or 4, always a multiple of 4 because the body interleaves four
+// rows) and passes it as -DLN_ROWS, which is why these are separate SYMBOLS and
+// not one symbol with a parameter: the JIT cache identifies a design by the
+// symbol it links, and two row counts behind one symbol would be two different
+// programs with one identity.
+void layernorm_il4_8_bf16(bfloat16 *restrict input, float *params,
+                          bfloat16 *restrict output) {
+  layernorm_il4_impl(input, params, output, 8);
+}
+
+void layernorm_il4_4_bf16(bfloat16 *restrict input, float *params,
+                          bfloat16 *restrict output) {
+  layernorm_il4_impl(input, params, output, 4);
 }
 
 } // extern "C"

@@ -117,6 +117,86 @@ void NpuGemm::run(size_t instr, const float *a, int64_t n_real, int64_t rows,
   });
 }
 
+void NpuGemm::run_accum(size_t instr, const float *a, int64_t n_real,
+                        int64_t rows, int64_t k, size_t wslot, int64_t n,
+                        float *acc) {
+  if (n_real <= 0 || n_real > rows)
+    throw std::runtime_error(d_.info().name + ": " + std::to_string(n_real) +
+                             " real rows into a " + std::to_string(rows) +
+                             "-row dispatch");
+  if (rows <= 0 || k <= 0 || n <= 0)
+    throw std::runtime_error(d_.info().name + ": GEMM with a zero dimension");
+  const size_t ab = d_.info().a_elem_bytes, cb = d_.info().c_elem_bytes;
+  if (static_cast<size_t>(rows) * k * ab > d_.info().buffer_bytes[0] ||
+      static_cast<size_t>(rows) * n * cb > d_.info().buffer_bytes[2])
+    throw std::runtime_error(
+        d_.info().name + ": " + std::to_string(rows) + "x" +
+        std::to_string(k) + " A or " + std::to_string(rows) + "x" +
+        std::to_string(n) + " C does not fit the design's buffers -- the "
+        "design was exported for a different shape (seq " +
+        std::to_string(d_.info().seq) + ", M " + std::to_string(d_.info().M) +
+        "). Re-export it for this model.");
+  if (ab != 2)
+    throw std::runtime_error(d_.info().name + ": a_dtype is int8, which the "
+                             "Whisper packer does not produce -- the container "
+                             "and the design disagree about the operand type");
+  // Checked BEFORE the dispatch, not after reading C: a design that emits fp32
+  // would already have run by the time a wrong-width read refused.
+  if (cb != 2)
+    throw std::runtime_error(d_.info().name + ": run_accum reads C as bf16; this "
+                             "design emits " + std::to_string(cb * 8) +
+                             "-bit C. The encoder's own run() handles fp32 C, "
+                             "and the convolution needs the accumulate path, so "
+                             "re-export with --c-bf16.");
+
+  const double t0 = app::now_s();
+  auto *abuf = static_cast<uint16_t *>(d_.slot_ptr(0, slot_a));
+  app::bf16_fill(abuf, a, static_cast<size_t>(n_real * k));
+  if (n_real < rows)
+    std::memset(abuf + n_real * k, 0,
+                static_cast<size_t>(rows - n_real) * k * sizeof(uint16_t));
+  t_convert += app::now_s() - t0;
+
+  {
+    std::unique_lock<std::mutex> lk;
+    if (npu_mu) lk = std::unique_lock<std::mutex>(*npu_mu);
+    d_.bind_instr(instr);
+    d_.bind(0, slot_a);
+    d_.bind(1, wslot);
+    d_.bind(2, slot_c);
+    d_.sync_to_device(0, static_cast<size_t>(rows) * k * ab);
+    d_.dispatch_only();
+    d_.sync_from_device(d_.output_index(), static_cast<size_t>(rows) * n * cb);
+  }
+  t_dispatch += app::now_s() - t0;
+  ++n_dispatch;
+
+  const auto *c = static_cast<const uint16_t *>(
+      d_.slot_ptr(d_.output_index(), slot_c));
+  // The scratch row is allocated INSIDE the pool lambda, so each worker has its
+  // own: a single buffer shared by the workers is a race that returns a
+  // different answer on every run, and only on a host with more than one core.
+  // bf16_read is reused rather than a second bf16 unpack written here, because
+  // two unpack paths in one file is one more thing to keep bit-identical.
+  pool_.run([&](int w, int nw) {
+    std::vector<float> tmp(static_cast<size_t>(n));
+    for (int64_t r = w; r < n_real; r += nw) {
+      // += , not =: this is the accumulate form, and acc already holds the
+      // previous K block's contribution to this row.
+      app::bf16_read(tmp.data(), c + r * n, static_cast<size_t>(n));
+      float *o = acc + r * n;
+      int64_t j = 0;
+#if defined(__AVX2__)
+      for (; j + 8 <= n; j += 8)
+        _mm256_storeu_ps(o + j,
+                         _mm256_add_ps(_mm256_loadu_ps(o + j),
+                                       _mm256_loadu_ps(tmp.data() + j)));
+#endif
+      for (; j < n; ++j) o[j] += tmp[static_cast<size_t>(j)];
+    }
+  });
+}
+
 void layernorm_rows(float *x, int64_t n_rows, int64_t d, const float *gamma,
                     const float *beta, double eps, app::Pool &pool) {
   pool.run([&](int w, int nw) {
@@ -221,6 +301,49 @@ void attention(const float *q, int64_t q_stride, const float *kv,
       }
     }
   });
+}
+
+std::vector<uint16_t> tile_b_panel(const float *mat, int64_t K, int64_t N,
+                                  int64_t tile_k, int64_t tile_n, int64_t mac_s,
+                                  int64_t mac_t) {
+  if (tile_k <= 0 || tile_n <= 0 || mac_s <= 0 || mac_t <= 0)
+    throw std::runtime_error(
+        "tile_b_panel: the layout has a zero extent (tile " +
+        std::to_string(tile_k) + "x" + std::to_string(tile_n) + ", mac " +
+        std::to_string(mac_s) + "x" + std::to_string(mac_t) +
+        ") -- read it from the design's b_layout, not from a default");
+  if (K % tile_k || N % tile_n)
+    throw std::runtime_error(
+        "tile_b_panel: operand [" + std::to_string(K) + "," +
+        std::to_string(N) + "] does not tile evenly by (" +
+        std::to_string(tile_k) + "," + std::to_string(tile_n) +
+        "): K%tile_k=" + std::to_string(K % tile_k) +
+        ", N%tile_n=" + std::to_string(N % tile_n));
+  if (tile_k % mac_s || tile_n % mac_t)
+    throw std::runtime_error(
+        "tile_b_panel: tile " + std::to_string(tile_k) + "x" +
+        std::to_string(tile_n) + " does not split into the MMAC sub-tile " +
+        std::to_string(mac_s) + "x" + std::to_string(mac_t));
+
+  // The order, spelled out: k block, then n block, then the sub-tile's k step,
+  // then its n step, then s, then t. Same traversal as tools/npue.py's
+  // tile_b(order="k,n") and the C++ packer's tile_b, and the byte order inside
+  // the panel is the MMAC's (s fastest after t), which is why mac_s/mac_t have
+  // to be the design's and not a constant.
+  const int64_t kb_n = K / tile_k, nb_n = N / tile_n;
+  std::vector<uint16_t> out(static_cast<size_t>(K) * N);
+  size_t w = 0;
+  for (int64_t kb = 0; kb < kb_n; ++kb)
+    for (int64_t nb = 0; nb < nb_n; ++nb)
+      for (int64_t si = 0; si < tile_k / mac_s; ++si)
+        for (int64_t ti = 0; ti < tile_n / mac_t; ++ti)
+          for (int64_t s = 0; s < mac_s; ++s)
+            for (int64_t t = 0; t < mac_t; ++t) {
+              const int64_t r = kb * tile_k + si * mac_s + s;
+              const int64_t c = nb * tile_n + ti * mac_t + t;
+              out[w++] = app::to_bf16(mat[r * N + c]);
+            }
+  return out;
 }
 
 }  // namespace npue::whisper

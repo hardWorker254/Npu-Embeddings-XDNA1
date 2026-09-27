@@ -93,7 +93,25 @@ def export_arch(args: argparse.Namespace, arch: str) -> int:
     dirs: dict[tuple[str, int], Path] = {}
     shapes_by_batch: dict[int, dict[str, dict[str, int]]] = {}
 
+    # The vocabulary projection runs at ONE tier -- the step tier, which is the
+    # smallest, because a step is one row -- so its chunks are dropped from the
+    # other two. Eight streams a tier is eight compiles, and an xclbin that no
+    # instruction stream ever binds is not worth three of them.
+    logit_geom = getattr(args, "logit_geometry", None)
+    step_tier = min(tiers) if stream_set == "stt" else None
+    # The stream ORDER is per tier now, and everything downstream that writes a
+    # set reads it from here. It was a loop variable before, and one tier had the
+    # same names as the others -- so the last tier's list was written for all of
+    # them, and the vocabulary chunks (step tier only) were built, cached and
+    # silently not written.
+    order_by_batch: dict[int, list[str]] = {}
+
     for b in tiers:
+        drop = ()
+        logit_b = logit_geom
+        if logit_geom is not None and b != step_tier:
+            drop = npu_ops.GEMM_STREAMS["logit"]
+            logit_b = None
         stream_order, shapes_b = shapes_for_stream_set(
             stream_set,
             b,
@@ -102,8 +120,17 @@ def export_arch(args: argparse.Namespace, arch: str) -> int:
             args.gated_ffn,
             args.qkv_n,
             args.seq,
+            tuple(getattr(args, "attn_streams", ()) or ()),
+            getattr(args, "attn_geometry", None),
+            args.cols,
+            getattr(args, "mel_geometry", None),
+            args.k,
+            getattr(args, "fft_geometry", None),
+            logit_b,
+            drop,
         )
         shapes_by_batch[b] = shapes_b
+        order_by_batch[b] = list(stream_order)
 
         for name in stream_order:
             sh = shapes_b[name]
@@ -157,7 +184,7 @@ def export_arch(args: argparse.Namespace, arch: str) -> int:
             )
 
     # All shapes/tiers must share the same static xclbin modulo UUID metadata.
-    ref_key = (stream_order[0], max(tiers))
+    ref_key = (order_by_batch[max(tiers)][0], max(tiers))
     base = (dirs[ref_key] / "final.xclbin").read_bytes()
 
     for key, d in dirs.items():
@@ -198,7 +225,7 @@ def export_arch(args: argparse.Namespace, arch: str) -> int:
 
     slot0_meta = {
         "file": "insts.bin",
-        "op": stream_order[0],
+        "op": order_by_batch[max(tiers)][0],
         "batch": max(tiers),
         "src": dirs[ref_key].name,
         "arch": int(arch),
@@ -208,7 +235,7 @@ def export_arch(args: argparse.Namespace, arch: str) -> int:
     stream_meta = []
 
     for b in tiers:
-        for name in stream_order:
+        for name in order_by_batch[b]:
             slot += 1
             fn = f"insts_{name}_b{b}.bin"
             shutil.copy2(dirs[(name, b)] / "insts.bin", out / fn)
@@ -231,6 +258,14 @@ def export_arch(args: argparse.Namespace, arch: str) -> int:
 
     biggest_batch = max(tiers)
     biggest = shapes_by_batch[biggest_batch]
+    # The buffer sizes are the max over EVERY shape in EVERY tier, not over the
+    # biggest tier's. The vocabulary chunks live at the step tier and are by far
+    # the widest B in the set (384 x 6656 = 5.1 MB of panel against 1.2 MB for
+    # the FFN), so sizing the buffers from one tier produced a design whose B
+    # operand is smaller than a stream the set itself exports -- and the refusal
+    # then came from the runtime, at staging time, naming a buffer the design
+    # claimed to have.
+    all_shapes = [sh for b in tiers for sh in shapes_by_batch[b].values()]
 
     a_bytes = np.dtype(dp.a_np).itemsize
     c_bytes = dp.c_bytes_out
@@ -254,12 +289,12 @@ def export_arch(args: argparse.Namespace, arch: str) -> int:
         "arch": int(arch),
         "device": device,
 
-        "M": biggest[stream_order[0]]["M"],
+        "M": biggest[order_by_batch[max(tiers)][0]]["M"],
 
         "buffers": [
-            max(sh["M"] * sh["K"] * a_bytes for sh in biggest.values()),
-            max(sh["K"] * sh["N"] * a_bytes for sh in biggest.values()),
-            max(sh["M"] * sh["N"] * c_bytes for sh in biggest.values()),
+            max(sh["M"] * sh["K"] * a_bytes for sh in all_shapes),
+            max(sh["K"] * sh["N"] * a_bytes for sh in all_shapes),
+            max(sh["M"] * sh["N"] * c_bytes for sh in all_shapes),
         ],
 
         "c_dtype": dp.c_marker,
@@ -321,17 +356,24 @@ def export_arch(args: argparse.Namespace, arch: str) -> int:
 
     print(
         f"\n  wrote {out} -- ONE xclbin, {len(stream_meta)} streams "
-        f"({len(stream_order)} shapes x {len(tiers)} batch tiers, "
-        f"m={args.m} rows={args.rows})"
+        f"({' + '.join(f'{len(order_by_batch[b])}' for b in tiers)} shapes at "
+        f"tiers {tiers}, m={args.m} rows={args.rows})"
     )
     print(f"  b_layout {device}: mac (s={mac_s}, t={mac_t}), tile "
           f"({args.k}, {args.n}), hash {layout_hash(b_layout)[:16]}...")
 
 
-    extra = npu_ops.parse_ops(getattr(args, "npu_extra_ops", ""),
-                              npu_ops.EXPORTER_FLAG)
-    if extra:
-        # Same generation root, alongside gemm_rtp: the runtime's --npu-ops
+    extra = npu_ops.parse_exportable(getattr(args, "npu_extra_ops", ""),
+                                     npu_ops.EXPORTER_FLAG)
+    # The elementwise designs are built by the ENCODER pass only. The decoder
+    # pass runs second and writes to the same directories, with its own smaller
+    # row counts (batch*seq is 4*64 there against 1*512 here), so letting it
+    # build them last would leave a design whose capacity is the decoder's --
+    # enough for the decoder, one chunk short for the encoder on some models.
+    # The encoder's capacity is the larger of the two, and NpuEltwise walks a
+    # tensor in chunks of whatever the design holds.
+    if extra and stream_set != "stt":
+        # Same generation root, alongside gemm_rtp: the runtime's --npu-extra-ops
         # resolves these directories by the op's code, which IS the directory
         # name (see tools/npu_ops.py). Built in the same invocation so the two
         # sets never drift apart by a rebuild, and only for the ops that were
@@ -340,7 +382,15 @@ def export_arch(args: argparse.Namespace, arch: str) -> int:
         export_eltwise.export_arch(
             Path(args.out), arch, args.batch, args.hidden, args.seq,
             args.elt_cols, args.gelu_tile, args.ln_variant, args.sm_variant,
-            args.cache_root, args.per_arch_cache, ops=extra)
+            args.cache_root, args.per_arch_cache,
+            gelu_variant=args.gelu_variant,
+            # The LayerNorm design is built for THIS model: its row width is
+            # d_model and its epsilon is the checkpoint's layer_norm_eps, both
+            # of which the runtime then checks against the container it is
+            # holding. A design exported with the wrong pair is refused by name
+            # rather than silently normalising with the other model's numbers.
+            ln_cols=args.ln_cols, ln_eps=args.ln_eps, sm_cols=args.sm_cols,
+            ops=extra)
 
     return 0
 
@@ -412,9 +462,16 @@ def build_child_argv(
             npu_ops.EXPORTER_FLAG, args.npu_extra_ops,
             "--elt-cols", str(args.elt_cols),
             "--gelu-tile", str(args.gelu_tile),
+            "--gelu-variant", args.gelu_variant,
             "--ln-variant", args.ln_variant,
             "--sm-variant", args.sm_variant,
         ]
+        if args.ln_cols is not None:
+            cmd += ["--ln-cols", str(args.ln_cols)]
+        if args.ln_eps is not None:
+            cmd += ["--ln-eps", repr(args.ln_eps)]
+        if args.sm_cols is not None:
+            cmd += ["--sm-cols", str(args.sm_cols)]
 
     if args.require_arch_marker:
         cmd.append("--require-arch-marker")

@@ -282,17 +282,96 @@ def main() -> int:
     )
 
     ap.add_argument(
+        "--gelu-variant",
+        default="poly",
+        choices=["poly", "erf"],
+        help=(
+            "which GELU function --npu-extra-ops gelu builds. poly is the "
+            "degree-8 fit of the even part (2.49e-3 relative against exact "
+            "erf) that the BERT-family designs have always used; erf is "
+            "kernels/gelu_erf.cc, the activation a Whisper container declares. "
+            "They are different functions, not two accuracies of one -- a "
+            "packer refuses a checkpoint whose activation is not `gelu`. A "
+            "target with kind stt picks erf on its own."
+        ),
+    )
+
+    ap.add_argument(
         "--ln-variant",
         default="il4",
-        choices=["base", "il4", "rne", "il4_rne"],
-        help="LayerNorm kernel variant for --npu-extra-ops layn.",
+        choices=["base", "il4", "rne", "il4_rne", "il4_8", "il4_4"],
+        help=(
+            "LayerNorm kernel variant for --npu-extra-ops layn. The il4_8 and "
+            "il4_4 entries are the same four-row body with fewer rows per call: "
+            "L1 is 64 KB and a block of rows x columns is double-buffered on both "
+            "sides, so a wide row (Whisper's 1280) fits four rows per call where "
+            "MiniLM's 384 fits sixteen. The exporter picks that itself and "
+            "overrides this flag."
+        ),
+    )
+
+    ap.add_argument(
+        "--ln-cols",
+        type=int,
+        default=None,
+        help=(
+            "row width of the LayerNorm design built by --npu-extra-ops layn. "
+            "Default: --hidden. A Whisper container's d_model is the number "
+            "here, and the runtime refuses a design whose width is not the "
+            "model's."
+        ),
+    )
+
+    ap.add_argument(
+        "--ln-eps",
+        type=float,
+        default=None,
+        help=(
+            "epsilon compiled into the LayerNorm design. Default: the target's "
+            "layer_norm_eps, else 1e-12. It sits INSIDE a square root, so 1e-5 "
+            "(Whisper) and 1e-12 (MiniLM) are not a rounding difference; the "
+            "runtime refuses a design whose eps is not the container's."
+        ),
     )
 
     ap.add_argument(
         "--sm-variant",
         default="poly_il4",
-        choices=["lib", "poly", "poly_il4", "poly_rne", "poly_il4_rne"],
-        help="softmax kernel variant for --npu-extra-ops softm.",
+        choices=["lib", "poly", "poly_il4", "poly_rne", "poly_il4_rne",
+                 "wide", "wide2"],
+        help=(
+            "softmax kernel variant for --npu-extra-ops softm. `wide` and "
+            "`wide2` are kernels/softmax_w.cc at one and two rows per call: a "
+            "Whisper attention score row is n_kv (1500, padded) wide, which the "
+            "64-column kernel cannot hold in registers or on a worker's stack. "
+            "The kernel is chosen from --sm-cols, so this only has to agree "
+            "with it."
+        ),
+    )
+
+    ap.add_argument(
+        "--sm-rows",
+        type=int,
+        default=None,
+        help=(
+            "row capacity of the softmax design built by --npu-extra-ops softm. "
+            "Default: batch*12*seq, which is an embedder's attention. A Whisper "
+            "dispatch is one QUERY CHUNK, so a stt target passes batch*seq: every "
+            "dispatch fills and drains the whole buffer, and a design 12x wider "
+            "than the work syncs 37 MB to move 1.5 MB of scores."
+        ),
+    )
+
+    ap.add_argument(
+        "--sm-cols",
+        type=int,
+        default=None,
+        help=(
+            "row width of the softmax design built by --npu-extra-ops softm. "
+            "Default: 64. A Whisper target passes its padded n_kv, and the "
+            "runtime refuses a design whose width is not the score row it is "
+            "about to hand it."
+        ),
     )
 
     ap.add_argument(
@@ -372,8 +451,12 @@ def main() -> int:
 
     # Validated here, not where it is used: a bad code must be refused before a
     # single design is compiled, and the eltwise child would otherwise be the
-    # one to notice, after the GEMM set was already built.
-    npu_ops.parse_ops(args.npu_extra_ops, npu_ops.EXPORTER_FLAG)
+    # one to notice, after the GEMM set was already built. parse_exportable, not
+    # parse_ops, because `conv` is a runtime code with no directory to compile
+    # (tools/npu_ops.py) -- and this is also the line --dry-run goes through, so
+    # a code that cannot be built is refused in a dry run too rather than
+    # printed into a command that would fail later.
+    npu_ops.parse_exportable(args.npu_extra_ops, npu_ops.EXPORTER_FLAG)
     resolved = resolve_args(args)
 
     # Validate each architecture against its own resolved values: the npu1

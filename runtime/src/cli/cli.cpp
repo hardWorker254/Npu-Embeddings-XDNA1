@@ -73,7 +73,7 @@ CLIArgs CLI::parse(int argc, char **argv) {
             args.tile_k = std::atoll(argv[++i]);
         else if (a == "--tile-n" && i + 1 < argc)
             args.tile_n = std::atoll(argv[++i]);
-        else if (a == "--npu-ops" && i + 1 < argc)
+        else if (a == "--npu-extra-ops" && i + 1 < argc)
             args.npu_ops = argv[++i];
         else if (a == "--root" && i + 1 < argc)
             args.root = argv[++i];

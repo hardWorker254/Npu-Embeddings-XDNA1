@@ -18,3 +18,10 @@ GELU_TILE = 1024
 
 MAX_LN_SM_COLS = 2
 MAX_GELU_COLS = 8
+
+# Rows one softmax call handles, and the LayerNorm default. These are the
+# divisors the exporter checks a design's row count against, so they live here
+# rather than inside the program builder: a refusal that quotes a number and a
+# program that uses a different one is a refusal nobody can act on.
+SM_ROWS_PER_CALL = 64
+LN_ROWS_PER_CALL = 16

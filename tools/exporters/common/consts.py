@@ -60,7 +60,28 @@ FALLBACK_HIDDEN = 384
 FALLBACK_M = 32
 FALLBACK_K = 32
 FALLBACK_N = 48
-FALLBACK_IDENTITY_THRESHOLD = 80
+# How many differing bytes two xclbins of one design set may have and still be
+# the same static configuration. The number is the METADATA FOOTPRINT of this
+# toolchain, measured: two builds of the same shape differ in six regions -- a
+# 16-byte UUID and an 18-byte header at 296, another at 416, the `aie_image`
+# block with a build checksum at 1184, a 16-byte UUID at 66736, an
+# `"aie_TimeStamp":"1790505983"` JSON field at 69267 and a 32-byte hex UUID at
+# 69458 -- and the count lands between 69 and 82 depending on how much of a
+# random UUID happens to differ.
+#
+# 80 was one byte short of the worst case this reaches, so a set whose shapes
+# were all fine refused to export. The same inspection says the check cannot see
+# a real static difference in the other direction either: the four pre-existing
+# encoder streams have genuinely different shapes and sit 69-79 bytes apart,
+# because a shape difference is a BUFFER size and the static program does not
+# change. 128 leaves room for the UUID variance and is still three orders below
+# a program section, so anything it lets through is metadata and not a design.
+FALLBACK_IDENTITY_THRESHOLD = 128
+# MiniLM's LayerNorm epsilon, and the only fallback that is right without a
+# target. It is compiled into kernels/layernorm.cc and sits inside a square
+# root, so a Whisper design MUST be exported with 1e-5 instead -- which is what
+# a target's layer_norm_eps is for.
+FALLBACK_LN_EPS = 1e-12
 
 # tools/npu_targets.json -- the geometry source of truth. Lives in tools/ rather
 # than beside this module so the path does not depend on the package depth.
@@ -87,6 +108,14 @@ KNOWN_MODEL_KEYS = {
     "kind", "hidden", "intermediate", "gated_ffn", "qkv_n", "datapath",
     "overrides", "heads", "head_dim", "enc_layers", "dec_layers", "mel_bins",
     "frames", "max_target",
+    # The vocabulary size, which is the number of columns the tied-embedding
+    # projection is chunked into. It is the CONTAINER's vocab_size, and a target
+    # that pins a different one would build chunks for the wrong vocabulary.
+    "vocab",
+    # The checkpoint's own LayerNorm epsilon. It is compiled into the kernel
+    # (kernels/layernorm.cc, inside a square root) and recorded in the design,
+    # so a model that differs from the 1e-12 default has to say so here.
+    "layer_norm_eps",
 }
 STT_MODEL_KEYS = {"kind", "heads", "head_dim", "enc_layers", "dec_layers",
                   "mel_bins", "frames", "max_target"}

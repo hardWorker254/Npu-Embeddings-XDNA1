@@ -16,6 +16,7 @@ the other generation is refused rather than loaded.
 - [Quick start](#quick-start)
 - [How a request is executed](#how-a-request-is-executed)
 - [Where each operation runs](#where-each-operation-runs)
+- [What to move to the NPU](#what-to-move-to-the-npu)
 - [Command-line reference](#command-line-reference)
 - [Speech to text](#speech-to-text)
 - [Models](#models)
@@ -89,7 +90,9 @@ This writes `runtime/all-MiniLM-L6-v2/artifacts_npu1/gemm_rtp/`.
 
 Add `--npu-extra-ops CODES` to also build the elementwise designs beside it:
 `gelu`, `layn` (LayerNorm), `softm` (softmax), comma-separated, and only the
-ones you name. Build only what the runtime's `--npu-ops` will ask for — each is
+ones you name. The exporter's flag is the **same string** the runtime takes:
+`--npu-extra-ops` BUILDS the design that `--npu-extra-ops` SELECTS at run time, so
+there is one name to learn. Build only what a run will ask for — each is
 a compile, an xclbin, and one more `hw_context`. See
 [Where each operation runs](#where-each-operation-runs) for why you probably do
 not want any of them.
@@ -163,12 +166,12 @@ texts
 embedding
 ```
 
-`*` = on the array instead when its op is named in `--npu-ops`.
+`*` = on the array instead when its op is named in `--npu-extra-ops`.
 
 The array does the four GEMMs per layer; attention and the elementwise ops run
 on the host by default because they were **measured faster on the host** — the
 elementwise designs pay a fixed per-dispatch cost that a 384-wide row-wise op
-does not amortise. `--npu-ops` exists to make that an explicit, measurable
+does not amortise. `--npu-extra-ops` exists to make that an explicit, measurable
 choice, not because it is the default.
 
 **`--pipeline N`** splits one request into right-sized chunks and runs `N` of
@@ -182,31 +185,151 @@ array work, not more array throughput.
 
 ## Where each operation runs
 
-| Operation | Default | On the array when |
-|---|---|---|
-| QKV / attention-out / FFN-up / FFN-down GEMM | array | always |
-| LayerNorm | host | `--npu-ops layn` |
-| softmax | host | `--npu-ops softm` |
-| GELU | host | `--npu-ops gelu` |
+| Operation | Default | On the array when | Costs |
+|---|---|---|---|
+| QKV / attention-out / FFN-up / FFN-down / cross-Q / cross-K\|V GEMM | array | always | — |
+| conv1, conv2 (Whisper) | host | `--npu-extra-ops conv` | no context: the encoder set's own `[rows, d, d]` stream |
+| attention, as QK^T and softmax·V GEMMs | host | `--npu-extra-ops attn` | no context: two more streams in the same sets |
+| the mel filter bank, as a GEMM | host | `--npu-extra-ops mproj` | no context: one more stream in the encoder set |
+| the 400-point transform, as a GEMM | host | `--npu-extra-ops fft` | no context: one more stream in the encoder set |
+| the tied-embedding logit projection | host | `--npu-extra-ops logit` | no context: eight chunk streams in the decoder set; 39 MB of staged panels |
+| LayerNorm | host | `--npu-extra-ops layn` | one `hw_context` (`layernorm/`) |
+| softmax | host | `--npu-extra-ops softm` | one `hw_context` (`softmax/`) |
+| GELU (exact erf) | host | `--npu-extra-ops gelu` | one `hw_context` (`gelu/`) |
+
+The four GEMM-shaped codes (`conv`, `attn`, `mproj`, `fft`, `logit`) need no
+sibling design set: each one is a stream inside a set that already exists, so
+they cost no `hw_context` and the runtime refuses a set that does not carry
+them **by name** rather than answering from the host. The three elementwise
+ones are whole xclbins of their own and cost one context each, so all three is
+five contexts of the six npu1 allows.
+
+**Which of them is worth asking for is a measurement, not a preference** — see
+[What to move to the NPU](#what-to-move-to-the-npu).
 
 One flag, and an op is on the host exactly when it is **not** listed — so
-`--npu-ops layn,softm` is "LayerNorm and softmax on the array, GELU on the
+`--npu-extra-ops layn,softm` is "LayerNorm and softmax on the array, GELU on the
 host", and there is no inverse flag to drift against it. This replaces
-`--npu-eltwise` (all three or none) and `--host-ln/--host-sm/--host-gelu`; the
-old names are now **refused by name**, so a stale command line cannot look like
+`--npu-ops`, `--npu-eltwise` (all three or none) and
+`--host-ln/--host-sm/--host-gelu`; the old names are now **refused by name**, so a stale command line cannot look like
 it worked.
 
-`--npu-ops` needs one sibling design set per named op next to `gemm_rtp/`
+`--npu-extra-ops` needs one sibling design set per named op next to `gemm_rtp/`
 (`layernorm/`, `softmax/`, `gelu/`), built by
 `tools/export_gemm_rtp.py --npu-extra-ops CODES`. A missing one is **refused by
 name** — it never silently falls back to the host, because a flag whose whole
 point is "put this on the array" must not quietly not do that. Each op also
 costs one more `hw_context` out of six.
 
+`conv` is the one code with no sibling design set, and that is deliberate: it is
+a speech-to-text op (Whisper's two audio convolutions) which runs on the
+encoder set's own `[rows, d, d]` stream, so there is nothing to build and an
+exporter asked for it refuses the code by name. On an embedder it is refused
+too.
+
 It also costs four `hw_context`s instead of one. Before allocating any, the
 runtime asks `xrt-smi` how many contexts the device allows and refuses by name
 if the total would not fit. `--allow-contention` overrides; a throughput number
 from a contended run is not an NPU performance claim.
+
+---
+
+## What to move to the NPU
+
+Three different questions have three different answers, and they are not the
+same set of operations. Everything below is **measured on this machine**, on
+`whisper-tiny` (d=384, 4+4 layers, 6 heads), a 3 s 440 Hz tone, 16 host
+threads, the same binary, ~0.35 s of which is setup. `CPU` is the summed user
+time of all threads, which is the number that matters when the CPU is the scarce
+resource; `wall` is what a caller waits.
+
+| `--npu-extra-ops` | wall, s | CPU, s | encoder, s | decoder, s | dispatches |
+|---|---:|---:|---:|---:|---:|
+| *(nothing — everything on the host)* | 0.94 | 5.54 | 0.28 | 0.07 | 192 |
+| `conv` | **0.66** | **3.81** | 0.30 | 0.07 | 207 |
+| `conv,mproj,fft` | **0.65** | **3.49** | 0.30 | 0.07 | 219 |
+| `conv,mproj,logit` | 0.77 | 3.94 | 0.28 | 0.07 | 253 |
+| `layn` | 1.05 | 5.57 | 0.36 | 0.28 | 284 |
+| `gelu` | 1.22 | 5.04 | 0.43 | 0.33 | 224 |
+| `conv,mproj,layn,gelu,logit` | 1.56 | 3.62 | 0.52 | 0.53 | 377 |
+| `conv,attn,softm` | 4.32 | 2.46 | 1.01 | 2.88 | 1143 |
+| `conv,attn,mproj,fft,logit,layn,softm,gelu` | 4.90 | **1.05** | 1.21 | 3.35 | 1319 |
+
+Run-to-run spread on this box is a few percent on wall and up to 10% on CPU, so
+read the ratios, not the last digit.
+
+### 1. Maximum performance: `conv`, and only `conv`
+
+`conv` is the one op that wins on **both** axes, and the reason is structural:
+its work is d² MACs, so the host's cost grows with the square of the width while
+the array's grows with the dispatch count, which is constant. Per 30 s window on
+16 host workers: 0.11 s → 0.02 s at d=384, 1.37 s → 0.07 s at d=1280. The
+measured 0.94 → 0.66 s wall and 5.54 → 3.81 s CPU on whisper-tiny is that same
+ratio on a short window, and it gets **better** with width, not worse.
+
+The GEMMs are already there — they are the model, and they are what the array is
+for. Everything else is host work whose arithmetic is small next to its
+dispatch count.
+
+### 2. Balance: `conv,mproj,logit` — or just `conv`
+
+`mproj` is 48M MAC per window, ~5 ms of host, and 6 dispatches: free at this
+width, and it removes the front end's largest host loop. `logit` is neutral on
+wall (the encoder and decoder times do not move) because the host matvec and the
+eight dispatches cost about the same — it buys 39 MB of staged bf16 panels and
+back, which is worth it only when the CPU is the bottleneck.
+
+`layn` and `gelu` are the counter-example, and the reason is the same in both:
+**the work per dispatch has to beat the dispatch**. A `layn` dispatch covers 512
+rows of 384 columns and the host does the same 196k elements in 0.08 s across 16
+threads — the array's per-dispatch cost and its bf16 round trip are the same
+order. Worse in the decoder, where one LayerNorm is **one row**: 0.07 → 0.28 s,
+four times worse, because 511 of the 512 rows are padding.
+
+### 3. Maximum CPU saving at acceptable performance: everything
+
+All eight codes: **1.05 s of CPU against 5.54 s** — 5.3x less — for 4.90 s of
+wall against 0.94 s. That is the honest trade: the CPU stops doing the
+conversions, the fp64 work and the panel tiling, and the array does the
+dispatches instead.
+
+The middle point is `conv,mproj,layn,gelu,logit`: 1.56 s wall (1.7x slower) for
+3.62 s CPU (35% less), which is the set to pick when the transcript may be 60%
+later and a core has to be freed for something else. `conv,attn,softm` is the
+opposite end: it costs 4.6x the wall time and saves 56% of the CPU.
+
+### What attention costs, and why
+
+Attention is the largest piece of arithmetic in the model (184 GFLOP per
+window) and the **worst** thing to move at this width: 0.28 → 1.01 s for the
+encoder and 0.07 → 2.88 s for the decoder. The dispatch count is the obvious
+part (heads × chunks × 2 × layers, 144 per layer for whisper-tiny) but it is not
+the whole cost. The B operand of a score is an **activation** — the K and V
+rows of the fused qkv tensor — not a weight, so it cannot be staged once per
+session: it is re-tiled from scratch for every head of every layer, 196k
+elements of `tile_b_panel` each, and that host loop is what the measurement is
+mostly made of. A GEMM whose B is a weight is a one-off stage; a GEMM whose B
+is an activation pays for the tiling on every layer.
+
+The FFT is the other end of the same trade, and the only one that is not merely
+slower: `dft400` is the direct transform as a GEMM against a precomputed
+bf16 twiddle matrix, so it has a **noise floor** of about (bf16 eps)² times the
+loudest bin. The loud bins agree with the host to 0.2%, and the quiet mel
+channels — the ones the floor would otherwise clamp — read 0.3 where the host
+reads 3e-5. It is on the array because it can be, and off by default because
+that is a different spectrogram; fixing it is an fp32 radix-400 kernel, which
+is research rather than wiring.
+
+### The rule this gives
+
+1. Measure the **work per dispatch** against the ~150 µs fixed cost. An op
+   whose dispatch carries less arithmetic than that is host work.
+2. Count the **B operand**. A weight stages once; an activation is re-tiled per
+   layer, and the tiling is on the host no matter where the multiply happens.
+3. Check the **padding**. A design computes all of its rows; a row-wise op
+   asked to do one row of work pays for the whole buffer in both directions.
+4. Look at the **host's own parallelism** before calling a host loop slow. 16
+   AVX2 threads beat one AIE column on anything but a big GEMM.
 
 ---
 
@@ -228,7 +351,7 @@ from a contended run is not an NPU performance claim.
 `serve` and `transcribe` are the same command for two different architectures:
 a Whisper container is served by the STT mode off the same flags, answers
 `POST /v1/audio/transcriptions` instead of `/v1/embeddings`, and refuses
-`--npu-ops` rather than ignoring it. The mode is picked by the container's
+`--npu-extra-ops conv` rather than ignoring it. The mode is picked by the container's
 `arch`, never by a flag.
 
 ### Options for `serve` / `embed`
@@ -240,7 +363,7 @@ a Whisper container is served by the STT mode off the same flags, answers
 | `--threads N` | host thread budget (`serve`/`embed` pass 24) |
 | `--pipeline N` | concurrent encode lanes (`serve`/`embed` pass 4) |
 | `--artifacts DIR` | override the design set |
-| `--npu-ops CODES` | send the named ops to the array: `gelu`, `layn`, `softm` |
+| `--npu-extra-ops CODES` | send the named ops to the array: `gelu`, `layn`, `softm`, and `conv` (Whisper's conv1/conv2, a `transcribe`-only code). The exporter's flag is the same string and builds them |
 | `--dev npu1\|npu2` | NPU generation; a design built for the other is refused |
 | `--root DIR` | override where models/ and designs live |
 | `--token VALUE` | HuggingFace token for a gated model (else `$HF_TOKEN`) |
@@ -327,18 +450,50 @@ refused at run time rather than quietly answering something else.
 
 | | on the NPU | on the host |
 |---|---|---|
-| audio → log-mel, 3001 FFTs of 400 points | | yes |
-| conv1, conv2, GELU, the permute into 1500 rows | | yes |
+| the 3001 transforms of 400 points | `--npu-extra-ops fft` | yes (the default, fp64) |
+| the slaney mel bank | `--npu-extra-ops mproj` | yes (the default) |
+| conv1, conv2 | `--npu-extra-ops conv` | yes (the default) |
+| the GELU between them, and the permute into 1500 rows | `--npu-extra-ops gelu` (that one only) | yes (the default) |
 | every GEMM: qkv, attention-out, ffn-up, ffn-down, cross-q, cross-K\|V | **yes** | |
-| LayerNorm, GELU, softmax, attention | | yes |
-| the tied-embedding logit projection and argmax | | yes |
-| token ids → text, and the long-form merge | | yes |
+| attention: QK^T, softmax, softmax·V | `--npu-extra-ops attn,softm` | yes (the default) |
+| LayerNorm (both stacks) | `--npu-extra-ops layn` | yes (the default) |
+| GELU in the FFN | `--npu-extra-ops gelu` | yes (the default) |
+| the tied-embedding logit projection | `--npu-extra-ops logit` | yes (the default) |
+| argmax and the two suppression lists | | yes, always |
+| token ids → text, and the long-form merge | | yes, always |
 
-Only GEMMs are on the array. The elementwise ops could be (see
-[Where each operation runs](#where-each-operation-runs)) but these design sets
-declare no eltwise streams, and a row-wise op of this width is measured faster
-on the host. The two convolutions are host work and grow as d², which is what
-dominates the runtime on `whisper-large-v3`.
+Two rows are unconditional and stay that way: the argmax is a search over a
+vector and the suppression policy is a table walk, and **decode + merge** is
+BPE longest-common-sequence over ids. None of them is a matrix, so no design
+expresses them; that is not a scheduling choice left open.
+
+The two convolutions are host work by default and grow as d², which is what
+dominates the runtime on `whisper-large-v3` (2.8 s of a 19 s window on 16 host
+workers). `--npu-extra-ops conv` puts them on the array: a 3-tap convolution is a
+GEMM over an im2col'ed `(input channel, tap)` K axis, so conv1 rides in one
+dispatch of the encoder set's own `[rows, d, d]` stream (attn_out's shape) and
+conv2 in three, accumulated in fp32 on the host. It needs **no new design set** —
+the same instruction stream the encoder's attention-out projection uses — and it
+costs no extra `hw_context`. Measured per 30 s window, 16 host workers:
+
+| model | host conv | `--npu-extra-ops conv` | dispatches added |
+|---|---|---|---|
+| whisper-tiny (d=384) | 0.11 s | 0.02 s | 15 |
+| whisper-large-v3-turbo (d=1280) | 1.37 s | 0.07 s | 15 |
+| whisper-large-v3 (d=1280, 128 mel) | 1.42 s | 0.15 s | 15 |
+
+The output is bf16 rather than fp32, which is the design's C precision: the
+tensor matches `transformers` to 1-cos 1.5e-6 and 1.4e-2 max-abs at whisper-tiny
+(`tools/verify_whisper_model.py` checks both, the array path at its own max-abs
+tolerance), and the encoder fed from it still matches at the same 1-cos as the
+host-fed one. A design set with no `[rows, d, d]` stream cannot run them, and
+asking for it there is **refused by name** rather than answered from the host.
+
+Everything else that can be a matrix now can be one: attention, the mel bank,
+the transform and the logit projection each got a stream, and the elementwise
+ops got their own designs. Whether any of them is **worth** asking for is a
+different question, and it has a measured answer:
+[What to move to the NPU](#what-to-move-to-the-npu).
 
 ### Long form
 
@@ -550,7 +705,7 @@ goldens directly — see [Known defects](#known-defects).
 
 ### LayerNorm on the array used the previous layer's parameters — fixed
 
-**Symptom.** With the LayerNorm design loaded (`--npu-ops layn`), the LayerNorm
+**Symptom.** With the LayerNorm design loaded (`--npu-extra-ops layn`), the LayerNorm
 result was not reproducible and
 was not correct. Consecutive requests for the same input answered differently
 (cos ≈ 0.38 against ≈ 0.68), and mixing batch tiers inside one request made it
@@ -677,11 +832,11 @@ below are the ones that actually decide the number.
   `--allow-contention`.
 - **Per-dispatch cost is fixed and not small** (~150 µs measured). A design set
   is loaded once and kept precisely to avoid paying it per dispatch — which is
-  also why the elementwise ops default to the host, and why `--npu-ops` can
+  also why the elementwise ops default to the host, and why `--npu-extra-ops` can
   *lower* throughput rather than raise it.
 - **Batch tiers are right-sized, not padded.** A request is split into the
   largest tier that fits; the design set carries an instruction stream per tier.
-- **`--npu-ops` costs one `hw_context` per named op** on top of the unified
+- **`--npu-extra-ops` costs one `hw_context` per named op** on top of the unified
   one, so all three is four, against a
   measured budget of six on this driver. XRT exposes no usable-count query, so
   the budget is a labelled constant and the source of the number is printed
@@ -718,7 +873,7 @@ export PYTHONPATH=/opt/xilinx/xrt/python:$PYTHONPATH
 export NPU_RUNTIME=xrt
 ```
 
-**`--npu-ops <code> asks for it on the array, but <dir>/design.json does not
+**`--npu-extra-ops <code> asks for it on the array, but <dir>/design.json does not
 exist`** — that sibling design set was not built. Re-run the exporter with
 `--npu-extra-ops <code>`, or drop the code from the list.
 

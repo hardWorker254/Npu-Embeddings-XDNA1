@@ -41,6 +41,8 @@
 #include "runtime/design.hpp"
 #include "runtime/model.hpp"
 #include "runtime/pool.hpp"
+#include "whisper/attention_npu.hpp"
+#include "whisper/eltwise.hpp"
 #include "whisper/geometry.hpp"
 #include "whisper/npu_ops.hpp"
 
@@ -61,6 +63,16 @@ public:
                  const Geometry &geom);
 
   void set_streams(const EncoderStreams &s) { streams_ = s; }
+  // Where LayerNorm and GELU run. Null is the host pass, which is what the
+  // measured-faster path is at this width; a non-null design is one
+  // --npu-extra-ops code's worth of xclbin, and the numbers it computes are the
+  // same operations in the same order, in bf16.
+  void set_layernorm(NpuEltwise *ln) { ln_ = ln; }
+  void set_gelu(NpuEltwise *gelu) { gelu_ = gelu; }
+  // Where attention runs. Null is the host pass over the whole score matrix,
+  // which is the measured-faster path at this width; non-null is the design
+  // set's own attn_qk/attn_av streams and it computes the same function.
+  void set_attention(NpuAttention *attn) { attn_ = attn; }
 
   // Stage every layer's operands and every LayerNorm from the container.
   // Returns the bytes staged, for the status line.
@@ -76,6 +88,7 @@ public:
   int64_t hidden() const { return geom_.d_model; }
   const Geometry &geometry() const { return geom_; }
   const NpuGemm &gemm() const { return g_; }
+  const NpuAttention *attention_npu() const { return attn_; }
   void reset_timers();
 
 private:
@@ -85,16 +98,33 @@ private:
       f(r0, std::min<int64_t>(n, r0 + streams_.rows));
   }
 
+  // One LayerNorm over `n` rows, on the array when a design was given and on the
+  // host otherwise. `slot` is the staged gamma|beta pair and is only read on the
+  // array path; gamma/beta are only read on the host one, so the container's
+  // pointers and the staged bytes cannot drift apart unnoticed: a design whose
+  // width is not d_model is refused when it is opened.
+  void norm_rows(float *x, int64_t n, const float *gamma, const float *beta,
+                 size_t slot);
+  void gelu_rows(float *x, int64_t n);
+
   npue::File &model_;
   NpuGemm g_;
   app::Pool &pool_;
   Geometry geom_;
   EncoderStreams streams_;
+  NpuEltwise *ln_ = nullptr, *gelu_ = nullptr;
+  NpuAttention *attn_ = nullptr;
 
   // Per layer: four tiled operands, four biases, two LayerNorm sites.
   std::vector<size_t> s_qkv, s_ao, s_fu, s_fd;
   std::vector<const float *> b_qkv, b_ao, b_fu, b_fd;
   std::vector<const float *> ln1_gamma, ln1_beta, ln2_gamma, ln2_beta;
+  // The staged gamma|beta of each site, when LayerNorm runs on the array. One
+  // per site and per layer, staged once, for the same reason the GEMM operands
+  // are: a site is 2*d floats and a dispatch does not save a transfer by
+  // repeating it.
+  std::vector<size_t> s_ln1, s_ln2;
+  size_t s_ln_final = 0;
   const float *enc_pos_ = nullptr;
   const float *final_gamma_ = nullptr, *final_beta_ = nullptr;
 };

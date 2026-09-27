@@ -67,6 +67,14 @@ int64_t json_int(const std::string &t, const std::string &key,
   return std::stoll(t.substr(t.find(':', i) + 1));
 }
 
+double json_double(const std::string &t, const std::string &key,
+                   double fallback) {
+  size_t i = t.find("\"" + key + "\"");
+  if (i == std::string::npos) return fallback;
+  const size_t colon = t.find(':', i);
+  return std::stod(t.substr(colon + 1));
+}
+
 std::string json_str(const std::string &t, const std::string &key,
                      const std::string &fallback) {
   size_t i = t.find("\"" + key + "\"");
@@ -174,7 +182,12 @@ Design::Design(Device &dev, const std::string &dir)
         js.find("\"emulate_bfp16\"") != std::string::npos;
 
     info_.tile_n = json_int(js, "tile_n", 0);
+    info_.b_tile_k = json_int(js, "tile_k", 0);
+    info_.b_mac_s = json_int(js, "mac_s", 0);
+    info_.b_mac_t = json_int(js, "mac_t", 0);
     info_.cols = json_int(js, "cols", 0);
+    info_.row_capacity = json_int(js, "row_capacity", 0);
+    info_.ln_eps = json_double(js, "ln_eps", 0.0);
 
     // Which generation built this set (subtask 3). Top-level `arch`/`device`
     // appear before the per-stream `arch` fields, so the first hit is the

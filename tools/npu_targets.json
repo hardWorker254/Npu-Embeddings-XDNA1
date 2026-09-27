@@ -6,7 +6,7 @@
     "tile_m": 64,
     "tile_k": 64,
     "tile_n": 48,
-    "identity_threshold": 80,
+    "identity_threshold": 128,
     "c_bf16": true
   },
   "arches": {
@@ -89,6 +89,8 @@
     },
     "whisper-tiny": {
       "kind": "stt",
+      "layer_norm_eps": 1e-05,
+      "vocab": 51865,
       "hidden": 384,
       "intermediate": 1536,
       "gated_ffn": false,
@@ -113,6 +115,8 @@
     },
     "whisper-base": {
       "kind": "stt",
+      "layer_norm_eps": 1e-05,
+      "vocab": 51865,
       "hidden": 512,
       "intermediate": 2048,
       "gated_ffn": false,
@@ -137,6 +141,8 @@
     },
     "whisper-small": {
       "kind": "stt",
+      "layer_norm_eps": 1e-05,
+      "vocab": 51865,
       "hidden": 768,
       "intermediate": 3072,
       "gated_ffn": false,
@@ -161,6 +167,8 @@
     },
     "whisper-medium": {
       "kind": "stt",
+      "layer_norm_eps": 1e-05,
+      "vocab": 51865,
       "hidden": 1024,
       "intermediate": 4096,
       "gated_ffn": false,
@@ -185,6 +193,8 @@
     },
     "whisper-large-v3": {
       "kind": "stt",
+      "layer_norm_eps": 1e-05,
+      "vocab": 51866,
       "hidden": 1280,
       "intermediate": 5120,
       "gated_ffn": false,
@@ -209,6 +219,8 @@
     },
     "whisper-large-v3-turbo": {
       "kind": "stt",
+      "layer_norm_eps": 1e-05,
+      "vocab": 51866,
       "hidden": 1280,
       "intermediate": 5120,
       "gated_ffn": false,

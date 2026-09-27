@@ -100,6 +100,135 @@ def stt_shapes_for(
     }
 
 
+def attn_shapes(M: int, head_dim: int, n_kv: int,
+                n_aie_cols: int = 4, tile_n: int = 32) -> dict[str, dict[str, int]]:
+    """The two streams that turn attention into GEMMs.
+
+        attn_qk   [M, head_dim] @ [head_dim, n_kv]  -> one head's scores
+        attn_av   [M, n_kv]      @ [n_kv, head_dim]  -> that head's context
+
+    `n_kv` is PADDED to the tile (1536 for a 1500-position window at tile_n 32),
+    which is the whole reason this is expressible: the B panel has to tile
+    evenly, and a score row of 1500 columns does not divide by 32. The padded
+    keys are not a mask the runtime has to remember -- the B panel is built from
+    the K|V block with zeros past n_kv, the scores that come back are finite, and
+    the runtime writes -1e30 into exactly those columns before the softmax. The
+    alternative, a design per n_kv, is a design per position.
+
+    `n_kv` is padded to the LEAST COMMON MULTIPLE of tile_k and tile_n, not to
+    tile_n alone: attn_qk's N only has to divide by tile_n, but attn_av's K is
+    the same number and has to divide by tile_k as well.
+
+    The context width is the other direction of the same wall, and the one that
+    bites first: a design's N must be a multiple of tile_n * AIE columns, which
+    is 128 on npu1, and head_dim is 64. So attn_av's N is head_dim rounded up to
+    that, the extra columns of the B panel are zero, and the runtime reads the
+    first head_dim of every C row. Halving the columns to make 64 legal is not
+    an option -- every stream in a set shares the set's xclbin.
+
+    head_dim is 64 on every shipped Whisper, and a K of 64 is one k-tile: a thin
+    GEMM, which is why this is worth having for the arithmetic and not for the
+    dispatch count.
+    """
+    step_k = _lcm(tile_n, 64)
+    kv = -(-n_kv // step_k) * step_k
+    ctx = -(-head_dim // (tile_n * n_aie_cols)) * (tile_n * n_aie_cols)
+    return {
+        "attn_qk": {"M": M, "K": head_dim, "N": kv},
+        "attn_av": {"M": M, "K": kv, "N": ctx},
+    }
+
+
+def _lcm(a: int, b: int) -> int:
+    from math import gcd
+    return a * b // gcd(a, b) if a and b else max(a, b)
+
+
+
+def mel_proj_shapes(M: int, n_bins: int, n_mels: int,
+                    tile_k: int = 64, tile_n: int = 32,
+                    n_aie_cols: int = 4) -> dict[str, dict[str, int]]:
+    """The slaney filter bank as a GEMM: power spectrum @ bank.
+
+        mel_proj   [M, n_bins] @ [n_bins, n_mels]   one frame's mel row
+
+    The bank's own shape is (n_bins, n_mels) = (201, 80) or (201, 128), and
+    neither tiles: K is 201 against a 64-wide k-tile and N is 80 against the
+    128 a four-column design needs. So both are padded UP -- 256 and 128 -- and
+    the runtime writes zeros into the A columns past n_bins and reads back only
+    the first n_mels of every C row. That is the same padding the attention
+    streams need for the same two reasons, and the reason a 201-bin spectrum
+    cannot share their designs is that K and N are both wrong by a different
+    amount.
+
+    This is the CHEAPEST op in the tree: 48M MAC on a window, a few milliseconds
+    on a host that has sixteen of them. It is here because the question was
+    which operations CAN run on the array, not which should.
+    """
+    K = -(-n_bins // tile_k) * tile_k
+    N = -(-n_mels // (tile_n * n_aie_cols)) * (tile_n * n_aie_cols)
+    return {"mel_proj": {"M": M, "K": K, "N": N}}
+
+
+def dft_shapes(M: int, n_fft: int = 400, n_bins: int = 201,
+               tile_k: int = 64, tile_n: int = 32,
+               n_aie_cols: int = 4) -> dict[str, dict[str, int]]:
+    """The 400-point transform as one GEMM against a precomputed DFT matrix.
+
+        dft400   [M, n_fft] @ [n_fft, 2 * n_bins]   -> (real, imaginary)
+
+    A direct transform IS a matrix: X[k] = sum_n x[n] exp(-2*pi*i*k*n/400), so
+    one GEMM against the matrix of twiddles computes every bin of every frame in
+    the chunk. The real and imaginary halves sit side by side in the B panel, and
+    the squared magnitude is taken on the host afterwards -- a square is not a
+    matrix, and the array has no epilogue to put it in.
+
+    K is 400 padded to 448 (the frame has 400 samples and the k-tile is 64) and N
+    is 201 padded to 256, twice: 256 is the smallest multiple of 128 that holds
+    201 bins, and the real and imaginary halves each get one. The runtime writes
+    zeros into the 48 padded input columns and reads the first 201 bins of each
+    half.
+
+    WHAT THIS COSTS, STATED PLAINLY: the host transform is an exact-size
+    mixed-radix Cooley-Tukey in fp64, accurate to about 1e-15 relative. This one
+    multiplies by bf16 twiddles, so a bin carries roughly 6e-3 relative error and
+    a power spectrum 1.2e-2. It computes the same function; it is not the same
+    arithmetic, and the mel gate is what says whether that is inside tolerance.
+    """
+    K = -(-n_fft // tile_k) * tile_k
+    half = -(-n_bins // (tile_n * n_aie_cols)) * (tile_n * n_aie_cols)
+    return {"dft400": {"M": M, "K": K, "N": 2 * half}}
+
+
+LOGIT_CHUNK = 6656   # 52 tiles of 32, the widest N this design library takes
+
+
+def logit_shapes(M: int, hidden: int, vocab: int, n_chunks: int = 8,
+                 tile_k: int = 64, tile_n: int = 32,
+                 n_aie_cols: int = 4) -> dict[str, dict[str, int]]:
+    """The tied token embedding as a GEMM, in chunks of the vocabulary.
+
+        logits_i   [M, hidden] @ [hidden, chunk]   one slice of the vocabulary
+
+    ONE stream cannot hold the projection: 51865 columns is 1621 tiles of 32
+    against the 12 the biggest shipping stream uses, and the design library puts
+    one tile per column per row-block, so the N is bounded by the silicon, not by
+    patience. The vocabulary is therefore cut into chunks, each a stream of its
+    own, and a step dispatches one per chunk and takes the argmax over what comes
+    back.
+
+    The chunk is padded up to a multiple of tile_n * AIE columns (128 here), and
+    the runtime zeroes the padding and reads back only the ids that exist, so a
+    vocab_size that is not a multiple of the chunk is not a wrong answer -- the
+    last chunk is short and the rest of it is masked.
+    """
+    out: dict[str, dict[str, int]] = {}
+    chunk = LOGIT_CHUNK
+    for i in range(n_chunks):
+        out[f"logits_{i}"] = {"M": M, "K": hidden, "N": chunk}
+    return out
+
+
 def shapes_for_stream_set(
     stream_set: str,
     batch: int,
@@ -108,6 +237,14 @@ def shapes_for_stream_set(
     gated: bool = False,
     qkv_n: int | None = None,
     seq: int = DEFAULT_SEQ,
+    extra_streams: tuple[str, ...] = (),
+    attn: tuple[int, int] | None = None,
+    n_aie_cols: int = 4,
+    mel: tuple[int, int] | None = None,
+    tile_k: int = 64,
+    fft: tuple[int, int] | None = None,
+    logit: tuple[int, int, int] | None = None,
+    drop_streams: tuple[str, ...] = (),
 ) -> tuple[list[str], dict[str, dict[str, int]]]:
     """(stream order, shapes) for a named stream set. One dispatch point.
 
@@ -115,12 +252,58 @@ def shapes_for_stream_set(
     sets differ in BOTH the names and the shapes, and a caller that picked the
     wrong one would build a design whose K/N do not match the weights the
     runtime hands it -- a wrong answer with no error anywhere.
+
+    `extra_streams` names streams the SET gains, and `attn` is the
+    (head_dim, n_kv) pair they need. They are appended, never inserted: the
+    xclbin is taken from the first stream of the set and every slot number after
+    it moves if the order does, so a design set exported without them keeps the
+    slot numbers it always had.
+
+    `drop_streams` removes names again, per batch tier. It exists for the
+    vocabulary projection: a decode step is one row, so its chunks are only ever
+    dispatched at the SMALLEST tier, and building eight streams at the other two
+    is eight compiles per tier of an xclbin nothing binds.
     """
     if stream_set == "stt":
-        return list(STT_STREAM_ORDER), stt_shapes_for(batch, hidden,
-                                                      intermediate, seq)
-    return list(STREAM_ORDER), shapes_for(batch, hidden, intermediate, gated,
-                                          qkv_n, seq)
+        order, shapes = list(STT_STREAM_ORDER), stt_shapes_for(
+            batch, hidden, intermediate, seq)
+    else:
+        order, shapes = list(STREAM_ORDER), shapes_for(
+            batch, hidden, intermediate, gated, qkv_n, seq)
+    if drop_streams:
+        order = [n for n in order if n not in drop_streams]
+        shapes = {k: v for k, v in shapes.items() if k not in drop_streams}
+    if extra_streams:
+        if attn is None:
+            raise SystemExit(
+                f"extra streams {list(extra_streams)} need a head_dim and a "
+                f"padded n_kv, and the caller passed neither")
+        M = shapes[order[0]]["M"]
+        more: dict[str, dict[str, int]] = {}
+        if attn is not None:
+            head_dim, n_kv = attn
+            more.update(attn_shapes(M, head_dim, n_kv, n_aie_cols))
+        if mel is not None:
+            n_bins, n_mels = mel
+            more.update(mel_proj_shapes(M, n_bins, n_mels, tile_k,
+                                        32, n_aie_cols))
+        if fft is not None:
+            n_fft, n_bins = fft
+            more.update(dft_shapes(M, n_fft, n_bins, tile_k, 32, n_aie_cols))
+        if logit is not None:
+            hidden, vocab, n_chunks = logit
+            more.update(logit_shapes(M, hidden, vocab, n_chunks, tile_k, 32,
+                                     n_aie_cols))
+        for name in extra_streams:
+            if name in drop_streams:
+                continue
+            if name not in more:
+                raise SystemExit(
+                    f"unknown extra stream {name!r}; the ones a design set can "
+                    f"gain are {sorted(more) or 'none for this model'}")
+            order.append(name)
+            shapes[name] = more[name]
+    return order, shapes
 
 @dataclass(frozen=True)
 class DataPath:

@@ -41,7 +41,7 @@ inline void load_designs(RunContext &ctx) {
   // run skips this: the default path must not require a contention tool.
   int want_contexts = 0;
   if (unified) {
-    // One context for the unified GEMM design plus one per op --npu-ops sends to
+    // One context for the unified GEMM design plus one per op --npu-extra-ops sends to
     // the array. Counted from the request, not from what got loaded, so the
     // guard refuses BEFORE any Design is built (the point of the whole check).
     want_contexts = 1 + static_cast<int>(ctx.npu_ops.size());
@@ -91,7 +91,7 @@ inline void load_designs(RunContext &ctx) {
                   "one hw_context\n", ctx.streams.size(), tset.size());
     }
 
-    // --npu-ops: the unified xclbin carries only the four GEMM streams, so each
+    // --npu-extra-ops: the unified xclbin carries only the four GEMM streams, so each
     // op sent to the array comes from a sibling directory, one Design each.
     // Refuse by NAME when one is missing -- falling back to the host after the
     // flag asked for the array is the fail-open this project keeps meeting, and
@@ -108,7 +108,7 @@ inline void load_designs(RunContext &ctx) {
       const std::string dir = ctx.art + "/" + op->design;
       if (!std::ifstream(dir + "/design.json").good())
         throw std::runtime_error(
-            std::string("--npu-ops ") + code + " (" + op->long_name +
+            std::string("--npu-extra-ops ") + code + " (" + op->long_name +
             ") asks for it on the array, but " + dir +
             "/design.json does not exist -- build it with "
             "tools/export_gemm_rtp.py --npu-extra-ops " + code +
@@ -120,11 +120,18 @@ inline void load_designs(RunContext &ctx) {
       if (inf.device_recorded && !inf.device.empty() &&
           !running_device().empty() && inf.device != running_device())
         throw std::runtime_error(
-            std::string("--npu-ops ") + code + ": " + dir +
+            std::string("--npu-extra-ops ") + code + ": " + dir +
             " was built for device " + inf.device + ", but this process runs on " +
             running_device() +
             " -- rebuild it for this generation or drop it from the list");
     }
+    // A code this path cannot honour is REFUSED, not skipped. `conv` is the one
+    // that matters today: it is a real op with no eltwise directory (Whisper's
+    // conv1/conv2, which run on the encoder set's own [rows, d, d] stream), and
+    // this container is an embedder, so there is no front end to send it to.
+    // The check lives in setup_flags_pools rather than here because this
+    // function runs BEFORE the flag is parsed, and a check that reads an empty
+    // set is a check that never fires.
   } else {
     ctx.ld_qkv = std::make_unique<npu::Design>(*ctx.dev, ctx.art + "/qkv");
     ctx.ld_ao = std::make_unique<npu::Design>(*ctx.dev, ctx.art + "/attn_out");
@@ -288,7 +295,7 @@ inline std::vector<float> pool_normalise(const RunContext &ctx,
 
 inline void setup_flags_pools(RunContext &ctx) {
   // A value flag in the LAST position used to be invisible: the loops below
-  // stopped at argc-1 because they read argv[i+1], so `--npu-ops gelu` as the
+  // stopped at argc-1 because they read argv[i+1], so `--npu-extra-ops gelu` as the
   // final two arguments parsed as nothing and the run quietly did the default.
   // That is the project's worst failure shape -- a flag the user typed that has
   // no effect and no error -- so the bound is argc and a flag with no value
@@ -305,14 +312,32 @@ inline void setup_flags_pools(RunContext &ctx) {
     if (std::string(ctx.argv[i]) == "--threads")
       ctx.nthreads = std::atoi(value_after(i, "--threads"));
   refuse_removed_op_flags(ctx.argc, ctx.argv);
+  refuse_exporter_only_flags(ctx.argc, ctx.argv);
   // Which ops go on the array. The DEFAULT is the empty list -- all three on the
   // host, which is the measured-faster path -- and a repeated flag replaces the
   // previous one rather than adding to it, the same as --artifacts and --model:
-  // the last one on the line is the one that counts, and `--npu-ops ""` clears.
+  // the last one on the line is the one that counts, and `--npu-extra-ops ""`
+  // clears.
   ctx.npu_ops.clear();
   for (int i = 2; i < ctx.argc; ++i)
-    if (std::string(ctx.argv[i]) == "--npu-ops")
-      ctx.npu_ops = parse_npu_ops(value_after(i, "--npu-ops"));
+    if (std::string(ctx.argv[i]) == "--npu-extra-ops")
+      ctx.npu_ops = parse_npu_ops(value_after(i, "--npu-extra-ops"));
+  // An op this pipeline has no place for is REFUSED by name here, where the
+  // flag has just been parsed. `conv` is the one that matters today: Whisper's
+  // conv1/conv2, which the STT mode already dispatched above with (it owns the
+  // flag) -- so reaching here means an embedder was asked for a speech-to-text
+  // op, and dropping it would be the "the flag was there and nothing happened"
+  // failure the subcommand whitelist exists to prevent.
+  for (const auto &code : ctx.npu_ops) {
+    if (code == "gelu" || code == "layn" || code == "softm") continue;
+    const NpuOp *op = find_npu_op(code);
+    throw std::runtime_error(
+        std::string("--npu-extra-ops ") + code + " (" +
+        (op ? op->long_name : "unknown op") +
+        ") is a speech-to-text op and this container is an embedder, which has "
+        "no front end to send it to the array. It belongs to `transcribe <a "
+        "whisper model> <audio>`.");
+  }
   ctx.host_ln = !ctx.on_array("layn");
   ctx.host_sm = !ctx.on_array("softm");
   ctx.host_gelu = !ctx.on_array("gelu");
@@ -427,7 +452,7 @@ inline int setup_encoder(RunContext &ctx) {
   // Where each op ACTUALLY runs, read off the design the encoder will call --
   // never off the flag that led here. A host-forced op prints the host line; an
   // array op names the resolved design and the generation it was built for.
-  // The op's CODE is printed, not its long name: the code is what --npu-ops
+  // The op's CODE is printed, not its long name: the code is what --npu-extra-ops
   // takes, and a status line that names something you cannot type is one more
   // thing to translate at the terminal.
   auto where = [](const char *code, bool host, const npu::Design &d,

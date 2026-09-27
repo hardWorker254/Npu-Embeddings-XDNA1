@@ -42,7 +42,10 @@
 #include "runtime/design.hpp"
 #include "runtime/model.hpp"
 #include "runtime/pool.hpp"
+#include "whisper/attention_npu.hpp"
+#include "whisper/eltwise.hpp"
 #include "whisper/geometry.hpp"
+#include "whisper/logits_npu.hpp"
 #include "whisper/npu_ops.hpp"
 
 namespace npue::whisper {
@@ -66,6 +69,19 @@ public:
                  const Geometry &geom);
 
   void add_tier(const DecoderTier &t) { tiers_.push_back(t); }
+  // Where LayerNorm and GELU run. Null is the host pass, which is the
+  // measured-faster path at this width; a non-null design is one
+  // --npu-extra-ops code's worth of xclbin, shared with the encoder's.
+  void set_layernorm(NpuEltwise *ln) { ln_ = ln; }
+  void set_gelu(NpuEltwise *gelu) { gelu_ = gelu; }
+  // Where attention runs. Null is the host pass; non-null is the design set's
+  // attn_qk/attn_av streams at the STEP tier, which is the only place the
+  // decoder attends (the cross-attention prefill is a GEMM, not an attention).
+  void set_attention(NpuAttention *attn) { attn_ = attn; }
+  // Where the vocabulary projection runs. Null is the host's fp32 matvec against
+  // the tied embedding; non-null is the design set's logits_i streams, one
+  // dispatch per chunk of the vocabulary.
+  void set_logits(NpuLogits *lg) { logit_ = lg; }
   // Which tier a decode step dispatches at, and which one the cross-attention
   // K|V prefill uses. The prefill wants the widest tier available: it is the
   // only place in the decoder that touches all 1500 positions, and it happens
@@ -121,17 +137,28 @@ public:
   int64_t n_cached() const { return n_cached_; }
   int64_t n_source() const { return n_src_; }
   const NpuGemm &gemm() const { return g_; }
+  const NpuAttention *attention_npu() const { return attn_; }
   void reset_timers();
 
 private:
   const DecoderTier &tier(int64_t batch) const;
   void logits_from(const std::vector<float> &h, std::vector<float> *out,
                    int32_t *argmax);
+  // One LayerNorm over `n` rows and one GELU over `n` values, on the array when
+  // a design was given and on the host otherwise. The slot is indexed by the
+  // caller as an argument and ignored on the host path, so the vectors are sized
+  // either way.
+  void norm_rows(float *x, int64_t n, const float *gamma, const float *beta,
+                 size_t slot);
+  void gelu_rows(float *x, int64_t n);
 
   npue::File &model_;
   NpuGemm g_;
   app::Pool &pool_;
   Geometry geom_;
+  NpuEltwise *ln_ = nullptr, *gelu_ = nullptr;
+  NpuAttention *attn_ = nullptr;
+  NpuLogits *logit_ = nullptr;
   std::vector<DecoderTier> tiers_;
   int64_t step_batch_ = 0, prefill_batch_ = 0;
 
@@ -139,6 +166,10 @@ private:
   std::vector<const float *> b_sqkv, b_sao, b_cq, b_ckv, b_cao, b_fu, b_fd;
   std::vector<const float *> ln1_gamma, ln1_beta, ln2_gamma, ln2_beta, ln3_gamma,
       ln3_beta;
+  // The staged gamma|beta of each site, when LayerNorm runs on the array: three
+  // per layer plus the final norm, staged once at session start.
+  std::vector<size_t> s_ln1, s_ln2, s_ln3;
+  size_t s_ln_final = 0;
   const float *dec_pos_ = nullptr;
   const float *final_gamma_ = nullptr, *final_beta_ = nullptr;
   const float *embed_tokens_ = nullptr;

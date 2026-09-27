@@ -24,11 +24,17 @@
 //   --prefill-tier N          decoder tier for the cross-attention K|V prefill
 //                             (default: the largest)
 //   --threads N               host workers
+//   --conv cpu|npu|both        where conv1/conv2 run. cpu is the fp32 reference,
+//                             npu is the array path (bf16 GEMMs on the encoder
+//                             set's [rows, d, d] stream), both runs the cpu one
+//                             and prints the npu one next to it so the gate can
+//                             hold each against transformers in the same run
 //   --skip-decoder            encoder only, and do not open the decoder xclbin
 //
 // Output, all on stdout, all hex, so the gate parses one thing and never
 // round-trips a float through a decimal pipe:
-//   conv <rows> <cols> <hex>            the front end's output
+//   conv <rows> <cols> <hex>            the front end's output, host path
+//   convnpu <rows> <cols> <hex>         the same tensor from the NPU path
 //   enc <rows> <cols> <hex>             encoder hidden states (final LayerNorm)
 //   step <pos> <top1> <cols> <hex>      one decoder step's final state
 //   logits <pos> <vocab> <hex>          that step's logits
@@ -50,6 +56,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -62,7 +69,9 @@
 #include "runtime/pool.hpp"
 #include "tokenizers/whisper.hpp"
 #include "whisper/audio.hpp"
+#include "whisper/conv1d.hpp"
 #include "whisper/decoder.hpp"
+#include "whisper/eltwise.hpp"
 #include "whisper/encoder.hpp"
 #include "whisper/geometry.hpp"
 #include "whisper/features.hpp"
@@ -141,7 +150,9 @@ int main(int argc, char **argv) {
     std::fprintf(stderr,
                  "usage: %s <model.npue> <artifacts> <audio.wav> "
                  "[--ids a,b] [--greedy a,b] [--max-new N] [--step-tier N] "
-                 "[--prefill-tier N] [--threads N] [--skip-decoder]\n",
+                 "[--prefill-tier N] [--threads N] [--conv cpu|npu|both] "
+                 "[--layn host|npu] [--gelu host|npu] [--attn host|npu] "
+                 "[--skip-decoder]\n",
                  argv[0]);
     return 2;
   }
@@ -153,6 +164,10 @@ int main(int argc, char **argv) {
   int64_t max_new = 0;
   int64_t step_tier = -1, prefill_tier = -1;
   bool skip_decoder = false;
+  std::string conv_mode = "both";
+  std::string layn_mode = "host";
+  std::string attn_mode = "host";
+  std::string gelu_mode = "host";
   for (int i = 4; i < argc; ++i) {
     const std::string a = argv[i];
     auto next = [&]() -> std::string {
@@ -165,7 +180,27 @@ int main(int argc, char **argv) {
     else if (a == "--threads") threads = std::max(1, std::atoi(next().c_str()));
     else if (a == "--step-tier") step_tier = std::atoll(next().c_str());
     else if (a == "--prefill-tier") prefill_tier = std::atoll(next().c_str());
-    else if (a == "--skip-decoder") skip_decoder = true;
+    else if (a == "--conv") {
+      conv_mode = next();
+      if (conv_mode != "cpu" && conv_mode != "npu" && conv_mode != "both")
+        throw std::runtime_error("--conv " + conv_mode +
+                                 ": expected cpu, npu or both");
+    } else if (a == "--layn") {
+      layn_mode = next();
+      if (layn_mode != "host" && layn_mode != "npu")
+        throw std::runtime_error("--layn " + layn_mode +
+                                 ": expected host or npu");
+    } else if (a == "--gelu") {
+      gelu_mode = next();
+      if (gelu_mode != "host" && gelu_mode != "npu")
+        throw std::runtime_error("--gelu " + gelu_mode +
+                                 ": expected host or npu");
+    } else if (a == "--attn") {
+      attn_mode = next();
+      if (attn_mode != "host" && attn_mode != "npu")
+        throw std::runtime_error("--attn " + attn_mode +
+                                 ": expected host or npu");
+    } else if (a == "--skip-decoder") skip_decoder = true;
     else {
       std::fprintf(stderr, "unknown flag %s\n", a.c_str());
       return 2;
@@ -184,16 +219,6 @@ int main(int argc, char **argv) {
     const npue::whisper::Audio a = npue::whisper::ingest(audio, false);
     const MelSpec mel =
         log_mel_30s(a.samples, static_cast<int>(geom.mel_bins), nullptr, use);
-    const std::vector<float> conv = conv_front_end(
-        mel, model.raw("frontend.conv1.weight").as<float>(),
-        model.raw("frontend.conv1.bias").as<float>(),
-        model.raw("frontend.conv2.weight").as<float>(),
-        model.raw("frontend.conv2.bias").as<float>(),
-        static_cast<int>(geom.d_model), use);
-    const int64_t n_src = kEncoderPositions;
-    std::printf("conv %lld %lld %s\n", static_cast<long long>(n_src),
-                static_cast<long long>(geom.d_model),
-                to_hex(conv.data(), conv.size() * 4).c_str());
 
     npu::Device dev;
     npu::Design enc_design(dev, art + "/gemm_rtp");
@@ -221,8 +246,186 @@ int main(int argc, char **argv) {
     es.ffn_down = static_cast<size_t>(find_op(enc_streams, "ffn_down", eb).slot);
     es.rows = find_op(enc_streams, "qkv", eb).M;
 
+    const int64_t n_src = kEncoderPositions;
+    // --conv: cpu prints the fp32 reference, npu the array path, both prints
+    // each next to the other so one run holds both against transformers. The
+    // array path borrows the encoder set's [rows, d, d] stream, so a set
+    // without one is reported rather than silently skipped.
+    std::vector<float> conv;
+    double t_conv_cpu = 0.0, t_conv_npu = 0.0;
+    if (conv_mode != "npu") {
+      const double t0 = app::now_s();
+      conv = conv_front_end(
+          mel, model.raw("frontend.conv1.weight").as<float>(),
+          model.raw("frontend.conv1.bias").as<float>(),
+          model.raw("frontend.conv2.weight").as<float>(),
+          model.raw("frontend.conv2.bias").as<float>(),
+          static_cast<int>(geom.d_model), use);
+      t_conv_cpu = app::now_s() - t0;
+      std::printf("conv %lld %lld %s\n", static_cast<long long>(n_src),
+                  static_cast<long long>(geom.d_model),
+                  to_hex(conv.data(), conv.size() * 4).c_str());
+    }
+
+    const app::StreamEntry *conv_stream = nullptr;
+    for (const auto &s : enc_streams)
+      if (s.K == geom.d_model && s.N == geom.d_model) {
+        conv_stream = &s;
+        break;
+      }
+    std::vector<float> conv_npu;
+    if (conv_mode != "cpu") {
+      if (!conv_stream)
+        std::fprintf(stderr,
+                     "conv: no [rows, d, d] stream in this design set, so "
+                     "conv1/conv2 stay on the host\n");
+      else {
+        NpuGemm conv_gemm(enc_design, pool);
+        conv_gemm.alloc_buffers();
+        NpuConv1d c1(enc_design, pool, conv_gemm,
+                     static_cast<size_t>(conv_stream->slot), conv_stream->M,
+                     conv_stream->K, conv_stream->N);
+        NpuConv1d c2(enc_design, pool, conv_gemm,
+                     static_cast<size_t>(conv_stream->slot), conv_stream->M,
+                     conv_stream->K, conv_stream->N);
+        c1.stage("frontend.conv1", model.raw("frontend.conv1.weight").as<float>(),
+                 model.raw("frontend.conv1.bias").as<float>(), geom.mel_bins,
+                 geom.d_model, 3);
+        c2.stage("frontend.conv2", model.raw("frontend.conv2.weight").as<float>(),
+                 model.raw("frontend.conv2.bias").as<float>(), geom.d_model,
+                 geom.d_model, 3);
+        const double t0 = app::now_s();
+        conv_npu = conv_front_end_npu(mel, c1, c2, static_cast<int>(geom.d_model));
+        t_conv_npu = app::now_s() - t0;
+        std::printf("convnpu %lld %lld %s\n", static_cast<long long>(n_src),
+                    static_cast<long long>(geom.d_model),
+                    to_hex(conv_npu.data(), conv_npu.size() * 4).c_str());
+        std::fprintf(stderr,
+                     "conv: %s stream, %lld+%lld K blocks, %lld dispatches, "
+                     "npu %.3f s vs cpu %.3f s\n",
+                     conv_stream->op.c_str(),
+                     static_cast<long long>(c1.k_blocks()),
+                     static_cast<long long>(c2.k_blocks()),
+                     static_cast<long long>(conv_gemm.n_dispatch), t_conv_npu,
+                     t_conv_cpu);
+        if (conv_mode == "npu") conv = conv_npu;
+      }
+    }
+    if (conv.empty())
+      throw std::runtime_error("no conv output: both --conv paths produced "
+                               "nothing to run the encoder on");
+
+    // The LayerNorm design, when the case asks for it. It is a sibling xclbin of
+    // its own, and the two facts that make it a DIFFERENT MODEL rather than a
+    // rounding -- its row width and its epsilon -- are compiled into the kernel,
+    // so both are checked against the container before anything is staged.
+    // Constructed ONLY for this case: the design directory is not there on a
+    // host run, and opening it unconditionally would turn a missing optional
+    // design into a refusal of the default path.
+    std::unique_ptr<npu::Design> ln_design;
+    std::unique_ptr<NpuEltwise> ln;
+    if (layn_mode == "npu") {
+      ln_design = std::make_unique<npu::Design>(dev, art + "/layernorm");
+      if (ln_design->info().cols != geom.d_model)
+        throw std::runtime_error(
+            art + "/layernorm is " + std::to_string(ln_design->info().cols) +
+            " columns wide and this container's d_model is " +
+            std::to_string(geom.d_model));
+      if (std::abs(ln_design->info().ln_eps - geom.ln_eps) > 1e-12)
+        throw std::runtime_error(
+            art + "/layernorm was built with eps " +
+            std::to_string(ln_design->info().ln_eps) +
+            ", the container says " + std::to_string(geom.ln_eps));
+      ln = std::make_unique<NpuEltwise>(*ln_design, pool,
+                                        EltwiseKind::LayerNorm);
+      ln->alloc_buffers();
+      std::fprintf(stderr,
+                   "layernorm: %lld rows x %lld, eps %g\n",
+                   static_cast<long long>(ln->rows()),
+                   static_cast<long long>(ln->cols()),
+                   ln_design->info().ln_eps);
+    }
+
+    // Attention as two GEMMs, on the set's own attn_qk / attn_av streams. The
+    // same refusals the session makes: a set without those streams cannot run
+    // it, and one whose n_kv is not this model's window would tile a B panel
+    // that is not the score row.
+    std::unique_ptr<npu::Design> sm_design;
+    std::unique_ptr<NpuEltwise> sm;
+    std::unique_ptr<NpuAttention> attn;
+    if (attn_mode == "npu") {
+      const app::StreamEntry *qk = nullptr, *av = nullptr;
+      for (const auto &st : enc_streams)
+        if (st.batch == eb) {
+          if (st.op == "attn_qk" && !qk) qk = &st;
+          if (st.op == "attn_av" && !av) av = &st;
+        }
+      if (!qk || !av)
+        throw std::runtime_error(
+            art + "/gemm_rtp has no attn_qk/attn_av streams at tier " +
+            std::to_string(eb) +
+            "; re-export with --npu-extra-ops attn to run attention here");
+      bool want_softmax = std::ifstream(art + "/softmax/design.json").good();
+      if (want_softmax) {
+        sm_design = std::make_unique<npu::Design>(dev, art + "/softmax");
+        sm = std::make_unique<NpuEltwise>(*sm_design, pool,
+                                          EltwiseKind::Softmax);
+        sm->alloc_buffers();
+        if (sm->cols() != qk->N)
+          throw std::runtime_error(
+              art + "/softmax is " + std::to_string(sm->cols()) +
+              " wide and the score row is " + std::to_string(qk->N));
+      }
+      attn = std::make_unique<NpuAttention>(enc_design, pool, qk->N,
+                                            geom.head_dim, av->N);
+      attn->set_streams(static_cast<size_t>(qk->slot),
+                        static_cast<size_t>(av->slot), qk->M);
+      // Attached AFTER the object exists and BEFORE its buffers: the softmax is
+      // a dispatch inside the attention, so it has to be a pointer that outlives
+      // this scope, not a temporary.
+      if (sm) attn->set_softmax(sm.get());
+      attn->alloc_buffers();
+      std::fprintf(stderr,
+                   "attention: attn_qk %lldx%lldx%lld, attn_av %lldx%lldx%lld, "
+                   "%lld rows, softmax %s\n",
+                   static_cast<long long>(qk->M), static_cast<long long>(qk->K),
+                   static_cast<long long>(qk->N), static_cast<long long>(av->M),
+                   static_cast<long long>(av->K), static_cast<long long>(av->N),
+                   static_cast<long long>(qk->M),
+                   sm ? "on the array" : "on the host");
+    }
+
+    // The GELU design, when the case asks for it. The kernel is the model's own
+    // exact-erf activation (kernels/gelu_erf.cc), and what has to be checked is
+    // that it IS that function and not the tanh polynomial the BERT-family
+    // designs use: the two differ by 2.5e-3 relative, which is a different
+    // activation rather than a rounding of one.
+    std::unique_ptr<npu::Design> gelu_design;
+    std::unique_ptr<NpuEltwise> gelu;
+    if (gelu_mode == "npu") {
+      gelu_design = std::make_unique<npu::Design>(dev, art + "/gelu");
+      gelu = std::make_unique<NpuEltwise>(*gelu_design, pool,
+                                          EltwiseKind::Gelu);
+      gelu->alloc_buffers();
+      const int64_t need = es.rows * geom.enc_intermediate;
+      if (gelu->rows() * gelu->cols() < need)
+        throw std::runtime_error(
+            art + "/gelu holds " +
+            std::to_string(gelu->rows() * gelu->cols()) +
+            " elements and one encoder chunk of GELU is " +
+            std::to_string(need) +
+            ". It is walked in dispatches of its own, so a smaller design is "
+            "slower rather than wrong, but a design exported for another model's "
+            "width is not the one to measure.");
+      std::fprintf(stderr, "gelu: %lld elements per dispatch\n",
+                   static_cast<long long>(gelu->rows() * gelu->cols()));
+    }
+
     WhisperEncoder enc(model, enc_design, pool, geom);
     enc.set_streams(es);
+    if (ln) enc.set_layernorm(ln.get());
+    if (gelu) enc.set_gelu(gelu.get());
+    if (attn) enc.set_attention(attn.get());
     const double t_stage = app::now_s();
     enc.stage_all();
     const double t_enc0 = app::now_s();

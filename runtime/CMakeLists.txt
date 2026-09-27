@@ -87,8 +87,10 @@ add_executable(npuembed
   src/whisper/stt_engine.cpp
   src/whisper/whisper.cpp
   # P3: the audio front end. XRT-free like the tokenizer above -- the log-mel
-  # spectrogram and the two convolutions are pure host code, and tools/
-  # verify_whisper_features.py holds both against transformers.
+  # spectrogram is pure host code, and tools/verify_whisper_features.py holds
+  # it against transformers. The two convolutions live here too, as the fp32
+  # REFERENCE; src/whisper/conv1d.cpp below is the NPU path over the same
+  # weights, and it is this one that dispatches.
   src/whisper/features.cpp
   src/whisper/audio.cpp
   # P4: the Whisper NPU stacks -- the shared GEMM/layernorm/GELU/attention layer
@@ -97,6 +99,15 @@ add_executable(npuembed
   # by the same build that serves every other architecture, rather than only by
   # the gate's own g++ line.
   src/whisper/npu_ops.cpp
+  src/whisper/conv1d.cpp
+  # The elementwise designs Whisper can be given instead of the host passes:
+  # LayerNorm, softmax and GELU, each one xclbin the runtime opens only when
+  # --npu-extra-ops names it.
+  src/whisper/eltwise.cpp
+  src/whisper/attention_npu.cpp
+  src/whisper/mel_proj.cpp
+  src/whisper/fft_npu.cpp
+  src/whisper/logits_npu.cpp
   src/whisper/encoder.cpp
   src/whisper/decoder.cpp
   # P5: the transcription session (device, both design sets, long-form, the

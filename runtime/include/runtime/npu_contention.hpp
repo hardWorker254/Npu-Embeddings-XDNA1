@@ -35,6 +35,8 @@
 
 #pragma once
 
+#include <cstdio>
+
 #include <string>
 #include <vector>
 
@@ -84,8 +86,14 @@ ContextBudget context_budget();
 //     (a missing xrt-smi is not a negative reading -- tasks/0040).
 // A refusal names the limit and its source, the number requested, and every
 // foreign holder's pid and process name.
+//
+// `out` is where the report goes, and the default is stdout because that is
+// where the embedding path's header lives. The STT mode passes stderr: its
+// contract is that stdout carries the transcript -- or the JSON object -- and
+// nothing else, and a context report in front of a JSON object makes it
+// unparseable for the caller that piped it.
 bool require_context_budget(const ContentionReport &r, int requested,
-                            bool allow_override);
+                            bool allow_override, FILE *out = stdout);
 
 // Print the report, then:
 //   - return true  when the array is ours alone;

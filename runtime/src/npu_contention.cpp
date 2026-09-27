@@ -259,7 +259,7 @@ ContextBudget context_budget() {
 }
 
 bool require_context_budget(const ContentionReport &r, int requested,
-                            bool allow_override) {
+                            bool allow_override, FILE *out) {
   const ContextBudget b = context_budget();
   const size_t foreign = r.foreign.size();
 
@@ -267,24 +267,24 @@ bool require_context_budget(const ContentionReport &r, int requested,
   // contexts, we cannot claim there is room. Refuse the multi-context run
   // rather than collide with a leftover process and surface a raw driver error.
   if (!r.tool_ran) {
-    std::printf("\n");
-    std::printf("  !! CANNOT VERIFY THE NPU CONTEXT BUDGET: %s\n",
+    std::fprintf(out, "\n");
+    std::fprintf(out, "  !! CANNOT VERIFY THE NPU CONTEXT BUDGET: %s\n",
                 r.failure.c_str());
-    std::printf("     An absent data source is not a negative reading "
+    std::fprintf(out, "     An absent data source is not a negative reading "
                 "(tasks/0040).\n");
     if (b.limit)
-      std::printf("     This run needs %d concurrent hw_context(s) of a %d-"
+      std::fprintf(out, "     This run needs %d concurrent hw_context(s) of a %d-"
                   "context budget (%s).\n", requested, b.limit,
                   b.source.c_str());
     else
-      std::printf("     This run needs %d concurrent hw_context(s); the budget "
+      std::fprintf(out, "     This run needs %d concurrent hw_context(s); the budget "
                   "is %s.\n", requested, b.source.c_str());
     if (allow_override) {
-      std::printf("  !! --allow-contention given: continuing without being "
+      std::fprintf(out, "  !! --allow-contention given: continuing without being "
                   "able to check.\n\n");
       return true;
     }
-    std::printf("\n  Refusing to build %d hw_context(s) without knowing the "
+    std::fprintf(out, "\n  Refusing to build %d hw_context(s) without knowing the "
                 "device has room. Make `xrt-smi examine -r all` work, close "
                 "other NPU\n  processes, or pass --allow-contention to proceed "
                 "anyway.\n\n", requested);
@@ -294,31 +294,31 @@ bool require_context_budget(const ContentionReport &r, int requested,
   // Tool ran. A generation with no known budget (npu2) cannot be compared, so
   // report the state and proceed rather than invent a limit.
   if (b.limit == 0) {
-    std::printf("\n  npu        %d requested context(s), %zu foreign; budget "
+    std::fprintf(out, "\n  npu        %d requested context(s), %zu foreign; budget "
                 "%s\n", requested, foreign, b.source.c_str());
     return true;
   }
 
   const int total = requested + static_cast<int>(foreign);
-  std::printf("\n  npu        context budget -- %d requested + %zu foreign = "
+  std::fprintf(out, "\n  npu        context budget -- %d requested + %zu foreign = "
               "%d of %d (%s)\n", requested, foreign, total, b.limit,
               b.source.c_str());
   if (total <= b.limit) return true;
 
-  std::printf("  !! NPU CONTEXT BUDGET EXCEEDED -- this run needs %d "
+  std::fprintf(out, "  !! NPU CONTEXT BUDGET EXCEEDED -- this run needs %d "
               "hw_context(s), the device allows %d (%s), and %zu are already "
               "held by other processes:\n",
               requested, b.limit, b.source.c_str(), foreign);
   for (const auto &c : r.foreign)
-    std::printf("       pid %-8lu %-24s %-8s %s\n", c.pid, c.process.c_str(),
+    std::fprintf(out, "       pid %-8lu %-24s %-8s %s\n", c.pid, c.process.c_str(),
                 c.status.c_str(), c.memory.c_str());
 
   if (allow_override) {
-    std::printf("  !! --allow-contention given: continuing anyway. A context "
+    std::fprintf(out, "  !! --allow-contention given: continuing anyway. A context "
                 "construction may still fail with a raw driver error.\n\n");
     return true;
   }
-  std::printf("\n  Refusing BEFORE any hw_context is built. Close the other "
+  std::fprintf(out, "\n  Refusing BEFORE any hw_context is built. Close the other "
               "process(es), or pass\n  --allow-contention to proceed "
               "anyway.\n\n");
   return false;

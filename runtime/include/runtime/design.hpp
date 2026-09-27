@@ -30,6 +30,23 @@ struct DesignInfo {
   size_t a_elem_bytes = 2;
   bool c_is_int = false;
   int64_t tile_n = 0;
+  // An ELTWISE design's own shape, read from the two keys only the eltwise
+  // exporter writes: `row_capacity` is how many rows one dispatch computes and
+  // `ln_eps` is the epsilon compiled into the LayerNorm kernel. They are named
+  // apart from `cols` and `tile.rows` on purpose -- the GEMM exporter writes a
+  // "rows" of its own inside `tile`, and a field that meant AIE rows on one
+  // design set and matrix rows on another is a field nobody can check.
+  int64_t row_capacity = 0;
+  double ln_eps = 0.0;
+  // The B panel's own geometry, out of `b_layout`: the tile and the MMAC
+  // sub-tile. Read here rather than re-parsed by whoever builds an operand at
+  // run time, because the sub-tile is PER GENERATION (npu1 s8/t4, npu2 s8/t8)
+  // and a host-side operand that guesses it is right for one board and wrong on
+  // the other -- same byte count, same hash, wrong products. `b_mac_*` are 0 on
+  // a design.json that predates the fields, and the operand builders refuse
+  // rather than default them.
+  int64_t b_tile_k = 0;
+  int64_t b_mac_s = 0, b_mac_t = 0;
   int64_t cols = 0;
   bool emulate_bfp16 = false;
   bool datapath_recorded = false;

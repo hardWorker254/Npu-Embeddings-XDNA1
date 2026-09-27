@@ -8,7 +8,7 @@
 #   <out>/artifacts_npu<N>/layernorm
 #   <out>/artifacts_npu<N>/softmax
 #
-# The runtime only touches these when `--npu-ops` names the op; with nothing
+# The runtime only touches these when `--npu-extra-ops` names the op; with nothing
 # named the unified `gemm_rtp` set runs all three on the host, which is the
 # measured-faster path. Build only the ops you will ask for:
 # `--extra-ops layn,softm`. The exporter and the flag therefore agree on one layout:

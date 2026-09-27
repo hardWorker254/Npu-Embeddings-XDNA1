@@ -17,6 +17,7 @@
 
 #include "common/design_selection.hpp"  // parse_streams, app::StreamEntry
 #include "common/host_kernels.hpp"       // now_s
+#include "whisper/attention_npu.hpp"
 #include "whisper/audio.hpp"
 #include "whisper/features.hpp"
 
@@ -164,7 +165,8 @@ std::string resolve_stt_artifacts(const std::string &root,
 }
 
 Session::Session(npue::File &model, const std::string &model_name,
-                 const std::string &artifacts, int threads)
+                 const std::string &artifacts, int threads,
+                 const std::set<std::string> &npu_ops)
     : model_(model),
       geom_(read_geometry(model, model_name)),
       art_(artifacts),
@@ -177,6 +179,63 @@ Session::Session(npue::File &model, const std::string &model_name,
       enc_(model, *enc_design_, *pool_, geom_),
       dec_(model, *dec_design_, *pool_, geom_),
       tok_(nullptr) {
+  // -- the elementwise designs, BEFORE the stacks are asked to stage anything.
+  // Each is one xclbin and one hw_context, and the npu1 driver allows six of
+  // those, so this is where a run that asked for too many has to be told.
+  // maybe_stt_mode() counts them and checks the budget before constructing this
+  // session at all; here each one is opened by name and CHECKED against the
+  // container, because an eltwise design carries the model's own width and
+  // epsilon compiled into its kernel.
+  auto open_elt = [&](const std::string &code, const std::string &dir,
+                      EltwiseKind kind, std::unique_ptr<npu::Design> &design,
+                      std::unique_ptr<NpuEltwise> &op) {
+    if (!npu_ops.count(code)) return;
+    design = std::make_unique<npu::Design>(*dev_, artifacts + "/" + dir);
+    op = std::make_unique<NpuEltwise>(*design, *pool_, kind);
+    op->alloc_buffers();
+    // The WIDTH check is LayerNorm's alone, and it is per op because the three
+    // designs have three different meanings for a row: a LayerNorm row is
+    // d_model wide, a softmax row is an attention score row (n_kv, checked
+    // where the scores are handed to it), and a GELU "row" is a flat span of
+    // activations the runtime walks in chunks. Checking all three against
+    // d_model would refuse two designs that are exactly right.
+    if (kind == EltwiseKind::LayerNorm && op->cols() != geom_.d_model)
+      throw std::runtime_error(
+          dir + "/design.json has rows " + std::to_string(op->cols()) +
+          " columns wide, and this container's d_model is " +
+          std::to_string(geom_.d_model) +
+          ". The kernel's row width is compiled in, so this design normalises "
+          "the wrong number of channels. Re-export it for this model: "
+          "python tools/export_gemm_rtp.py --target " + name_ +
+          " --arch 1 --npu-extra-ops " + code);
+    if (kind == EltwiseKind::LayerNorm) {
+      const double want = geom_.ln_eps;
+      const double got = design->info().ln_eps;
+      if (got <= 0.0 || std::abs(got - want) > 1e-12 * std::max(1.0, want))
+        throw std::runtime_error(
+            dir + "/design.json was built with layer_norm_eps " +
+            std::to_string(got) + " and this container says " +
+            std::to_string(want) +
+            ". The epsilon is inside a square root, so the two are not a "
+            "rounding difference. Re-export the design for this container.");
+      elt_notes_.push_back(dir + ": " + std::to_string(op->rows()) + " rows x " +
+                           std::to_string(op->cols()) + ", eps " +
+                           std::to_string(got));
+    } else if (kind == EltwiseKind::Gelu) {
+      // One flat span of activations, so the pair that reads as "1 rows x N" is
+      // spelled as what it is: the elements one dispatch covers.
+      elt_notes_.push_back(dir + ": " +
+                           std::to_string(op->rows() * op->cols()) +
+                           " elements per dispatch");
+    } else {
+      elt_notes_.push_back(dir + ": " + std::to_string(op->rows()) + " rows x " +
+                           std::to_string(op->cols()));
+    }
+  };
+  open_elt("layn", "layernorm", EltwiseKind::LayerNorm, ln_design_, ln_);
+  open_elt("softm", "softmax", EltwiseKind::Softmax, softm_design_, softm_);
+  open_elt("gelu", "gelu", EltwiseKind::Gelu, gelu_design_, gelu_);
+
   const std::vector<app::StreamEntry> enc_streams =
       load_streams(*enc_design_, artifacts + "/gemm_rtp");
   const std::vector<app::StreamEntry> dec_streams =
@@ -199,6 +258,218 @@ Session::Session(npue::File &model, const std::string &model_name,
       static_cast<size_t>(find_op(enc_streams, "ffn_down", etiers[0]).slot);
   es.rows = find_op(enc_streams, "qkv", etiers[0]).M;
   enc_.set_streams(es);
+  // The status line's schedule, read off the loaded set rather than written
+  // down: a printed table that lists four encoder streams when the export
+  // carries five describes a design that is not the one loaded, which is worse
+  // than printing nothing.
+  enc_rows_ = es.rows;
+  for (const auto &s : enc_streams) enc_ops_.push_back(s.op);
+  // The decoder set repeats its seven streams once per batch tier, and the
+  // status line prints the tier row counts separately, so the NAMES go in once:
+  // printing seven names three times reads as twenty-one GEMMs per layer.
+  for (const auto &s : dec_streams) {
+    bool seen = false;
+    for (const auto &have : dec_ops_) seen = seen || have == s.op;
+    if (!seen) dec_ops_.push_back(s.op);
+  }
+  // The stacks take their LayerNorm (and GELU) from the array only after the
+  // designs are open, so a stack can never dispatch into a design that does not
+  // exist. Both stacks share the sessions' pool and the designs' single
+  // dispatch window: an STT request is serial, so the lock is not taken.
+  if (ln_) {
+    enc_.set_layernorm(ln_.get());
+    dec_.set_layernorm(ln_.get());
+  }
+  if (gelu_) {
+    enc_.set_gelu(gelu_.get());
+    dec_.set_gelu(gelu_.get());
+  }
+
+  // -- attention as two GEMMs, on the two sets' own attn_qk / attn_av streams.
+  // A set that does not carry them was exported without --npu-extra-ops attn,
+  // and asking for the array on it is refused by name rather than answered from
+  // the host -- the flag was in the command and nothing happened.
+  auto open_attn = [&](const std::string &code, const std::string &dir,
+                       npu::Design &design,
+                       const std::vector<app::StreamEntry> &streams,
+                       int64_t batch, int64_t rows_here,
+                       std::unique_ptr<NpuAttention> &out) {
+    if (!npu_ops.count(code)) return;
+    const app::StreamEntry *qk = nullptr;
+    const app::StreamEntry *av = nullptr;
+    for (const auto &s : streams) {
+      if (s.batch != batch) continue;
+      if (s.op == "attn_qk" && !qk) qk = &s;
+      if (s.op == "attn_av" && !av) av = &s;
+    }
+    if (!qk || !av)
+      throw std::runtime_error(
+          dir + " has no attn_qk/attn_av streams at batch tier " +
+          std::to_string(batch) +
+          ", so --npu-extra-ops attn cannot run attention on the array here. "
+          "Re-export this model with the code in the list: python "
+          "tools/export_gemm_rtp.py --target " + name_ + " --arch 1 "
+          "--npu-extra-ops attn");
+    if (qk->M != rows_here)
+      throw std::runtime_error(
+          dir + ": the attn streams compute " + std::to_string(qk->M) +
+          " rows per dispatch and the stack walks " + std::to_string(rows_here) +
+          ". The two have to be the same number -- the score chunk one dispatch "
+          "produces IS the query chunk the next GEMM reads. Re-export the set.");
+    if (qk->N != av->K)
+      throw std::runtime_error(
+          dir + ": attn_qk's N is " + std::to_string(qk->N) + " and attn_av's K "
+          "is " + std::to_string(av->K) +
+          ". The score chunk travels from one to the other as the A operand, so "
+          "the two numbers are the same padded n_kv and a set that says "
+          "otherwise is not one of ours.");
+    if (qk->K != geom_.head_dim)
+      throw std::runtime_error(
+          dir + ": attn_qk's K is " + std::to_string(qk->K) +
+          " and this container's head_dim is " + std::to_string(geom_.head_dim) +
+          ". The Q operand of a score is one head, so that K is the head width "
+          "and nothing else rounds it.");
+    if (av->N < geom_.head_dim)
+      throw std::runtime_error(
+          dir + ": attn_av's N is " + std::to_string(av->N) +
+          " and a head is " + std::to_string(geom_.head_dim) +
+          " wide. The design pads this one UP to its own N granularity, never "
+          "down to a head.");
+    if (softm_ && softm_->cols() != qk->N)
+      throw std::runtime_error(
+          dir + "/softmax has rows " + std::to_string(softm_->cols()) +
+          " wide and the attn streams' score row is " + std::to_string(qk->N) +
+          ". The softmax design has to be the width of the score row it is "
+          "handed, because it reduces along the whole row.");
+    out = std::make_unique<NpuAttention>(design, *pool_, qk->N, geom_.head_dim,
+                                        av->N);
+    out->set_streams(static_cast<size_t>(qk->slot),
+                     static_cast<size_t>(av->slot), qk->M);
+    out->set_softmax(softm_.get());
+    out->alloc_buffers();
+  };
+  open_attn("attn", artifacts + "/gemm_rtp", *enc_design_, enc_streams,
+            etiers[0], es.rows, enc_attn_);
+  // -- the mel filter bank as a GEMM --------------------------------------
+  // A stream of its own in the same set, and the bank is a weight, so this one
+  // stages once at session start like any other operand. A set without the
+  // stream is a refusal for the same reason as the attention's.
+  if (npu_ops.count("mproj")) {
+    const app::StreamEntry *mp = nullptr;
+    for (const auto &st : enc_streams)
+      if (st.op == "mel_proj" && st.batch == etiers[0]) mp = &st;
+    if (!mp)
+      throw std::runtime_error(
+          artifacts + "/gemm_rtp has no mel_proj stream at batch tier " +
+          std::to_string(etiers[0]) +
+          ", so --npu-extra-ops mproj cannot run the mel bank on the array "
+          "here. Re-export this model with the code in the list: python "
+          "tools/export_gemm_rtp.py --target " + name_ +
+          " --arch 1 --npu-extra-ops mproj");
+    if (mp->K < kMelBins || mp->N < geom_.mel_bins)
+      throw std::runtime_error(
+          artifacts + "/gemm_rtp: mel_proj is " + std::to_string(mp->K) + "x" +
+          std::to_string(mp->N) + " and this front end's bank is " +
+          std::to_string(kMelBins) + "x" + std::to_string(geom_.mel_bins) +
+          ". A design narrower than the tensor it multiplies would drop the top "
+          "frequency bins and the top mel bands, which is silence, not "
+          "rounding.");
+    mel_proj_ = std::make_unique<NpuMelProj>(*enc_design_, *pool_, kMelBins,
+                                              geom_.mel_bins);
+    mel_proj_->set_streams(static_cast<size_t>(mp->slot), mp->M);
+    mel_proj_->alloc_buffers(mel_filter_bank(static_cast<int>(geom_.mel_bins)));
+    mel_note_ = mel_proj_->note(kMelFrames);
+  }
+
+  // -- the 400-point transform as a GEMM ----------------------------------
+  // Same shape of argument as the mel bank: a stream in the same set, a weight
+  // staged once, and a refusal by name when the set does not carry the stream.
+  if (npu_ops.count("fft")) {
+    const app::StreamEntry *df = nullptr;
+    for (const auto &st : enc_streams)
+      if (st.op == "dft400" && st.batch == etiers[0]) df = &st;
+    if (!df)
+      throw std::runtime_error(
+          artifacts + "/gemm_rtp has no dft400 stream at batch tier " +
+          std::to_string(etiers[0]) +
+          ", so --npu-extra-ops fft cannot run the transform on the array "
+          "here. Re-export this model with the code in the list: python "
+          "tools/export_gemm_rtp.py --target " + name_ +
+          " --arch 1 --npu-extra-ops fft");
+    if (df->K < kNfft)
+      throw std::runtime_error(
+          artifacts + "/gemm_rtp: dft400's K is " + std::to_string(df->K) +
+          " and a frame is " + std::to_string(kNfft) +
+          " samples. A narrower operand would transform a truncated frame, "
+          "which is a different spectrum.");
+    fft_ = std::make_unique<NpuFft>(*enc_design_, *pool_, kNfft, kMelBins);
+    fft_->set_streams(static_cast<size_t>(df->slot), df->M);
+    fft_->alloc_buffers();
+    fft_note_ = fft_->note(kMelFrames);
+  }
+
+  if (enc_attn_) {
+    enc_.set_attention(enc_attn_.get());
+    attn_note_ = enc_attn_->note(geom_.max_seq, geom_.heads, geom_.enc_layers);
+  }
+  {
+    std::vector<int64_t> rows;
+    for (int64_t b : tiers_of(dec_streams))
+      rows.push_back(find_op(dec_streams, "self_qkv", b).M);
+    dec_tier_rows_ = rows;
+  }
+
+  // -- the audio front end, on the encoder set's OWN [rows, d, d] stream
+  //
+  // attn_out is a context-by-out_proj GEMM of exactly the shape a convolution
+  // needs -- M rows, K = d_model, N = d_model -- so conv1 and conv2 run on its
+  // instruction stream with no new export. A set that does not have one is not
+  // this architecture's: the front end then stays on the host, and a request
+  // that asked for the array is refused by name rather than answered from the
+  // host (see maybe_stt_mode).
+  conv_note_ = "this design set has no [rows, d, d] stream to run them on";
+  {
+    const app::StreamEntry *gemm_stream = nullptr;
+    for (const auto &s : enc_streams)
+      if (s.K == geom_.d_model && s.N == geom_.d_model) {
+        gemm_stream = &s;
+        break;
+      }
+    if (gemm_stream) {
+      conv_gemm_ = std::make_unique<NpuGemm>(*enc_design_, *pool_);
+      conv_gemm_->alloc_buffers();
+      conv1_ = std::make_unique<NpuConv1d>(
+          *enc_design_, *pool_, *conv_gemm_,
+          static_cast<size_t>(gemm_stream->slot), gemm_stream->M,
+          gemm_stream->K, gemm_stream->N);
+      conv2_ = std::make_unique<NpuConv1d>(
+          *enc_design_, *pool_, *conv_gemm_,
+          static_cast<size_t>(gemm_stream->slot), gemm_stream->M,
+          gemm_stream->K, gemm_stream->N);
+      conv1_->stage("frontend.conv1",
+                    model_.raw("frontend.conv1.weight").as<float>(),
+                    model_.raw("frontend.conv1.bias").as<float>(),
+                    geom_.mel_bins, geom_.d_model, 3);
+      conv2_->stage("frontend.conv2",
+                    model_.raw("frontend.conv2.weight").as<float>(),
+                    model_.raw("frontend.conv2.bias").as<float>(),
+                    geom_.d_model, geom_.d_model, 3);
+      // Per WINDOW, not "so far": the status line prints before the first
+      // transcription, so a running counter reads as zero and says nothing
+      // about what a request will cost. This one is a fact about the geometry.
+      const int64_t rows = gemm_stream->M;
+      const int64_t conv1_disp =
+          (kMelFrames + rows - 1) / rows * conv1_->k_blocks();
+      const int64_t conv2_disp =
+          (kEncoderPositions + rows - 1) / rows * conv2_->k_blocks();
+      conv_note_ = gemm_stream->op + " stream, K = N = " +
+                   std::to_string(gemm_stream->K) + ", M = " +
+                   std::to_string(rows) + ", " +
+                   std::to_string(conv1_->k_blocks()) + "+" +
+                   std::to_string(conv2_->k_blocks()) + " K blocks, " +
+                   std::to_string(conv1_disp + conv2_disp) +
+                   " dispatches per window";    }
+  }
 
   // -- the decoder: every tier, plus which one a step and which one the
   //    cross-attention prefill uses
@@ -224,6 +495,76 @@ Session::Session(npue::File &model, const std::string &model_name,
   // it runs in the widest. Both are the same trade the gate measures.
   dec_.set_step_tier(dtiers.front());
   dec_.set_prefill_tier(dtiers.back());
+  // The decoder attends only at the STEP tier: its cross-attention prefill is a
+  // GEMM over the encoder output, and a step is one query row, so the tier the
+  // step uses is the only one whose attn streams are ever dispatched.
+  {
+    const app::StreamEntry *sq = nullptr;
+    for (const auto &s : dec_streams)
+      if (s.op == "self_qkv" && s.batch == dtiers.front()) sq = &s;
+    if (sq)
+      open_attn("attn", artifacts + "/gemm_rtp_dec", *dec_design_, dec_streams,
+                dtiers.front(), sq->M, dec_attn_);
+  }
+  if (dec_attn_) dec_.set_attention(dec_attn_.get());
+
+  // -- the vocabulary projection, in chunks, on the decoder set -------------
+  // At the STEP tier, which is the only place the projection runs. The chunk
+  // count and width come from the set's own logits_i streams, and the container's
+  // vocab_size has to FIT them: a container with more ids than the streams cover
+  // would silently lose the tail of the vocabulary, which is a plausible-looking
+  // transcript of a truncated model.
+  if (npu_ops.count("logit")) {
+    const app::StreamEntry *first = nullptr;
+    for (const auto &st : dec_streams)
+      if (st.batch == dtiers.front() && st.op.rfind("logits_", 0) == 0) {
+        if (!first || st.slot < first->slot) first = &st;
+      }
+    if (!first)
+      throw std::runtime_error(
+          artifacts + "/gemm_rtp_dec has no logits_i streams at batch tier " +
+          std::to_string(dtiers.front()) +
+          ", so --npu-extra-ops logit cannot run the projection on the array. "
+          "Re-export this model with the code in the list: python "
+          "tools/export_gemm_rtp.py --target " + name_ +
+          " --arch 1 --npu-extra-ops logit");
+    std::vector<size_t> lslots;
+    int64_t chunk_n = 0;
+    for (const auto &st : dec_streams) {
+      if (st.batch != dtiers.front() || st.op.rfind("logits_", 0) != 0) continue;
+      if (st.K != geom_.d_model)
+        throw std::runtime_error(
+            artifacts + "/gemm_rtp_dec: a logits stream's K is " +
+            std::to_string(st.K) + " and d_model is " +
+            std::to_string(geom_.d_model));
+      if (chunk_n && st.N != chunk_n)
+        throw std::runtime_error(
+            artifacts + "/gemm_rtp_dec: the logits streams are " +
+            std::to_string(chunk_n) + " and " + std::to_string(st.N) +
+            " columns wide. The vocabulary is cut into equal chunks, and a set "
+            "whose chunks differ is not one of ours.");
+      chunk_n = st.N;
+      lslots.push_back(static_cast<size_t>(st.slot));
+    }
+    std::sort(lslots.begin(), lslots.end());
+    const int64_t cover = static_cast<int64_t>(lslots.size()) * chunk_n;
+    if (cover < geom_.vocab)
+      throw std::runtime_error(
+          artifacts + "/gemm_rtp_dec: " + std::to_string(lslots.size()) +
+          " chunks of " + std::to_string(chunk_n) + " cover " +
+          std::to_string(cover) + " ids and this container's vocabulary is " +
+          std::to_string(geom_.vocab) +
+          ". The last ids would have no operand and the argmax would never see "
+          "them. Re-export the set for this container.");
+    logit_ = std::make_unique<NpuLogits>(*dec_design_, *pool_, geom_.d_model,
+                                         geom_.vocab,
+                                         static_cast<int>(lslots.size()));
+    logit_->set_design(dec_design_.get());
+    logit_->set_streams(lslots, first->M, chunk_n);
+    logit_->alloc_buffers(model_.raw("decoder.embed_tokens").as<float>());
+    logit_note_ = logit_->note();
+    dec_.set_logits(logit_.get());
+  }
 
   enc_.stage_all();
   dec_.stage_all();
@@ -271,16 +612,63 @@ Segment Session::run_window(const std::vector<float> &samples, int64_t start,
   const std::vector<float> window(samples.begin() + static_cast<long>(start),
                                   samples.begin() + static_cast<long>(end));
   const double t_mel0 = app::now_s();
-  const MelSpec mel = log_mel_30s(window, static_cast<int>(geom_.mel_bins),
-                                  nullptr, pool_.get());
+  // The front end in three steps, because the middle one can be a GEMM: the
+  // power spectrum, then the mel bank, then the floor. With no mel_proj stream
+  // the bank is the host's and the three steps are the same arithmetic in the
+  // same order -- the split is a scheduling seam, not a second implementation.
+  MelSpec mel;
+  if (mel_proj_ || fft_) {
+    // Two of the three front-end steps on the array, in the order they depend on
+    // each other: the transform produces the power spectrum, the bank projects
+    // it. Either one alone is a valid request, and with neither the whole thing
+    // is the host's -- the same arithmetic in the same order either way.
+    std::vector<float> power;
+    if (fft_) {
+      const std::vector<float> fr =
+          windowed_frames_30s(window, static_cast<int>(geom_.mel_bins), nullptr,
+                              pool_.get());
+      power.assign(static_cast<size_t>(kMelBins) * kMelFrames, 0.0f);
+      fft_->run(fr, kMelFrames, power.data());
+    } else {
+      power = power_30s(window, static_cast<int>(geom_.mel_bins), nullptr,
+                        pool_.get());
+    }
+    std::vector<float> projected;
+    if (mel_proj_) {
+      mel.n_mels = static_cast<int>(geom_.mel_bins);
+      mel.frames = kMelFrames;
+      mel.data.assign(static_cast<size_t>(mel.n_mels) * kMelFrames, 0.0f);
+      mel_proj_->run(power, kMelFrames, mel.data.data());
+      // The GEMM produces the bank product; the log is a per-element map and
+      // stays here. Without this line the tensor reaching mel_floor_scale is a
+      // projection (values of 10^1, not 10^0) and the floor is applied to the
+      // wrong scale -- a plausible-looking spectrogram off by a factor of ten in
+      // the log, which the encoder absorbs as a shifted input.
+      mel_log_inplace(mel.data, pool_.get());
+    } else {
+      project_and_log(power, static_cast<int>(geom_.mel_bins), pool_.get(),
+                      projected);
+      mel.n_mels = static_cast<int>(geom_.mel_bins);
+      mel.frames = kMelFrames;
+      mel.data = std::move(projected);
+    }
+    mel_floor_scale(mel.data);
+  } else {
+    mel = log_mel_30s(window, static_cast<int>(geom_.mel_bins), nullptr,
+                      pool_.get());
+  }
   const double t_conv0 = app::now_s();
   timing.mel_seconds += t_conv0 - t_mel0;
-  const std::vector<float> conv = conv_front_end(
-      mel, model_.raw("frontend.conv1.weight").as<float>(),
-      model_.raw("frontend.conv1.bias").as<float>(),
-      model_.raw("frontend.conv2.weight").as<float>(),
-      model_.raw("frontend.conv2.bias").as<float>(),
-      static_cast<int>(geom_.d_model), pool_.get());
+  const std::vector<float> conv =
+      (o.conv_npu && conv1_)
+          ? conv_front_end_npu(mel, *conv1_, *conv2_,
+                               static_cast<int>(geom_.d_model))
+          : conv_front_end(
+                mel, model_.raw("frontend.conv1.weight").as<float>(),
+                model_.raw("frontend.conv1.bias").as<float>(),
+                model_.raw("frontend.conv2.weight").as<float>(),
+                model_.raw("frontend.conv2.bias").as<float>(),
+                static_cast<int>(geom_.d_model), pool_.get());
   const double t_enc0 = app::now_s();
   timing.conv_seconds += t_enc0 - t_conv0;   // t_conv0 was the mel's end
   const std::vector<float> hidden = enc_.run(conv, kEncoderPositions);

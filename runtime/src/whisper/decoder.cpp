@@ -31,6 +31,23 @@ const DecoderTier &WhisperDecoder::tier(int64_t batch) const {
                            std::to_string(tiers_.size()) + " tiers)");
 }
 
+void WhisperDecoder::norm_rows(float *x, int64_t n, const float *gamma,
+                               const float *beta, size_t slot) {
+  if (!ln_) {
+    layernorm_rows(x, n, geom_.d_model, gamma, beta, geom_.ln_eps, pool_);
+    return;
+  }
+  ln_->layernorm(x, n, slot);
+}
+
+void WhisperDecoder::gelu_rows(float *x, int64_t n) {
+  if (!gelu_) {
+    gelu_erf_inplace(x, static_cast<size_t>(n), pool_);
+    return;
+  }
+  gelu_->gelu(x, n);
+}
+
 void WhisperDecoder::set_step_tier(int64_t batch) {
   step_batch_ = batch;
   (void)tier(batch);
@@ -59,6 +76,17 @@ size_t WhisperDecoder::stage_all() {
     beta.push_back(model_.raw(name + ".bias").as<float>());
     bytes += 2 * static_cast<size_t>(geom_.d_model) * sizeof(float);
   };
+  // gamma|beta as ONE fp32 buffer of 2*d for the LayerNorm design: a core tile
+  // has two input DMA channels, and two operands would need three.
+  auto norm_stage = [&](const std::string &name, std::vector<size_t> &slots) {
+    std::vector<float> gb(2 * static_cast<size_t>(geom_.d_model));
+    const float *w = model_.raw(name + ".weight").as<float>();
+    const float *b = model_.raw(name + ".bias").as<float>();
+    std::copy(w, w + geom_.d_model, gb.begin());
+    std::copy(b, b + geom_.d_model, gb.begin() + geom_.d_model);
+    slots.push_back(ln_->stage_params(gb));
+    bytes += gb.size() * sizeof(float);
+  };
   for (int64_t L = 0; L < geom_.dec_layers; ++L) {
     const std::string p = "decoder.layers." + std::to_string(L) + ".";
     operand(p + "self_qkv", s_sqkv, b_sqkv);
@@ -71,11 +99,30 @@ size_t WhisperDecoder::stage_all() {
     norm(p + "ln1", ln1_gamma, ln1_beta);
     norm(p + "ln2", ln2_gamma, ln2_beta);
     norm(p + "ln3", ln3_gamma, ln3_beta);
+    if (ln_) {
+      norm_stage(p + "ln1", s_ln1);
+      norm_stage(p + "ln2", s_ln2);
+      norm_stage(p + "ln3", s_ln3);
+    }
   }
   dec_pos_ = model_.raw("decoder.embed_positions").as<float>();
   const std::string f = "decoder.layer_norm.";
   final_gamma_ = model_.raw(f + "weight").as<float>();
   final_beta_ = model_.raw(f + "bias").as<float>();
+  if (ln_) {
+    std::vector<size_t> one;
+    // The prefix WITHOUT its trailing dot: norm_stage appends ".weight", and
+    // "encoder.layer_norm." + ".weight" is a tensor this container has never
+    // heard of.
+    norm_stage("decoder.layer_norm", one);
+    s_ln_final = one.front();
+  } else {
+    // Sized either way: step() passes the slot as an argument and the host path
+    // ignores it, so an empty vector would be indexed out of bounds first.
+    s_ln1.assign(static_cast<size_t>(geom_.dec_layers), 0);
+    s_ln2.assign(static_cast<size_t>(geom_.dec_layers), 0);
+    s_ln3.assign(static_cast<size_t>(geom_.dec_layers), 0);
+  }
   embed_tokens_ = model_.raw("decoder.embed_tokens").as<float>();
   bytes += 2 * static_cast<size_t>(geom_.d_model) * sizeof(float) +
            static_cast<size_t>(geom_.vocab) * geom_.d_model * sizeof(float);
@@ -144,13 +191,19 @@ void WhisperDecoder::reset() {
 void WhisperDecoder::logits_from(const std::vector<float> &h,
                                  std::vector<float> *out, int32_t *argmax) {
   // The checkpoint has no proj_out: the logit matrix is the tied token
-  // embedding, so logits = h @ embed_tokens^T. Host, because a 51866 x 384
-  // matvec is 20 MFLOP -- nothing next to the 28 dispatches that produced h.
+  // embedding, so logits = h @ embed_tokens^T. 66 MB of weights are read for
+  // 66 MFLOP of work, which is why the HOST does it and why the array version
+  // (NpuLogits) is opt-in and no cheaper -- it moves the op, not the bandwidth.
+  //
+  // WHAT IS BELOW THE MATVEC IS THE SAME EITHER WAY: the policy's two lists, the
+  // argmax, and the tie-break towards the lower id. A caller reading `logits` and
+  // the id the step chose must see the same numbers, and an argmax taken on the
+  // device while the policy was applied on the host would break exactly that.
   const int64_t d = geom_.d_model, vocab = geom_.vocab;
   const bool policy = has_suppression();
-  // The logits are materialised whenever anyone will look at them OR the
-  // policy has to be applied to them -- which is the point: the vector a caller
-  // sees and the id the step chose have to come from the same numbers.
+  // The vector is materialised whenever anyone will look at it OR the policy has
+  // to be applied to it -- which is the point: the vector a caller sees and the
+  // id the step chose have to come from the same numbers.
   std::vector<float> local;
   float *dst = nullptr;
   if (out) {
@@ -160,15 +213,23 @@ void WhisperDecoder::logits_from(const std::vector<float> &h,
     local.assign(static_cast<size_t>(vocab), 0.f);
     dst = local.data();
   }
+
   const float *hv = h.data();
   float best = 0.f;
   int32_t best_id = 0;
   bool have = false;
-  pool_.run([&](int w, int nw) {
-    float local_best = 0.f;
-    int32_t local_id = 0;
-    bool local_have = false;
-    for (int64_t v = w; v < vocab; v += nw) {
+
+  if (logit_) {
+    // The array needs somewhere to put the vector even when nobody asked for it:
+    // its chunks arrive one dispatch at a time, so there is no fused
+    // matvec-and-max to read them incrementally.
+    if (!dst) {
+      local.assign(static_cast<size_t>(vocab), 0.0f);
+      dst = local.data();
+    }
+    logit_->run(hv, dst);
+  } else if (dst) {
+    for (int64_t v = 0; v < vocab; ++v) {
       const float *e = embed_tokens_ + v * d;
       float acc = 0.f;
       int64_t j = 0;
@@ -179,31 +240,52 @@ void WhisperDecoder::logits_from(const std::vector<float> &h,
       acc = app::hsum256(a);
 #endif
       for (; j < d; ++j) acc += hv[j] * e[j];
-      if (dst) dst[v] = acc;
-      if (!local_have || acc > local_best) {
-        local_best = acc;
-        local_id = static_cast<int32_t>(v);
-        local_have = true;
+      dst[v] = acc;
+    }
+  } else {
+    // Nobody wants the vector and the policy is empty: the argmax alone, split
+    // over the pool, with the reduction below.
+    pool_.run([&](int w, int nw) {
+      float local_best = 0.f;
+      int32_t local_id = 0;
+      bool local_have = false;
+      for (int64_t v = w; v < vocab; v += nw) {
+        const float *e = embed_tokens_ + v * d;
+        float acc = 0.f;
+        int64_t j = 0;
+#if defined(__AVX2__)
+        __m256 a = _mm256_setzero_ps();
+        for (; j + 8 <= d; j += 8)
+          a = _mm256_fmadd_ps(_mm256_loadu_ps(hv + j), _mm256_loadu_ps(e + j), a);
+        acc = app::hsum256(a);
+#endif
+        for (; j < d; ++j) acc += hv[j] * e[j];
+        if (!local_have || acc > local_best) {
+          local_best = acc;
+          local_id = static_cast<int32_t>(v);
+          local_have = true;
+        }
       }
-    }
-    // Ties broken by the lower id, so the result does not depend on which
-    // worker got there first -- argmax is a function of the logits, not of the
-    // pool's schedule.
-    std::lock_guard<std::mutex> lk(argmax_mu_);
-    if (local_have && (!have || local_best > best ||
-                       (local_best == best && local_id < best_id))) {
-      best = local_best;
-      best_id = local_id;
-      have = true;
-    }
-  });
+      // Ties broken by the lower id, so the result does not depend on which
+      // worker got there first -- argmax is a function of the logits, not of the
+      // pool's schedule.
+      std::lock_guard<std::mutex> lk(argmax_mu_);
+      if (local_have && (!have || local_best > best ||
+                         (local_best == best && local_id < best_id))) {
+        best = local_best;
+        best_id = local_id;
+        have = true;
+      }
+    });
+  }
+
   if (dst) {
     if (policy) {
       // transformers installs TWO processors and they OVERLAP on the first
       // step: SuppressTokensLogitsProcessor(suppress_tokens) at every step,
       // and SuppressTokensAtBeginLogitsProcessor(begin_suppress_tokens) at the
-      // first generated step only. Applying only the begin list there -- which
-      // is the obvious reading of "begin" -- lets a token the full list forbids
+      // first generated step only. Applying only the begin list there -- which is
+      // the obvious reading of "begin" -- lets a token the full list forbids
       // win the first step: on a 3 s tone that is 50362 instead of 50259, and
       // the whole transcript after it is a different language. Applied to the
       // vector, not to the argmax, so that a caller reading `logits` sees
@@ -214,9 +296,6 @@ void WhisperDecoder::logits_from(const std::vector<float> &h,
         for (int32_t id : begin_suppress_)
           if (id >= 0 && id < vocab) dst[id] = -3.4e38f;
     }
-    best = 0.f;
-    best_id = 0;
-    have = false;
     for (int64_t v = 0; v < vocab; ++v) {
       const float x = dst[v];
       if (!have || x > best) {
@@ -271,49 +350,54 @@ int32_t WhisperDecoder::step(int32_t token, int64_t position,
   for (int64_t L = 0; L < geom_.dec_layers; ++L) {
     // ---- self-attention over the cache, one new row ----------------------
     norm = h;
-    layernorm_rows(norm.data(), 1, d, ln1_gamma[L], ln1_beta[L], geom_.ln_eps,
-                   pool_);
+    norm_rows(norm.data(), 1, ln1_gamma[L], ln1_beta[L], s_ln1[L]);
     g_.run(t.streams.self_qkv, norm.data(), 1, t.rows, d, s_sqkv[L], b_sqkv[L],
            3 * d, qkv.data());
     std::vector<float> &cache = self_kv_[L];
     cache.resize(static_cast<size_t>(n_cached_ + 1) * 2 * d);
     std::copy(qkv.begin() + d, qkv.begin() + 3 * d,
               cache.begin() + static_cast<long>(n_cached_ * 2 * d));
-    attention(qkv.data(), 3 * d, cache.data(), 2 * d, 1, n_cached_ + 1, d,
-              geom_.heads, geom_.head_dim, scale, ctx.data(), nullptr, pool_);
+    if (attn_)
+      attn_->run(qkv.data(), 3 * d, cache.data(), 2 * d, 1, n_cached_ + 1, d,
+                 scale, ctx.data());
+    else
+      attention(qkv.data(), 3 * d, cache.data(), 2 * d, 1, n_cached_ + 1, d,
+                geom_.heads, geom_.head_dim, scale, ctx.data(), nullptr, pool_);
     g_.run(t.streams.self_attn_out, ctx.data(), 1, t.rows, d, s_sao[L], b_sao[L],
            d, proj.data());
     for (int64_t j = 0; j < d; ++j) h[j] += proj[static_cast<size_t>(j)];
 
     // ---- cross-attention over the encoder output -------------------------
     norm = h;
-    layernorm_rows(norm.data(), 1, d, ln2_gamma[L], ln2_beta[L], geom_.ln_eps,
-                   pool_);
+    norm_rows(norm.data(), 1, ln2_gamma[L], ln2_beta[L], s_ln2[L]);
     g_.run(t.streams.cross_q, norm.data(), 1, t.rows, d, s_cq[L], b_cq[L], d,
            qkv.data());
     // The Q row is all this step needs from cross_q: its K|V half was folded
     // into a separate operand precisely so the two could be fed from different
     // A operands.
-    attention(qkv.data(), d, cross_kv_[L].data(), 2 * d, 1, n_src_, d,
-              geom_.heads, geom_.head_dim, scale, ctx.data(), nullptr, pool_);
+    if (attn_)
+      attn_->run(qkv.data(), d, cross_kv_[L].data(), 2 * d, 1, n_src_, d, scale,
+                 ctx.data());
+    else
+      attention(qkv.data(), d, cross_kv_[L].data(), 2 * d, 1, n_src_, d,
+                geom_.heads, geom_.head_dim, scale, ctx.data(), nullptr, pool_);
     g_.run(t.streams.cross_attn_out, ctx.data(), 1, t.rows, d, s_cao[L],
            b_cao[L], d, proj.data());
     for (int64_t j = 0; j < d; ++j) h[j] += proj[static_cast<size_t>(j)];
 
     // ---- feed-forward -----------------------------------------------------
     norm = h;
-    layernorm_rows(norm.data(), 1, d, ln3_gamma[L], ln3_beta[L], geom_.ln_eps,
-                   pool_);
+    norm_rows(norm.data(), 1, ln3_gamma[L], ln3_beta[L], s_ln3[L]);
     g_.run(t.streams.ffn_up, norm.data(), 1, t.rows, d, s_fu[L], b_fu[L], inter,
            up.data());
-    gelu_erf_inplace(up.data(), static_cast<size_t>(inter), pool_);
+    gelu_rows(up.data(), inter);
     g_.run(t.streams.ffn_down, up.data(), 1, t.rows, inter, s_fd[L], b_fd[L], d,
            down.data());
     for (int64_t j = 0; j < d; ++j) h[j] += down[static_cast<size_t>(j)];
   }
 
   ++n_cached_;
-  layernorm_rows(h.data(), 1, d, final_gamma_, final_beta_, geom_.ln_eps, pool_);
+  norm_rows(h.data(), 1, final_gamma_, final_beta_, s_ln_final);
   int32_t next = 0;
   logits_from(h, logits, &next);
   if (hidden) *hidden = h;

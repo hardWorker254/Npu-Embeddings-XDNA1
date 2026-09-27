@@ -41,6 +41,7 @@
 
 #include "common/design_selection.hpp"
 #include "common/host_kernels.hpp"
+#include "common/npu_ops_flag.hpp"   // parse_npu_ops, the one --npu-extra-ops parser
 #include "runtime/model.hpp"
 #include "server/stt_backend.hpp"
 #include "whisper/transcribe.hpp"
@@ -64,6 +65,7 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
   // The same removal check the embedding path runs: a stale --npu-eltwise must
   // not be silently ignored just because this container never used it.
   refuse_removed_op_flags(argc, argv);
+  refuse_exporter_only_flags(argc, argv);
   auto flag = [&](const char *name) {
     for (int i = 1; i < argc - 1; ++i)
       if (std::string(argv[i]) == name) return std::string(argv[i + 1]);
@@ -116,10 +118,44 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
     opts.chunk_seconds = std::atoi(flag("--chunk-seconds").c_str());
   if (has("--stride-seconds"))
     opts.stride_seconds = std::atoi(flag("--stride-seconds").c_str());
+  // conv1/conv2 on the array or on the host, from the one flag that already
+  // answers "which ops go on the array". The host is the fp32 reference the
+  // features gate holds against, so it stays reachable with `--npu-extra-ops ""`.
+  // The whole SET is parsed once, here, and handed to the session: the codes
+  // that name a design directory decide which xclbins exist, and a design cannot
+  // be opened after the stacks have been built.
+  const std::set<std::string> npu_ops = [&] {
+    std::string listing;
+    for (int i = 1; i < argc - 1; ++i)
+      if (std::string(argv[i]) == "--npu-extra-ops") listing = argv[i + 1];
+    return app::parse_npu_ops(listing);
+  }();
+  opts.conv_npu = npu_ops.count("conv") > 0;
   const bool json = has("--json");
 
+  // The context budget, BEFORE the session builds anything. Two design sets are
+  // the floor here, and every elementwise op on the array is one more xclbin and
+  // one more hw_context: the npu1 driver measured six, so a run that asks for
+  // four elementwise ops on top of the two GEMM sets cannot be served and has to
+  // be told so while there is still nothing to unwind. The embedding path has
+  // always done this; the STT path did not, and the first symptom was a
+  // hw_context failing to open instead of a sentence saying which of the two it
+  // was.
+  {
+    int want = 2;   // gemm_rtp and gemm_rtp_dec
+    for (const auto &op : app::npu_op_table())
+      if (op.design[0] && npu_ops.count(op.code)) ++want;
+    if (want > 1 &&
+        !npu::require_context_budget(npu::survey_contexts(), want,
+                                     has("--allow-contention"), stderr))
+      throw std::runtime_error(
+          "NPU context budget: refusing to load " + std::to_string(want) +
+          " concurrent hw_context(s) -- see the report above (close the other "
+          "process, or pass --allow-contention)");
+  }
+
   const double t0 = app::now_s();
-  npue::whisper::Session session(probe, model_name, art, threads);
+  npue::whisper::Session session(probe, model_name, art, threads, npu_ops);
   const double t_setup = app::now_s() - t0;
   const auto &g = session.geometry();
 
@@ -136,6 +172,134 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
                static_cast<long long>(g.vocab));
   std::fprintf(stderr, "  designs    %s\n", art.c_str());
   std::fprintf(stderr, "  datapath   %s\n", session.datapath_note().c_str());
+  // What ran, not what could: the design set's capability is one thing and this
+  // request's --npu-extra-ops is another, and a status line that reports the
+  // capability is a status line that says "npu" to a run that used the host.
+  // Asking for the array on a set that cannot provide it is refused, because
+  // answering from the host instead is the "the flag was there and nothing
+  // happened" failure this project treats as worst.
+  if (opts.conv_npu && !session.conv_available())
+    throw std::runtime_error(
+        "--npu-extra-ops conv asked for conv1/conv2 on the array, but " + art +
+        "/gemm_rtp has no [rows, d, d] stream to run them on: "
+        + session.conv_device() +
+        ". Re-export the encoder set with tools/export_gemm_rtp.py, or drop "
+        "conv from --npu-extra-ops and run the host front end.");
+
+  // WHERE EVERY OPERATION RUNS, and why. One row per op, the device it runs on,
+  // and the thing that decides it -- the stream that exists, or the reason one
+  // does not. A status block that only says "conv: npu" answers a question
+  // nobody asked and hides the six ops that did not move; this one is the
+  // README's "what runs where" table, computed rather than transcribed.
+  //
+  // The NPU rows are read off the LOADED design set (session.enc_stream_ops()
+  // and friends), so the table cannot describe an export other than the one
+  // running. The host rows are this build's own schedule: there is no design
+  // for them to be read from, and a design set that had one would say so in
+  // --npu-extra-ops, which is the same flag that moved conv.
+  {
+    auto joined = [](const std::vector<std::string> &v) {
+      std::string s;
+      for (const auto &x : v) {
+        if (!s.empty()) s += ", ";
+        s += x;
+      }
+      return s;
+    };
+    const int64_t d = g.d_model;
+    const int64_t n_pos = g.max_seq;
+    // The score matrix attention allocates per window, in MB. It is the one
+    // host cost that scales with the model's WIDTH as well as its length, and
+    // it is why attention is a host pass at this size.
+    const double score_mb = static_cast<double>(n_pos) * g.heads * n_pos *
+                            sizeof(float) / (1024.0 * 1024.0);
+    std::fprintf(stderr, "  ops        (npu = dispatched, host = this process)\n");
+    // The front end in two rows, because its two halves are separable: the
+    // transform is one code and the bank another, and a combined "log-mel +
+    // slaney bank: host" line is what hid two of the ops that HAD moved.
+    {
+      const bool on = session.on_array("fft");
+      std::fprintf(stderr, "             %-26s %-5s %s\n", "transform, 400 points",
+                   on ? "npu" : "host",
+                   on ? session.fft_note().c_str()
+                      : "3001 mixed-radix transforms of 400 points, fp64");
+    }
+    {
+      const bool on = session.on_array("mproj");
+      std::fprintf(stderr, "             %-26s %-5s %s\n", "slaney mel bank",
+                   on ? "npu" : "host",
+                   on ? session.mel_note().c_str()
+                      : "the checkpoint's own filter bank, 201 x n_mels");
+    }
+    if (opts.conv_npu) {
+      std::fprintf(stderr, "             %-26s %-5s %s\n", "conv1, conv2", "npu",
+                   session.conv_device().c_str());
+    } else {
+      std::fprintf(stderr,
+                   "             %-26s %-5s %s\n", "conv1, conv2", "host",
+                   "fp32, d^2 MACs; --npu-extra-ops conv sends it to the array");
+    }
+    std::fprintf(stderr, "             %-26s %-5s %s\n",
+                 ("encoder GEMMs, " + std::to_string(g.enc_layers) + " layers")
+                     .c_str(),
+                 "npu", (joined(session.enc_stream_ops()) + ", M=" +
+                         std::to_string(session.enc_rows()) + " rows")
+                            .c_str());
+    std::string tiers;
+    for (int64_t r : session.dec_tier_rows()) {
+      if (!tiers.empty()) tiers += "/";
+      tiers += std::to_string(r);
+    }
+    std::fprintf(stderr, "             %-26s %-5s %s\n",
+                 ("decoder GEMMs, " + std::to_string(g.dec_layers) + " layers")
+                     .c_str(),
+                 "npu", (joined(session.dec_stream_ops()) + ", M=" + tiers +
+                         " rows per tier")
+                            .c_str());
+    // LayerNorm, GELU and softmax, one row each: a combined "layer_norm, gelu,
+    // softmax  host" line is what hid two of the three that HAD moved, and the
+    // whole point of the block is that every op is accounted for.
+    auto elt_row = [&](const char *label, const char *code,
+                       const char *dir) {
+      const bool on = session.on_array(code);
+      std::string why;
+      if (on) {
+        for (const auto &n : session.elt_notes())
+          if (n.rfind(dir, 0) == 0) why = n;
+      } else {
+        why = std::string("fp32 on this process; --npu-extra-ops ") + code +
+              " sends it to the array";
+      }
+      std::fprintf(stderr, "             %-26s %-5s %s\n", label,
+                   on ? "npu" : "host", why.c_str());
+    };
+    elt_row("layer_norm", "layn", "layernorm");
+    elt_row("gelu", "gelu", "gelu");
+    elt_row("softmax", "softm", "softmax");
+    {
+      const std::string attn_why =
+          session.on_array("attn")
+              ? "QK^T and softmax.V as GEMMs on the attn_qk/attn_av streams"
+              : "one score row at a time: " + std::to_string(n_pos) + " x " +
+                    std::to_string(g.heads) + " x " + std::to_string(n_pos) +
+                    " = " + std::to_string(static_cast<int>(score_mb)) +
+                    " MB at full length";
+      std::fprintf(stderr, "             %-26s %-5s %s\n", "attention",
+                   session.on_array("attn") ? "npu" : "host", attn_why.c_str());
+    }
+    {
+      const bool on = session.on_array("logit");
+      std::fprintf(stderr, "             %-26s %-5s %s\n", "logits + argmax",
+                   on ? "npu" : "host",
+                   on ? session.logit_note().c_str()
+                      : ("tied embedding, " + std::to_string(g.vocab) + " x " +
+                         std::to_string(d) + " on the last row only")
+                            .c_str());
+    }
+    std::fprintf(stderr, "             %-26s %-5s %s\n", "decode + merge", "host",
+                 "the container's own BPE table; the window merge is "
+                 "transformers' longest-common-sequence over ids");
+  }
   std::fprintf(stderr, "  setup      %.2f s (device, two design sets, weights "
                        "staged on it)\n", t_setup);
   std::fprintf(stderr, "  language   %s%s\n", opts.language.c_str(),

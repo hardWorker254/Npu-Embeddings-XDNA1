@@ -60,6 +60,7 @@ void forward_common(const char *const *argv, int argc,
       std::vector<std::string> args;
       for (int i = 0; i < argc; ++i) args.emplace_back(argv[i]);
       refuse_removed_op_flags(args);
+      refuse_exporter_only_flags(args);
     }
     for (int i = 3; i < argc; ++i) {
         const std::string a = argv[i];
@@ -82,7 +83,7 @@ void forward_common(const char *const *argv, int argc,
             store.push_back(a);
         else if ((a == "--threads" || a == "--pipeline" || a == "--prefix" ||
                   a == "--artifacts" || a == "--dev" || a == "--bo-mode" ||
-                  a == "--npu-ops" ||
+                  a == "--npu-extra-ops" ||
                   a == "--language" || a == "--task" || a == "--max-new" ||
                   a == "--chunk-seconds" || a == "--stride-seconds") &&
                  i + 1 < argc) {

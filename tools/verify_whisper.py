@@ -114,7 +114,8 @@ def run_ours(exe, name, audio, args) -> tuple[str, float, dict]:
     p = subprocess.run(
         [str(exe), "transcribe", name, str(audio), "--language", LANG,
          "--artifacts", str(args.artifacts), "--json",
-         "--threads", str(args.threads)],
+         "--threads", str(args.threads)]
+        + (["--npu-extra-ops", args.npu_ops] if args.npu_ops else []),
         capture_output=True, text=True, timeout=3600)
     dt = time.monotonic() - t0
     if p.returncode != 0:
@@ -168,6 +169,14 @@ def main() -> int:
     ap.add_argument("--corpus", type=Path,
                     help="a directory: every *.wav with a *.txt of the same stem")
     ap.add_argument("--threads", type=int, default=16)
+    ap.add_argument("--npu-ops", default="",
+                    help="op codes for the runtime's --npu-extra-ops, so this "
+                         "gate can be run with the audio front end on the array "
+                         "(conv) and check that the transcript does not move. "
+                         "The gate's own flag is short because the runtime's is "
+                         "long and the two are not the same thing. Empty: the "
+                         "host front end, which is what every other run of this "
+                         "gate means")
     ap.add_argument("--max-wer", type=float, default=0.20,
                     help="fail above this WER (default %(default)s). The point "
                          "is not the threshold but the DIFFERENCE from "

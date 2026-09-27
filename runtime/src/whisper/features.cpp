@@ -176,8 +176,18 @@ std::vector<double> mel_filter_bank(int n_mels, int sample_rate, int n_fft) {
   return bank;
 }
 
-MelSpec log_mel_30s(const std::vector<float> &samples, int n_mels,
-                    int64_t *samples_used, app::Pool *pool) {
+// The WINDOWED FRAMES, (frames, kNfft) row-major, one frame per row, last
+// frame dropped. Row-major by frame because that is the GEMM's A operand: the
+// 400-point transform reads a frame as one contiguous row, and transposing it
+// here would be the only data movement the front end needs on either path.
+//
+// Split out of power_30s for the same reason log_mel_30s is split three ways: the
+// transform is a separable step, and on the array it is a different algorithm
+// (a direct transform against a precomputed matrix) rather than a different
+// place to run the same one.
+std::vector<float> windowed_frames_30s(const std::vector<float> &samples,
+                                       int n_mels, int64_t *samples_used,
+                                       app::Pool *pool) {
   // 1. 30 s of audio, zero-padded. The encoder is fixed at 1500 positions, so
   //    a short file is padded rather than given a shorter feature tensor.
   const size_t n_used = std::min(samples.size(),
@@ -206,15 +216,9 @@ MelSpec log_mel_30s(const std::vector<float> &samples, int n_mels,
     window[static_cast<size_t>(n)] =
         0.5 - 0.5 * std::cos(2.0 * kPi * n / kNfft);
 
-  const std::vector<double> bank = mel_filter_bank(n_mels);
-  const int n_bins = kNfft / 2 + 1;
-
-  // 4. frames -> power spectrum -> mel -> log10, one frame at a time so the
-  //    whole (n_mels, frames) matrix is never resident twice.
-  MelSpec out;
-  out.n_mels = n_mels;
-  out.frames = kMelFrames;
-  out.data.assign(static_cast<size_t>(n_mels) * kMelFrames, 0.0f);
+  // 4. frames -> windowed samples, one frame at a time so the whole (frames,
+  //    400) matrix is never resident twice.
+  std::vector<float> fr(static_cast<size_t>(kMelFrames) * kNfft, 0.0f);
 
   // Frames are independent too, and each writes a disjoint span, so the same
   // channel split applies. The floor's global maximum is a separate pass over
@@ -238,37 +242,148 @@ MelSpec log_mel_30s(const std::vector<float> &samples, int n_mels,
     // corruption rather than a wrong number, so the shape of the scratch is
     // part of the contract here.
     std::vector<double> frame(static_cast<size_t>(kNfft));
-    std::vector<double> spec(static_cast<size_t>(n_bins));
-    std::vector<double> mel(static_cast<size_t>(n_mels));
     for (int t = t_lo; t < t_hi; ++t) {
       const double *src = padded.data() + static_cast<size_t>(t) * kHopLength;
       for (int i = 0; i < kNfft; ++i)
         frame[static_cast<size_t>(i)] = src[i] * window[static_cast<size_t>(i)];
+      if (t == num_frames - 1) continue;  // the frame Whisper drops
+      float *dst = fr.data() + static_cast<size_t>(t) * kNfft;
+      for (int i = 0; i < kNfft; ++i) dst[i] = static_cast<float>(frame[i]);
+    }
+  });
+  (void)n_mels;
+  return fr;
+}
+
+// The (n_bins, frames) POWER spectrum, channels-first, one frame per column.
+//
+// The host's transform: the exact-size mixed-radix Cooley-Tukey above, in fp64.
+// The array's version of this step is a GEMM against a precomputed DFT matrix,
+// which computes the same function to bf16 -- see whisper/fft_npu.hpp.
+std::vector<float> power_30s(const std::vector<float> &samples, int n_mels,
+                             int64_t *samples_used, app::Pool *pool) {
+  const std::vector<float> fr =
+      windowed_frames_30s(samples, n_mels, samples_used, pool);
+  const int n_bins = kNfft / 2 + 1;
+  std::vector<float> power(static_cast<size_t>(n_bins) * kMelFrames, 0.0f);
+  auto frames_range = [&](const std::function<void(int, int)> &body) {
+    if (!pool || pool->size() <= 1) {
+      body(0, kMelFrames);
+      return;
+    }
+    pool->run([&](int w, int nworkers) {
+      const int chunk = (kMelFrames + nworkers - 1) / nworkers;
+      body(std::min(kMelFrames, chunk * w),
+           std::min(kMelFrames, chunk * (w + 1)));
+    });
+  };
+  frames_range([&](int t_lo, int t_hi) {
+    std::vector<double> frame(static_cast<size_t>(kNfft));
+    std::vector<double> spec(static_cast<size_t>(n_bins));
+    for (int t = t_lo; t < t_hi; ++t) {
+      for (int i = 0; i < kNfft; ++i)
+        frame[static_cast<size_t>(i)] =
+            static_cast<double>(fr[static_cast<size_t>(t) * kNfft + i]);
       spec = power_spectrum(frame.data(), kNfft);
+      for (int k = 0; k < n_bins; ++k)
+        power[static_cast<size_t>(k) * kMelFrames + t] =
+            static_cast<float>(spec[static_cast<size_t>(k)]);
+    }
+  });
+  return power;
+}
+
+// log10 of max(x, 1e-10), in place.
+//
+// Its own function because the array's mel path needs it: the bank projection
+// is a GEMM there and the logarithm is not a matrix, so the two halves of
+// project_and_log are taken from different places -- and the log is a
+// PER-ELEMENT map, so it is the same numbers on both paths by construction
+// rather than by two implementations agreeing.
+void mel_log_inplace(std::vector<float> &v, app::Pool *pool) {
+  auto range = [&](const std::function<void(size_t, size_t)> &body) {
+    if (!pool || pool->size() <= 1) {
+      body(0, v.size());
+      return;
+    }
+    pool->run([&](int w, int nworkers) {
+      const size_t chunk = (v.size() + nworkers - 1) / nworkers;
+      body(std::min(v.size(), chunk * static_cast<size_t>(w)),
+           std::min(v.size(), chunk * static_cast<size_t>(w + 1)));
+    });
+  };
+  range([&](size_t lo, size_t hi) {
+    // The 1e-10 floor BEFORE the log, not after: log10(0) is -inf, and an -inf in
+    // the tensor poisons the global max on the way to mel_floor_scale.
+    for (size_t i = lo; i < hi; ++i)
+      v[i] = static_cast<float>(
+          std::log10(std::max(static_cast<double>(v[i]), 1e-10)));
+  });
+}
+
+// The slaney bank over the power spectrum, then log10, in that order. This is
+// the HOST projection; the array's is a GEMM over the same bank matrix, and the
+// two are interchangeable only because the order is written down here once.
+void project_and_log(const std::vector<float> &power, int n_mels,
+                     app::Pool *pool, std::vector<float> &mel_out) {
+  const int n_bins = kNfft / 2 + 1;
+  const std::vector<double> bank = mel_filter_bank(n_mels);
+  mel_out.assign(static_cast<size_t>(n_mels) * kMelFrames, 0.0f);
+  auto frames_range = [&](const std::function<void(int, int)> &body) {
+    if (!pool || pool->size() <= 1) {
+      body(0, kMelFrames);
+      return;
+    }
+    pool->run([&](int w, int nworkers) {
+      const int chunk = (kMelFrames + nworkers - 1) / nworkers;
+      body(std::min(kMelFrames, chunk * w),
+           std::min(kMelFrames, chunk * (w + 1)));
+    });
+  };
+  frames_range([&](int t_lo, int t_hi) {
+    // Per-CALL scratch, not per-frame and NOT shared: hoisting this out of the
+    // lambda made two workers write the same buffer, which is heap corruption
+    // rather than a wrong number, so the shape of the scratch is part of the
+    // contract here.
+    std::vector<double> mel(static_cast<size_t>(n_mels));
+    for (int t = t_lo; t < t_hi; ++t) {
       for (int j = 0; j < n_mels; ++j) {
         double acc = 0.0;
         for (int k = 0; k < n_bins; ++k)
           acc += bank[static_cast<size_t>(k) * n_mels + j] *
-                 spec[static_cast<size_t>(k)];
-        // 1e-10 floor BEFORE the log, not after: log10(0) is -inf and a -inf
-        // in the tensor poisons the global max on the way to the floor below.
-        mel[static_cast<size_t>(j)] = std::log10(std::max(acc, 1e-10));
-        if (t == num_frames - 1) continue;  // the frame Whisper drops
-        out.data[static_cast<size_t>(j) * kMelFrames + t] =
-            static_cast<float>(mel[static_cast<size_t>(j)]);
+                 static_cast<double>(
+                     power[static_cast<size_t>(k) * kMelFrames + t]);
+        mel[static_cast<size_t>(j)] = acc;
+        mel_out[static_cast<size_t>(j) * kMelFrames + t] =
+            static_cast<float>(acc);
       }
     }
   });
+  mel_log_inplace(mel_out, pool);
+}
 
+// transformers' floor and scale, in place, over a FINISHED (n_mels, frames)
+// tensor. The maximum is taken after the last frame is dropped: taking it before
+// would let a dropped frame raise the floor of every frame that stayed.
+void mel_floor_scale(std::vector<float> &mel) {
   double global_max = -1e300;
-  for (float v : out.data) global_max = std::max(global_max, static_cast<double>(v));
-
-  // 5. floor and scale, over the ALREADY TRIMMED tensor: transformers takes
-  //    the max after dropping the last frame, and taking it before would let a
-  //    dropped frame raise the floor of every frame that stayed.
+  for (float v : mel) global_max = std::max(global_max, static_cast<double>(v));
   const double floor_v = global_max - 8.0;
-  for (float &v : out.data)
+  for (float &v : mel)
     v = static_cast<float>((std::max(static_cast<double>(v), floor_v) + 4.0) / 4.0);
+}
+
+MelSpec log_mel_30s(const std::vector<float> &samples, int n_mels,
+                    int64_t *samples_used, app::Pool *pool) {
+  const std::vector<float> power =
+      power_30s(samples, n_mels, samples_used, pool);
+  std::vector<float> mel;
+  project_and_log(power, n_mels, pool, mel);
+  mel_floor_scale(mel);
+  MelSpec out;
+  out.n_mels = n_mels;
+  out.frames = kMelFrames;
+  out.data = std::move(mel);
   return out;
 }
 

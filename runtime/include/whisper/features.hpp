@@ -60,6 +60,7 @@ constexpr int kSampleRate = 16000;
 constexpr int kChunkSamples = 30 * kSampleRate;   // 480000
 constexpr int kHopLength = 160;
 constexpr int kNfft = 400;
+constexpr int kMelBins = kNfft / 2 + 1;        // 201, the bank's row count
 constexpr int kMelFrames = 3000;                  // after dropping the last
 constexpr int kEncoderPositions = kMelFrames / 2; // 1500
 
@@ -84,6 +85,35 @@ struct MelSpec {
 MelSpec log_mel_30s(const std::vector<float> &samples, int n_mels,
                     int64_t *samples_used = nullptr,
                     app::Pool *pool = nullptr);
+
+//   windowed_frames_30s  (frames, 400) windowed samples, last frame dropped
+//   power_30s            (n_bins, frames) power spectrum -- the host transform
+//   project_and_log      bank @ power, then log10 of max(x, 1e-10)
+//   mel_floor_scale      maximum over the finished tensor, floor at max - 8,
+//                        then (x + 4) / 4
+//
+// The ORDER is the model's: the bank multiplies the power spectrum and the log
+// comes after it. Writing the projection as `log_spec @ bank` instead is HF's
+// formulation and produces a different spectrogram.
+//
+// power_30s is TWO steps on the array -- windowed_frames_30s, then a transform
+// that is a GEMM rather than a recursive FFT -- so the tensor between them is
+// exposed. See whisper/fft_npu.hpp for what the array's transform is and what it
+// costs in precision.
+std::vector<float> windowed_frames_30s(const std::vector<float> &samples,
+                                       int n_mels, int64_t *samples_used = nullptr,
+                                       app::Pool *pool = nullptr);
+std::vector<float> power_30s(const std::vector<float> &samples, int n_mels,
+                             int64_t *samples_used = nullptr,
+                             app::Pool *pool = nullptr);
+void project_and_log(const std::vector<float> &power, int n_mels,
+                     app::Pool *pool, std::vector<float> &mel_out);
+// log10 of max(x, 1e-10), in place. Its own entry point because the array's mel
+// path takes the PROJECTION from a GEMM and the logarithm from here: a
+// logarithm is not a matrix, and the two halves of the host's project_and_log
+// have to be separately reachable for that to be true.
+void mel_log_inplace(std::vector<float> &v, app::Pool *pool = nullptr);
+void mel_floor_scale(std::vector<float> &mel);
 
 // The slaney mel filter bank, (201, n_mels) row-major. Exposed because the
 // encoder's first layer wants to reason about the band count, and because a

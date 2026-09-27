@@ -7,10 +7,17 @@
 #   conv     the front end's output, against torch with the checkpoint's own
 #            conv weights, so a divergence in the encoder below it can be
 #            attributed
+#   convnpu  the same tensor from the NPU path (--npu-extra-ops conv), which runs
+#            two convolutions as GEMMs on the encoder set's own [rows, d, d]
+#            stream. Checked at the same cosine tolerance and its own max-abs
+#            one, because its precision is the design's bf16 C rather than the
+#            host's fp32
 #   enc      the encoder's output hidden states, against
 #            transformers' WhisperEncoder on the same mel. This is the whole
 #            4-layer stack, the position table, all sixteen GEMMs and the host
-#            attention, in one number
+#            attention, in one number. Run twice: once on the host conv and once
+#            on the NPU one, which is the property that decides whether
+#            --npu-extra-ops conv is a default or a curiosity
 #   step     one teacher-forced decoder step: the state after the final
 #            LayerNorm and the tied-embedding logits, both against transformers
 #   greedy   the argmax chain from the standard control-token prompt, id by id
@@ -122,6 +129,12 @@ def build_exe(path: Path) -> Path | None:
     srcs = [
         "runtime/tests/test_whisper_model.cpp",
         "runtime/src/whisper/npu_ops.cpp",
+        "runtime/src/whisper/conv1d.cpp",
+        "runtime/src/whisper/eltwise.cpp",
+        "runtime/src/whisper/attention_npu.cpp",
+        "runtime/src/whisper/mel_proj.cpp",
+        "runtime/src/whisper/fft_npu.cpp",
+        "runtime/src/whisper/logits_npu.cpp",
         "runtime/src/whisper/encoder.cpp",
         "runtime/src/whisper/decoder.cpp",
         "runtime/src/whisper/features.cpp",
@@ -164,8 +177,11 @@ def read_wav_python(path: Path):
 
 
 def run_cpp(exe, npue, art, audio, threads=1, ids=None, greedy=None,
-            encoder_only=False, max_new=0):
+            encoder_only=False, max_new=0, conv="both", layn="host",
+            gelu="host", attn="host"):
     cmd = [str(exe), str(npue), str(art), str(audio), "--threads", str(threads)]
+    cmd += ["--conv", conv]
+    cmd += ["--layn", layn, "--gelu", gelu, "--attn", attn]
     if ids:
         cmd += ["--ids", ",".join(str(i) for i in ids)]
     if greedy:
@@ -180,7 +196,7 @@ def run_cpp(exe, npue, art, audio, threads=1, ids=None, greedy=None,
     for line in p.stdout.splitlines():
         parts = line.split()
         kind = parts[0] if parts else ""
-        if kind in ("conv", "enc"):
+        if kind in ("conv", "convnpu", "enc"):
             arr = np.frombuffer(bytes.fromhex(parts[-1]), dtype="<f4")
             out[kind] = arr.reshape(int(parts[1]), int(parts[2]))
         elif kind == "step":
@@ -358,6 +374,16 @@ def main() -> int:
                     help="teacher-forced decoder steps (default %(default)s)")
     ap.add_argument("--greedy-steps", type=int, default=8)
     ap.add_argument("--rtol", type=float, default=RTOL_COS)
+    ap.add_argument("--conv-atol-npu", type=float, default=5e-2,
+                    help=(
+                        "max-abs tolerance for the NPU front end's conv output. "
+                        "Separate from the host path's because the arithmetic "
+                        "is bf16 with a bf16 C: conv2 accumulates three d-wide "
+                        "GEMMs on the host in fp32, so three bf16 roundings of "
+                        "partial sums are the floor, and at whisper-tiny's "
+                        "value scale (rms 0.39, max 3.6) that is 1.8e-2. The "
+                        "cosine check still runs at --rtol. Default: %(default)s"
+                    ))
     ap.add_argument("--keep", action="store_true",
                     help="keep the built corpus and the executable")
     args = ap.parse_args()
@@ -454,11 +480,28 @@ def main() -> int:
         d_enc = one_minus_cos(got["enc"], want_enc)
         maxd = float(np.abs(got["enc"] - want_enc).max())
         shape_ok = got["enc"].shape == want_enc.shape
-        ok = (d_conv <= args.rtol and d_enc <= args.rtol and shape_ok)
+        # The NPU front end is a SEPARATE check with its own tolerance, not a
+        # second value for the same one. It runs the same arithmetic in bf16 with
+        # a bf16 C, so its max-abs error is set by the design's output precision
+        # and not by the schedule: conv2 is 3 accumulations of a d-wide GEMM, so
+        # three bf16 roundings of partial sums land in the last bits of a value
+        # of order 1. The cosine check still uses --rtol because that is the
+        # property the rest of this gate reasons in, and 1-cos for this path is
+        # ~1e-6.
+        npu_line = ""
+        npu_ok = True
+        if got.get("convnpu") is not None:
+            d_npu = one_minus_cos(got["convnpu"], want_conv)
+            max_npu = float(np.abs(got["convnpu"] - want_conv).max())
+            npu_ok = (d_npu <= args.rtol and max_npu <= args.conv_atol_npu and
+                      got["convnpu"].shape == want_conv.shape)
+            npu_line = (f"   convnpu 1-cos {d_npu:.1e}  max|d| {max_npu:.2e} "
+                        f"(atol {args.conv_atol_npu:g})")
+        ok = (d_conv <= args.rtol and d_enc <= args.rtol and shape_ok and npu_ok)
         bad += 0 if ok else 1
         print(f"  {'ok  ' if ok else 'FAIL'} {name:32s} conv 1-cos {d_conv:.1e}"
               f"   enc 1-cos {d_enc:.1e}  max|d| {maxd:.2e}  "
-              f"shape {got['enc'].shape}/{want_enc.shape}")
+              f"shape {got['enc'].shape}/{want_enc.shape}{npu_line}")
 
         want_steps = hf_decoder(model, want_enc, forced)
         for i, w in enumerate(want_steps):
@@ -515,6 +558,109 @@ def main() -> int:
                 bad += 0 if same else 1
                 print(f"       {'ok  ' if same else 'FAIL'} text  "
                       f"{got['text']!r} vs generate {gen_text!r}")
+
+    # -- the whole stack fed from the NPU front end --------------------------
+    # Everything above runs the encoder on the fp32 host conv. This runs it on
+    # the array's, which is the property that decides whether --npu-extra-ops conv is
+    # a default or a curiosity: the bf16 front end is 15 dispatches, and what
+    # matters is whether the encoder output still matches transformers when its
+    # input carries that design's output precision.
+    print("\n  encoder fed from the NPU conv:")
+    probe = paths["3 s tone"]
+    npu_run = run_cpp(exe, npue, art, probe, threads=args.threads,
+                      encoder_only=True, conv="npu")
+    if npu_run["rc"] or npu_run.get("enc") is None:
+        bad += 1
+        print(f"  FAIL --conv npu refused or printed nothing\n"
+              f"       {npu_run['err'].strip()}")
+    else:
+        samples, _ = read_wav_python(probe)
+        want_conv = torch_conv(hf_features(samples, n_mels), w1, b1, w2, b2)
+        want_enc = hf_encoder(model, hf_features(samples, n_mels))
+        d = one_minus_cos(npu_run["enc"], want_enc)
+        maxd = float(np.abs(npu_run["enc"] - want_enc).max())
+        ok = d <= args.rtol and npu_run["enc"].shape == want_enc.shape
+        bad += 0 if ok else 1
+        print(f"  {'ok  ' if ok else 'FAIL'} enc on the NPU conv 1-cos {d:.1e}"
+              f"  max|d| {maxd:.2e}  (rtol {args.rtol:g})")
+        print(f"       {npu_run['err'].strip().splitlines()[0] if npu_run['err'].strip() else ''}")
+
+    # -- the same encoder, with its LayerNorm on the array ------------------
+    # The LayerNorm design is a second xclbin and its kernel computes the row
+    # in bf16 with a two-pass variance, so this is the measurement that decides
+    # whether it is a different number or a different ROUNDING of the same one:
+    # the endpoint has to stay inside the same rtol as the host pass, not
+    # inside one of its own that nobody chose by measuring.
+    print("\n  encoder with LayerNorm on the array:")
+    probe = paths["3 s tone"]
+    layn_run = run_cpp(exe, npue, art, probe, threads=args.threads,
+                       encoder_only=True, conv="cpu", layn="npu")
+    if layn_run["rc"] or layn_run.get("enc") is None:
+        bad += 1
+        print(f"  FAIL --layn npu refused or printed nothing\n"
+              f"       {layn_run['err'].strip()}")
+    else:
+        samples, _ = read_wav_python(probe)
+        want_enc = hf_encoder(model, hf_features(samples, n_mels))
+        d = one_minus_cos(layn_run["enc"], want_enc)
+        host_run = run_cpp(exe, npue, art, probe, threads=args.threads,
+                           encoder_only=True, conv="cpu", layn="host")
+        d_host = one_minus_cos(host_run["enc"], want_enc)
+        ok = d <= args.rtol
+        bad += 0 if ok else 1
+        print(f"  {'ok  ' if ok else 'FAIL'} enc on the array LayerNorm 1-cos "
+              f"{d:.1e}  (host {d_host:.1e}, rtol {args.rtol:g})")
+
+    # -- the same encoder, with GELU on the array --------------------------
+    # The erf kernel against the host's std::erf. A tanh polynomial here is
+    # 2.5e-3 away, which is a DIFFERENT activation rather than a slower one, and
+    # the gate is what says the array's GELU is this model's GELU.
+    print("\n  encoder with GELU on the array:")
+    probe = paths["3 s tone"]
+    gelu_run = run_cpp(exe, npue, art, probe, threads=args.threads,
+                       encoder_only=True, conv="cpu", gelu="npu")
+    if gelu_run["rc"] or gelu_run.get("enc") is None:
+        bad += 1
+        print(f"  FAIL --gelu npu refused or printed nothing\n"
+              f"       {gelu_run['err'].strip()}")
+    else:
+        samples, _ = read_wav_python(probe)
+        want_enc = hf_encoder(model, hf_features(samples, n_mels))
+        d = one_minus_cos(gelu_run["enc"], want_enc)
+        host_run = run_cpp(exe, npue, art, probe, threads=args.threads,
+                           encoder_only=True, conv="cpu", gelu="host")
+        d_host = one_minus_cos(host_run["enc"], want_enc)
+        ok = d <= args.rtol
+        bad += 0 if ok else 1
+        print(f"  {'ok  ' if ok else 'FAIL'} enc on the array GELU 1-cos {d:.1e}"
+              f"  (host {d_host:.1e}, rtol {args.rtol:g})")
+
+    # -- the same encoder, with attention as two GEMMs ---------------------
+    # QK^T and softmax.V on the set's attn_qk/attn_av streams. The scores go
+    # through bf16 on the way in and out of both GEMMs, so this is a wider
+    # tolerance than the LayerNorm case and a NARROWER one than a fp32 pass would
+    # give -- and the point of the gate is that the endpoint stays inside the
+    # same rtol as the host attention, not that the attention is exact.
+    print("\n  encoder with attention on the array:")
+    probe = paths["3 s tone"]
+    attn_run = run_cpp(exe, npue, art, probe, threads=args.threads,
+                       encoder_only=True, conv="cpu", attn="npu")
+    if attn_run["rc"] or attn_run.get("enc") is None:
+        bad += 1
+        print(f"  FAIL --attn npu refused or printed nothing\n"
+              f"       {attn_run['err'].strip()}")
+    else:
+        samples, _ = read_wav_python(probe)
+        want_enc = hf_encoder(model, hf_features(samples, n_mels))
+        d = one_minus_cos(attn_run["enc"], want_enc)
+        host_run = run_cpp(exe, npue, art, probe, threads=args.threads,
+                           encoder_only=True, conv="cpu", attn="host")
+        d_host = one_minus_cos(host_run["enc"], want_enc)
+        ok = d <= args.rtol
+        bad += 0 if ok else 1
+        print(f"  {'ok  ' if ok else 'FAIL'} enc on the array attention 1-cos "
+              f"{d:.1e}  (host {d_host:.1e}, rtol {args.rtol:g})")
+        print(f"       {attn_run['err'].strip().splitlines()[0] if attn_run['err'].strip() else ''}")
 
     # -- one worker must give the same bytes as sixteen ---------------------
     # The host passes are split over the pool, so a split that changed a

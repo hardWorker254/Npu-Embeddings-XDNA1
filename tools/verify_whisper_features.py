@@ -35,7 +35,9 @@
 #   python tools/verify_whisper_features.py --npue models/whisper-base.npue
 
 import argparse
+import json
 import math
+import os
 import subprocess
 import sys
 import tempfile
@@ -48,16 +50,38 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
 
 
+XRT = Path(os.environ.get("XRT_ROOT", "/opt/xilinx/xrt"))
+
+
 def build_exe(path):
-    cmd = [
-        "g++", "-std=c++17", "-O2", "-I", str(REPO / "runtime" / "include"),
-        str(REPO / "runtime" / "tests" / "test_whisper_features.cpp"),
+    # The array front end (--front npu) needs the design, the device and the two
+    # GEMMs that run the transform and the mel bank, so the harness links the XRT
+    # libraries too. Without the toolchain the XRT half is skipped and the host
+    # gate still runs, which is what kept this gate usable on a machine that has
+    # no silicon.
+    srcs = [
         str(REPO / "runtime" / "src" / "whisper" / "features.cpp"),
         str(REPO / "runtime" / "src" / "whisper" / "audio.cpp"),
         str(REPO / "runtime" / "src" / "model.cpp"),
         str(REPO / "runtime" / "src" / "pool.cpp"),
-        "-o", str(path),
     ]
+    extra = []
+    if (XRT / "include" / "xrt" / "xrt_device.h").exists():
+        srcs += [
+            str(REPO / "runtime" / "src" / "whisper" / "npu_ops.cpp"),
+            str(REPO / "runtime" / "src" / "whisper" / "fft_npu.cpp"),
+            str(REPO / "runtime" / "src" / "whisper" / "mel_proj.cpp"),
+            str(REPO / "runtime" / "src" / "device.cpp"),
+            str(REPO / "runtime" / "src" / "design.cpp"),
+            str(REPO / "runtime" / "src" / "npu_contention.cpp"),
+            str(REPO / "runtime" / "src" / "common" / "json_min.cpp"),
+        ]
+        extra = ["-I", str(XRT / "include"), "-L", str(XRT / "lib"),
+                 "-lxrt_coreutil"]
+    cmd = [
+        "g++", "-std=c++17", "-O2", "-I", str(REPO / "runtime" / "include"),
+        str(REPO / "runtime" / "tests" / "test_whisper_features.cpp"),
+    ] + srcs + extra + ["-o", str(path)]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print("building the C++ front end failed:\n" + r.stderr)
@@ -79,12 +103,15 @@ def write_wav(path, samples, rate=16000, channels=1, width=2):
             w.writeframes(pcm.astype(np.uint8).tobytes())
 
 
-def run_cpp(exe, npue, audio, convert=False, threads=1):
+def run_cpp(exe, npue, audio, convert=False, threads=1, art=None,
+            npu_step=None):
     cmd = [str(exe), str(npue), str(audio)]
     if convert:
         cmd.append("--convert")
     if threads > 1:
         cmd += ["--threads", str(threads)]
+    if art and npu_step:
+        cmd += ["--artifacts", str(art), "--" + npu_step, "npu"]
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
         print(f"{exe} failed:\n{p.stderr}")
@@ -144,6 +171,29 @@ def main() -> int:
         description="Hold the C++ Whisper front end against transformers.")
     ap.add_argument("--npue", default=str(REPO / "models" / "whisper-tiny.npue"))
     ap.add_argument("--exe", default=None)
+    ap.add_argument("--artifacts", default=None,
+                    help="design set root for the --front npu case; default "
+                         "runtime/<model>/artifacts_npu<N> when it exists")
+    ap.add_argument("--mel-atol-npu", type=float, default=1e-3,
+                    help="tolerance for the mel bank on the array. It is the "
+                         "HOST's tolerance on purpose: the bank's GEMM is inside "
+                         "it (measured 7e-4), so this case says the projection "
+                         "moved without changing the features.")
+    ap.add_argument("--fft-atol-npu", type=float, default=5e-1,
+                    help="tolerance for the transform on the array, which is "
+                         "THIRTY TIMES the host's and is a fact about the "
+                         "algorithm, not a rounding budget: a direct 400-point "
+                         "product against bf16 twiddles carries a noise floor "
+                         "of about (bf16 eps)^2 times the loudest bin, and in "
+                         "the quiet mel channels -- the ones the floor would "
+                         "otherwise clamp -- that reads as 0.3 where the host "
+                         "reads 3e-5. The loud bins agree to 0.2 percent. Fixing it "
+                         "means an fp32 radix-400 kernel, which is research, "
+                         "not wiring. The case prints both numbers so the gap "
+                         "is visible rather than absorbed by the tolerance.")
+    ap.add_argument("--threads", type=int, default=1,
+                    help="host threads for both front ends; the array case "
+                         "splits the same way the host one does")
     ap.add_argument("--mel-atol", type=float, default=1e-3)
     ap.add_argument("--conv-atol", type=float, default=2e-2)
     ap.add_argument("--keep", action="store_true", help="keep the built corpus")
@@ -217,6 +267,59 @@ def main() -> int:
               f"conv {d_conv:.2e} (1-cos {cos_conv:.1e})  "
               f"shapes {got['mel'].shape}/{want_mel.shape} "
               f"{got['conv'].shape}/{want_conv.shape}")
+
+    # -- the front end's first two steps on the array ----------------------
+    # The transform and the mel bank are GEMMs there, against bf16 twiddles and a
+    # bf16 bank. This case exists to say what that costs: it is compared against
+    # TRANSFORMERS, with its own tolerance, and never against our own fp64 host
+    # path -- a number measured against the thing it replaced would only say the
+    # array is different from the host.
+    art = args.artifacts
+    if art is None:
+        guess = REPO / "runtime" / npue.stem / "artifacts_npu1"
+        art = str(guess) if guess.is_dir() else None
+    npu_probe = None
+    if art and (Path(art) / "gemm_rtp" / "design.json").exists():
+        have = json.loads((Path(art) / "gemm_rtp" / "design.json").read_text())
+        ops = {e["op"] for e in have.get("streams", [])}
+        if {"dft400", "mel_proj"} <= ops:
+            # The two steps separately, because they are separable failures: one
+            # of them is inside the host's tolerance and the other is thirty
+            # times outside it, and a combined "front on the array" line would
+            # hide which is which.
+            for name, p in paths.items():
+                want_samples, _ = read_wav_python(p)
+                want_mel = hf_mel(want_samples, n_mels)
+                want_conv = torch_conv(want_mel, w1, b1, w2, b2)
+                # (step, mel tolerance, conv tolerance). The bank's case is held
+                # to the HOST's two tolerances -- it is inside both, which is the
+                # point: the projection moved and the features did not. The
+                # transform's case is held to its own, and its own is 30x looser
+                # for the noise-floor reason in --fft-atol-npu.
+                for step, atol_m, atol_c in (
+                        ("mproj", args.mel_atol_npu, args.conv_atol),
+                        ("fft", args.fft_atol_npu, args.fft_atol_npu)):
+                    got = run_cpp(exe, npue, p, threads=args.threads, art=art,
+                                  npu_step=step)
+                    if got is None or got.get("refused"):
+                        bad += 1
+                        print(f"  FAIL {name}: --{step} npu refused")
+                        continue
+                    d_mel = float(np.abs(got["mel"] - want_mel).max())
+                    d_conv = float(np.abs(got["conv"] - want_conv).max())
+                    ok = (d_mel <= atol_m and d_conv <= atol_c and
+                          got["mel"].shape == want_mel.shape)
+                    bad += 0 if ok else 1
+                    print(f"  {'ok  ' if ok else 'FAIL'} {name:32s} "
+                          f"{step} on the array: mel {d_mel:.2e} "
+                          f"(atol {atol_m:g})  conv {d_conv:.2e} "
+                          f"(atol {atol_c:g})")
+                    if npu_probe is None:
+                        npu_probe = got
+        else:
+            print("\n  array front end: this design set has no dft400/mel_proj "
+                  "streams, so the case is skipped (re-export with "
+                  "--npu-extra-ops fft,mproj)")
 
     # The filter bank on its own, so a spectrogram divergence can be attributed.
     from transformers.audio_utils import mel_filter_bank

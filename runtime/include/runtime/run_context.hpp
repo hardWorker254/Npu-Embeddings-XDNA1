@@ -82,7 +82,7 @@ struct RunContext {
 
   // --- host-side policy flags ---------------------------------------------
   int nthreads = 1;
-  // Which ops go on the array: --npu-ops. The three host_* booleans are DERIVED
+  // Which ops go on the array: --npu-extra-ops. The three host_* booleans are DERIVED
   // from it by setup_flags_pools, because they are the encoder's contract and
   // because "on the host" is exactly "not in the list" -- one setting, one
   // meaning, and no inverse flag to drift against it.
@@ -116,9 +116,9 @@ struct RunContext {
   // going to run on the array, and otherwise alias the unified GEMM design so a
   // host-side op still gets a valid reference. `ld_*` is non-null exactly when
   // load_designs resolved it, which happens exactly when the op is listed in
-  // --npu-ops.
+  // --npu-extra-ops.
   // `!host_*` and `ld_* != nullptr` are the same condition -- load_designs opens
-  // a sibling design exactly for the ops in --npu-ops -- and both are checked,
+  // a sibling design exactly for the ops in --npu-extra-ops -- and both are checked,
   // because getting this backwards does not fail: it hands an op a Design that
   // has no stream for it, and the dispatch that follows computes the wrong
   // thing without an error.

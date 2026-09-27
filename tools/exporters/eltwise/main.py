@@ -49,11 +49,39 @@ def main() -> int:
                          f"softmax refuse above {MAX_LN_SM_COLS}.")
     ap.add_argument("--gelu-tile", type=int, default=GELU_TILE,
                     choices=[1024, 4096])
+    ap.add_argument("--gelu-variant", default="poly", choices=["poly", "erf"],
+                    help=(
+                        "poly is the degree-8 fit of the even part, 2.49e-3 "
+                        "relative against exact erf, which is what the "
+                        "BERT-family designs have always built. erf is "
+                        "kernels/gelu_erf.cc: the activation a Whisper "
+                        "container declares, and a different FUNCTION rather "
+                        "than a faster one."))
     ap.add_argument("--ln-variant", default="il4",
-                    choices=["base", "il4", "rne", "il4_rne"])
+                    choices=["base", "il4", "rne", "il4_rne", "il4_8",
+                             "il4_4"])
+    ap.add_argument("--ln-cols", type=int, default=None,
+                    help="row width of the LayerNorm design. Default: --hidden, "
+                         "which is the model's d_model for a Whisper target.")
+    ap.add_argument("--ln-eps", type=float, default=1e-12,
+                    help="epsilon compiled into the LayerNorm design. It is "
+                         "inside a square root, so it is the model's own "
+                         "layer_norm_eps (1e-5 for Whisper, 1e-12 for "
+                         "MiniLM) and not a tuning knob.")
     ap.add_argument("--sm-variant", default="poly_il4",
                     choices=["lib", "poly", "poly_il4", "poly_rne",
-                             "poly_il4_rne"])
+                             "poly_il4_rne", "wide", "wide2"])
+    ap.add_argument("--sm-rows", type=int, default=None,
+                    help="row capacity of the softmax design. Default: "
+                         "batch*12*seq, an embedder's attention. A Whisper "
+                         "dispatch is one query chunk, so it passes batch*seq -- a "
+                         "design 12x too big syncs 12x the traffic to move the "
+                         "same rows.")
+    ap.add_argument("--sm-cols", type=int, default=None,
+                    help="row width of the softmax design. Default: 64, which "
+                         "is an embedder's attention score row. A Whisper score "
+                         "row is n_kv (1500, padded to a tile), which needs "
+                         "--sm-variant wide and kernels/softmax_w.cc.")
     ap.add_argument("--cache-root", default=str(DEFAULT_CACHE_ROOT))
     ap.add_argument("--per-arch-cache", action="store_true")
     args = ap.parse_args()
@@ -72,7 +100,9 @@ def main() -> int:
     metas = export_arch(
         Path(args.out), args.arch, args.batch, args.hidden, args.seq,
         args.elt_cols, args.gelu_tile, args.ln_variant, args.sm_variant,
-        args.cache_root, args.per_arch_cache,
-        ops=npu_ops.parse_ops(args.extra_ops, "--extra-ops"))
+        args.cache_root, args.per_arch_cache, gelu_variant=args.gelu_variant,
+        ln_cols=args.ln_cols, ln_eps=args.ln_eps, sm_cols=args.sm_cols,
+        sm_rows=args.sm_rows,
+        ops=npu_ops.parse_exportable(args.extra_ops, "--extra-ops"))
     print(f"\nwrote {len(metas)} eltwise design(s) under {args.out}")
     return 0

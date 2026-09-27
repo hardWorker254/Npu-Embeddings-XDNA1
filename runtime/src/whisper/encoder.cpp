@@ -37,6 +37,18 @@ size_t WhisperEncoder::stage_all() {
     beta.push_back(model_.raw(name + ".bias").as<float>());
     bytes += 2 * static_cast<size_t>(d) * sizeof(float);
   };
+  // The same pair, staged for the LayerNorm design: one fp32 buffer of 2*d,
+  // gamma first, because a core tile has two input DMA channels and two
+  // arguments would need three.
+  auto norm_stage = [&](const std::string &name, std::vector<size_t> &slots) {
+    std::vector<float> gb(2 * static_cast<size_t>(d));
+    std::copy(model_.raw(name + ".weight").as<float>(),
+              model_.raw(name + ".weight").as<float>() + d, gb.begin());
+    std::copy(model_.raw(name + ".bias").as<float>(),
+              model_.raw(name + ".bias").as<float>() + d, gb.begin() + d);
+    slots.push_back(ln_->stage_params(gb));
+    bytes += gb.size() * sizeof(float);
+  };
   for (int64_t L = 0; L < geom_.enc_layers; ++L) {
     const std::string p = "encoder.layers." + std::to_string(L) + ".";
     operand(p + "qkv", s_qkv, b_qkv);
@@ -45,12 +57,30 @@ size_t WhisperEncoder::stage_all() {
     operand(p + "ffn_down", s_fd, b_fd);
     norm(p + "ln1", ln1_gamma, ln1_beta);
     norm(p + "ln2", ln2_gamma, ln2_beta);
+    if (ln_) {
+      norm_stage(p + "ln1", s_ln1);
+      norm_stage(p + "ln2", s_ln2);
+    }
   }
   enc_pos_ = model_.raw("encoder.embed_positions").as<float>();
   const std::string f = "encoder.layer_norm.";
   final_gamma_ = model_.raw(f + "weight").as<float>();
   final_beta_ = model_.raw(f + "bias").as<float>();
   bytes += 2 * static_cast<size_t>(d) * sizeof(float);
+  if (ln_) {
+    std::vector<size_t> one;
+    // The prefix WITHOUT its trailing dot: norm_stage appends ".weight", and
+    // "encoder.layer_norm." + ".weight" is a tensor this container has never
+    // heard of.
+    norm_stage("encoder.layer_norm", one);
+    s_ln_final = one.front();
+  } else {
+    // Sized either way: run() passes the slot as an argument, and the host path
+    // ignores it, so an empty vector would be indexed out of bounds before the
+    // path that ignores it is chosen.
+    s_ln1.assign(static_cast<size_t>(geom_.enc_layers), 0);
+    s_ln2.assign(static_cast<size_t>(geom_.enc_layers), 0);
+  }
   g_.alloc_buffers();
   return bytes;
 }
@@ -59,6 +89,23 @@ void WhisperEncoder::reset_timers() {
   g_.n_dispatch = 0;
   g_.t_dispatch = 0.0;
   g_.t_convert = 0.0;
+}
+
+void WhisperEncoder::norm_rows(float *x, int64_t n, const float *gamma,
+                               const float *beta, size_t slot) {
+  if (!ln_) {
+    layernorm_rows(x, n, geom_.d_model, gamma, beta, geom_.ln_eps, pool_);
+    return;
+  }
+  ln_->layernorm(x, n, slot);
+}
+
+void WhisperEncoder::gelu_rows(float *x, int64_t n) {
+  if (!gelu_) {
+    gelu_erf_inplace(x, static_cast<size_t>(n), pool_);
+    return;
+  }
+  gelu_->gelu(x, n);
 }
 
 std::vector<float> WhisperEncoder::run(const std::vector<float> &conv_out,
@@ -101,29 +148,38 @@ std::vector<float> WhisperEncoder::run(const std::vector<float> &conv_out,
   std::vector<float> down(static_cast<size_t>(rows) * d);
   std::vector<float> qkv_all(static_cast<size_t>(n_src) * 3 * d);
   std::vector<float> ctx(static_cast<size_t>(n_src) * d);
-  // The encoder attends over every position, so the score matrix is
+  // The encoder attends over every position, so the HOST score matrix is
   // n_src * heads * n_src -- 54 MB at whisper-tiny's 6 heads and 180 MB at
   // large-v3's 20. That is the price of a full 1500-position attention on the
-  // host, and it is the next wall if a bigger Whisper has to be fast.
-  std::vector<float> scores(static_cast<size_t>(n_src) * geom_.heads * n_src);
+  // host, and it is what the array path exists to avoid. Allocated only when it
+  // is the path being taken: on the array the scores are one dispatch's chunk.
+  std::vector<float> scores;
+  if (!attn_)
+    scores.assign(static_cast<size_t>(n_src) * geom_.heads * n_src, 0.f);
 
   for (int64_t L = 0; L < geom_.enc_layers; ++L) {
     // ---- self-attention, pre-LN -----------------------------------------
     chunks(n_src, [&](int64_t r0, int64_t r1) {
       const int64_t n = r1 - r0;
       std::copy(x.begin() + r0 * d, x.begin() + r1 * d, norm.begin());
-      layernorm_rows(norm.data(), n, d, ln1_gamma[L], ln1_beta[L], geom_.ln_eps,
-                     pool_);
+      norm_rows(norm.data(), n, ln1_gamma[L], ln1_beta[L], s_ln1[L]);
       g_.run(streams_.qkv, norm.data(), n, rows, d, s_qkv[L], b_qkv[L], 3 * d,
              qkv_chunk.data());
       std::copy(qkv_chunk.begin(), qkv_chunk.begin() + n * 3 * d,
                 qkv_all.begin() + r0 * 3 * d);
     });
     // The fused [Q|K|V] row is read as Q at offset 0 and a K|V block at offset
-    // d, both with row stride 3*d_model.
-    attention(qkv_all.data(), 3 * d, qkv_all.data() + d, 3 * d, n_src, n_src, d,
-              geom_.heads, geom_.head_dim, scale, ctx.data(), scores.data(),
-              pool_);
+    // d, both with row stride 3*d_model -- which is the one layout that serves
+    // all three of Whisper's attentions, and the array path reads it the same
+    // way. The score matrix is the host path's alone: the array path keeps one
+    // chunk of it and never holds n_src x heads x n_src.
+    if (attn_)
+      attn_->run(qkv_all.data(), 3 * d, qkv_all.data() + d, 3 * d, n_src, n_src,
+                 d, scale, ctx.data());
+    else
+      attention(qkv_all.data(), 3 * d, qkv_all.data() + d, 3 * d, n_src, n_src, d,
+                geom_.heads, geom_.head_dim, scale, ctx.data(), scores.data(),
+                pool_);
     chunks(n_src, [&](int64_t r0, int64_t r1) {
       const int64_t n = r1 - r0;
       g_.run(streams_.attn_out, ctx.data() + r0 * d, n, rows, d, s_ao[L],
@@ -136,11 +192,10 @@ std::vector<float> WhisperEncoder::run(const std::vector<float> &conv_out,
     chunks(n_src, [&](int64_t r0, int64_t r1) {
       const int64_t n = r1 - r0;
       std::copy(x.begin() + r0 * d, x.begin() + r1 * d, norm.begin());
-      layernorm_rows(norm.data(), n, d, ln2_gamma[L], ln2_beta[L], geom_.ln_eps,
-                     pool_);
+      norm_rows(norm.data(), n, ln2_gamma[L], ln2_beta[L], s_ln2[L]);
       g_.run(streams_.ffn_up, norm.data(), n, rows, d, s_fu[L], b_fu[L], inter,
              up.data());
-      gelu_erf_inplace(up.data(), static_cast<size_t>(n) * inter, pool_);
+      gelu_rows(up.data(), n * inter);
       g_.run(streams_.ffn_down, up.data(), n, rows, inter, s_fd[L], b_fd[L], d,
              down.data());
       for (int64_t i = 0; i < n * d; ++i)
@@ -150,8 +205,7 @@ std::vector<float> WhisperEncoder::run(const std::vector<float> &conv_out,
 
   // Whisper's encoder output is AFTER the final LayerNorm -- that is what
   // transformers hands the decoder and therefore what the gate compares.
-  layernorm_rows(x.data(), n_src, d, final_gamma_, final_beta_, geom_.ln_eps,
-                 pool_);
+  norm_rows(x.data(), n_src, final_gamma_, final_beta_, s_ln_final);
   return x;
 }
 
