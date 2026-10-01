@@ -35,7 +35,7 @@
 # uses, does not divide 5120 -- large-v3's FFN -- and would force a per-size
 # repack and a per-size design set.
 #
-# Env: numpy only (plus the repo's own npue.py and safetensors_mmap.py).
+# Env: numpy only (plus the repo's own npue.py and onnx_weights.py).
 
 import json
 import math
@@ -50,7 +50,8 @@ from gemm_i8 import add_gemm_b_int8                              # noqa: E402
 from npue import (ARCH_WHISPER_ENC_DEC_GELU, MAC_BY_DEVICE,  # noqa: E402
                   MAC_DEFAULT_DEVICE, Writer, gemm_b_layout, layout_hash,
                   mac_for_device, tile_b, to_bf16_bits)
-from safetensors_mmap import SafeTensors                              # noqa: E402
+from onnx_weights import (Combined, OnnxWeights,                  # noqa: E402
+                          WHISPER_DECODER_ONNX, WHISPER_ENCODER_ONNX)
 from whisper_bpe import VocabMerges, build_table                      # noqa: E402
 
 # Only s and t of the MAC geometry affect the B operand's byte order, and both
@@ -89,12 +90,39 @@ def _sha256(path):
     return h.hexdigest()
 
 
+def _sha256_many(*paths):
+    """One digest identifying a SET of source files.
+
+    whisper's weights arrive as two ONNX files and neither is the source on
+    its own: `source_sha256` is what find_goldens() matches a golden against,
+    and a golden was produced from encoder and decoder together. So the digest
+    covers each file's own digest together with its basename, in the order
+    given. Basenames rather than paths because the digest has to be identical
+    on every machine, and a fixed order because a set that hashes differently
+    depending on how it was enumerated is not a fingerprint of anything.
+
+    It is deliberately NOT the digest of any single file, so it cannot be
+    mistaken for one -- CHECKPOINT.json pins the two files individually, and
+    that is a different question (is this file the file?) from this one (is
+    this the pair that produced the golden?).
+    """
+    import hashlib
+    outer = hashlib.sha256()
+    for p in paths:
+        outer.update(p.name.encode("utf-8"))
+        outer.update(b"\0")
+        outer.update(_sha256(p).encode("ascii"))
+        outer.update(b"\n")
+    return outer.hexdigest()
+
+
 def _read_json(path, what):
     p = Path(path)
     if not p.exists():
         raise SystemExit(f"{what}: {p} not found. A Whisper checkpoint needs "
                          f"config.json, preprocessor_config.json, "
-                         f"model.safetensors, vocab.json, merges.txt and "
+                         f"{WHISPER_ENCODER_ONNX}, {WHISPER_DECODER_ONNX}, "
+                         f"vocab.json, merges.txt and "
                          f"added_tokens.json.")
     return json.loads(p.read_text(encoding="utf-8"))
 
@@ -408,8 +436,21 @@ def pack_whisper(model_dir, out, max_seq=None, max_target=None,
             f"vocab_size {vocab}; the logit matrix would be narrower than the "
             f"ids the decoder can emit")
 
-    st = SafeTensors(model_dir / "model.safetensors")
-    src_sha = _sha256(model_dir / "model.safetensors")
+    # Two ONNX files behind one reader: this function asks for
+    # `model.encoder.conv1.weight` about a hundred lines after
+    # `model.decoder.embed_tokens.weight` and cannot sensibly be split, so
+    # Combined() presents them as one namespace and refuses a name that
+    # resolves in both. The encoder export dropped the `model.encoder.` root
+    # its tensors are named for -- prefix= puts it back -- while the decoder
+    # export kept `model.decoder.` and needs nothing; OnnxWeights documents
+    # both directions.
+    st = Combined([
+        OnnxWeights(model_dir / WHISPER_ENCODER_ONNX,
+                    prefix="model.encoder."),
+        OnnxWeights(model_dir / WHISPER_DECODER_ONNX),
+    ])
+    src_sha = _sha256_many(model_dir / WHISPER_ENCODER_ONNX,
+                           model_dir / WHISPER_DECODER_ONNX)
 
     # The int8 calibration, before any operand is written: it needs torch and
     # transformers, which are build-time only, and it is the reason this branch

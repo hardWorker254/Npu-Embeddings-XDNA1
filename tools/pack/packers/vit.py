@@ -74,7 +74,7 @@
 # that can be wrong.
 #
 # Env: numpy only (plus the repo's own npue.py, gemm_i8.py and
-# safetensors_mmap.py); torch and transformers only under --int8.
+# onnx_weights.py); torch and transformers only under --int8.
 
 import json
 import math
@@ -89,7 +89,7 @@ from gemm_i8 import add_gemm_b_int8                              # noqa: E402
 from npue import (ARCH_VIT_PATCH16_PRELN, MAC_BY_DEVICE,        # noqa: E402
                   MAC_DEFAULT_DEVICE, Writer, gemm_b_layout, layout_hash,
                   mac_for_device, tile_b, to_bf16_bits)
-from safetensors_mmap import SafeTensors                         # noqa: E402
+from onnx_weights import MODEL_ONNX, OnnxWeights                # noqa: E402
 
 # Only s and t of the MAC geometry affect the B operand's byte order, and the
 # board decides them: npu1's MMAC sub-tile is (s=8, t=4) and npu2's is (8, 8).
@@ -124,7 +124,7 @@ def _read_json(path, what):
     if not p.exists():
         raise SystemExit(f"{what}: {p} not found. A ViT checkpoint needs "
                          f"config.json, preprocessor_config.json and "
-                         f"model.safetensors.")
+                         f"{MODEL_ONNX}.")
     return json.loads(p.read_text(encoding="utf-8"))
 
 
@@ -387,8 +387,8 @@ def pack_vit(model_dir, out, fold_scale=True, dry_run=False, device=None,
             "concatenation of three biases, which is exact only because all "
             "three exist.")
 
-    st = SafeTensors(model_dir / "model.safetensors")
-    src_sha = _sha256(model_dir / "model.safetensors")
+    st = OnnxWeights(model_dir / MODEL_ONNX)
+    src_sha = _sha256(model_dir / MODEL_ONNX)
 
     # The checkpoint's OWN image front end, read for EVERY pack and not only for
     # an int8 one. Its numbers are part of the model's definition -- a container

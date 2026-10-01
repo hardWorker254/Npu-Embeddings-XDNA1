@@ -44,41 +44,46 @@ from npue import (ARCH_GEMMA3_MQA_ROPE_GEGLU, ARCH_GTE_NEW_ROPE_GEGLU,  # noqa: 
                   ARCH_NOMIC_ROPE_SWIGLU, MAC_BY_DEVICE, MAC_DEFAULT_DEVICE,
                   Writer, gemm_b_layout, layout_hash, mac_for_device, tile_b,
                   to_bf16_bits)
+from onnx_weights import MODEL_ONNX                          # noqa: E402
 
 
-def load(path):
-    """Read a .safetensors into a plain dict of numpy arrays.
+def load(path, strip=""):
+    """Read an ONNX checkpoint into a plain dict of numpy arrays.
 
-    The historical import was module-level:
+    `strip` is handed to the reader: a root the export ADDED and the checkpoint
+    does not have comes off, so what lands in the dict is what the safetensors
+    dict always was. Only embeddinggemma needs it ("model."); see
+    OnnxWeights for the other direction (a root the export dropped).
 
-        from safetensors_io import load
+    The reader is tools/lib/onnx_weights.py, which serves every tensor under
+    the name AND the orientation the safetensors checkpoint used, so the dict
+    built here is the dict this file has always built. That is the whole point
+    of the reader's contract: the source of the .npue changed from safetensors
+    to ONNX and no packer changed shape.
 
-    from reference/, a tree THIS FORK DOES NOT CARRY. A module-level import of
-    a module that does not exist makes the whole file unimportable, so
-    pack_npue.py could not run for ANY architecture here, not just the ones
-    that needed the reference encoders -- the arch=4 dispatch below was
-    unreachable behind an ImportError. The import is therefore inside this
-    function, and the fallback is tools/lib/safetensors_mmap.py, which is in-tree.
+    Two things about this function are load-bearing and easy to undo:
 
-    Both return {name: ndarray}; the reference reader returns a
-    (dict, metadata) pair and every call site in this file discards the
-    metadata, so the fallback returns the same shape with an empty meta.
+      * the import is INSIDE the function. pack_npue.py puts reference/ and
+        tools/lib on sys.path at import time, but a module-level import of a
+        name that is not there yet makes the whole file unimportable, and
+        then every architecture -- not just the one that needed it -- fails
+        with a bare ImportError instead of a message naming what is missing.
+      * no .copy() here, unlike the safetensors version of this function.
+        OnnxWeights.array() promises an OWNED array on purpose (see its
+        docstring: a view outlives close() and then faults), so copying would
+        double the peak on a 1.2 GB gemma checkpoint for nothing. If that
+        promise is ever relaxed, this call site is where it starts to bite.
 
-    The .copy() is not optional. SafeTensors.array() may hand back a view into
-    the mapping when the dtype already matches, and close() below releases that
-    mapping -- a dict of views into a closed mmap segfaults on first use, which
-    is exactly what it did.
+    Returns (dict, metadata) with the metadata empty: that pair is the shape
+    reference/safetensors_io.load used to return, every call site in this file
+    discards the second element, and keeping it costs nothing.
     """
+    from onnx_weights import OnnxWeights
+    w = OnnxWeights(path, strip=strip)
     try:
-        from safetensors_io import load as _ref_load
-    except ImportError:
-        from safetensors_mmap import SafeTensors
-        st = SafeTensors(path)
-        try:
-            return {k: st.array(k).copy() for k in st.keys()}, {}
-        finally:
-            st.close()
-    return _ref_load(path)
+        return {k: w.array(k) for k in w.keys()}, {}
+    finally:
+        w.close()
 
 # From M2's traced results: mac_dims are (r,s,t) = (4,8,8) for plain bf16 on
 # npu2 and (8,8,8) with bfp16 emulation. Only s and t affect the B operand
@@ -439,10 +444,22 @@ def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
     """
     model_dir = Path(model_dir)
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    src, _ = load(model_dir / "model.safetensors")
-    src_sha = sha256(model_dir / "model.safetensors")
-    d2, _ = load(model_dir / "2_Dense" / "model.safetensors")
-    d3, _ = load(model_dir / "3_Dense" / "model.safetensors")
+    # strip="model.": this export KEEPS a root the checkpoint does not have.
+    # encoder_gemma.py:208 records that as the verified ground truth for these
+    # names, so the root comes off here rather than the packers and the
+    # reference encoder being rewritten to match one exporter's convention.
+    src, _ = load(model_dir / MODEL_ONNX, strip="model.")
+    src_sha = sha256(model_dir / MODEL_ONNX)
+    # The sentence-transformers head is no longer a checkpoint of its own: its
+    # two matrices were fused into the export and ride beside the rest of the
+    # weights as /model/st/dense_1 and /model/st/dense_2, numbered in the order
+    # modules.json lists them -- dense_1 is 2_Dense, dense_2 is 3_Dense, which
+    # the shapes confirm once the reader has undone the MatMul transpose
+    # (3072x768 and 768x3072, matching encoder_gemma.py:210). The leading slash
+    # is the exporter's; strip="model." only removes that prefix, so these are
+    # looked up verbatim.
+    d2 = {"linear.weight": src["/model/st/dense_1.weight"]}
+    d3 = {"linear.weight": src["/model/st/dense_2.weight"]}
 
     L = cfg["num_hidden_layers"]
     hidden = cfg["hidden_size"]
@@ -793,8 +810,8 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
     """
     model_dir = Path(model_dir)
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    src, _ = load(model_dir / "model.safetensors")
-    src_sha = sha256(model_dir / "model.safetensors")
+    src, _ = load(model_dir / MODEL_ONNX)
+    src_sha = sha256(model_dir / MODEL_ONNX)
 
     L = cfg["num_hidden_layers"]
     H = cfg["num_attention_heads"]
@@ -1116,8 +1133,8 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
             "(calibrate_smoothing has no 'gte' arch) -- not implemented in "
             "0.5.0; pack bf16 or extend the oracle first")
 
-    raw, _ = load(model_dir / "model.safetensors")
-    src_sha = sha256(model_dir / "model.safetensors")
+    raw, _ = load(model_dir / MODEL_ONNX)
+    src_sha = sha256(model_dir / MODEL_ONNX)
     # The checkpoint stores F16; every consumer here wants f32 (the bf16
     # pre-tiler and the F32 emitters both). Upcast once, losslessly.
     src = {}
@@ -1595,8 +1612,8 @@ def main():
                         int8_images=args.int8_images,
                         int8_corpus=args.int8_corpus)
 
-    src, _ = load(model_dir / "model.safetensors")
-    src_sha = sha256(model_dir / "model.safetensors")
+    src, _ = load(model_dir / MODEL_ONNX)
+    src_sha = sha256(model_dir / MODEL_ONNX)
 
     L = cfg["num_hidden_layers"]
     H = cfg["num_attention_heads"]

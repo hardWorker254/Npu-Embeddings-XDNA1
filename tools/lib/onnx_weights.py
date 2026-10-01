@@ -68,8 +68,8 @@
 #
 # Env: numpy only, plus the standard library.
 # Usage:
-#   from onnx_weights import OnnxWeights
-#   with OnnxWeights(model_dir / "model.onnx") as w:
+#   from onnx_weights import OnnxWeights, MODEL_ONNX
+#   with OnnxWeights(model_dir / MODEL_ONNX) as w:
 #       q = w.array("encoder.layer.0.attention.self.query.weight")
 
 import mmap as _mmap
@@ -78,6 +78,22 @@ import os
 import numpy as np
 
 # ---------------------------------------------------------------------------
+# Where a model's weights live. models/** is gitignored, so this is a
+# CONVENTION rather than a cache path: the ONNX is placed into models/<name>/
+# by hand (the project deliberately does not fetch it -- see BUILD.md) and
+# CHECKPOINT.json pins its digest instead. Three places have to agree on it:
+# the Python packers, CHECKPOINT.json's `file` field, and the runtime's
+# manifest in runtime/src/common/hub.cpp.
+#
+# whisper is the exception that makes this a named constant instead of a
+# literal: it ships one ONNX per sub-model against a single checkpoint, and
+# the encoder's export drops the `model.encoder.` root that the checkpoint's
+# tensor names carry (see OnnxWeights.prefix).
+# ---------------------------------------------------------------------------
+MODEL_ONNX = "onnx/model.onnx"
+WHISPER_ENCODER_ONNX = "onnx/encoder_model.onnx"
+WHISPER_DECODER_ONNX = "onnx/decoder_model.onnx"
+
 # ONNX TensorProto.DataType -> (numpy dtype, the safetensors tag it maps to).
 #
 # info() hands back the safetensors tag on purpose: callers that switch on
@@ -369,15 +385,29 @@ class OnnxWeights:
     the mapping -- which matters because a dict of views into a closed mapping
     faults on first read rather than raising.
 
-    `prefix` is prepended to every recovered name. It exists for exports that
-    dropped a module root: whisper's encoder ships `layers.0...` where the
-    checkpoint says `model.encoder.layers.0...`, so that packer opens it with
-    prefix="model.encoder.". Everything else leaves it empty.
+    `prefix` is prepended to every recovered name, `strip` removed from the
+    front of it. Both exist for one reason: the packers ask for the names THE
+    CHECKPOINT used, and exporters disagree with it in both directions.
+
+      prefix="model.encoder."   whisper's encoder was exported as a submodule,
+                                so it ships `layers.0...` where the checkpoint
+                                says `model.encoder.layers.0...`. The export
+                                dropped a root.
+      strip="model."            embeddinggemma's export keeps `model.` where
+                                the checkpoint -- and therefore
+                                encoder_gemma.py, which is the verified
+                                ground truth -- has none (documented at
+                                encoder_gemma.py:208). The export added a root.
+
+    A strip that makes two tensors collide is refused by _build() rather than
+    resolved, because silently keeping one would pack one weight into the
+    other's slot.
     """
 
-    def __init__(self, path, prefix=""):
+    def __init__(self, path, prefix="", strip=""):
         self.path = str(path)
         self.prefix = prefix
+        self.strip = strip
         self._ext = {}
         self._tensors = {}
         self._order = []
@@ -447,6 +477,8 @@ class OnnxWeights:
                             int(t["ext"].get("length", 0)))
             uses = by_input.get(t["name"], ())
             fixed, how = _recover(t["name"], uses)
+            if self.strip and fixed.startswith(self.strip):
+                fixed = fixed[len(self.strip):]
             fixed = self.prefix + fixed
             t["how"] = how
             named.setdefault(fixed, []).append(t)
@@ -588,6 +620,73 @@ class OnnxWeights:
         if self._map is not None:
             self._map.close()
             self._map = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
+class Combined:
+    """Two or more OnnxWeights behind one SafeTensors-shaped surface.
+
+    whisper ships its encoder and its decoder as separate ONNX files against a
+    single checkpoint, and pack_whisper() reads both inside one function: it
+    asks for `model.encoder.conv1.weight` a handful of lines before
+    `model.decoder.embed_tokens.weight`. Rather than make the packer track two
+    handles and choose correctly at sixty call sites, each file is opened with
+    the prefix that restores its root -- the encoder export dropped
+    `model.encoder.`, the decoder export kept `model.decoder.` -- and this
+    presents them as one namespace.
+
+    A name found in two readers is REFUSED, not resolved. It can only mean the
+    prefixes did not do their job, and silently picking one would pack one
+    sub-model's weights into the other's slots -- a container that builds,
+    hashes and produces wrong embeddings.
+    """
+
+    def __init__(self, readers):
+        self._readers = list(readers)
+        if not self._readers:
+            raise ValueError("Combined needs at least one reader")
+        self._where = {}
+        for r in self._readers:
+            for k in r.keys():
+                if k in self._where:
+                    raise ValueError(
+                        f"{k!r} resolves in both ONNX files "
+                        f"({self._where[k].path} and {r.path}); the prefixes "
+                        f"were meant to keep the two sub-models apart")
+                self._where[k] = r
+
+    def keys(self):
+        return list(self._where)
+
+    def __contains__(self, name):
+        return name in self._where
+
+    def _r(self, name):
+        try:
+            return self._where[name]
+        except KeyError:
+            raise KeyError(
+                f"no tensor named {name!r} in "
+                + ", ".join(r.path for r in self._readers)) from None
+
+    def info(self, name):
+        return self._r(name).info(name)
+
+    def raw(self, name):
+        return self._r(name).raw(name)
+
+    def array(self, name, dtype=np.float32):
+        return self._r(name).array(name, dtype)
+
+    def close(self):
+        for r in self._readers:
+            r.close()
 
     def __enter__(self):
         return self
