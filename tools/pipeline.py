@@ -67,6 +67,9 @@ TOOLSET = [
      "the fp32 reference the tail gate measures against",
      ("torch", "transformers")),
 
+    ("verify_onnx_reader", "verify/verify_onnx_reader.py",
+     "the ONNX weight reader vs onnx, vs the checkpoint, and vs a broken copy",
+     ("numpy", "onnx")),
     ("verify_npue", "verify/verify_npue.py",
      "the .npue: spec, bit-exact round trip, stale layout, goldens",
      ("numpy", "container", "reference")),
@@ -136,6 +139,9 @@ GATES = [t for t in TOOLSET if t[1].startswith("verify/")
 ENVIRONMENTS = [
     ("numpy", "the packer, every container gate and both exporters",
      "pip install numpy"),
+    ("onnx", "verify_onnx_reader.py -- the reference the ONNX reader is checked "
+     "against; the reader itself never imports it",
+     "pip install onnx"),
     ("torch", "the reference encoders and the Whisper gates",
      "pip install torch --index-url https://download.pytorch.org/whl/cpu"),
     ("transformers", "the Whisper gates and the tokenizer references",
