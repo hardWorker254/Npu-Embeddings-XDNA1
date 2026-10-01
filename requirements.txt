@@ -1,0 +1,53 @@
+# NpuEmbeddings -- build-time Python requirements.
+#
+# Build-time ONLY. Nothing here is used at runtime: the runtime is C++, and a
+# release contains no Python at all (BUILD.md §1).
+#
+# This file is the HUMAN-READABLE list -- the packages this project asks for,
+# and why. The exact bytes a build is known to work with are in
+# requirements.lock.txt, which is what bootstrap.sh installs. Bump a pin here,
+# then re-freeze.
+#
+# Targets Python 3.14 on x86_64. The MLIR-AIE / Triton-XDNA wheels are built
+# per-ABI (cp314, cp313, cp312, cp311), so a different Python needs a
+# different tag in requirements.amd.txt.
+
+# The extra index torch's +cpu wheels live on. PyPI's torch is the CUDA build
+# (a much larger wheel, and useless here -- there is no NVIDIA device).
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# --- the reference stack -------------------------------------------------
+# numpy     every container gate, both exporters, the packer itself
+# torch     the reference encoders and the Whisper gates (CPU build)
+# transformers / tokenizers / safetensors / huggingface-hub
+#           reading the checkpoint; the tokenizer references; the golden gates
+# scipy     the image and audio front ends
+# pillow    tools/verify/verify_vit_image.py -- the decode/resize reference
+# protobuf  whisper's sentencepiece table
+numpy==2.5.3
+scipy==1.18.1
+torch==2.11.0+cpu
+transformers==4.57.6
+tokenizers==0.22.2
+safetensors==0.8.0
+huggingface-hub==0.36.2
+pillow==12.3.0
+protobuf==7.36.1
+tqdm==4.70.1
+regex==2026.9.3
+
+# --- the endpoint gate ---------------------------------------------------
+# verify_endpoint.py drives the running binary with the official OpenAI client
+openai==2.14.0
+
+# --- supporting ----------------------------------------------------------
+# rich     MLIR-AIE uses it for its diagnostics
+# ml-dtypes  required by MLIR-AIE (>=0.6.0) and by onnx
+# filelock  EXACT. mlir-air pins ==3.13.1, so a newer one makes `pip check`
+#           fail for a package that is otherwise satisfied.
+# aiofiles / cloudpickle  required by MLIR-AIE
+rich==15.0.0
+ml-dtypes==0.6.0
+filelock==3.13.1
+aiofiles==25.1.0
+cloudpickle==3.1.2

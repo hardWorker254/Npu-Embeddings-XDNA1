@@ -4,6 +4,18 @@
 __pycache__/
 *.pyc
 
+# The build venv. Made and filled by ./bootstrap.sh. `python -m venv` drops a
+# self-ignoring .gitignore inside it, so this line is belt-and-braces: the tree
+# stays ignored if that file is ever missing (older Python, a copy tool that
+# skips dotfiles).
+.venv/
+
+# The AMD/Xilinx wheel cache bootstrap.sh downloads into (~1 GB) before it
+# verifies their sha256 against requirements.amd.txt. Fully regenerable from
+# the pinned URLs, so it is never committed -- the four digests are the
+# record, not the bytes.
+.wheel-cache/
+
 # Parsed Perfetto traces (~100 MB) are pure derivatives of the raw trace.txt +
 # the physical MLIR, both of which ARE committed. Regenerate byte-identically:
 #   python experiments\m2-bf16-gemm\regen_trace_json.py

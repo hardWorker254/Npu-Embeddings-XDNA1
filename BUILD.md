@@ -64,13 +64,47 @@ the reasoning.
 
 ### 2.1 Python environments
 
-Two are used, deliberately kept apart so that a `pip install` accident cannot
+Three are used, deliberately kept apart so that a `pip install` accident cannot
 break the toolchain that was hardest to get working:
 
 | environment | role |
 |---|---|
+| **`.venv`** | **The build environment.** Everything the exporters, the packer and the gates need, including the four AMD/Xilinx wheels. Made by `./bootstrap.sh`. |
 | IRON's own env | **Build only.** Do not install anything into it. |
-| `.venv-ref` | The reference and verification env: transformers, sentence-transformers, mteb, openai. |
+| `.venv-ref` | The reference and verification env: sentence-transformers, mteb, for the `reference/` golden generators. Only those need it. |
+
+**`.venv` — the one command (Linux / macOS):**
+
+```sh
+./bootstrap.sh                      # makes .venv, installs the pins, fetches + verifies the toolchain wheels
+source .venv/bin/activate
+python tools/pipeline.py check      # 24 of 27 tools
+```
+
+`bootstrap.sh` is idempotent and offline-friendly: the four wheels are pinned
+by **sha256** in `requirements.amd.txt` and cached in `.wheel-cache/`, so a
+second run is seconds, and a wheel whose digest does not match is refused
+rather than installed. Those tags (`latest-wheels`, `nightly`, …) are rolling
+upstream — the digest, not the tag, is what says what this build uses.
+
+`requirements.txt` is the human-readable list of *why* each package is here;
+`requirements.lock.txt` is what actually gets installed.
+
+Two things the venv deliberately does **not** own, because they are not Python:
+
+- **XRT.** `xclbinutil` and `pyxrt` come from `/opt/xilinx/xrt` — the exporter
+  shells out to `xclbinutil` in its last stage and dies without it:
+  `aiecc: tool 'xclbinutil' not found`. `source /opt/xilinx/xrt/setup.sh`
+  before exporting. `verify_design_numerics` refuses by name for the same
+  reason.
+- **`mlir-aie` vs `mlir-aie-no-rtti`.** They install the *same* `aie.pth` and
+  the same `mlir_aie/` tree, so both cannot coexist: the payload silently
+  belongs to whichever was installed last while *both* dist-infos remain.
+  `.venv` has no-rtti only, which is the build that was live. Installing
+  `mlir-aie` on top of it changes what compiles and leaves
+  `toolchain.json` reporting the wrong version.
+
+**`.venv-ref` (Windows, as before):**
 
 ```powershell
 # a venv off your Python 3.13, inheriting numpy/torch rather than duplicating them

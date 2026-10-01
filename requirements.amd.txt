@@ -1,0 +1,45 @@
+# NpuEmbeddings -- the AMD/Xilinx toolchain wheels.
+#
+# NOT on PyPI. These four come from GitHub release assets, on tags that are
+# MUTABLE -- `latest-wheels`, `latest-wheels-no-rtti-2`,
+# `latest-air-wheels-no-rtti` and `nightly` all get new assets pushed onto
+# them. An asset NAME has never been observed to disappear, but a tag moving is
+# what would silently change what you build, so every line is pinned by
+# sha256. bootstrap.sh refuses a wheel whose digest does not match.
+#
+# The dependency chain, verbatim from the wheels' own METADATA:
+#
+#   triton-xdna 3.6.0.2026091704+6fc1352
+#     -> mlir-air[aie]==0.0.1.2026091604+12e6f9f.no.rtti
+#        -> mlir_aie_no_rtti==1.4.3.dev55+g10767b5
+#        -> llvm-aie
+#     -> llvm-aie==22.0.0.2026090201+a36c62b9
+#
+# `aie.iron` -- what tools/export/* actually import -- comes from
+# mlir_aie_no_rtti's `mlir_aie/python` tree, exposed through its aie.pth.
+#
+# WARNING: mlir-aie (the RTTI build) and mlir-aie-no-rtti install the SAME
+# aie.pth and the SAME mlir_aie/ directory. Installing both makes the last one
+# win the payload while BOTH dist-infos remain, which is how this tree ended
+# up reporting mlir_aie==1.4.2 while compiling with 1.4.3.dev55. Install one.
+# The build here uses no-rtti, because that is what was live.
+
+# Pythons the wheels are published for: cp311 cp312 cp313 cp314 (llvm-aie is
+# py3-none and any will do). Bump AIE_ABI if you change interpreter.
+AIE_ABI=cp314
+
+# sha256 / 235 MB / Name: mlir-aie-no-rtti 1.4.3.dev55+g10767b5
+MLIR_AIE_NO_RTTI_URL=https://github.com/Xilinx/mlir-aie/releases/download/latest-wheels-no-rtti-2/mlir_aie_no_rtti-1.4.3.dev55%2Bg10767b5-cp314-cp314-manylinux_2_35_x86_64.whl
+MLIR_AIE_NO_RTTI_SHA256=1a6890b16ac3ca37c2b11b7f83a3d5f52df387fcbe606bac0c9f94634de2e173
+
+# sha256 / 242 MB / Name: mlir-air 0.0.1.2026091604+12e6f9f.no.rtti
+MLIR_AIR_URL=https://github.com/Xilinx/mlir-air/releases/download/latest-air-wheels-no-rtti/mlir_air-0.0.1.2026091604%2B12e6f9f.no.rtti-cp314-cp314-linux_x86_64.whl
+MLIR_AIR_SHA256=d88044f2add4ba8a9adf68264adacd110b2cf1ec84bf94d228077f75205bf647
+
+# sha256 / 142 MB / Name: llvm-aie 22.0.0.2026090201+a36c62b9 (Peano)
+LLVM_AIE_URL=https://github.com/Xilinx/llvm-aie/releases/download/nightly/llvm_aie-22.0.0.2026090201%2Ba36c62b9-py3-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+LLVM_AIE_SHA256=5b76445852a75310b3c5b8304b9f48a71c434452ecc6183b06c34892e6890200
+
+# sha256 / 352 MB / Name: triton-xdna 3.6.0.2026091704+6fc1352
+TRITON_XDNA_URL=https://github.com/amd/Triton-XDNA/releases/download/latest-wheels/triton_xdna-3.6.0.2026091704%2B6fc1352-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+TRITON_XDNA_SHA256=2a4278cf0a71d7041bff84449de07c23db72ae896de73bc504c02fef3d6ef73b
