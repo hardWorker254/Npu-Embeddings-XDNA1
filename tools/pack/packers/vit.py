@@ -89,7 +89,7 @@ from gemm_i8 import add_gemm_b_int8                              # noqa: E402
 from npue import (ARCH_VIT_PATCH16_PRELN, MAC_BY_DEVICE,        # noqa: E402
                   MAC_DEFAULT_DEVICE, Writer, gemm_b_layout, layout_hash,
                   mac_for_device, tile_b, to_bf16_bits)
-from onnx_weights import MODEL_ONNX, OnnxWeights                # noqa: E402
+from onnx_weights import MODEL_ONNX, OnnxWeights, model_digest  # noqa: E402
 
 # Only s and t of the MAC geometry affect the B operand's byte order, and the
 # board decides them: npu1's MMAC sub-tile is (s=8, t=4) and npu2's is (8, 8).
@@ -108,15 +108,6 @@ TILE_K, TILE_N = 64, 48
 # disagreement would be a container whose layout_hash describes the other
 # datatype, which nothing except the hardware would notice.
 I8_DTYPE = "BF16"
-
-
-def _sha256(path):
-    import hashlib
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def _read_json(path, what):
@@ -388,7 +379,7 @@ def pack_vit(model_dir, out, fold_scale=True, dry_run=False, device=None,
             "three exist.")
 
     st = OnnxWeights(model_dir / MODEL_ONNX)
-    src_sha = _sha256(model_dir / MODEL_ONNX)
+    src_sha = model_digest(model_dir / MODEL_ONNX)
 
     # The checkpoint's OWN image front end, read for EVERY pack and not only for
     # an int8 one. Its numbers are part of the model's definition -- a container

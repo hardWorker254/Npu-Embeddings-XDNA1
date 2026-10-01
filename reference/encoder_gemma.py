@@ -15,8 +15,9 @@
 #  * Embedding: token lookup, then scaled by sqrt(hidden_size). HF stores this
 #    as `Gemma3TextScaledWordEmbedding.embed_scale`, a python float computed
 #    once and cast to the weight's dtype at multiply time. This checkpoint's
-#    weights are F32 on disk (verified: every tensor in
-#    unsloth/embeddinggemma-300m's model.safetensors is F32, not BF16), so
+#    weights are F32 on disk (verified on unsloth/embeddinggemma-300m: every
+#    tensor is F32, not BF16 -- a dtype is a property of the tensor, so it
+#    survives the move to ONNX unchanged), so
 #    there is no bf16-downcast-of-the-scale landmine here -- see
 #    modeling_gemma3.py's own comment about sqrt(3072) rounding to 55.5 in
 #    bf16, which does NOT apply to this checkpoint's dtype.
@@ -111,8 +112,10 @@
 #    special-casing of the task-prefix tokens) -> Dense(768->3072, no bias,
 #    identity activation) -> Dense(3072->768, no bias, identity activation) ->
 #    L2 normalize. Both Dense layers are `nn.Linear(bias=False)`, confirmed by
-#    reading their own config.json (`"bias": false`) and their
-#    model.safetensors (only a `linear.weight` tensor, no `linear.bias`).
+#    reading their own config.json (`"bias": false`) and their weights (only a
+#    `linear.weight` tensor, no `linear.bias`). The export keeps that: the two
+#    matrices arrive as /model/st/dense_1.weight and dense_2.weight with no
+#    bias beside them.
 #
 # Env: numpy only (runs in either .venv-ref or the iron env).
 
@@ -401,14 +404,27 @@ def load_reference(model_dir):
     import json
     from pathlib import Path
 
-    from safetensors_io import load
+    from onnx_io import MODEL_ONNX, load
 
     model_dir = Path(model_dir)
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    w, _ = load(model_dir / "model.safetensors")
-    d2, _ = load(model_dir / "2_Dense" / "model.safetensors")
-    d3, _ = load(model_dir / "3_Dense" / "model.safetensors")
-    dense_w = {"2": d2["linear.weight"], "3": d3["linear.weight"]}
+    # strip="model.": this export KEEPS a root the checkpoint does not have.
+    # The prefixless names are the verified ground truth (recorded at
+    # GemmaEmbeddingReference, from tasks/0055's checkpoint inventory), so the
+    # root comes off here rather than this reference being rewritten to match
+    # one exporter's convention.
+    w, _ = load(model_dir / MODEL_ONNX, strip="model.")
+    # The sentence-transformers head is no longer a sibling checkpoint: its two
+    # matrices were fused into the export and ride beside the rest of the
+    # weights as /model/st/dense_1 and /model/st/dense_2, numbered in
+    # modules.json order -- dense_1 is 2_Dense, dense_2 is 3_Dense, the shapes
+    # confirming it (3072x768 and 768x3072, matching this class's docstring)
+    # once the MatMul transpose has been undone. The leading slash is the
+    # exporter's and strip="model." only removes a leading `model.`, so these
+    # are looked up verbatim. One load serves both: `w` carries extra keys,
+    # which the lookups below never ask for.
+    dense_w = {"2": w["/model/st/dense_1.weight"],
+               "3": w["/model/st/dense_2.weight"]}
     return GemmaEmbeddingReference(
         w, dense_w,
         num_layers=cfg["num_hidden_layers"],

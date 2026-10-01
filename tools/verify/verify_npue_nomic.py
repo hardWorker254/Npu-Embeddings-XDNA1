@@ -49,7 +49,7 @@ sys.path.insert(0, str(REPO / "reference"))
 
 from npue import ALIGN, ARCH_NOMIC_ROPE_SWIGLU, HEADER_SIZE, MAGIC, VERSION, \
     Reader, to_bf16_bits, untile_b                                  # noqa: E402
-from safetensors_io import load                                     # noqa: E402
+from onnx_io import MODEL_ONNX, load                                # noqa: E402
 
 
 def rel_fro(got, want):
@@ -352,7 +352,7 @@ def main():
     checkpoint_cfg_path = Path(args.model_dir) / "config.json"
     import json
     checkpoint_cfg = json.loads(checkpoint_cfg_path.read_text(encoding="utf-8"))
-    src, _ = load(Path(args.model_dir) / "model.safetensors")
+    src, _ = load(Path(args.model_dir) / MODEL_ONNX)
 
     problems = []
     problems += check_spec(args.npue, r)

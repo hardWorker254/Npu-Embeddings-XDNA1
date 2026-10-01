@@ -215,8 +215,8 @@ def apply_rope(q, k, cos, sin):
 class NomicEmbeddingReference:
     """NomicBertModel forward (post-LN + RoPE + SwiGLU) + mean pooling, numpy.
 
-    `w` is the checkpoint's raw state dict (HF tensor names, as they appear in
-    model.safetensors: "embeddings.word_embeddings.weight",
+    `w` is the checkpoint's weight dict (HF tensor names, as onnx_io.py
+    serves them -- the names the HuggingFace checkpoint has always used): "embeddings.word_embeddings.weight",
     "embeddings.token_type_embeddings.weight", "emb_ln.{weight,bias}",
     "encoder.layers.{i}.attn.Wqkv.weight", ".attn.out_proj.weight",
     ".mlp.fc11.weight", ".mlp.fc12.weight", ".mlp.fc2.weight",
@@ -402,11 +402,11 @@ def load_reference(model_dir):
     import json
     from pathlib import Path
 
-    from safetensors_io import load
+    from onnx_io import MODEL_ONNX, load
 
     model_dir = Path(model_dir)
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    w, _ = load(model_dir / "model.safetensors")
+    w, _ = load(model_dir / MODEL_ONNX)
     rope_theta = cfg.get("rope_parameters", {}).get("rope_theta", cfg.get("rotary_emb_base", 1000.0))
     return NomicEmbeddingReference(
         w,

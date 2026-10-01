@@ -19,22 +19,23 @@
 #
 #   2. DOES IT READ THE SAME BYTES? Compared against `onnx.load()` -- a from-
 #      scratch protobuf implementation with no code shared with ours -- for
-#      names, shapes, dtypes and values. And, while the safetensors checkpoints
-#      are still on disk, against the reader this one replaces: the migration's
-#      real acceptance criterion is "the ONNX container carries byte-identical
-#      weights to the safetensors container", because every golden, every .npue
-#      and every provenance pin downstream is defined in terms of those bytes.
+#      names, shapes, dtypes and values. What that proves is narrower than the
+#      PASS line makes it look, and crosscheck_onnx() says so in place: a
+#      MatMul weight handed back TRANSPOSED still matches the file's bytes, so
+#      this indexes both orientations on purpose and therefore cannot tell them
+#      apart, and a name recovered to a sibling tensor still names a real
+#      tensor. The file alone has no opinion about what torch.nn.Linear meant.
 #
-#   3. DOES IT ACTUALLY CATCH A WRONG ANSWER? A gate that has only ever been
-#      run on a correct reader proves nothing -- "PASS" is indistinguishable
-#      from a gate that would pass anything. So each failure mode is injected
-#      and the gate FAILS unless it is reported: the transpose left undone (the
-#      single most likely bug here, and one that still produces a container that
-#      passes its own layout hash and emits embeddings shaped like noise), and a
-#      name recovered to the wrong tensor.
+#   3. SO WHO SAYS THE TENSOR IS THE RIGHT ONE? The committed goldens. They are
+#      reference activations produced from a known-good weight set, so the
+#      reader's own bytes pushed through the reference encoder must reproduce
+#      them -- and must then STOP reproducing them the moment a fault is
+#      injected. check_sensitivity() runs exactly that: the correct reader, a
+#      transpose left undone, and a name recovered to the wrong tensor. A gate
+#      that has only ever passed is indistinguishable from one that would pass
+#      anything; this one is built to be able to fail.
 #
-# Env: numpy, onnx; safetensors reader from tools/lib (checkpoint comparison is
-# skipped, not failed, when a checkpoint is absent).
+# Env: numpy, onnx; the reference encoder and the goldens from reference/.
 # Usage:
 #   python tools/verify/verify_onnx_reader.py
 
@@ -46,60 +47,46 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "tools" / "lib"))
 
-from onnx_weights import OnnxWeights            # noqa: E402
+from onnx_weights import MODEL_ONNX, OnnxWeights    # noqa: E402
 
-# (model dir, ONNX path relative to it, reader prefix, safetensors subset).
+# (model dir, ONNX path relative to it, reader prefix).
 #
 # `prefix` restores a module root an export dropped -- whisper's encoder was
 # exported as a submodule and carries `layers.0...` where the checkpoint says
-# `model.encoder.layers.0...`. `subset` limits the safetensors comparison to
-# the half of the checkpoint this ONNX file holds, because whisper ships
-# encoder and decoder as two files against one checkpoint.
+# `model.encoder.layers.0...`. The decoder export kept `model.decoder.` and
+# needs nothing.
 #
 # Cases whose files are absent are SKIPPED and reported: this table is the
 # registry of every ONNX source the project can pack from, and a model nobody
 # has fetched yet must not make the gate red.
 CASES = [
-    ("all-MiniLM-L6-v2", "onnx/model.onnx", "", ""),
-    ("bge-small-en-v1.5", "onnx/model.onnx", "", ""),
-    ("bge-base-en-v1.5", "onnx/model.onnx", "", ""),
-    ("bge-large-en-v1.5", "onnx/model.onnx", "", ""),
-    ("bge-micro-v2", "onnx/model.onnx", "", ""),
-    ("nomic-embed-text-v1.5", "onnx/model.onnx", "", ""),
-    ("gte-multilingual-base", "onnx/model.onnx", "", ""),
-    ("embeddinggemma-300m", "onnx/model.onnx", "", ""),
-    ("vit-base-patch16-224", "onnx/model.onnx", "", ""),
-    # whisper: one ONNX per sub-model, one checkpoint for both
-    ("whisper-tiny", "onnx/encoder_model.onnx", "model.encoder.",
-     "model.encoder."),
-    ("whisper-tiny", "onnx/decoder_model.onnx", "", "model.decoder."),
-    ("whisper-base", "onnx/encoder_model.onnx", "model.encoder.",
-     "model.encoder."),
-    ("whisper-base", "onnx/decoder_model.onnx", "", "model.decoder."),
-    ("whisper-small", "onnx/encoder_model.onnx", "model.encoder.",
-     "model.encoder."),
-    ("whisper-small", "onnx/decoder_model.onnx", "", "model.decoder."),
-    ("whisper-medium", "onnx/encoder_model.onnx", "model.encoder.",
-     "model.encoder."),
-    ("whisper-medium", "onnx/decoder_model.onnx", "", "model.decoder."),
-    ("whisper-large-v3", "onnx/encoder_model.onnx", "model.encoder.",
-     "model.encoder."),
-    ("whisper-large-v3", "onnx/decoder_model.onnx", "", "model.decoder."),
-    ("whisper-large-v3-turbo", "onnx/encoder_model.onnx", "model.encoder.",
-     "model.encoder."),
-    ("whisper-large-v3-turbo", "onnx/decoder_model.onnx", "", "model.decoder."),
+    ("all-MiniLM-L6-v2", "onnx/model.onnx", ""),
+    ("bge-small-en-v1.5", "onnx/model.onnx", ""),
+    ("bge-base-en-v1.5", "onnx/model.onnx", ""),
+    ("bge-large-en-v1.5", "onnx/model.onnx", ""),
+    ("bge-micro-v2", "onnx/model.onnx", ""),
+    ("nomic-embed-text-v1.5", "onnx/model.onnx", ""),
+    ("gte-multilingual-base", "onnx/model.onnx", ""),
+    ("embeddinggemma-300m", "onnx/model.onnx", ""),
+    ("vit-base-patch16-224", "onnx/model.onnx", ""),
+    # whisper: one ONNX per sub-model
+    ("whisper-tiny", "onnx/encoder_model.onnx", "model.encoder."),
+    ("whisper-tiny", "onnx/decoder_model.onnx", ""),
+    ("whisper-base", "onnx/encoder_model.onnx", "model.encoder."),
+    ("whisper-base", "onnx/decoder_model.onnx", ""),
+    ("whisper-small", "onnx/encoder_model.onnx", "model.encoder."),
+    ("whisper-small", "onnx/decoder_model.onnx", ""),
+    ("whisper-medium", "onnx/encoder_model.onnx", "model.encoder."),
+    ("whisper-medium", "onnx/decoder_model.onnx", ""),
+    ("whisper-large-v3", "onnx/encoder_model.onnx", "model.encoder."),
+    ("whisper-large-v3", "onnx/decoder_model.onnx", ""),
+    ("whisper-large-v3-turbo", "onnx/encoder_model.onnx", "model.encoder."),
+    ("whisper-large-v3-turbo", "onnx/decoder_model.onnx", ""),
 ]
-
-# Tensors an ONNX graph has no reason to carry, listed by reference/fetch_model.py
-# as IGNORABLE and absent from every export checked so far:
-#   pooler.*       sentence-transformers never calls it (dead weight by design)
-#   position_ids   a constant arange, materialised in the graph rather than stored
-# Everything else must be there, byte for byte.
-IGNORABLE = {"pooler.dense.weight", "pooler.dense.bias", "embeddings.position_ids"}
 
 # `onnx.load()` reads the entire file into RAM, so the cross-check is capped.
 # Raise it on a machine with room to check a large model end to end; above the
-# cap the model still gets the wire-table and safetensors checks.
+# cap the model still gets the wire-table and the golden-based checks.
 MAX_ONNX_LOAD_MB = int((__import__("os").environ.get("ONNX_VERIFY_MAX_MB")
                          or 400))
 
@@ -176,7 +163,7 @@ def check_wire_table():
 
 
 # ---------------------------------------------------------------------------
-# 2. values, against onnx.load() and against the safetensors checkpoint
+# 2. values, against onnx.load()
 # ---------------------------------------------------------------------------
 def crosscheck_onnx(model, path, prefix):
     """Byte-level agreement with `onnx.load()`, an implementation sharing no
@@ -187,10 +174,12 @@ def crosscheck_onnx(model, path, prefix):
     the file, so a digest of what we hand back matches the reference either in
     the same orientation or in the other one; both mean the offsets, the dtypes
     and the dimensions were parsed correctly, and neither says the orientation
-    is the RIGHT one -- the file alone cannot say that, it has no opinion about
-    what torch.nn.Linear meant. Orientation and naming are proven against the
-    safetensors checkpoint instead, which is the ground truth for what the
-    packers asked for; see crosscheck_safetensors().
+    is the RIGHT one. The file alone cannot say that -- it has no opinion about
+    what torch.nn.Linear meant -- so this indexes BOTH orientations on purpose
+    and stays silent about orientation and naming. Those are proven against the
+    goldens instead, by pushing this reader's own bytes through the reference
+    encoder and requiring the committed activations to come back: see
+    check_sensitivity().
     """
     import hashlib
 
@@ -222,7 +211,14 @@ def crosscheck_onnx(model, path, prefix):
     try:
         bad, checked = [], 0
         for k in got.keys():
-            a = got.array(k)
+            # Native dtype, NOT array()'s default float32: that would compare
+            # an int64 graph constant (whisper-turbo's export carries 128 of
+            # them) against float32 bytes and call a correct read wrong -- and
+            # would do the same to any fp16 export. np.array() then copies the
+            # view out of the mapping, because a raw() view still exported when
+            # close() runs is a BufferError (and on a reader that allowed it, a
+            # fault), which is the hazard array()'s own docstring exists for.
+            a = np.array(got.raw(k))
             if digest(a) not in index:
                 bad.append(f"{k}: these bytes are not in the file")
             elif index[digest(a)] not in (a.shape, a.shape[::-1]):
@@ -235,89 +231,99 @@ def crosscheck_onnx(model, path, prefix):
         got.close()
 
 
-def crosscheck_safetensors(model, path, prefix, subset):
-    from safetensors_mmap import SafeTensors
-    st_path = REPO / "models" / model / "model.safetensors"
-    if not st_path.exists():
-        print(f"   skip  {model}: no safetensors checkpoint to compare "
-              f"({st_path.name} not fetched)")
-        return
-    st = SafeTensors(st_path)
-    got = OnnxWeights(path, prefix=prefix)
-    try:
-        want = [k for k in st.keys()
-                if (not subset or k.startswith(subset))
-                and k not in IGNORABLE
-                and not k.endswith(".position_ids")]
-        bad, missing = [], []
-        for k in want:
-            if k not in got:
-                missing.append(k)
-                continue
-            a, b = st.array(k), got.array(k)
-            if a.shape != b.shape:
-                bad.append(f"{k}: shape {a.shape} vs {b.shape}")
-            elif not np.array_equal(a, b):
-                bad.append(f"{k}: bytes differ")
-        ok(f"{model}/{path.name}: byte-identical to the safetensors checkpoint "
-           f"({len(want) - len(missing) - len(bad)}/{len(want)})",
-           not bad and not missing,
-           "; ".join((bad + missing)[:3]))
-    finally:
-        got.close()
-        st.close()
-
-
 # ---------------------------------------------------------------------------
-# 3. fault injection: the gate must REPORT a broken reader
+# 3. the goldens: is it the RIGHT tensor, and can this gate tell when it is not
 # ---------------------------------------------------------------------------
 def check_sensitivity():
-    """A gate that cannot fail is not a gate (see verify_i8_scheme.py)."""
-    print("-- sensitivity: a deliberately broken reader must be caught")
-    onnx_path = REPO / "models" / "all-MiniLM-L6-v2" / "onnx" / "model.onnx"
-    st_path = REPO / "models" / "all-MiniLM-L6-v2" / "model.safetensors"
-    if not (onnx_path.exists() and st_path.exists()):
-        print("   skip  neither all-MiniLM-L6-v2/model.onnx nor its "
-              "checkpoint is present")
+    """A gate that cannot fail is not a gate (see verify_i8_scheme.py).
+
+    The two checks above say the file was parsed and that the bytes came out
+    of it. Neither can say the reader handed back the RIGHT tensor under the
+    right NAME in the ORIENTATION the packers expect, and neither can: this
+    gate indexes both orientations on purpose (see crosscheck_onnx), and a name
+    recovered to a sibling still names a real tensor. The file has no opinion
+    about what torch.nn.Linear meant.
+
+    The goldens do. They are committed reference activations produced from a
+    known-good weight set, so the reader's own bytes pushed through the
+    reference encoder must reproduce them -- and must then STOP reproducing
+    them when either fault is injected. Two questions answered at once: the
+    reader is right, and this check can tell when it is not.
+    """
+    print("-- sensitivity: the goldens must catch a wrong reader")
+    model_dir = REPO / "models" / "all-MiniLM-L6-v2"
+    gpath = REPO / "reference" / "goldens" / "minilm_l6_s64_boundary.npz"
+    if not ((model_dir / MODEL_ONNX).exists() and gpath.exists()):
+        print("   skip  all-MiniLM-L6-v2's ONNX or its golden is absent")
         return
 
-    from safetensors_mmap import SafeTensors
-    st = SafeTensors(st_path)
-    got = OnnxWeights(onnx_path)
-    try:
-        # (a) the transpose left undone. Must produce a DIFFERENCE, and only
-        #     where a weight was actually transposed -- if this does not trip,
-        #     the comparison above would pass a reader that never untwists
-        #     MatMul weights at all.
-        victim = next(k for k in got.keys()
-                      if got._tensors[k]["transpose"])
-        got._tensors[victim]["transpose"] = False
-        a, b = st.array(victim), got.array(victim)
-        caught = not np.array_equal(a, b)
-        # a square weight still differs after a wrong transpose (the bytes are
-        # in the other order), but the SHAPE check must also be exercised
-        ok(f"missing transpose is detected on {victim}", caught)
-        got._tensors[victim]["transpose"] = True
+    import json
 
-        # (b) a name recovered to the wrong tensor. The equivalence check must
-        #     notice that a weight now holds someone else's bytes.
-        #     The shapes are equal on purpose: a mismatch that shows up only as
-        #     a shape error would pass even for a reader that never recovered a
-        #     name at all, so this has to be caught on VALUES alone.
-        victim = next(k for k in got.keys()
-                      if got._tensors[k]["transpose"])
-        other = next(k for k in got.keys()
-                     if k != victim and got._tensors[k]["transpose"]
-                     and st.array(k).shape == st.array(victim).shape)
-        saved = got._tensors[victim]
-        got._tensors[victim] = got._tensors[other]   # victim reads other's bytes
-        a, b = st.array(victim), got.array(victim)
-        ok("a weight pointing at the wrong tensor is detected",
-           not np.array_equal(a, b))
-        got._tensors[victim] = saved
-    finally:
-        got.close()
-        st.close()
+    sys.path.insert(0, str(REPO / "reference"))
+    from encoder import MiniLMReference, read_pooling     # noqa: E402
+    from npz_io import load as load_goldens               # noqa: E402
+    from onnx_io import load as load_ckpt                 # noqa: E402
+
+    g, meta = load_goldens(gpath)
+    n_layers = int(meta["num_layers"])
+    cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+    want = np.asarray(g["hf.last_hidden_state"], dtype=np.float64)
+
+    def deviation(weights):
+        """rel_fro of this weight set's answer against the committed golden."""
+        ref = MiniLMReference(weights, num_layers=n_layers,
+                              num_heads=cfg["num_attention_heads"],
+                              eps=cfg["layer_norm_eps"],
+                              pooling=read_pooling(model_dir))
+        taps = {}
+        ref.encode(g["input_ids"], g["attention_mask"], g["token_type_ids"],
+                   taps=taps)
+        got = np.asarray(taps["last_hidden_state"], dtype=np.float64)
+        if got.shape != want.shape:
+            return float("inf")
+        denom = np.linalg.norm(want)
+        return float(np.linalg.norm(got - want) / denom) if denom else 0.0
+
+    # load_ckpt() hands back OWNED arrays (OnnxWeights.array()'s contract), so
+    # the dict below can be corrupted for the injections without touching the
+    # file on disk.
+    w, _ = load_ckpt(model_dir / MODEL_ONNX)
+
+    good = deviation(w)
+    ok("the reader's bytes reproduce the golden end to end", good <= 2e-5,
+       f"rel_fro {good:.2e} (limit 2e-5)")
+
+    # (a) the transpose left undone -- the single most likely bug here, and one
+    #     that still yields a layout hash that verifies and embeddings shaped
+    #     like noise. The victim has to be square (a wrong transpose must show
+    #     up in the VALUES, not as a shape error) and one the reference reads.
+    square = [k for k, a in w.items()
+              if a.ndim == 2 and a.shape[0] == a.shape[1]]
+    if ok("a square weight exists to transpose", bool(square)):
+        victim = next((k for k in square if "query.weight" in k), square[0])
+        orig = w[victim]
+        w[victim] = orig.T.copy()
+        bad = deviation(w)
+        w[victim] = orig
+        ok(f"a transpose left undone is caught ({victim})", bad > 1e-3,
+           f"rel_fro {bad:.2e} -- would have been <= 2e-5 if not caught")
+
+    # (b) a name recovered to the wrong tensor: two projections of equal shape
+    #     swapped, which is exactly what a mis-resolved tier-2/tier-3 name
+    #     produces. Equal SHAPE on purpose, so detection has to come from the
+    #     values the reference consumes -- a shape mismatch would be caught by
+    #     anything, including a reader that never recovered a name at all.
+    q = next((k for k in w if "query.weight" in k), None)
+    kq = next((k for k in w if "key.weight" in k and k != q), None)
+    if ok("two equal-shaped projections exist to swap",
+          bool(q and kq and w[q].shape == w[kq].shape)):
+        saved_q, saved_k = w[q].copy(), w[kq].copy()
+        w[q], w[kq] = saved_k, saved_q
+        bad = deviation(w)
+        w[q], w[kq] = saved_q, saved_k
+        ok("a weight pointing at the wrong tensor is caught "
+           f"({q} <- {kq})", bad > 1e-3,
+           f"rel_fro {bad:.2e} -- still matched the golden")
 
 
 def main():
@@ -326,13 +332,12 @@ def main():
 
     print("-- per-model reads")
     ran = 0
-    for model, rel, prefix, subset in CASES:
+    for model, rel, prefix in CASES:
         path = REPO / "models" / model / rel
         if not path.exists():
             continue
         ran += 1
         crosscheck_onnx(model, path, prefix)
-        crosscheck_safetensors(model, path, prefix, subset)
     if ran == 0:
         ok("at least one ONNX model is present to check", False,
            "no models/*/<onnx> found")
@@ -344,9 +349,9 @@ def main():
         for f in _failures:
             print("   -", f)
         return 1
-    print("\nPASS -- the wire table matches onnx, the reader returns the same\n"
-          "       bytes as both reference implementations, and it reports a\n"
-          "       reader that has been deliberately broken.")
+    print("\nPASS -- the wire table matches onnx, every tensor is a verbatim\n"
+          "       read of the file, the reader's bytes reproduce the golden\n"
+          "       end to end, and both injected faults are caught.")
     return 0
 
 

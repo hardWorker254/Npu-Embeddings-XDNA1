@@ -38,7 +38,6 @@
 #   & .\.venv-ref\Scripts\python.exe reference\make_goldens_nomic.py --taps
 
 import argparse
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -52,7 +51,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from corpus_nomic import SENTENCES, SEQ_LEN as DEFAULT_SEQ_LEN  # noqa: E402
 from encoder_nomic import PROMPTS               # noqa: E402
-from safetensors_io import save, load           # noqa: E402
+from npz_io import save, load as load_goldens  # noqa: E402
+from onnx_io import MODEL_ONNX, load, model_digest           # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 GOLDENS = REPO / "reference" / "goldens_nomic"
@@ -66,14 +66,6 @@ GOLDENS = REPO / "reference" / "goldens_nomic"
 TOL_ORACLE_AGREE = 2e-5
 
 
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def refuse_to_clobber(path, sha, force):
     """A golden belongs to exactly one checkpoint. Same behaviour as
     make_goldens.py's refuse_to_clobber() (reference/make_goldens.py) --
@@ -84,7 +76,7 @@ def refuse_to_clobber(path, sha, force):
     if not path.exists() or force:
         return
     try:
-        _, meta = load(path)
+        _, meta = load_goldens(path)
     except Exception:
         return  # unreadable: let the write replace it
     have = meta.get("source_sha256", "")
@@ -135,9 +127,9 @@ def main():
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     n_layers = cfg["num_hidden_layers"]
 
-    digest = sha256(model_dir / "model.safetensors")
+    digest = model_digest(model_dir / MODEL_ONNX)
     if digest != pin["sha256"]:
-        raise SystemExit(f"model.safetensors sha256 {digest} != CHECKPOINT.json pin "
+        raise SystemExit(f"checkpoint ONNX sha256 {digest} != CHECKPOINT.json pin "
                          f"{pin['sha256']} -- re-run fetch_model.py --model nomic-ai/nomic-embed-text-v1.5")
 
     prefix = PROMPTS[args.prompt]
@@ -242,7 +234,7 @@ def main():
         tensors[f"hf.L{i}.norm2"] = hs[i + 1]
 
     slug = "nomic-embed-text-v1.5_l12"
-    path = GOLDENS / f"{slug}_s{SEQ_LEN}_boundary.safetensors"
+    path = GOLDENS / f"{slug}_s{SEQ_LEN}_boundary.npz"
     refuse_to_clobber(path, digest, args.force)
     save(path, tensors, meta)
     print(f"\nwrote {path.relative_to(REPO)}  "
@@ -251,7 +243,7 @@ def main():
     if args.taps:
         from encoder_nomic import NomicEmbeddingReference
 
-        w, _ = load(model_dir / "model.safetensors")
+        w, _ = load(model_dir / MODEL_ONNX)
         ref = NomicEmbeddingReference(
             w, num_layers=n_layers, hidden=cfg["hidden_size"],
             num_heads=cfg["num_attention_heads"], head_dim=cfg["head_dim"],
@@ -264,7 +256,7 @@ def main():
         tap_meta["note"] = ("Full intermediate dump from reference/encoder_nomic.py. "
                             "Derivative of a sha256-pinned checkpoint; gitignored. "
                             "Regenerate: make_goldens_nomic.py --taps")
-        tpath = GOLDENS / f"{slug}_s{SEQ_LEN}_taps.safetensors"
+        tpath = GOLDENS / f"{slug}_s{SEQ_LEN}_taps.npz"
         refuse_to_clobber(tpath, digest, args.force)
         save(tpath, taps, tap_meta)
         print(f"wrote {tpath.relative_to(REPO)}  "

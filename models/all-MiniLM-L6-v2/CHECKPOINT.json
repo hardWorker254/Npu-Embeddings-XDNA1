@@ -1,5 +1,7 @@
 {
   "repo_id": "sentence-transformers/all-MiniLM-L6-v2",
-  "file": "model.safetensors",
-  "sha256": "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db"
+  "file": [
+    "onnx/model.onnx"
+  ],
+  "sha256": "75ba77256ecf2dbf7314c59adc785a002662e09a2062c2f3b3f650a80f1411b4"
 }

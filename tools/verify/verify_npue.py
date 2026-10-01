@@ -67,7 +67,8 @@ from precision_study import make_gemm                              # noqa: E402
 from gemm_i8 import check_i8_operand                                # noqa: E402
 from npue import (ALIGN, ASMOOTH_SUFFIX, HEADER_SIZE, MAGIC, VERSION,  # noqa: E402
                   Reader, WSCALE_SUFFIX, find_goldens, to_bf16_bits, untile_b)
-from safetensors_io import load                                    # noqa: E402
+from npz_io import load                                            # noqa: E402
+from onnx_io import MODEL_ONNX, load as load_ckpt                   # noqa: E402
 
 
 def rel_fro(got, want):
@@ -538,7 +539,7 @@ def main():
               f"  goldens  {_gmeta.get('source_sha256')}")
         return 1
 
-    src, _ = load(Path(args.model_dir) / "model.safetensors")
+    src, _ = load_ckpt(Path(args.model_dir) / MODEL_ONNX)
 
     problems = []
     problems += check_spec(args.npue, r)

@@ -5,8 +5,9 @@
 # are validated against.
 #
 # Deliberately runs with numpy ONLY, so it can execute in the iron env where
-# the NPU work happens -- no torch, no transformers, no safetensors package.
-# That is the whole point of the file-based env boundary.
+# the NPU work happens -- no torch, no transformers, not even onnx: the
+# checkpoint is read by reference/onnx_io.py, which walks the protobuf wire
+# format itself. That is the whole point of the file-based env boundary.
 #
 # What is compared, and what is not:
 #   emb.ln, L{i}.ln2, last_hidden_state, pool.mean, out.embedding   <- HF exposes
@@ -19,7 +20,6 @@
 #   & "C:\Users\vegar\.conda\envs\iron\python.exe" reference\check_reference.py
 
 import argparse
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -29,7 +29,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from encoder import MiniLMReference, read_pooling          # noqa: E402
-from safetensors_io import load              # noqa: E402
+from npz_io import load as load_goldens                    # noqa: E402
+from onnx_io import MODEL_ONNX, load as load_ckpt, model_digest  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -59,22 +60,14 @@ def compare(name, got, want):
     }
 
 
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", default=str(REPO / "models" / "all-MiniLM-L6-v2"))
     ap.add_argument("--goldens", default=str(REPO / "reference" / "goldens"
-                                             / "minilm_l6_s64_boundary.safetensors"))
+                                             / "minilm_l6_s64_boundary.npz"))
     args = ap.parse_args()
 
-    g, meta = load(args.goldens)
+    g, meta = load_goldens(args.goldens)
     n_layers = int(meta["num_layers"])
     print(f"goldens  : {Path(args.goldens).name}")
     print(f"  model  : {meta['repo_id']}  ({meta['torch']} / {meta['transformers']})")
@@ -82,7 +75,7 @@ def main():
 
     # A golden compared against a different checkpoint is worse than no golden.
     model_dir = Path(args.model_dir)
-    digest = sha256(model_dir / "model.safetensors")
+    digest = model_digest(model_dir / MODEL_ONNX)
     if digest != meta["source_sha256"]:
         print(f"\nFAIL -- checkpoint sha256 does not match the goldens:\n"
               f"  goldens    {meta['source_sha256']}\n  on disk    {digest}")
@@ -90,7 +83,7 @@ def main():
     print(f"  sha256   : {digest[:16]}... matches")
 
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    w, _ = load(model_dir / "model.safetensors")
+    w, _ = load_ckpt(model_dir / MODEL_ONNX)
     ref = MiniLMReference(w, num_layers=n_layers,
                           num_heads=cfg["num_attention_heads"],
                           eps=cfg["layer_norm_eps"],

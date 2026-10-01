@@ -284,11 +284,12 @@ def _parse_tensor(buf, start, end):
                 t["ext"][k] = v
         elif no in _INLINED and t["loc"] is None:
             t["loc"] = ("inline", no, wt, ps, pe)
-    if t["loc"] is None and t["ext"]:
-        base = os.path.dirname(os.path.abspath(t["_path"])) if "_path" in t else ""
-        t["loc"] = ("ext", os.path.join(base, t["ext"].get("location", "")),
-                    int(t["ext"].get("offset", 0)),
-                    int(t["ext"].get("length", 0)))
+    # An external-data path in the graph is RELATIVE to the graph file, and
+    # this function does not know where that is -- `_build()` resolves it
+    # against the real base directory. Leaving `loc` None here is what makes
+    # that happen; resolving it here as well would produce a path relative to
+    # the current working directory, which silently reads nothing (or the
+    # wrong file) for every model that keeps its weights in a side file.
     return t
 
 
@@ -611,6 +612,29 @@ class OnnxWeights:
             flat = np.frombuffer(buf, dtype=d, count=1, offset=ps)
         return flat.reshape(t["dims"])
 
+    def source_files(self):
+        """Every file whose BYTES this reader can hand back, graph first.
+
+        An ONNX model may keep its weights in a side file (`external_data`),
+        and the ones that do are the large ones -- whisper-large-v3's graph is
+        0.7 MB and the data it points at is 2.5 GB. Hashing only the graph,
+        which is what a plain `sha256(model.onnx)` would do, then pins the
+        tensor names and none of the WEIGHTS: swap the checkpoint out under an
+        unchanged graph and the pin verifies clean. This is the list
+        `model_digest()` walks instead.
+        """
+        out = [self.path]
+        seen = {os.path.abspath(self.path)}
+        for t in self._tensors.values():
+            loc = t.get("loc")
+            if not loc or loc[0] != "ext":
+                continue
+            ap = os.path.abspath(loc[1])
+            if ap not in seen:
+                seen.add(ap)
+                out.append(loc[1])
+        return out
+
     # -- lifecycle ----------------------------------------------------------
 
     def close(self):
@@ -684,6 +708,17 @@ class Combined:
     def array(self, name, dtype=np.float32):
         return self._r(name).array(name, dtype)
 
+    def source_files(self):
+        """Every file behind all of the readers, in reader order."""
+        out, seen = [], set()
+        for r in self._readers:
+            for p in r.source_files():
+                ap = os.path.abspath(p)
+                if ap not in seen:
+                    seen.add(ap)
+                    out.append(p)
+        return out
+
     def close(self):
         for r in self._readers:
             r.close()
@@ -712,3 +747,53 @@ def _range_of(t):
     if loc[0] == "ext":
         return loc[2], loc[2] + loc[3]
     return loc[3], loc[4]
+
+
+def sha256_file(path, chunk=1 << 20):
+    """Digest of one file, read once and never held in memory."""
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for blk in iter(lambda: f.read(chunk), b""):
+            h.update(blk)
+    return h.hexdigest()
+
+
+def model_digest(*paths):
+    """One digest identifying an ONNX model: its graph and everything it holds.
+
+    Every ONNX path that names "the checkpoint" -- `source_sha256` in the
+    .npue, `sha256` in CHECKPOINT.json, the pin the gate compares -- passes
+    through here, so there is one answer to "is this the same weights?".
+
+    The digest covers each of the model's source files as that file's own
+    digest together with its BASENAME, in a fixed order:
+
+      * each file's own digest, so a 2.5 GB side file costs 2.5 GB of reading
+        and then 32 bytes of combining rather than being read a second time;
+      * the basename with it, because two checkpoints can be byte-identical
+        under different names and that is not the same checkpoint -- the
+        external-data location is part of the model's layout, and a reader
+        that resolves `encoder_model.onnx_data` when the graph asks for a
+        different name has not read this model;
+      * a fixed order, because a set that hashes differently depending on how
+        it was enumerated is not a fingerprint of anything.
+
+    It is deliberately NOT the digest of any single file, so it cannot be
+    mistaken for one: `sha256_file()` is still there for the plain question
+    "is this file this file?".
+    """
+    import hashlib
+    files = []
+    for p in paths:
+        with OnnxWeights(p) as w:
+            for f in w.source_files():
+                if f not in files:
+                    files.append(f)
+    outer = hashlib.sha256()
+    for p in files:
+        outer.update(os.path.basename(p).encode("utf-8"))
+        outer.update(b"\0")
+        outer.update(sha256_file(p).encode("ascii"))
+        outer.update(b"\n")
+    return outer.hexdigest()

@@ -1,12 +1,13 @@
 # NpuEmbeddings -- M3: generate golden vectors from HuggingFace.
 #
 # This is the ONLY place torch/transformers is allowed to run. It produces
-# .safetensors files that cross into the iron env as plain data -- never as an
-# import (CLAUDE.md: "Golden data crosses env boundaries as files").
+# .npz files that cross into the iron env as plain data -- never as an import
+# (CLAUDE.md: "Golden data crosses env boundaries as files"). numpy opens them
+# on both sides, which is the whole reason for the format.
 #
 # Two outputs, deliberately split by size:
 #
-#   goldens/<slug>_s64_boundary.safetensors      ~6 MB, COMMITTED
+#   goldens/<slug>_s64_boundary.npz      ~6 MB, COMMITTED
 #   (<slug> is derived from the checkpoint; all-MiniLM-L6-v2 keeps its
 #    historical "minilm_l6" because task logs cite the filename)
 #       tokenizer output, every layer boundary (emb.ln, L*.ln1, L*.ln2),
@@ -14,7 +15,7 @@
 #       the sentence-transformers embedding as an independent second oracle.
 #       This is the contract M5 kernels are checked against.
 #
-#   goldens/<slug>_s64_taps.safetensors          ~55 MB, GITIGNORED
+#   goldens/<slug>_s64_taps.npz          ~55 MB, GITIGNORED
 #       every intermediate our reference produces, including attention scores
 #       and the FFN interior. Deterministic and CPU-only: regenerate with
 #       --taps. Kept out of git for the same reason the parsed Perfetto traces
@@ -41,11 +42,15 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+# tools/lib, not tools: npue.py (and golden_slug with it) lives there. This
+# line said `tools`, so `from npue import golden_slug` raised
+# ModuleNotFoundError and the file had not run since npue.py moved -- found
+# while converting the goldens' container.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools" / "lib"))
 
 from corpus import SENTENCES, SEQ_LEN as DEFAULT_SEQ_LEN   # noqa: E402
 from npue import golden_slug                   # noqa: E402
-from safetensors_io import save                # noqa: E402
+from npz_io import save                        # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 GOLDENS = REPO / "reference" / "goldens"
@@ -64,7 +69,7 @@ def refuse_to_clobber(path, sha, force):
     """
     if not path.exists() or force:
         return
-    from safetensors_io import load
+    from npz_io import load
     try:
         _, meta = load(path)
     except Exception:
@@ -210,7 +215,7 @@ def main():
         tensors[f"hf.L{i}.ln2"] = hs[i + 1]
 
     slug = golden_slug(model_dir, n_layers)
-    path = GOLDENS / f"{slug}_s{SEQ_LEN}_boundary.safetensors"
+    path = GOLDENS / f"{slug}_s{SEQ_LEN}_boundary.npz"
     refuse_to_clobber(path, pin["sha256"], args.force)
     save(path, tensors, meta)
     print(f"\nwrote {path.relative_to(REPO)}  "
@@ -221,9 +226,9 @@ def main():
         # qkv/scores/gelu. It is only trustworthy because check_reference.py
         # proves the reference agrees with HF at every point HF does expose.
         from encoder import MiniLMReference
-        from safetensors_io import load
+        from onnx_io import MODEL_ONNX, load
 
-        w, _ = load(model_dir / "model.safetensors")
+        w, _ = load(model_dir / MODEL_ONNX)
         ref = MiniLMReference(w, num_layers=n_layers,
                               num_heads=cfg["num_attention_heads"],
                               eps=cfg["layer_norm_eps"],
@@ -235,7 +240,7 @@ def main():
         tap_meta["note"] = ("Full intermediate dump from reference/encoder.py. "
                             "Derivative of a sha256-pinned checkpoint; gitignored. "
                             "Regenerate: make_goldens.py --taps")
-        tpath = GOLDENS / f"{slug}_s{SEQ_LEN}_taps.safetensors"
+        tpath = GOLDENS / f"{slug}_s{SEQ_LEN}_taps.npz"
         refuse_to_clobber(tpath, pin["sha256"], args.force)
         save(tpath, taps, tap_meta)
         print(f"wrote {tpath.relative_to(REPO)}  "

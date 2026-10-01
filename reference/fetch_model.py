@@ -1,18 +1,25 @@
-# NpuEmbeddings -- M3: fetch and verify the reference checkpoint.
+# NpuEmbeddings -- M3: fetch the checkpoint's CONFIG and verify its ONNX.
 #
 # Downloads sentence-transformers/all-MiniLM-L6-v2 into models/<name>/ and then
-# ASSERTS it against docs/04-model/README.md: the config values, the 104-tensor
+# ASSERTS it against docs/04-model/README.md: the config values, the tensor
 # inventory, and the tensor shapes. A silently different checkpoint would poison
-# every golden vector downstream, so the sha256 of model.safetensors is printed
-# and stored -- .npue files will carry it as `source_sha256` (M4).
+# every golden vector downstream, so the sha256 of the ONNX model is printed
+# and stored -- CHECKPOINT.json and every .npue's `source_sha256` are that
+# number, and the goldens refuse to be compared against anything else.
 #
-# Env: .venv-ref  (huggingface_hub, safetensors)
+# The WEIGHTS ARE NOT DOWNLOADED, on purpose. The ONNX export is placed into
+# models/<name>/onnx/ by hand (BUILD.md §2.2); this script's job is to accept
+# or refuse what is there, not to fetch it. That is the whole reason the
+# inventory check still runs: without it, "the model works" and "we happened
+# to pick up someone else's file" are indistinguishable.
+#
+# Env: .venv-ref  (huggingface_hub -- no safetensors package needed: the
+#      checkpoint is read by reference/onnx_io.py, numpy only)
 # Usage:
 #   & .\.venv-ref\Scripts\python.exe reference\fetch_model.py
 #   & .\.venv-ref\Scripts\python.exe reference\fetch_model.py --model BAAI/bge-small-en-v1.5
 
 import argparse
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -20,11 +27,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 MODELS = REPO / "models"
 
-# Only what we actually consume. The .onnx/.openvino exports and the pytorch
-# .bin duplicate are several hundred MB of nothing.
+# Only what we actually consume. Weights are NOT in this list: the ONNX export
+# is placed into models/<name>/onnx/ by hand and verified below, never fetched
+# -- and the pytorch .bin duplicate would be several hundred MB of nothing.
 ALLOW = [
     "config.json",
-    "model.safetensors",
     "tokenizer.json",
     "tokenizer_config.json",
     "vocab.txt",
@@ -164,17 +171,9 @@ INVENTORY = {
 IGNORABLE = {"pooler.dense.weight", "pooler.dense.bias", "embeddings.position_ids"}
 
 
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def check(local, expect_layers):
     """Assert the checkpoint matches what docs/04-model claims. Returns problems."""
-    from safetensors import safe_open
+    from onnx_io import MODEL_ONNX, reader
 
     problems = []
     cfg = json.loads((local / "config.json").read_text(encoding="utf-8"))
@@ -229,11 +228,20 @@ def check(local, expect_layers):
         for suffix, shape in pl.items():
             want[f"{prefix}.{i}.{suffix}"] = shape
 
-    st = local / "model.safetensors"
-    with safe_open(st, framework="np") as f:
+    # The inventory is checked against the ONNX, not against a list of what
+    # safetensors happened to hold: ONNX exports drop the two pooler tensors
+    # and the position_ids buffer (all three are in IGNORABLE -- dead weight
+    # sentence-transformers never calls), so their absence is expected and
+    # their presence would be the surprise.
+    st = local / MODEL_ONNX
+    if not st.exists():
+        # main() reports this with the instructions; here it is just a
+        # problem, because check() must be able to answer for itself.
+        return [f"{MODEL_ONNX} is not present under {local}"]
+    with reader(local) as f:
         names = set(f.keys())
-        shapes = {n: list(f.get_slice(n).get_shape()) for n in names}
-        dtypes = {n: f.get_slice(n).get_dtype() for n in names}
+        shapes = {n: list(f.info(n)[1]) for n in names}
+        dtypes = {n: f.info(n)[0] for n in names}
 
     for name, shape in want.items():
         if name not in names:
@@ -267,6 +275,7 @@ def main():
     args = ap.parse_args()
 
     from huggingface_hub import snapshot_download
+    from onnx_io import MODEL_ONNX, model_digest
 
     local = MODELS / args.model.split("/")[-1]
     print(f"fetching {args.model} -> {local}")
@@ -276,8 +285,19 @@ def main():
         allow_patterns=ALLOW,
     )
 
-    digest = sha256(local / "model.safetensors")
-    print(f"  model.safetensors     : {(local / 'model.safetensors').stat().st_size/1e6:.1f} MB")
+    # Nothing below may run without the weights on disk: CHECKPOINT.json is a
+    # PIN, and a pin written for a file that is not there is worse than no
+    # pin -- every golden and every .npue would be verified against it.
+    src = local / MODEL_ONNX
+    if not src.exists():
+        print(f"\nFAIL -- {src} does not exist.")
+        print("  Weights are not fetched by this script. Place the ONNX "
+              f"export at\n  {local / MODEL_ONNX} (BUILD.md §2.2) and re-run; "
+              "the config and tokenizer\n  have been fetched, and the "
+              "structural check will run then.")
+        return 1
+    digest = model_digest(src)
+    print(f"  {MODEL_ONNX:<21}: {src.stat().st_size / 1e6:.1f} MB")
     print(f"  sha256                : {digest}")
 
     problems = check(local, args.layers)
@@ -286,7 +306,7 @@ def main():
     # loudly rather than quietly compare against a different checkpoint.
     (local / "CHECKPOINT.json").write_text(
         json.dumps(
-            {"repo_id": args.model, "file": "model.safetensors", "sha256": digest},
+            {"repo_id": args.model, "file": MODEL_ONNX, "sha256": digest},
             indent=2,
         ),
         encoding="utf-8",

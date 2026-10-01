@@ -18,7 +18,6 @@
 #   & .\.venv-ref\Scripts\python.exe reference\fetch_model_gemma.py
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -34,10 +33,11 @@ ALLOW = [
     "sentence_bert_config.json",
     "1_Pooling/config.json",
     "2_Dense/config.json",
-    "2_Dense/model.safetensors",
     "3_Dense/config.json",
-    "3_Dense/model.safetensors",
-    "model.safetensors",
+    # No weights, on purpose. The ONNX export -- with both Dense heads fused
+    # into it as /model/st/dense_1 and dense_2 -- is placed into the model dir
+    # by hand (BUILD.md §2.2) and pinned below. `2_Dense/` and `3_Dense/` are
+    # config-only now for the same reason: their matrices live in the export.
     "tokenizer.json",
     "tokenizer.model",
     "tokenizer_config.json",
@@ -70,14 +70,6 @@ EXPECT_CONFIG = {
 }
 
 
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=None,
@@ -99,14 +91,26 @@ def main():
               "with a token instead).")
 
     from huggingface_hub import snapshot_download
+    from onnx_io import MODEL_ONNX, model_digest
 
     local = Path(args.dest)
     print(f"fetching {repo_id} -> {local}")
     snapshot_download(repo_id=repo_id, local_dir=str(local),
                       allow_patterns=ALLOW, token=token)
 
-    digest = sha256(local / "model.safetensors")
-    print(f"  model.safetensors     : {(local / 'model.safetensors').stat().st_size/1e6:.1f} MB")
+    # Same rule as reference/fetch_model.py: no pin without a file. The ONNX
+    # (both Dense heads fused in) is placed here by hand and verified by
+    # being readable with the shapes encoder_gemma.py expects.
+    src = local / MODEL_ONNX
+    if not src.exists():
+        print(f"\nFAIL -- {src} does not exist.")
+        print("  Weights are not fetched by this script. Place the ONNX "
+              "export at\n"
+              f"  {local / MODEL_ONNX} (BUILD.md §2.2) and re-run; the "
+              "configs and\n  tokenizer have been fetched.")
+        return 1
+    digest = model_digest(src)
+    print(f"  {MODEL_ONNX:<21}: {src.stat().st_size / 1e6:.1f} MB")
     print(f"  sha256                : {digest}")
 
     cfg = json.loads((local / "config.json").read_text(encoding="utf-8"))
@@ -117,7 +121,7 @@ def main():
             problems.append(f"config.{k}: expected {want!r}, got {got!r}")
 
     (local / "CHECKPOINT.json").write_text(
-        json.dumps({"repo_id": repo_id, "file": "model.safetensors", "sha256": digest},
+        json.dumps({"repo_id": repo_id, "file": MODEL_ONNX, "sha256": digest},
                    indent=2),
         encoding="utf-8",
     )

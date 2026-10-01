@@ -421,8 +421,8 @@ def main() -> int:
     # statements are the tolerance above and the four scheme invariants in
     # section 3.
     from npue import to_bf16_bits, untile_b
-    from safetensors_mmap import SafeTensors
-    st = SafeTensors(Path(model_dir) / "model.safetensors")
+    from onnx_weights import MODEL_ONNX, OnnxWeights
+    st = OnnxWeights(Path(model_dir) / MODEL_ONNX)
     raw = np.array(patch_embed_operand(
         st.array("vit.embeddings.patch_embeddings.projection.weight")))
     st.close()
@@ -513,8 +513,8 @@ def main() -> int:
         # back in would check the file against itself.
         from gemm_i8 import check_i8_operand
         from packers.vit import linear_matrix, qkv_matrix
-        from safetensors_mmap import SafeTensors
-        st = SafeTensors(Path(model_dir) / "model.safetensors")
+        from onnx_weights import MODEL_ONNX, OnnxWeights
+        st = OnnxWeights(Path(model_dir) / MODEL_ONNX)
         folded = bool(cfg["qkv_scale_folded"])
         qscale = float(cfg["attention_scale"])
         src = {"frontend.patch_embed":

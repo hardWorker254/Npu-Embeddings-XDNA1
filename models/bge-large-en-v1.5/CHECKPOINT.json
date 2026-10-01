@@ -1,5 +1,7 @@
 {
   "repo_id": "BAAI/bge-large-en-v1.5",
-  "file": "model.safetensors",
-  "sha256": "45e1954914e29bd74080e6c1510165274ff5279421c89f76c418878732f64ae7"
+  "file": [
+    "onnx/model.onnx"
+  ],
+  "sha256": "4bae895edc7be61910dc4c195de713e081592cbdd6fe9c3ca60a5b83430b0052"
 }

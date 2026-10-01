@@ -37,7 +37,7 @@ MONOLITHS = ("export_gemm_rtp.py", "export_eltwise.py")
 # Everything the monoliths import by module name. Symlinked, not copied, so a
 # shared edit is a behaviour change on both sides.
 SHARED = ("gemm_pretiled.py", "npue.py", "toolchain_provenance.py",
-          "safetensors_mmap.py", "whisper_bpe.py")
+          "onnx_weights.py", "whisper_bpe.py")
 
 CASES = [
     ("gemm", ["--list-targets"]),

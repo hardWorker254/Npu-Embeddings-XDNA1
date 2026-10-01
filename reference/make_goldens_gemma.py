@@ -37,7 +37,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from corpus_gemma import SENTENCES, SEQ_LEN as DEFAULT_SEQ_LEN  # noqa: E402
 from encoder_gemma import PROMPTS               # noqa: E402
-from safetensors_io import save                 # noqa: E402
+from npz_io import save, load as load_goldens    # noqa: E402
+from onnx_io import MODEL_ONNX, load, model_digest            # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 GOLDENS = REPO / "reference" / "goldens_gemma"
@@ -112,11 +113,20 @@ def main():
     mask = enc["attention_mask"].unsqueeze(-1).float()
     pooled = (last_hidden * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
 
-    from safetensors_io import load
-    d2, _ = load(model_dir / "2_Dense" / "model.safetensors")
-    d3, _ = load(model_dir / "3_Dense" / "model.safetensors")
-    dense2 = pooled @ torch.from_numpy(d2["linear.weight"]).T
-    dense3 = dense2 @ torch.from_numpy(d3["linear.weight"]).T
+    # The sentence-transformers head was fused into the export: its two
+    # matrices ride beside the rest of the weights as /model/st/dense_1 and
+    # dense_2, numbered in modules.json order -- dense_1 is 2_Dense, dense_2 is
+    # 3_Dense (3072x768 and 768x3072 once the MatMul transpose is undone, the
+    # shapes recorded at encoder_gemma.GemmaEmbeddingReference). The leading
+    # slash is the exporter's and strip="model." only removes a leading
+    # `model.`, so these are looked up verbatim. Loaded once here and reused
+    # by the --taps branch below: this file is 1.2 GB.
+    #
+    # strip="model." because this export KEEPS a root the checkpoint does not
+    # have, and the prefixless names are the verified ground truth (tasks/0055).
+    w, _ = load(model_dir / MODEL_ONNX, strip="model.")
+    dense2 = pooled @ torch.from_numpy(w["/model/st/dense_1.weight"]).T
+    dense3 = dense2 @ torch.from_numpy(w["/model/st/dense_2.weight"]).T
     manual_embedding = torch.nn.functional.normalize(dense3, p=2, dim=1)
 
     # Independent second oracle: the real sentence-transformers pipeline,
@@ -140,17 +150,9 @@ def main():
             f"sentence-transformers by {delta:.3e} (limit 2e-5).\n"
             f"  Either the Dense heads, the pooling, or the prompt text is wrong.")
 
-    def sha256(path):
-        import hashlib
-        h = hashlib.sha256()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                h.update(chunk)
-        return h.hexdigest()
-
-    digest = sha256(model_dir / "model.safetensors")
+    digest = model_digest(model_dir / MODEL_ONNX)
     if digest != pin["sha256"]:
-        raise SystemExit(f"model.safetensors sha256 {digest} != CHECKPOINT.json pin "
+        raise SystemExit(f"checkpoint ONNX sha256 {digest} != CHECKPOINT.json pin "
                          f"{pin['sha256']} -- re-run fetch_model_gemma.py")
 
     meta = {
@@ -191,9 +193,9 @@ def main():
         tensors[f"hf.L{i}.resid2"] = hs[i + 1]
 
     slug = "embeddinggemma-300m_l24"
-    path = GOLDENS / f"{slug}_s{SEQ_LEN}_boundary.safetensors"
+    path = GOLDENS / f"{slug}_s{SEQ_LEN}_boundary.npz"
     if path.exists() and not args.force:
-        _, old_meta = load(path)
+        _, old_meta = load_goldens(path)
         if old_meta.get("source_sha256") and old_meta["source_sha256"] != digest:
             raise SystemExit(f"REFUSING to overwrite {path.name}: belongs to a "
                              f"different checkpoint. Pass --force to discard.")
@@ -204,8 +206,10 @@ def main():
     if args.taps:
         from encoder_gemma import GemmaEmbeddingReference
 
-        w, _ = load(model_dir / "model.safetensors")
-        dense_w = {"2": d2["linear.weight"], "3": d3["linear.weight"]}
+        # `w` is the very load the pooling oracle above already did: one read
+        # of a 1.2 GB file, and it carries everything this needs.
+        dense_w = {"2": w["/model/st/dense_1.weight"],
+                   "3": w["/model/st/dense_2.weight"]}
         ref = GemmaEmbeddingReference(
             w, dense_w, num_layers=n_layers, hidden=cfg["hidden_size"],
             num_heads=cfg["num_attention_heads"], num_kv_heads=cfg["num_key_value_heads"],
@@ -221,7 +225,7 @@ def main():
         tap_meta["note"] = ("Full intermediate dump from reference/encoder_gemma.py. "
                             "Derivative of a sha256-pinned checkpoint; gitignored. "
                             "Regenerate: make_goldens_gemma.py --taps")
-        tpath = GOLDENS / f"{slug}_s{SEQ_LEN}_taps.safetensors"
+        tpath = GOLDENS / f"{slug}_s{SEQ_LEN}_taps.npz"
         save(tpath, taps, tap_meta)
         print(f"wrote {tpath.relative_to(REPO)}  "
               f"({tpath.stat().st_size/1e6:.1f} MB, {len(taps)} tensors)")

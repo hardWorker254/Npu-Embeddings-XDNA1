@@ -13,7 +13,6 @@
 #   & "C:\Users\vegar\.conda\envs\iron\python.exe" reference\check_reference_gemma.py
 
 import argparse
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -23,7 +22,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from encoder_gemma import GemmaEmbeddingReference   # noqa: E402
-from safetensors_io import load                     # noqa: E402
+from npz_io import load as load_goldens            # noqa: E402
+from onnx_io import MODEL_ONNX, load, model_digest               # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -55,22 +55,14 @@ def compare(name, got, want):
     }
 
 
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", default=str(REPO / "models" / "embeddinggemma-300m"))
     ap.add_argument("--goldens", default=str(REPO / "reference" / "goldens_gemma"
-                                             / "embeddinggemma-300m_l24_s64_boundary.safetensors"))
+                                             / "embeddinggemma-300m_l24_s64_boundary.npz"))
     args = ap.parse_args()
 
-    g, meta = load(args.goldens)
+    g, meta = load_goldens(args.goldens)
     n_layers = int(meta["num_layers"])
     print(f"goldens  : {Path(args.goldens).name}")
     print(f"  model  : {meta['repo_id']}")
@@ -78,7 +70,7 @@ def main():
     print(f"  prompt : {meta['prompt_name']!r} = {meta['prompt_text']!r}")
 
     model_dir = Path(args.model_dir)
-    digest = sha256(model_dir / "model.safetensors")
+    digest = model_digest(model_dir / MODEL_ONNX)
     if digest != meta["source_sha256"]:
         print(f"\nFAIL -- checkpoint sha256 does not match the goldens:\n"
               f"  goldens    {meta['source_sha256']}\n  on disk    {digest}")
@@ -86,10 +78,14 @@ def main():
     print(f"  sha256   : {digest[:16]}... matches")
 
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    w, _ = load(model_dir / "model.safetensors")
-    d2, _ = load(model_dir / "2_Dense" / "model.safetensors")
-    d3, _ = load(model_dir / "3_Dense" / "model.safetensors")
-    dense_w = {"2": d2["linear.weight"], "3": d3["linear.weight"]}
+    # strip="model.": this export keeps a root the checkpoint does not have
+    # (see encoder_gemma.py: the prefixless names are the verified ground
+    # truth, so the root comes off rather than this being rewritten).
+    # The two Dense heads are no longer sibling checkpoints -- fused into the
+    # export as /model/st/dense_1 and dense_2, in modules.json order.
+    w, _ = load(model_dir / MODEL_ONNX, strip="model.")
+    dense_w = {"2": w["/model/st/dense_1.weight"],
+               "3": w["/model/st/dense_2.weight"]}
 
     ref = GemmaEmbeddingReference(
         w, dense_w, num_layers=n_layers, hidden=cfg["hidden_size"],

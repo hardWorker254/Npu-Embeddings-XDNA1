@@ -50,7 +50,7 @@ from gemm_i8 import add_gemm_b_int8                              # noqa: E402
 from npue import (ARCH_WHISPER_ENC_DEC_GELU, MAC_BY_DEVICE,  # noqa: E402
                   MAC_DEFAULT_DEVICE, Writer, gemm_b_layout, layout_hash,
                   mac_for_device, tile_b, to_bf16_bits)
-from onnx_weights import (Combined, OnnxWeights,                  # noqa: E402
+from onnx_weights import (Combined, OnnxWeights, model_digest,    # noqa: E402
                           WHISPER_DECODER_ONNX, WHISPER_ENCODER_ONNX)
 from whisper_bpe import VocabMerges, build_table                      # noqa: E402
 
@@ -79,41 +79,6 @@ I8_DTYPE = "BF16"
 # <|notimestamps|> silently produces timestamp soup.
 REQUIRED_TOKENS = ("<|startoftranscript|>", "<|notimestamps|>",
                    "<|transcribe|>", "<|translate|>", "<|endoftext|>")
-
-
-def _sha256(path):
-    import hashlib
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _sha256_many(*paths):
-    """One digest identifying a SET of source files.
-
-    whisper's weights arrive as two ONNX files and neither is the source on
-    its own: `source_sha256` is what find_goldens() matches a golden against,
-    and a golden was produced from encoder and decoder together. So the digest
-    covers each file's own digest together with its basename, in the order
-    given. Basenames rather than paths because the digest has to be identical
-    on every machine, and a fixed order because a set that hashes differently
-    depending on how it was enumerated is not a fingerprint of anything.
-
-    It is deliberately NOT the digest of any single file, so it cannot be
-    mistaken for one -- CHECKPOINT.json pins the two files individually, and
-    that is a different question (is this file the file?) from this one (is
-    this the pair that produced the golden?).
-    """
-    import hashlib
-    outer = hashlib.sha256()
-    for p in paths:
-        outer.update(p.name.encode("utf-8"))
-        outer.update(b"\0")
-        outer.update(_sha256(p).encode("ascii"))
-        outer.update(b"\n")
-    return outer.hexdigest()
 
 
 def _read_json(path, what):
@@ -449,7 +414,11 @@ def pack_whisper(model_dir, out, max_seq=None, max_target=None,
                     prefix="model.encoder."),
         OnnxWeights(model_dir / WHISPER_DECODER_ONNX),
     ])
-    src_sha = _sha256_many(model_dir / WHISPER_ENCODER_ONNX,
+    # The whole model, not just the two graph files: an export large enough
+    # to trip protobuf's 2 GB limit keeps its weights in an .onnx_data side
+    # file, and hashing only the graphs would pin the tensor names while
+    # leaving every weight unguarded.
+    src_sha = model_digest(model_dir / WHISPER_ENCODER_ONNX,
                            model_dir / WHISPER_DECODER_ONNX)
 
     # The int8 calibration, before any operand is written: it needs torch and

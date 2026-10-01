@@ -24,7 +24,6 @@
 #   ... --tile-n 32 --out models\minilm_n32.npue
 
 import argparse
-import hashlib
 import json
 import math
 import sys
@@ -44,7 +43,7 @@ from npue import (ARCH_GEMMA3_MQA_ROPE_GEGLU, ARCH_GTE_NEW_ROPE_GEGLU,  # noqa: 
                   ARCH_NOMIC_ROPE_SWIGLU, MAC_BY_DEVICE, MAC_DEFAULT_DEVICE,
                   Writer, gemm_b_layout, layout_hash, mac_for_device, tile_b,
                   to_bf16_bits)
-from onnx_weights import MODEL_ONNX                          # noqa: E402
+from onnx_weights import MODEL_ONNX, model_digest            # noqa: E402
 
 
 def load(path, strip=""):
@@ -106,14 +105,6 @@ MAC_DEFAULT = MAC_BY_DEVICE[MAC_DEFAULT_DEVICE]
 # 48 is the largest legal choice, needs zero padding on all three shapes, and
 # fits L1: 2*(64*64*2 + 64*48*2 + 64*48*4) = 53,248 < 65,536.
 DEFAULT_TILE_K, DEFAULT_TILE_N = 64, 48
-
-
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def read_pooling(model_dir):
@@ -449,7 +440,7 @@ def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
     # names, so the root comes off here rather than the packers and the
     # reference encoder being rewritten to match one exporter's convention.
     src, _ = load(model_dir / MODEL_ONNX, strip="model.")
-    src_sha = sha256(model_dir / MODEL_ONNX)
+    src_sha = model_digest(model_dir / MODEL_ONNX)
     # The sentence-transformers head is no longer a checkpoint of its own: its
     # two matrices were fused into the export and ride beside the rest of the
     # weights as /model/st/dense_1 and /model/st/dense_2, numbered in the order
@@ -811,7 +802,7 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
     model_dir = Path(model_dir)
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     src, _ = load(model_dir / MODEL_ONNX)
-    src_sha = sha256(model_dir / MODEL_ONNX)
+    src_sha = model_digest(model_dir / MODEL_ONNX)
 
     L = cfg["num_hidden_layers"]
     H = cfg["num_attention_heads"]
@@ -1134,7 +1125,7 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
             "0.5.0; pack bf16 or extend the oracle first")
 
     raw, _ = load(model_dir / MODEL_ONNX)
-    src_sha = sha256(model_dir / MODEL_ONNX)
+    src_sha = model_digest(model_dir / MODEL_ONNX)
     # The checkpoint stores F16; every consumer here wants f32 (the bf16
     # pre-tiler and the F32 emitters both). Upcast once, losslessly.
     src = {}
@@ -1613,7 +1604,7 @@ def main():
                         int8_corpus=args.int8_corpus)
 
     src, _ = load(model_dir / MODEL_ONNX)
-    src_sha = sha256(model_dir / MODEL_ONNX)
+    src_sha = model_digest(model_dir / MODEL_ONNX)
 
     L = cfg["num_hidden_layers"]
     H = cfg["num_attention_heads"]

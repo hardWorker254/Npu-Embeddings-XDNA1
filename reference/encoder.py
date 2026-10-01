@@ -8,7 +8,8 @@
 # Deliberate design choices:
 #
 #  * numpy only -- it must run in the iron env, which stays clean of pip
-#    installs. safetensors is read by our own reference/safetensors_io.py.
+#    installs. The ONNX checkpoint is read by our own reference/onnx_io.py,
+#    which walks the protobuf wire format by hand: no onnx package needed.
 #  * QKV is computed FUSED, as one [384, 1152] GEMM, because that is the shape
 #    M4 will bake and M5 will dispatch. The oracle should have the same seams as
 #    the implementation, or the goldens validate a different program.
@@ -87,7 +88,10 @@ def fp32_gemm(a, b):
 class MiniLMReference:
     """BertModel forward + mean pooling + L2 normalize, in numpy.
 
-    `w` is the raw safetensors state dict (fp32 numpy arrays, HF names).
+    `w` is the checkpoint's weight dict (fp32 numpy arrays, HF tensor names),
+    read by reference/onnx_io.py -- which serves them under exactly the names
+    and the [out, in] orientation the HuggingFace weights have always had, so
+    the reference never learned that its source changed container.
 
     `gemm` is the (M,K) x (K,N) -> (M,N) primitive used for every matmul that
     will run on the NPU -- the six per-layer GEMMs, including QK^T and A.V.
@@ -295,11 +299,11 @@ def load_reference(model_dir, num_layers=6, num_heads=12, eps=1e-12):
     import json
     from pathlib import Path
 
-    from safetensors_io import load
+    from onnx_io import MODEL_ONNX, load
 
     model_dir = Path(model_dir)
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    w, _ = load(model_dir / "model.safetensors")
+    w, _ = load(model_dir / MODEL_ONNX)
     return MiniLMReference(
         w,
         num_layers=cfg.get("num_hidden_layers", num_layers),

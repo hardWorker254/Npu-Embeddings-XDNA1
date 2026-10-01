@@ -18,7 +18,7 @@
 #  * The layout descriptor is DATA, not code. Retuning to a different tile size
 #    regenerates the file rather than editing the loader. `layout_hash` makes a
 #    stale file fail loudly instead of producing plausible garbage embeddings.
-#  * `source_sha256` of the upstream model.safetensors travels with the file, so
+#  * `source_sha256` of the upstream ONNX model travels with the file, so
 #    a golden comparison can assert it ran against the same checkpoint.
 #
 # SPEC CORRECTION (M4): docs/04-model declared `uint8_t reserved[24]` and
@@ -184,7 +184,8 @@ assert struct.calcsize(HEADER_FORMAT) == HEADER_SIZE
 ALIGN = 4096
 
 # dtype tags. BF16 has no numpy dtype, so it travels as raw uint16 and is
-# widened on read -- the same convention as reference/safetensors_io.py.
+# widened on read -- the same convention as tools/lib/onnx_weights.py, which
+# is what serves those bytes from the ONNX export.
 NP_DTYPE = {"F32": np.dtype("<f4"), "I32": np.dtype("<i4"), "I64": np.dtype("<i8"),
             "U16": np.dtype("<u2"), "BF16": np.dtype("<u2"),
             # I8 carries a per-output-channel symmetrically quantised GEMM
@@ -603,7 +604,7 @@ def find_goldens(goldens_dir, source_sha256, seq, load):
     deriving the filename from the container's name made that unexpressible --
     `bge-large-n16.npue` went looking for `bge-large-n16_l24_s64_*`.
 
-    `load` is passed in because reference/safetensors_io is not importable from
+    `load` is passed in because reference/npz_io is not importable from
     here without dragging reference/ onto the path of every caller.
 
     Returns (boundary_path, taps_path). Raises if the match is not exactly one:
@@ -613,7 +614,7 @@ def find_goldens(goldens_dir, source_sha256, seq, load):
     from pathlib import Path as _P
     gdir = _P(goldens_dir)
     hits = []
-    for cand in sorted(gdir.glob(f"*_s{seq}_boundary.safetensors")):
+    for cand in sorted(gdir.glob(f"*_s{seq}_boundary.npz")):
         try:
             _, meta = load(cand)
         except Exception:

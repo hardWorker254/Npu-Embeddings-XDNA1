@@ -76,7 +76,7 @@ from layernorm_kernel import (COLS as LN_COLS,            # noqa: E402
 from softmax_kernel import (COLS as SM_COLS,              # noqa: E402
                             ROWS_PER_CALL as SM_ROWS, sm_array)
 from npue import Reader                                   # noqa: E402
-from safetensors_io import load                           # noqa: E402
+from npz_io import load                                   # noqa: E402
 
 
 class NpuGemm:
@@ -279,7 +279,7 @@ def main() -> int:
     args = ap.parse_args()
 
     iron.set_current_device(from_name("npu1", n_cols=None))
-    g, meta = load(Path(args.goldens) / "minilm_l6_s64_boundary.safetensors")
+    g, meta = load(Path(args.goldens) / "minilm_l6_s64_boundary.npz")
 
     with Reader(args.npue) as r:
         cfg = r.config

@@ -68,8 +68,8 @@ TOOLSET = [
      ("torch", "transformers")),
 
     ("verify_onnx_reader", "verify/verify_onnx_reader.py",
-     "the ONNX weight reader vs onnx, vs the checkpoint, and vs a broken copy",
-     ("numpy", "onnx")),
+     "the ONNX weight reader vs onnx, vs the goldens, and vs a broken copy",
+     ("numpy", "onnx", "checkpoint")),
     ("verify_npue", "verify/verify_npue.py",
      "the .npue: spec, bit-exact round trip, stale layout, goldens",
      ("numpy", "container", "reference")),
@@ -218,8 +218,12 @@ GATE_TIERS = {
     # design set and not a device.
     "cheap": ("verify_i8_scheme", "verify_i8_kernels", "parity_exporters",
               "verify_vit_image", "verify_vit_model"),
-    "container": ("verify_npue", "verify_pack_parity", "verify_npue_nomic",
-                  "verify_vit"),
+    # "container" reads checkpoints and containers. verify_onnx_reader belongs
+    # here rather than in "cheap" because both of its claims need one: the
+    # per-model read needs an ONNX file, and the golden that proves the reader
+    # returns the RIGHT tensor needs the model directory beside it.
+    "container": ("verify_onnx_reader", "verify_npue", "verify_pack_parity",
+                  "verify_npue_nomic", "verify_vit"),
     "npu": ("verify_design_numerics", "verify_whisper_model"),
     "whisper": ("verify_whisper_tokenizer", "verify_whisper_features",
                 "verify_whisper_cli", "verify_whisper"),

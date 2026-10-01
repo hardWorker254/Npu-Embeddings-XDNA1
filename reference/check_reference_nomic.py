@@ -24,7 +24,6 @@
 #   & "C:\Users\vegar\.conda\envs\iron\python.exe" reference\check_reference_nomic.py
 
 import argparse
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -34,7 +33,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from encoder_nomic import NomicEmbeddingReference   # noqa: E402
-from safetensors_io import load                     # noqa: E402
+from npz_io import load as load_goldens            # noqa: E402
+from onnx_io import MODEL_ONNX, load, model_digest               # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -65,14 +65,6 @@ def compare(name, got, want):
     }
 
 
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def build_ref(w, cfg, n_layers, **overrides):
     kwargs = dict(
         num_layers=n_layers, hidden=cfg["hidden_size"],
@@ -88,10 +80,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", default=str(REPO / "models" / "nomic-embed-text-v1.5"))
     ap.add_argument("--goldens", default=str(REPO / "reference" / "goldens_nomic"
-                                             / "nomic-embed-text-v1.5_l12_s64_boundary.safetensors"))
+                                             / "nomic-embed-text-v1.5_l12_s64_boundary.npz"))
     args = ap.parse_args()
 
-    g, meta = load(args.goldens)
+    g, meta = load_goldens(args.goldens)
     n_layers = int(meta["num_layers"])
     print(f"goldens  : {Path(args.goldens).name}")
     print(f"  model  : {meta['repo_id']}")
@@ -99,7 +91,7 @@ def main():
     print(f"  prompt : {meta['prompt_name']!r} = {meta['prompt_text']!r}")
 
     model_dir = Path(args.model_dir)
-    digest = sha256(model_dir / "model.safetensors")
+    digest = model_digest(model_dir / MODEL_ONNX)
     if digest != meta["source_sha256"]:
         print(f"\nFAIL -- checkpoint sha256 does not match the goldens:\n"
               f"  goldens    {meta['source_sha256']}\n  on disk    {digest}")
@@ -107,7 +99,7 @@ def main():
     print(f"  sha256   : {digest[:16]}... matches")
 
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    w, _ = load(model_dir / "model.safetensors")
+    w, _ = load(model_dir / MODEL_ONNX)
 
     # ------------------------------------------------------------------
     # 1. The correct oracle vs the goldens.

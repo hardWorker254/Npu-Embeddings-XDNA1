@@ -42,7 +42,6 @@
 #   & .\.venv-ref\Scripts\python.exe reference\make_goldens_gte.py --seq 256
 
 import argparse
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -55,7 +54,8 @@ if hasattr(sys.stdout, "reconfigure"):
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from corpus_gte import SENTENCES, SEQ_LEN as DEFAULT_SEQ_LEN  # noqa: E402
-from safetensors_io import save, load           # noqa: E402
+from npz_io import save, load as load_goldens  # noqa: E402
+from onnx_io import MODEL_ONNX, load, model_digest           # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 GOLDENS = REPO / "reference" / "goldens_gte"
@@ -68,21 +68,13 @@ GOLDENS = REPO / "reference" / "goldens_gte"
 TOL_ORACLE_AGREE = 2e-5
 
 
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def refuse_to_clobber(path, sha, force):
     """A golden belongs to exactly one checkpoint. Same behaviour and same
     local-copy rationale as make_goldens_nomic.py's refuse_to_clobber()."""
     if not path.exists() or force:
         return
     try:
-        _, meta = load(path)
+        _, meta = load_goldens(path)
     except Exception:
         return  # unreadable: let the write replace it
     have = meta.get("source_sha256", "")
@@ -128,7 +120,7 @@ def main():
                     default=str(REPO / "models" / "gte-multilingual-base"))
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--taps", action="store_true",
-                    help="also write <slug>_s<seq>_taps.safetensors from "
+                    help="also write <slug>_s<seq>_taps.npz from "
                          "reference/encoder_gte.py (emb.sum / emb.ln / "
                          "L0.qkv), the fixtures tools/export/export_validation.py "
                          "consumes. Gitignored -- a deterministic derivative "
@@ -151,7 +143,7 @@ def main():
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     n_layers = cfg["num_hidden_layers"]
 
-    digest = sha256(model_dir / "model.safetensors")
+    digest = model_digest(model_dir / MODEL_ONNX)
     # gte was downloaded manually (tasks/0134): CHECKPOINT.json pins the
     # repo_id but carries no sha256 (unlike a hub fetch). The identity gate
     # that IS available is the packed container's own source_sha256 -- the
@@ -164,7 +156,7 @@ def main():
         packed_sha = npue_mod.Reader(str(npue_path)).config["source_sha256"]
         if packed_sha != digest:
             raise SystemExit(
-                f"\nFAIL -- model.safetensors sha256 {digest[:16]}... does "
+                f"\nFAIL -- checkpoint ONNX sha256 {digest[:16]}... does "
                 f"not match the packed container's source_sha256 "
                 f"{packed_sha[:16]}...\n  These goldens would describe a "
                 f"different checkpoint than the runtime serves. Re-download "
@@ -284,7 +276,7 @@ def main():
         tensors[f"hf.L{i}.mlp_ln"] = hs[i + 1]
 
     slug = "gte-multilingual-base_l12"
-    path = GOLDENS / f"{slug}_s{SEQ_LEN}_boundary.safetensors"
+    path = GOLDENS / f"{slug}_s{SEQ_LEN}_boundary.npz"
     refuse_to_clobber(path, digest, args.force)
     save(path, tensors, meta)
     print(f"\nwrote {path.relative_to(REPO)}  "
@@ -299,7 +291,7 @@ def main():
         # tools/export/export_validation.py consumes the taps.
         sys.path.insert(0, str(REPO / "reference"))
         from encoder_gte import GteEncoder
-        w, _ = load(model_dir / "model.safetensors")
+        w, _ = load(model_dir / MODEL_ONNX)
         w32 = {}
         for k, v in w.items():
             kk = k[4:] if k.startswith("new.") else k
@@ -324,7 +316,7 @@ def main():
                             "Derivative of a sha256-pinned checkpoint; "
                             "gitignored. Regenerate: make_goldens_gte.py "
                             "--taps")
-        tpath = GOLDENS / ("gte-multilingual-base_l12_s%d_taps.safetensors"
+        tpath = GOLDENS / ("gte-multilingual-base_l12_s%d_taps.npz"
                            % SEQ_LEN)
         refuse_to_clobber(tpath, digest, args.force)
         save(tpath, taps, tap_meta)

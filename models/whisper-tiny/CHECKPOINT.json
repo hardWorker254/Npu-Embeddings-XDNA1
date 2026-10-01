@@ -1,5 +1,8 @@
 {
   "repo_id": "openai/whisper-tiny",
-  "file": "model.safetensors",
-  "sha256": "7ebd0e69e78190ffe1438491fa05cc1f5c1aa3a4c4db3bc1723adbb551ea2395"
+  "file": [
+    "onnx/encoder_model.onnx",
+    "onnx/decoder_model.onnx"
+  ],
+  "sha256": "eb6a1b7f608a845fe447d8f2be5183ca92e927cf09da48614ace1b6759c8bf66"
 }

@@ -103,7 +103,7 @@ def main() -> int:
     is_gemma = model_type == "gemma3_text"
     # arch=2 (nomic-embed-text-v1.5, tasks/0069-0071): RoPE + gated SwiGLU
     # rather than BERT's absolute-position + GELU, but it needs the SAME two
-    # files as the BERT family (model.safetensors, vocab.txt) -- no special
+    # files as the BERT family (the ONNX model, vocab.txt) -- no special
     # file list, and neither packer takes a different CLI shape for it: both
     # tools/pack/pack_npue.py's main() and `npuembed --prepare-model` dispatch on
     # config.json's OWN model_type internally, so the subprocess calls below

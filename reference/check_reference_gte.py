@@ -23,7 +23,6 @@
 #   & "C:\Users\vegar\.conda\envs\iron\python.exe" reference\check_reference_gte.py
 
 import argparse
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -34,7 +33,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import encoder_gte                                  # noqa: E402
 from encoder_gte import GteEncoder                  # noqa: E402
-from safetensors_io import load                     # noqa: E402
+from npz_io import load as load_goldens            # noqa: E402
+from onnx_io import MODEL_ONNX, load, model_digest               # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -92,16 +92,8 @@ def compare(name, got, want, am=None):
     }
 
 
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def load_weights(model_dir):
-    raw, _ = load(model_dir / "model.safetensors")
+    raw, _ = load(model_dir / MODEL_ONNX)
     w = {}
     for k, v in raw.items():
         kk = k[4:] if k.startswith("new.") else k       # strip 'new.'
@@ -142,10 +134,10 @@ def main():
     ap.add_argument("--goldens",
                     default=str(REPO / "reference" / "goldens_gte" /
                                 "gte-multilingual-base_l12_s64_boundary"
-                                ".safetensors"))
+                                ".npz"))
     args = ap.parse_args()
 
-    g, meta = load(args.goldens)
+    g, meta = load_goldens(args.goldens)
     n_layers = int(meta["num_layers"])
     seq_len = int(meta["seq_len"])
     print(f"goldens  : {Path(args.goldens).name}")
@@ -154,7 +146,7 @@ def main():
           f"{n_layers} layers, NO prompt (gte has no prompts table)")
 
     model_dir = Path(args.model_dir)
-    digest = sha256(model_dir / "model.safetensors")
+    digest = model_digest(model_dir / MODEL_ONNX)
     if digest != meta["source_sha256"]:
         print(f"\nFAIL -- checkpoint sha256 does not match the goldens:\n"
               f"  goldens    {meta['source_sha256']}\n  on disk    {digest}")

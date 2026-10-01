@@ -45,7 +45,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from encoder import MiniLMReference          # noqa: E402
-from safetensors_io import load              # noqa: E402
+from npz_io import load as load_goldens       # noqa: E402
+from onnx_io import MODEL_ONNX, load          # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -214,7 +215,7 @@ def fit_on_real(model_dir, goldens, block, target=M5_BFP16_REAL_RELFRO):
     where the encoder actually operates. Same layer-0 QKV GEMM the hardware ran.
     """
     g, _ = load(goldens)
-    w, _ = load(Path(model_dir) / "model.safetensors")
+    w, _ = load(Path(model_dir) / MODEL_ONNX)
     a = to_bf16(g["hf.emb.ln"].reshape(-1, 384))
     b = to_bf16(np.ascontiguousarray(np.concatenate(
         [w[f"encoder.layer.0.attention.self.{n}.weight"]
@@ -245,7 +246,7 @@ def single_gemm_comparison(rng, model_dir, goldens, block, mant_bits):
     differs. Accumulated end-to-end error cannot answer it -- depth confounds it.
     """
     g, _ = load(goldens)
-    w, _ = load(Path(model_dir) / "model.safetensors")
+    w, _ = load(Path(model_dir) / MODEL_ONNX)
 
     # A real GEMM: layer 0 QKV. A is post-LayerNorm activations, B is the
     # trained weight -- exactly what the NPU will be handed.
@@ -295,10 +296,10 @@ def single_gemm_comparison(rng, model_dir, goldens, block, mant_bits):
 # -- part 2: run the real encoder under each format ------------------------
 
 def study(model_dir, goldens, block, mant_bits):
-    g, meta = load(goldens)
+    g, meta = load_goldens(goldens)
     n_layers = int(meta["num_layers"])
     cfg = json.loads((Path(model_dir) / "config.json").read_text(encoding="utf-8"))
-    w, _ = load(Path(model_dir) / "model.safetensors")
+    w, _ = load(Path(model_dir) / MODEL_ONNX)
 
     ids, mask, tti = g["input_ids"], g["attention_mask"], g["token_type_ids"]
     runs = {}
@@ -361,7 +362,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", default=str(REPO / "models" / "all-MiniLM-L6-v2"))
     ap.add_argument("--goldens", default=str(REPO / "reference" / "goldens"
-                                             / "minilm_l6_s64_boundary.safetensors"))
+                                             / "minilm_l6_s64_boundary.npz"))
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=str(REPO / "reference" / "goldens"
                                          / "precision_study.json"))

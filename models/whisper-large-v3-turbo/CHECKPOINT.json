@@ -1,5 +1,9 @@
 {
   "repo_id": "openai/whisper-large-v3-turbo",
-  "file": "model.safetensors",
-  "sha256": "542566a422ae4f3fd23f1ba11add198fca01bbf82e66e6a2857b3f608b1eb9d1"
+  "file": [
+    "onnx/encoder_model.onnx",
+    "onnx/encoder_model.onnx_data",
+    "onnx/decoder_model.onnx"
+  ],
+  "sha256": "3bde99002f993a9a8a401b0107a74ce3e8eebc8bf9e7b29c960ec009a58c79bd"
 }

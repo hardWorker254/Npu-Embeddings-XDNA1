@@ -1,5 +1,8 @@
 {
   "repo_id": "openai/whisper-base",
-  "file": "model.safetensors",
-  "sha256": "07cadb9f25677c8d50df603e66a98fbd842cce45047139baeb16e6219a1e807b"
+  "file": [
+    "onnx/encoder_model.onnx",
+    "onnx/decoder_model.onnx"
+  ],
+  "sha256": "f28875111fc17da2a849ae5cf89ea3d1a95c7e3ac13220adf0d774d5acc07220"
 }

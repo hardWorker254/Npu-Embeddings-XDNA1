@@ -1,0 +1,10 @@
+{
+  "repo_id": "openai/whisper-large-v3",
+  "file": [
+    "onnx/encoder_model.onnx",
+    "onnx/encoder_model.onnx_data",
+    "onnx/decoder_model.onnx",
+    "onnx/decoder_model.onnx_data"
+  ],
+  "sha256": "e102c8c8d65a1a1523781a7d8a060b3e01fe29153e3c2f3f1d041134a1d04413"
+}

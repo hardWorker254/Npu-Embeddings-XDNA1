@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # The runtime reads weights from the .npue (it has a C++ reader for that) but
-# the goldens live in safetensors, and writing a second safetensors parser in
-# C++ to check one number would be the wrong trade. So the vectors the runtime
-# validates against are dumped here, at build time, as raw little-endian fp32
-# with a JSON descriptor.
+# the goldens live in .npz (a zip of .npy arrays), and writing a second
+# container parser in C++ to check one number would be the wrong trade. So the
+# vectors the runtime validates against are dumped here, at build time, as raw
+# little-endian fp32 with a JSON descriptor.
 #
 # These are CHECK data, not model data. Nothing in the inference path reads
 # them; `main.cpp` uses them only to answer "did the C++ runtime reproduce the
@@ -30,7 +30,7 @@ sys.path.insert(0, str(REPO / "reference"))
 sys.path.insert(0, str(REPO / "tools" / "lib"))
 
 from npue import Reader, find_goldens                       # noqa: E402
-from safetensors_io import load               # noqa: E402
+from npz_io import load                       # noqa: E402
 
 
 
