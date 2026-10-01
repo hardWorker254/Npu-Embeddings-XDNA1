@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 cmake_minimum_required(VERSION 3.20)
-project(npuembed_runtime LANGUAGES CXX)
+project(npuembeddings_runtime LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -39,7 +39,14 @@ if(DEFINED BOOST_ROOT AND EXISTS "${BOOST_ROOT}")
   message(STATUS "Boost (fallback only): ${BOOST_ROOT}")
 endif()
 
-add_executable(npuembed
+# ONE name, not two. This target was called `npuembed`, with a POST_BUILD copy
+# beside it called `npuembeddings` so that the documented command line worked.
+# The two files were byte-identical by construction, every document and every
+# error message named the copy, and the copy was the one people actually ran --
+# so the name that was BUILT and the name that was USED were different, and
+# BUILD.md had to document the older one for its own commands to work. One
+# target, one name: npuembeddings.
+add_executable(npuembeddings
   src/main.cpp
   src/runtime.cpp
   # Subtask 1: core infrastructure (device/design/model/pool).
@@ -79,6 +86,18 @@ add_executable(npuembed
   src/embed_models/model_loader.cpp
   src/embed_models/bert_model.cpp
   src/embed_models/gemma_model.cpp
+  # arch=5 (image classification, arch 5 vit_patch16_prenorm_gelu): the model
+  # wrapper, the image front end (PNG/JPEG via libpng/libjpeg, PIL-equivalent
+  # resize, normalise, im2col), the classifier stack, and the session that owns
+  # the one design set. The GEMM/LayerNorm/GELU/attention it dispatches are
+  # npue::whisper::npu_ops, already listed above -- the arithmetic is shared and
+  # only the schedule is arch=5's, which is why nothing from whisper/ is
+  # duplicated here.
+  src/embed_models/vit_model.cpp
+  src/vit/image.cpp
+  src/vit/head.cpp
+  src/vit/encoder.cpp
+  src/vit/classify.cpp
   # Subtask 7: STT extension (Whisper). The tokenizer stub lives with the
   # other tokenizers but is grouped here with the rest of the Whisper
   # placeholders.
@@ -87,7 +106,7 @@ add_executable(npuembed
   src/whisper/stt_engine.cpp
   src/whisper/whisper.cpp
   # P3: the audio front end. XRT-free like the tokenizer above -- the log-mel
-  # spectrogram is pure host code, and tools/verify_whisper_features.py holds
+  # spectrogram is pure host code, and tools/verify/verify_whisper_features.py holds
   # it against transformers. The two convolutions live here too, as the fp32
   # REFERENCE; src/whisper/conv1d.cpp below is the NPU path over the same
   # weights, and it is this one that dispatches.
@@ -128,39 +147,42 @@ add_executable(npuembed
   src/cli/subcommand.cpp
 )
 
-target_include_directories(npuembed PRIVATE include "${XRT_INCLUDE_DIR}")
+target_include_directories(npuembeddings PRIVATE include "${XRT_INCLUDE_DIR}")
 
 if(DEFINED BOOST_ROOT AND EXISTS "${BOOST_ROOT}")
-  target_include_directories(npuembed PRIVATE "${BOOST_ROOT}")
+  target_include_directories(npuembeddings PRIVATE "${BOOST_ROOT}")
 endif()
 
+# The arch=5 image front end's decoders, on BOTH platforms and outside the
+# platform conditional on purpose: the choice is about the FORMATS, not about
+# the OS. libpng and libjpeg are the two formats this runtime reads, and both
+# are decoders whose output is well defined (8-bit RGB), so the alternative --
+# shipping a hand-written PNG inflate -- would be a second decoder to keep
+# correct rather than a dependency avoided. Every variant (palette, 16-bit,
+# gray, RGBA, CMYK JPEG, progressive) is normalised to RGB by the libraries
+# themselves; vit/image.cpp composites RGBA onto white and refuses everything it
+# was not asked for.
+find_package(PNG REQUIRED)
+find_package(JPEG REQUIRED)
+
 if(WIN32)
-  target_link_libraries(npuembed PRIVATE winhttp ws2_32)
+  target_link_libraries(npuembeddings PRIVATE winhttp ws2_32)
+  target_link_libraries(npuembeddings PRIVATE PNG::PNG JPEG::JPEG)
 else()
-  target_link_libraries(npuembed PRIVATE ${XRT_COREUTIL_LIB})
+  target_link_libraries(npuembeddings PRIVATE ${XRT_COREUTIL_LIB})
 
   find_package(CURL REQUIRED)
-  target_link_libraries(npuembed PRIVATE CURL::libcurl)
+  target_link_libraries(npuembeddings PRIVATE CURL::libcurl)
+  target_link_libraries(npuembeddings PRIVATE PNG::PNG JPEG::JPEG)
 endif()
-
-if(WIN32)
-  set(NPUE_COPY_EXT ".exe")
-else()
-  set(NPUE_COPY_EXT "")
-endif()
-
-add_custom_command(TARGET npuembed POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-          "$<TARGET_FILE:npuembed>"
-          "$<TARGET_FILE_DIR:npuembed>/npuembeddings${NPUE_COPY_EXT}")
 
 if(MSVC)
   set(NPUE_HOST_ARCH "AVX2" CACHE STRING
       "MSVC /arch: level for the host kernels (AVX2 or AVX512)")
-  target_compile_options(npuembed PRIVATE /W3 /EHsc /Zc:__cplusplus /O2
+  target_compile_options(npuembeddings PRIVATE /W3 /EHsc /Zc:__cplusplus /O2
                          /arch:${NPUE_HOST_ARCH})
-  target_compile_definitions(npuembed PRIVATE WIN32_LEAN_AND_MEAN)
+  target_compile_definitions(npuembeddings PRIVATE WIN32_LEAN_AND_MEAN)
 else()
-  target_compile_options(npuembed PRIVATE -Wall -O2 -march=native)
-  target_compile_definitions(npuembed PRIVATE _FILE_OFFSET_BITS=64)
+  target_compile_options(npuembeddings PRIVATE -Wall -O2 -march=native)
+  target_compile_definitions(npuembeddings PRIVATE _FILE_OFFSET_BITS=64)
 endif()

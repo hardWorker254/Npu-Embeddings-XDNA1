@@ -26,7 +26,7 @@ GemmaNpuEncoder::GemmaNpuEncoder(npue::File &model,
         "this container's gemm_layout is '" + layout + "', not "
         "'pretiled_bf16' -- it holds host-side row-major F32 operands and "
         "has no tiled weights for the array. Repack it with "
-        "tools/pack_npue.py");
+        "tools/pack/pack_npue.py");
 
   hidden_ = model.config_int("hidden");
   heads = model.config_int("num_heads");
@@ -412,7 +412,7 @@ void GemmaNpuEncoder::gemm(size_t islot, const float *a, size_t a_len, size_t ws
   if (i8 && (wscale == nullptr || asmooth == nullptr))
     throw std::runtime_error(
         "int8 design but this encoder has no quantisation scales -- the "
-        "container is bf16, or it was packed before tools/pack_npue.py "
+        "container is bf16, or it was packed before tools/pack/pack_npue.py "
         "--int8 supported arch=1");
   double t0 = now_s();
   if (i8 && a_ready) {

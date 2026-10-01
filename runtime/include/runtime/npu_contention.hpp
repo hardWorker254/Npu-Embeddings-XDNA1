@@ -5,7 +5,7 @@
 // ---------------
 // tasks/0044 took a --bench that read 221.4 seq/s. The same command on the
 // same binary minutes later read 694.0. The difference was a leftover
-// npuembed.exe from an earlier session still holding an Active hw_context
+// npuembeddings.exe from an earlier session still holding an Active hw_context
 // with 1,032 MB resident -- bge-large's weights. Per-dispatch hardware wait
 // was 15,541 us against a true 3,024.
 //
@@ -45,7 +45,7 @@ namespace npu {
 // One hw_context row as xrt-smi reports it.
 struct ContextRow {
   unsigned long pid = 0;
-  std::string process;   // e.g. "npuembed.exe"
+  std::string process;   // e.g. "npuembeddings.exe"
   std::string status;    // e.g. "Active", "Idle"
   std::string memory;    // e.g. "1032 MB", or "N/A"
 };

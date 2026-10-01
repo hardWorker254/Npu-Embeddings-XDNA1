@@ -5,7 +5,7 @@
 //
 // WHY THIS EXISTS IN C++ AT ALL
 // -----------------------------
-// tools/pack_npue.py already does this, and Python at BUILD time is fine by
+// tools/pack/pack_npue.py already does this, and Python at BUILD time is fine by
 // this project's rules. But the release does not ship the model: the weights
 // belong to sentence-transformers/all-MiniLM-L6-v2, and a 66 MB binary blob
 // that a user cannot easily check against the original is a worse deal than
@@ -21,10 +21,10 @@
 // correctly-sized weights in the wrong order -- the exact failure tasks/0022
 // hit, and one that a size check cannot catch. So the gate is not "it looks
 // right", it is `--prepare-model` and `pack_npue.py` producing a
-// BYTE-IDENTICAL file. tools/verify_pack_parity.py runs that comparison.
+// BYTE-IDENTICAL file. tools/verify/verify_pack_parity.py runs that comparison.
 //
 // The container format is documented in docs/04-model/npue-format.md and
-// implemented for reference in tools/npue.py.
+// implemented for reference in tools/lib/npue.py.
 
 #include "common/npue_pack.hpp"
 
@@ -297,7 +297,7 @@ struct Sha256 {
 
 // --- the container --------------------------------------------------------
 
-// fp32 -> bf16 bits, round-to-nearest-even. Must match tools/npue.py exactly:
+// fp32 -> bf16 bits, round-to-nearest-even. Must match tools/lib/npue.py exactly:
 // truncation would bias every one of 10.6 M weights toward zero.
 inline uint16_t bf16_rne(float x) {
   uint32_t u;
@@ -305,7 +305,7 @@ inline uint16_t bf16_rne(float x) {
   return static_cast<uint16_t>(((u + 0x7FFF + ((u >> 16) & 1)) >> 16) & 0xFFFF);
 }
 
-// The pre-tiling, matching tools/npue.py's tile_b(order="k,n"):
+// The pre-tiling, matching tools/lib/npue.py's tile_b(order="k,n"):
 //   [K,N] -> [kb][nb][tk/s][tn/t][s][t]
 // Both re-layouts the runtime design would otherwise do at load time are
 // absorbed here, which is the whole point of the format.
@@ -488,7 +488,7 @@ static void add_gemm_b(Writer &w, const std::string &name, const Tensor &t,
         layout_json, layout_hash);
 }
 
-// Mirror of tools/pack_npue.py's add_gemm_b_host: the [K,N] operand stored
+// Mirror of tools/pack/pack_npue.py's add_gemm_b_host: the [K,N] operand stored
 // PLAIN -- F32, row-major, no tiling. Used only by prepare_model_gemma
 // (arch=1), which has no NPU kernel to pre-tile for (tasks/0064). The
 // checkpoint's nn.Linear weight is [out, in]; transpose to [in, out] = [K, N]
@@ -507,7 +507,7 @@ static void add_gemm_b_host(Writer &w, const std::string &name,
 }
 
 // Fuse several [out, in] checkpoint tensors along N into ONE [K, N] operand
-// and ZERO-PAD the tail to `n_padded`. Mirror of tools/pack_npue.py's
+// and ZERO-PAD the tail to `n_padded`. Mirror of tools/pack/pack_npue.py's
 // pack_gemma() qkv assembly (tasks/0074).
 //
 // The padding is the whole reason this model reaches the array. MQA gives K
@@ -553,7 +553,7 @@ Layout gemm_b_layout(int64_t tile_k, int64_t tile_n, int64_t mac_s,
   const std::string k = std::to_string(tile_k), n = std::to_string(tile_n);
   const std::string s = std::to_string(mac_s), tt = std::to_string(mac_t);
   Layout L;
-  // Insertion order, matching tools/npue.py's dict literal.
+  // Insertion order, matching tools/lib/npue.py's dict literal.
   L.json = "{\"kind\":\"block_panel\",\"tile_k\":" + k + ",\"tile_n\":" + n +
            ",\"order\":\"k,n,kt,nt\",\"inner\":\"s,t\"" +
            ",\"mac_s\":" + s + ",\"mac_t\":" + tt + ",\"dtype\":\"BF16\"}";
@@ -641,9 +641,9 @@ void prepare_model(const std::string &safetensors, const std::string &vocab,
      // The operand datapath (tasks/0078). This C++ packer only produces bf16
      // -- int8 needs a SmoothQuant calibration pass that runs the numpy
      // oracle, which is build-time Python by design (CLAUDE.md rule 5) -- but
-     // it must still WRITE the key, in the same position tools/pack_npue.py
+     // it must still WRITE the key, in the same position tools/pack/pack_npue.py
      // writes it, or the two packers stop being byte-identical and
-     // tools/verify_pack_parity.py fails for a reason that is not a bug.
+     // tools/verify/verify_pack_parity.py fails for a reason that is not a bug.
      << ",\"a_dtype\":\"bf16\""
      << ",\"fusions\":{\"qkv_fused\":true,\"transposed_to_kn\":true,"
         "\"qk_scale_folded_into_q\":true,\"gemm_operands_bf16\":true,"
@@ -745,7 +745,7 @@ void prepare_model(const std::string &safetensors, const std::string &vocab,
   }
 }
 
-// arch=1 mirror of tools/pack_npue.py's pack_gemma() (tasks/0064,
+// arch=1 mirror of tools/pack/pack_npue.py's pack_gemma() (tasks/0064,
 // tasks/0065). Deliberately NOT threaded through prepare_model() above --
 // 4 RMSNorms/layer (not 2 LayerNorms), MQA, q_norm/k_norm, per-layer RoPE
 // base, separate gate/up GeGLU matrices, two post-pool Dense heads, no
@@ -861,7 +861,7 @@ void prepare_model_gemma(const std::string &model_dir, const std::string &out,
     log(s.str());
   }
 
-  // Exact key order and formatting of tools/pack_npue.py's pack_gemma()
+  // Exact key order and formatting of tools/pack/pack_npue.py's pack_gemma()
   // config dict -- json.dumps(..., separators=(",", ":")) preserves
   // insertion order, and this must match it byte for byte.
   std::string cj;
@@ -941,9 +941,9 @@ void prepare_model_gemma(const std::string &model_dir, const std::string &out,
     cj += ",\"prompt_default\":\"document\"";
   }
 
-  // tasks/0074. Key ORDER below mirrors tools/pack_npue.py's insertion order
+  // tasks/0074. Key ORDER below mirrors tools/pack/pack_npue.py's insertion order
   // exactly (gemm_layout, then the update() block), because json.dumps
-  // preserves it and tools/verify_pack_parity.py compares the two containers
+  // preserves it and tools/verify/verify_pack_parity.py compares the two containers
   // byte for byte.
   const int64_t kv_w = kv_heads * head_dim;
   const int64_t qkv_used = hidden + 2 * kv_w;
@@ -1124,7 +1124,7 @@ void prepare_model_gemma(const std::string &model_dir, const std::string &out,
 // nomic's gated FFN: fc11 (untouched "up") and fc12 (SiLU "gate") are two
 // SEPARATE [inter,hidden] checkpoint tensors (nn.Linear [out,in]), fused
 // into ONE [hidden, 2*inter] ffn_up operand along the N axis -- mirrors
-// tools/pack_npue.py's pack_nomic():
+// tools/pack/pack_npue.py's pack_nomic():
 //   up = fc11.weight.T; gate = fc12.weight.T; ffn_up = concat([up,gate],1)
 // add_gemm_b() above only takes one source tensor, so this transposes both
 // into the SAME [K,N] buffer at their own column offset, then tiles once --
@@ -1155,7 +1155,7 @@ static void add_gemm_b_concat2(Writer &w, const std::string &name,
 // Python's str.splitlines() count for plain-LF ASCII text (vocab.txt has no
 // CR and no exotic Unicode line separators): one line per '\n', plus a final
 // unterminated line if the file does not end with one. Matches
-// tools/pack_npue.py's `len(vocab_path.read_bytes().decode("utf-8")
+// tools/pack/pack_npue.py's `len(vocab_path.read_bytes().decode("utf-8")
 // .splitlines())` for this specific input shape -- not a general splitlines
 // reimplementation.
 static int64_t count_lines(const std::vector<uint8_t> &b) {
@@ -1166,7 +1166,7 @@ static int64_t count_lines(const std::vector<uint8_t> &b) {
   return n;
 }
 
-// arch=2 mirror of tools/pack_npue.py's pack_nomic() (tasks/0069, 0070,
+// arch=2 mirror of tools/pack/pack_npue.py's pack_nomic() (tasks/0069, 0070,
 // 0071). See npue_pack.hpp for the departures from prepare_model() above.
 // Every architectural fact asserted below was settled EMPIRICALLY against
 // the real checkpoint in tasks/0068 -- this function only implements that
@@ -1321,9 +1321,9 @@ void prepare_model_nomic(const std::string &model_dir,
     }
   }
 
-  // Exact key order of tools/pack_npue.py's pack_nomic() config dict --
+  // Exact key order of tools/pack/pack_npue.py's pack_nomic() config dict --
   // json.dumps(..., separators=(",", ":")) preserves insertion order, and
-  // this must match it byte for byte (tools/verify_pack_parity.py's gate).
+  // this must match it byte for byte (tools/verify/verify_pack_parity.py's gate).
   std::string cj;
   cj += "{\"arch\":\"nomic_bert_rope_swiglu\"";
   cj += ",\"model_type\":\"" + model_type + "\"";
@@ -1389,7 +1389,7 @@ void prepare_model_nomic(const std::string &model_dir,
 
   // -- embeddings: SAME order as prepare_model() above, including the odd
   // ln.weight -> tokenizer.vocab -> ln.bias interleaving, which is
-  // load-bearing for byte parity with tools/pack_npue.py. -----------------
+  // load-bearing for byte parity with tools/pack/pack_npue.py. -----------------
   add_f32("embeddings.word", get("embeddings.word_embeddings.weight"),
           "embedding", {vocab_size, hidden});
   // nomic has NO position table -- RoPE is computed inside attention
@@ -1433,7 +1433,7 @@ void prepare_model_nomic(const std::string &model_dir,
     // 1/sqrt(head_dim) folded into the Q block ONLY (the first `hidden`
     // columns of the transposed [768,2304] operand) -- legal here because
     // RoPE is linear in q: rope(s*q) = s*rope(q), so folding the scale
-    // before the GEMM and before RoPE is exact (tools/verify_npue_nomic.py
+    // before the GEMM and before RoPE is exact (tools/verify/verify_npue_nomic.py
     // check E). No qkv bias exists to fold.
     add_gemm_b(w, tag + "qkv", get(attn + "Wqkv.weight"), tile_k, tile_n,
                layout_json, layout_hash, scale, hidden, mac);
@@ -1529,7 +1529,7 @@ static std::string py_double_repr(double v) {
   return o;
 }
 
-// arch=3 mirror of tools/pack_npue.py's pack_gte() (tasks/0135, 0138). See
+// arch=3 mirror of tools/pack/pack_npue.py's pack_gte() (tasks/0135, 0138). See
 // npue_pack.hpp for the departures from the nomic shape it otherwise
 // mirrors. Every architectural fact asserted below was settled EMPIRICALLY
 // in tasks/0134 (per-layer probe against the repaired fp32 reference, with
@@ -1764,9 +1764,9 @@ void prepare_model_gte(const std::string &model_dir,
     log(s.str());
   }
 
-  // Exact key order of tools/pack_npue.py's pack_gte() config dict --
+  // Exact key order of tools/pack/pack_npue.py's pack_gte() config dict --
   // json.dumps(..., separators=(",", ":")) preserves insertion order, and
-  // this must match it byte for byte (tools/verify_pack_parity.py's gate,
+  // this must match it byte for byte (tools/verify/verify_pack_parity.py's gate,
   // held for arch=3 in tasks/0138).
   std::string cj;
   cj += "{\"arch\":\"gte_new_rope_geglu\"";

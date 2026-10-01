@@ -4,8 +4,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Spec: docs/04-model/npue-format.md. The Python implementation in
-// tools/npue.py is the reference this must agree with, and the round-trip is
-// checked by tools/verify_npue.py on the writing side.
+// tools/lib/npue.py is the reference this must agree with, and the round-trip is
+// checked by tools/verify/verify_npue.py on the writing side.
 //
 // The whole point of the format is that loading is mmap plus pointer
 // arithmetic: no parsing of weight data, no dtype conversion, no copying.
@@ -51,7 +51,7 @@ struct InputTooLong : std::runtime_error {
             std::to_string(n_tokens) + " tokens, but this runtime is running "
             "at sequence length " + std::to_string(limit) + ". Split the text "
             "into shorter pieces, or run a design exported for a longer "
-            "sequence (tools/export_gemm_rtp.py --seq N). Passing "
+            "sequence (tools/export/export_gemm_rtp.py --seq N). Passing "
             "--allow-truncation cuts it at " + std::to_string(limit) +
             " tokens instead and DISCARDS the rest."),
         index(index), n_tokens(n_tokens), limit(limit) {}

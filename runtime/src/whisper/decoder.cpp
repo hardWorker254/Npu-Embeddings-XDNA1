@@ -176,7 +176,7 @@ void WhisperDecoder::set_suppression(std::vector<int32_t> suppress,
         "decoder.suppress_tokens nor decoder.begin_suppress_tokens, so a "
         "greedy step here would pick a different token than the reference "
         "implementation does. Re-pack it OVER THIS FILE, or the old container "
-        "keeps being opened: python tools/pack_npue.py --model-dir <ckpt> "
+        "keeps being opened: python tools/pack/pack_npue.py --model-dir <ckpt> "
         "--out <this file> --device <npu1|npu2> --max-seq 1500");
   suppress_ = std::move(suppress);
   begin_suppress_ = std::move(begin);
@@ -409,7 +409,7 @@ std::vector<int32_t> WhisperDecoder::greedy(const std::vector<int32_t> &prompt,
   if (prompt.empty())
     throw std::runtime_error("whisper decoder: greedy() needs at least one "
                              "prompt token (the control tokens are the model's "
-                             "own; see tools/packers/whisper.py)");
+                             "own; see tools/pack/packers/whisper.py)");
   if (static_cast<int64_t>(prompt.size()) > geom_.max_target)
     throw std::runtime_error("whisper decoder: prompt of " +
                              std::to_string(prompt.size()) +

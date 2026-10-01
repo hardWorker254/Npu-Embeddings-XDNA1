@@ -1,0 +1,5 @@
+{
+  "repo_id": "google/vit-base-patch16-224",
+  "file": "model.safetensors",
+  "sha256": "1cea07110a4a47edc51420b2dda6f3b8b58e7256e8f44b4ea6aa9696162ccb5d"
+}

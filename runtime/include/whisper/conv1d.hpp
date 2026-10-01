@@ -36,7 +36,7 @@
 // d-wide blocks); at large-v3 conv1 pays 3.3x, which is 0.5% of one window's
 // encoder work. A design exported with K = taps*in_ch would remove the padding
 // AND collapse conv1 to a single dispatch, and that is the real fix -- it needs
-// one more stream in tools/npu_targets.json's stt set and a re-export.
+// one more stream in tools/data/npu_targets.json's stt set and a re-export.
 //
 // The GELU stays on the host, in fp32, exactly as in the CPU front end: the
 // design set has no eltwise stream for it (kinds.stt lists GEMM streams only),
@@ -92,7 +92,7 @@ public:
   // [out_ch, in_ch, taps] row-major, and `bias` is [out_ch]. The staged
   // operand is built here rather than read from the container because the
   // container keeps the convolutions in fp32 as the REFERENCE for
-  // tools/verify_whisper_features.py; the pre-tiled bf16 copy is derived from
+  // tools/verify/verify_whisper_features.py; the pre-tiled bf16 copy is derived from
   // those exact bytes with the design's own b_layout.
   void stage(const std::string &label, const float *w, const float *bias,
              int64_t in_ch, int64_t out_ch, int64_t taps);

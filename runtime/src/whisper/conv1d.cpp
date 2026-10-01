@@ -32,7 +32,7 @@ void NpuConv1d::stage(const std::string &label, const float *w,
         "stream this conv runs on has N = " + std::to_string(n_) +
         ". The output width IS the GEMM's N here, so it cannot be padded or "
         "split: export a stream with N = " + std::to_string(out_ch) + " (see "
-        "tools/npu_targets.json kinds.stt.streams).");
+        "tools/data/npu_targets.json kinds.stt.streams).");
   if (k_ <= 0 || k_ % d_.info().b_tile_k || n_ % d_.info().tile_n)
     throw std::runtime_error(
         label + ": the stream's " + std::to_string(k_) + "x" +

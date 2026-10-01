@@ -9,11 +9,11 @@
 // trusting a 66 MB blob in someone's zip file. This is what makes that
 // practical: two downloads and one command, no Python, no toolchain.
 //
-// The result must be BYTE-IDENTICAL to tools/pack_npue.py's output. Two
+// The result must be BYTE-IDENTICAL to tools/pack/pack_npue.py's output. Two
 // implementations of one binary layout is a real risk -- a disagreement would
 // mean correctly-sized weights in the wrong order, which no size check
 // catches -- so it is verified rather than assumed
-// (tools/verify_pack_parity.py).
+// (tools/verify/verify_pack_parity.py).
 
 #pragma once
 
@@ -28,14 +28,14 @@ namespace npue {
 // plausible garbage.
 // The canonical B-layout descriptor and its hash, built in ONE place.
 //
-// tools/npue.py's docstring records why: every hand-written copy of this dict
+// tools/lib/npue.py's docstring records why: every hand-written copy of this dict
 // is a chance for two sides to drift, and the drift is invisible -- the hash
 // changes, the bytes do not, and the check meant to catch wrong layouts starts
 // reporting a mismatch that is not one. main.cpp used to carry both the JSON
 // and a FROZEN hash for tile_n = 48, which made a second tile size
 // unexpressible without editing the packer.
 //
-// `json` preserves tools/npue.py's INSERTION order (the bytes that go in the
+// `json` preserves tools/lib/npue.py's INSERTION order (the bytes that go in the
 // file); `hash` is over the key-SORTED form, which is what npue.py hashes.
 struct Layout {
   std::string json;
@@ -84,7 +84,7 @@ void prepare_model(const std::string &safetensors, const std::string &vocab,
                    MacGeom mac = kMacDefault);
 
 // arch=1 (EmbeddingGemma / Gemma3 MQA+RoPE+GeGLU) mirror of
-// tools/pack_npue.py's pack_gemma(). `model_dir` must hold
+// tools/pack/pack_npue.py's pack_gemma(). `model_dir` must hold
 // model.safetensors, config.json, 2_Dense/model.safetensors,
 // 3_Dense/model.safetensors and (optionally) gemma_tokenizer.bin.
 // `source_repo` is resolved by the caller exactly as for the BERT path
@@ -96,7 +96,7 @@ void prepare_model(const std::string &safetensors, const std::string &vocab,
 // tasks/0064-0065 shipped -- plain F32 row-major operands for the CPU-only
 // npue::GemmaEncoder -- which is now the correctness CONTROL rather than the
 // product. Both packers must keep producing byte-identical output for BOTH
-// modes (tools/verify_pack_parity.py); tasks/0065 established that property
+// modes (tools/verify/verify_pack_parity.py); tasks/0065 established that property
 // and it is not allowed to lapse.
 void prepare_model_gemma(const std::string &model_dir, const std::string &out,
                          const std::string &source_repo,
@@ -106,7 +106,7 @@ void prepare_model_gemma(const std::string &model_dir, const std::string &out,
                          MacGeom mac = kMacDefault);
 
 // arch=2 (nomic-embed-text-v1.5 / RoPE + gated SwiGLU) mirror of
-// tools/pack_npue.py's pack_nomic() (tasks/0069, tasks/0070, tasks/0071).
+// tools/pack/pack_npue.py's pack_nomic() (tasks/0069, tasks/0070, tasks/0071).
 // Emits the SAME tensor names and SAME emission order as prepare_model()
 // above, so Encoder::run()'s existing NPU dispatch path works unchanged --
 // with three departures from BERT: no absolute position table (RoPE
@@ -133,7 +133,7 @@ void prepare_model_nomic(const std::string &model_dir,
                          MacGeom mac = kMacDefault);
 
 // arch=3 (gte-multilingual-base / NTK RoPE + gated GeGLU, model_type "new")
-// mirror of tools/pack_npue.py's pack_gte() (tasks/0135, tasks/0138). Same
+// mirror of tools/pack/pack_npue.py's pack_gte() (tasks/0135, tasks/0138). Same
 // tensor names and emission order as arch=0/2 -- including the
 // `ln.weight -> tokenizer -> ln.bias` interleaving that is load-bearing for
 // byte parity -- with pack_gte()'s departures from the nomic shape it
@@ -153,7 +153,7 @@ void prepare_model_nomic(const std::string &model_dir,
 //
 // `pooling` and `source_repo` are resolved by the CALLER exactly as for the
 // other packers above. The output must be byte-identical to pack_gte()'s
-// for the same inputs -- tools/verify_pack_parity.py's standing gate, held
+// for the same inputs -- tools/verify/verify_pack_parity.py's standing gate, held
 // for this arch in tasks/0138.
 void prepare_model_gte(const std::string &model_dir,
                        const std::string &pooling,

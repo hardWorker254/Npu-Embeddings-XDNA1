@@ -1,0 +1,26 @@
+{
+  "kind": "hardware measurement",
+  "milestone": "M6",
+  "format": "bf16",
+  "cols": 4,
+  "gelu": "host",
+  "source_sha256": "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db",
+  "npu_gemms": {
+    "256x384x1152": 6,
+    "256x384x384": 6,
+    "256x384x1536": 6,
+    "256x1536x384": 6
+  },
+  "host_gemms": {
+    "64x32x64": 288,
+    "64x64x32": 288
+  },
+  "npu_gemm_calls": 24,
+  "host_gemm_calls": 576,
+  "npu_gelu_calls": null,
+  "worst_1_minus_cos_vs_hf": 1.086578053310916e-05,
+  "max_similarity_shift": 0.000423063542189267,
+  "embedding_rel_fro": 0.004555105920361152,
+  "tolerance": 0.0001,
+  "pass": true
+}

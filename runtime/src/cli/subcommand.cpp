@@ -49,6 +49,27 @@ std::string ensure(const std::string &root, const std::string &name,
         token);
 }
 
+// THE FLAGS THAT CARRY A VALUE, one list, named. Two call sites need it -- the
+// forwarder below, and run_classify()'s positional scan -- and a second
+// hand-written copy is exactly the drift this file's comment about whitelists
+// warns about: run_classify would take `--threads 8`'s VALUE as an image path
+// and then refuse to open the integer 8 as a PNG.
+//
+// Written as a function rather than a table of pairs because the caller wants
+// two different things from it -- "forward this and its value" and "does this
+// one swallow the next argument" -- and both are the same question.
+bool flag_takes_value(const std::string &a) {
+    static const char *const kWithValue[] = {
+        "--threads", "--pipeline", "--prefix", "--artifacts", "--dev",
+        "--bo-mode", "--npu-extra-ops", "--language", "--task", "--max-new",
+        "--chunk-seconds", "--stride-seconds", "--classify", "--image",
+        "--root", "--port", "--bind", "--token", "--max-len",
+    };
+    for (const char *f : kWithValue)
+        if (a == f) return true;
+    return false;
+}
+
 void forward_common(const char *const *argv, int argc,
                     std::vector<std::string> &store) {
     // A REMOVED flag is refused here rather than dropped by the whitelist below.
@@ -79,14 +100,13 @@ void forward_common(const char *const *argv, int argc,
             // the same reason as the rest: a flag the whitelist drops is a flag
             // the runtime never sees, and `serve <whisper> --convert` would
             // then transcribe with a WAV reader that refuses every mp3.
-            a == "--convert" || a == "--json")
+            a == "--convert" || a == "--json" ||
+            // arch=5's own no-argument flags. Same reason, and --top-k is the
+            // one that would hurt most: dropping it would print one label and
+            // leave the user with no way to see how close the runner-up was.
+            a == "--top-k")
             store.push_back(a);
-        else if ((a == "--threads" || a == "--pipeline" || a == "--prefix" ||
-                  a == "--artifacts" || a == "--dev" || a == "--bo-mode" ||
-                  a == "--npu-extra-ops" ||
-                  a == "--language" || a == "--task" || a == "--max-new" ||
-                  a == "--chunk-seconds" || a == "--stride-seconds") &&
-                 i + 1 < argc) {
+        else if (flag_takes_value(a) && i + 1 < argc) {
             store.push_back(a);
             store.push_back(argv[++i]);
         }
@@ -188,8 +208,59 @@ int run_transcribe(int argc, char **argv) {
     return launch(argv[0], root, store);
 }
 
-int run_add(int argc, char **argv) {
+// `classify` for an image classifier. The image paths are written to the flag
+// form as repeated --classify, which Runtime::run then dispatches by the
+// container's arch -- one code path for
+// `npuembeddings classify <model> <a.png> <b.png>` and
+// `npuembeddings <root> --model ... --classify <a.png>`.
+//
+// It is deliberately run_transcribe's shape rather than run_embed's: no
+// --threads/--pipeline defaults, because "24 threads, 4 lanes" is a statement
+// about the embedding pipeline's per-request GEMM batching and this mode walks
+// one image through one pool. Its own --threads default lives in vit_mode.hpp.
+int run_classify(int argc, char **argv) {
     std::string root = default_root(argv[0]);
+    std::string cli_token;
+    for (int i = 2; i < argc; ++i) {
+        if (std::string(argv[i]) == "--root") root = argv[i + 1];
+        if (std::string(argv[i]) == "--token") cli_token = argv[i + 1];
+    }
+    if (argc < 3 || argv[2][0] == '-')
+        throw std::runtime_error("`classify` needs a model name");
+    const std::string model_name = argv[2];
+    if (argc < 4 || argv[3][0] == '-')
+        throw std::runtime_error(
+            "`classify` needs an image:\n"
+            "    npuembeddings classify <model> <image.png> [more.png ...]\n"
+            "  (PNG and JPEG; anything else is refused rather than guessed at. "
+            "--top-k prints the runners-up to stderr, --json to stdout)");
+    warn_if_unpinned(model_name);
+    const std::string container = ensure(root, model_name, cli_token);
+    std::vector<std::string> store = {"--model", container};
+    // Every leading non-flag argument is an image, so
+    // `classify <model> a.png b.png --top-k` classifies both. A flag's VALUE is
+    // never mistaken for a path: flag_takes_value() is the same list
+    // forward_common() uses, so `--threads 8 a.png` classifies a.png and not
+    // the integer 8.
+    bool swallow = false;
+    for (int i = 3; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (swallow) {
+            swallow = false;
+            continue;
+        }
+        if (!a.empty() && a[0] == '-') {
+            swallow = flag_takes_value(a);
+            continue;
+        }
+        store.push_back("--classify");
+        store.push_back(a);
+    }
+    forward_common(argv, argc, store);
+    return launch(argv[0], root, store);
+}
+
+int run_add(int argc, char **argv) {    std::string root = default_root(argv[0]);
     std::string cli_token;
     for (int i = 2; i < argc - 1; ++i) {
         if (std::string(argv[i]) == "--root") root = argv[i + 1];
@@ -313,6 +384,7 @@ void register_default_subcommands(SubcommandDispatcher &dispatcher) {
     dispatcher.register_handler("add", run_add);
     dispatcher.register_handler("tokenize", run_tokenize);
     dispatcher.register_handler("transcribe", run_transcribe);
+    dispatcher.register_handler("classify", run_classify);
 }
 
 }  // namespace app

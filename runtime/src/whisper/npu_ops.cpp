@@ -33,10 +33,10 @@ size_t NpuGemm::stage_operand(const npue::File &model,
   if (want.empty())
     throw std::runtime_error(d_.info().name +
                              "/design.json has no b_layout_hash -- re-export "
-                             "with tools/export_gemm_rtp.py");
+                             "with tools/export/export_gemm_rtp.py");
   if (got.empty())
     throw std::runtime_error(name + ": .npue tensor carries no layout_hash -- "
-                             "repack with tools/pack_npue.py");
+                             "repack with tools/pack/pack_npue.py");
   if (want != got)
     throw std::runtime_error(
         name + ": layout mismatch -- design " + d_.info().name + " wants " +
@@ -115,6 +115,79 @@ void NpuGemm::run(size_t instr, const float *a, int64_t n_real, int64_t rows,
       for (; j < n; ++j) o[j] += bias[j];
     }
   });
+}
+
+void NpuGemm::run_i8(size_t instr, const float *a, int64_t n_real,
+                     int64_t rows, int64_t k, size_t wslot, const float *bias,
+                     int64_t n, float *out, const float *wscale,
+                     const float *inv_smooth) {
+  const auto &in = d_.info();
+  if (in.a_elem_bytes != 1)
+    throw std::runtime_error(d_.info().name +
+                             ": run_i8 on a design whose A operand is " +
+                             std::to_string(in.a_elem_bytes * 8) +
+                             " bits. The container and the design must agree, "
+                             "and they do not.");
+  if (n_real <= 0 || n_real > rows)
+    throw std::runtime_error(d_.info().name + ": " + std::to_string(n_real) +
+                             " rows into a " + std::to_string(rows) +
+                             "-row dispatch");
+  if (rows <= 0 || k <= 0 || n <= 0)
+    throw std::runtime_error(d_.info().name + ": GEMM with a zero dimension");
+  if (static_cast<size_t>(rows) * k > d_.info().buffer_bytes[0] ||
+      static_cast<size_t>(rows) * n * in.c_elem_bytes >
+          d_.info().buffer_bytes[d_.output_index()])
+    throw std::runtime_error(
+        d_.info().name + ": " + std::to_string(rows) + "x" +
+        std::to_string(k) + " A or " + std::to_string(rows) + "x" +
+        std::to_string(n) + " C does not fit the design's buffers. Re-export "
+        "the design set with --int8 for this model.");
+  if (!wscale)
+    throw std::runtime_error(
+        d_.info().name + ": an int8 GEMM with no per-output-channel weight "
+        "scale. The container carries one for every int8 operand ("
+        "tools/lib/gemm_i8.py), so a missing one means the operand was not packed "
+        "as int8 while the design says it is.");
+
+  const double t0 = app::now_s();
+  // 1/s cached by POINTER, the same way the BERT path does it: a container's
+  // asmooth is a pointer into a mapping that outlives the session, so identity
+  // is "the same pointer" and the reciprocal is paid once per operand.
+  if (inv_smooth && inv_smooth != inv_smooth_src_) {
+    inv_smooth_.resize(static_cast<size_t>(k));
+    for (int64_t j = 0; j < k; ++j) inv_smooth_[static_cast<size_t>(j)] =
+        inv_smooth[j] > 0.f ? 1.0f / inv_smooth[j] : 1.0f;
+    inv_smooth_src_ = inv_smooth;
+  }
+  a_scale_.assign(static_cast<size_t>(rows), 0.0f);
+  auto *abuf = static_cast<int8_t *>(d_.slot_ptr(0, slot_a));
+  // The helpers take a `par_rows(n, body)` callable and this class HAS one, so
+  // the pool is the same in the int8 path as in the fp32 one. Passing a serial
+  // stand-in instead would be correct and would put the whole A quantisation on
+  // one core, which is the cost this datapath is supposed to avoid.
+  auto par = [this](int64_t n, auto &&body) { par_rows(n, body); };
+  app::quantise_a_int8(a, n_real, k, inv_smooth ? inv_smooth_.data() : nullptr,
+                  abuf, a_scale_.data(), par);
+  t_convert += app::now_s() - t0;
+
+  {
+    std::unique_lock<std::mutex> lk;
+    if (npu_mu) lk = std::unique_lock<std::mutex>(*npu_mu);
+    d_.bind_instr(instr);
+    d_.bind(0, slot_a);
+    d_.bind(1, wslot);
+    d_.bind(d_.output_index(), slot_c);
+    d_.sync_to_device(0, static_cast<size_t>(rows) * k);
+    d_.dispatch_only();
+    d_.sync_from_device(d_.output_index(),
+                        static_cast<size_t>(rows) * n * in.c_elem_bytes);
+  }
+  t_dispatch += app::now_s() - t0;
+  ++n_dispatch;
+
+  const void *c = d_.slot_ptr(d_.output_index(), slot_c);
+  app::dequantise_c(c, in.c_elem_bytes, n_real, n, a_scale_.data(), wscale, bias,
+               out, par);
 }
 
 void NpuGemm::run_accum(size_t instr, const float *a, int64_t n_real,
@@ -326,7 +399,7 @@ std::vector<uint16_t> tile_b_panel(const float *mat, int64_t K, int64_t N,
         std::to_string(mac_s) + "x" + std::to_string(mac_t));
 
   // The order, spelled out: k block, then n block, then the sub-tile's k step,
-  // then its n step, then s, then t. Same traversal as tools/npue.py's
+  // then its n step, then s, then t. Same traversal as tools/lib/npue.py's
   // tile_b(order="k,n") and the C++ packer's tile_b, and the byte order inside
   // the panel is the MMAC's (s fastest after t), which is why mac_s/mac_t have
   // to be the design's and not a constant.

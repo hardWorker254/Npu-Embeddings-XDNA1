@@ -137,6 +137,16 @@ inline void print_usage() {
         "        with one segment per 30 s window. --convert ingests through\n"
         "        ffmpeg (mp3, m4a, webm, or a WAV the reader refuses).\n"
         "\n"
+        "  npuembeddings classify <model> <image.png> [more.png ...]\n"
+        "        classify images with a ViT model (vit-base-patch16-224), one\n"
+        "        per argument. The label goes to stdout on its own and the\n"
+        "        status block to stderr, so it pipes. PNG and JPEG only --\n"
+        "        anything else is refused by name rather than guessed at, and\n"
+        "        so is a non-square resize or a shortest-edge crop: the\n"
+        "        container says which geometry it was trained with and this\n"
+        "        reads it. --top-k prints the runners-up to stderr, --json\n"
+        "        the objects to stdout. `embed` is not how this runs.\n"
+        "\n"
         "  npuembeddings add <org/model> [<sha256>]\n"
         "        teach this installation about a model that is not built in --\n"
         "        typically a finetune of one that is. Reads the repository's\n"
@@ -146,7 +156,7 @@ inline void print_usage() {
         "        WITHOUT a sha256 the weights are NOT verified. That is allowed,\n"
         "        and it is warned about on every single run.\n"
         "\n"
-        "  Options for serve/embed:\n"
+        "  Options for serve/embed/transcribe/classify:\n"
         "    --port N          listen port (default 8080)\n"
         "    --bind ADDR       interface (default 127.0.0.1, localhost only)\n"
         "    --threads N       host thread budget (default 24 for these)\n"
@@ -228,6 +238,10 @@ inline void print_usage() {
          "                      chunk - 2*stride apart and the merge\n"
          "                      de-duplicates the overlap\n"
          "    --json           transcribe: print {\"text\", \"segments\", ...}\n"
+         "    --top-k          classify: print the runners-up to stderr, under\n"
+         "                      the image. The whole row is ranked and the top\n"
+         "                      ten shown -- a truncated list reads as \"nothing\n"
+         "                      else is close\", which is a different claim\n"
         "    --root DIR        override where models/ and the design live\n"
         "    --token VALUE     HuggingFace access token for a GATED model\n"
         "                      (falls back to the HF_TOKEN env var if omitted)\n"
@@ -258,7 +272,7 @@ inline void print_usage() {
         "                      with it, a one-line warning on stderr.\n"
         "                      This build runs at the sequence length its\n"
         "                      design was exported for -- see\n"
-        "                      tools/export_gemm_rtp.py --seq to build for a\n"
+        "                      tools/export/export_gemm_rtp.py --seq to build for a\n"
         "                      longer one.\n"
         "\n"
         "  The flag form is unchanged and still works:\n"
@@ -310,6 +324,16 @@ inline void print_catalog(const std::string &root) {
                             : is_stt_arch(m->arch) && m->arch == "whisper_encdec_gelu"
                                 ? (stt_design_sets(root, e.name) ? "ready"
                                                                  : "no design")
+                            // arch=5 needs ONE set -- gemm_rtp -- and says so
+                            // with `ready`/`no design` like an embedder, because
+                            // that is what it is as far as "can this run" goes.
+                            // What it is NOT is an embedder, and the two
+                            // differences that matter (no pooling column value
+                            // the user chose, and `classify` rather than
+                            // `embed`) are stated in the notes and in the
+                            // `cls` line below the table.
+                            : is_vit_arch(m->arch)
+                                ? (have_design ? "ready" : "no design")
                             : m->gemm_layout == "host"      ? "cpu"
                             : have_design                   ? "ready"
                                                             : "no design";
@@ -338,6 +362,11 @@ inline void print_catalog(const std::string &root) {
         std::printf("  %-20s %-9s %6lld %6lld %8s %6.0f MB  %s\n", m.name.c_str(),
                     !encoder_implemented(m.arch)              ? "no encoder"
                     : is_stt_arch(m.arch)                    ? "stt"
+                    // A locally packed arch=5 container: `classify`, not
+                    // `embed`. The column says which command runs it, because
+                    // "ready" here would otherwise be read as "ready to embed"
+                    // and the first thing a user tries is the wrong one.
+                    : is_vit_arch(m.arch)                    ? "cls"
                     : m.gemm_layout == "host"                 ? "cpu"
                     : pick_artifacts(root, m.hidden, m.ffn, m.gated_ffn,
                                      m.qkv_n, "", "bf16", m.name).empty()
@@ -361,8 +390,15 @@ inline void print_catalog(const std::string &root) {
         "             stack and gemm_rtp_dec for the decoder. `transcribe` and\n"
         "             `serve` are how it runs; `embed` is not. A whisper row says\n"
         "             `no design` until BOTH are exported, which is one command:\n"
-        "               python tools/export_gemm_rtp.py --target <name> \\\n"
+        "               python tools/export/export_gemm_rtp.py --target <name> \\\n"
         "                   --arch 1 --out runtime\n"
+        "  cls         installed, and it is an IMAGE CLASSIFIER: no pooling and\n"
+        "             no text, and it needs ONE design set -- gemm_rtp, the same\n"
+        "             four streams bge-base-en-v1.5 uses, because a ViT's GEMM\n"
+        "             shapes ARE bge-base's and its patch embedding is [n,768]x\n"
+        "             [768,768], which is attn_out's shape. `classify` is how it\n"
+        "             runs; `embed` is not:\n"
+        "               npuembeddings classify <name> <image.png>\n"
         "\n  npuembeddings serve <model>\n\n");
 }
 

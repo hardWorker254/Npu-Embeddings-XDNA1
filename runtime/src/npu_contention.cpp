@@ -14,7 +14,7 @@
 //   |Memory Usage        |Instr BO   |            |            |     |FPS      |
 //   ...
 //   |63804               |144        |7233        |0           |0    |Normal   |
-//   |npuembed.exe        |Active     |7232        |0           |     |N/A      |
+//   |npuembeddings.exe        |Active     |7232        |0           |     |N/A      |
 //   |1032 MB             |608 KB     |            |            |     |N/A      |
 //   |                    |           |            |            |     |N/A      |
 //

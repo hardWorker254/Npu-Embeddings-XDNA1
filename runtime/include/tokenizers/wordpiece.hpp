@@ -12,7 +12,7 @@
 //
 // The Unicode facts it needs -- lowercase, NFD-with-Mn-dropped, and the
 // punctuation / control / space categories -- are GENERATED from Python's
-// unicodedata by tools/gen_tokenizer_tables.py, so they agree with the
+// unicodedata by tools/gen/gen_tokenizer_tables.py, so they agree with the
 // reference by construction rather than by careful reading.
 //
 // Correctness is not asserted, it is MEASURED: tools/verify_tokenizer.py runs

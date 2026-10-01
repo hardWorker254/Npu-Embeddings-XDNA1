@@ -110,7 +110,7 @@ std::vector<app::StreamEntry> load_streams(npu::Design &d,
   if (streams.empty())
     throw std::runtime_error(dir +
                              "/design.json lists no streams -- re-export with "
-                             "tools/export_gemm_rtp.py");
+                             "tools/export/export_gemm_rtp.py");
   std::sort(streams.begin(), streams.end(),
             [](const app::StreamEntry &a, const app::StreamEntry &b) {
               return a.slot < b.slot;

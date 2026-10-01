@@ -283,7 +283,7 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
   // ---- NPU path -----------------------------------------------------------
   //
   // The contention gate, when this run is a MEASUREMENT (tasks/0044's ninth
-  // fail-open). A foreign Active hw_context -- most often a stale npuembed.exe
+  // fail-open). A foreign Active hw_context -- most often a stale npuembeddings.exe
   // from an earlier command in the same session -- read MiniLM at 221 seq/s
   // against a true 691. It is opt-in here rather than always-on because an
   // ordinary `embed` is not a performance claim and should not refuse to run
@@ -305,7 +305,7 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
   }
   if (streams.empty())
     throw std::runtime_error(art + "/gemm_rtp/design.json lists no streams -- "
-                             "re-export with tools/export_gemm_rtp.py");
+                             "re-export with tools/export/export_gemm_rtp.py");
   std::sort(streams.begin(), streams.end(),
             [](const StreamEntry &a, const StreamEntry &b) {
               return a.slot < b.slot;

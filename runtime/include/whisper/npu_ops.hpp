@@ -67,6 +67,24 @@ public:
   void run(size_t instr, const float *a, int64_t n_real, int64_t rows, int64_t k,
            size_t wslot, const float *bias, int64_t n, float *out);
 
+  // INT8, when the design and the container agree that they are: A is
+  // quantised per ROW (per token) here, on the way into the buffer the dispatch
+  // reads, and C comes back dequantised by the rank-1 product of that row's scale
+  // and the weight's per-column scale. Both halves are the shared helpers the
+  // BERT path uses -- `quantise_a_int8` and `dequantise_c` in
+  // common/host_kernels.hpp -- so the arithmetic is written once and a
+  // divergence between the two architectures would have to be introduced, not
+  // inherited.
+  //
+  // `inv_smooth` is 1/asmooth of the operand (per INPUT channel), applied to the
+  // activation before its row maximum is taken, which is the whole point of
+  // SmoothQuant: the row scale is then set by the smoothed values, and the
+  // weight was pre-multiplied by asmooth at pack time. Null means no smoothing,
+  // which is what a container with all-ones asmooth carries.
+  void run_i8(size_t instr, const float *a, int64_t n_real, int64_t rows,
+              int64_t k, size_t wslot, const float *bias, int64_t n, float *out,
+              const float *wscale, const float *inv_smooth);
+
   // acc[n_real, n] += A[n_real, k] @ B, with no bias and no epilogue.
   //
   // This is the accumulate form, and it exists because of Whisper's audio front
@@ -99,6 +117,12 @@ private:
 
   npu::Design &d_;
   app::Pool &pool_;
+  // 1/asmooth per operand, cached across dispatches because the container's
+  // factor is a pointer into a mapping and the reciprocal is K divisions of work
+  // the array would otherwise pay per dispatch.
+  std::vector<float> inv_smooth_;
+  const float *inv_smooth_src_ = nullptr;
+  std::vector<float> a_scale_;
 };
 
 // LayerNorm over rows of `d` columns, in place, with the container's epsilon.
@@ -108,7 +132,7 @@ void layernorm_rows(float *x, int64_t n_rows, int64_t d, const float *gamma,
                     const float *beta, double eps, app::Pool &pool);
 
 // exact-erf GELU, in place. The activation is the model's, not a choice: the
-// container records `gelu` and tools/packers/whisper.py refuses a checkpoint
+// container records `gelu` and tools/pack/packers/whisper.py refuses a checkpoint
 // whose activation is not this one.
 void gelu_erf_inplace(float *x, size_t n, app::Pool &pool);
 
@@ -136,8 +160,8 @@ void attention(const float *q, int64_t q_stride, const float *kv,
 
 // The pre-tiled B panel, built on the host from an [K, N] fp32 matrix.
 //
-// Same layout and the same order as tools/npue.py's tile_b(order="k,n") and
-// tools/exporters/... the C++ packer's tile_b, which is what the container's
+// Same layout and the same order as tools/lib/npue.py's tile_b(order="k,n") and
+// tools/export/exporters/... the C++ packer's tile_b, which is what the container's
 // own GEMM operands are stored in:
 //
 //   [K,N] -> [K/tile_k][N/tile_n][tile_k/mac_s][tile_n/mac_t][s][t]

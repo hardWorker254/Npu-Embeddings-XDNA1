@@ -1,7 +1,7 @@
 //===- whisper.cpp -------------------------------------------------------*- C++ -*-===//
 //
 // NpuEmbeddings -- Whisper tokenizer. See tokenizers/whisper.hpp for what this
-// is and how it is verified; tools/whisper_tokenizer_ref.py is the executable
+// is and how it is verified; tools/lib/whisper_tokenizer_ref.py is the executable
 // specification it is written against.
 //
 // SPDX-License-Identifier: Apache-2.0
@@ -22,7 +22,7 @@ using whisper_unicode::is_letter;
 using whisper_unicode::is_number;
 using whisper_unicode::is_space;
 
-// tools/whisper_bpe.py's header is the single definition of this layout; the
+// tools/lib/whisper_bpe.py's header is the single definition of this layout; the
 // field offsets below are transcribed from it and checked against the magic and
 // version, because a reader that trusts a length field it has not verified
 // reads whatever else is in the file.

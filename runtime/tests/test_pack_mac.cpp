@@ -1,6 +1,6 @@
 //===- test_pack_mac.cpp --------------------------------------------*- C++ -*-//
 //
-// Do the C++ packer and tools/pack_npue.py agree, for BOTH generations?
+// Do the C++ packer and tools/pack/pack_npue.py agree, for BOTH generations?
 //
 // The B panel's byte order is the MMAC sub-tile, and it differs per board
 // (npu1 s8/t4, npu2 s8/t8). Two implementations of one layout is already a
@@ -8,11 +8,11 @@
 // risks, and the failure is invisible: the byte count, the shapes and the
 // layout_hash all agree, and only the products are wrong. So this packs the
 // same checkpoint twice -- once per device -- and prints each file's sha256
-// for tools/verify_pack_parity.py to compare against the Python packer.
+// for tools/verify/verify_pack_parity.py to compare against the Python packer.
 //
 // NOT a self-contained gate on purpose: the C++ side must be byte-identical to
 // the reference, and the reference is the Python packer, so the comparison
-// belongs where both are visible. tools/verify_pack_parity.py grew a --device
+// belongs where both are visible. tools/verify/verify_pack_parity.py grew a --device
 // flag for exactly this, and this binary is what it drives on the platforms
 // where the pack path is reachable from the CLI.
 //

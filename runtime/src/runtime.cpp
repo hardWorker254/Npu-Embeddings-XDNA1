@@ -11,6 +11,7 @@
 #include "runtime/run_probes.hpp"
 #include "runtime/gemma_mode.hpp"
 #include "runtime/stt_mode.hpp"
+#include "runtime/vit_mode.hpp"
 #include "runtime/model.hpp"
 #include <cstdio>
 #include <cstdlib>
@@ -26,7 +27,7 @@ Runtime::Runtime(const std::string &model_path, const std::string &root,
 
 int Runtime::run(int argc, char **argv) {
     // --dev names the NPU generation this process runs on -- the same name
-    // tools/export_gemm_rtp.py writes into design.json. It must be known before
+    // tools/export/export_gemm_rtp.py writes into design.json. It must be known before
     // any design is selected, because design_fits() refuses a set built for the
     // other generation. NPU_DEVICE / NPU2 are the environment defaults.
     for (int i = 1; i < argc - 1; ++i)
@@ -57,6 +58,14 @@ int Runtime::run(int argc, char **argv) {
     // container. --artifacts is read above, so the same flag works for both.
     if (int stt_r = app::maybe_stt_mode(root_, argc, argv, model_path_); stt_r >= 0)
         return stt_r;
+
+    // arch=5 (a ViT) is the third architecture with a pipeline of its own: an
+    // image front end, four GEMM streams on ONE design set, a host head, and
+    // none of the embedding machinery -- no pooling, no golden fixtures, no
+    // text. Dispatched here, beside the other two, and returns -1 for every
+    // other container. --artifacts is read above, so the same flag works.
+    if (int cls_r = app::maybe_vit_mode(root_, argc, argv, model_path_); cls_r >= 0)
+        return cls_r;
 
     RunContext ctx;
     ctx.argc = argc;
@@ -135,7 +144,7 @@ int Runtime::run(int argc, char **argv) {
                 std::to_string(g_hidden) + ", datapath " + want_datapath +
                 ", device " + running_device() + ") under " + root_ +
                 " -- name one with --artifacts, or export one for this "
-                "generation with tools/export_gemm_rtp.py");
+                "generation with tools/export/export_gemm_rtp.py");
     }
     if (!art_from_cli)
         std::printf("  artifacts  %s (picked from the container's geometry; "
@@ -188,7 +197,7 @@ int Runtime::run(int argc, char **argv) {
             throw std::runtime_error(
                 "the golden fixtures were made from checkpoint " +
                 want_sha.substr(0, 16) + "... but this model is " +
-                got_sha.substr(0, 16) + "... -- re-run tools/export_validation.py");
+                got_sha.substr(0, 16) + "... -- re-run tools/export/export_validation.py");
     }
 
     std::printf("NpuEmbeddings C++ runtime -- full encode\n");

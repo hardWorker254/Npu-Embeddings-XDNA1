@@ -51,7 +51,7 @@ size_t BertEncoder::stage_all() {
     if (got.empty())
       throw std::runtime_error(name + ": .npue tensor carries no "
                                "layout_hash -- repack with "
-                               "tools/pack_npue.py");
+                               "tools/pack/pack_npue.py");
     if (want != got)
       throw std::runtime_error(
           name + ": layout mismatch -- design " + d.info().name +
@@ -464,7 +464,7 @@ void BertEncoder::dequant_act_bf16(const void *c, size_t c_bytes, int64_t N,
       if (c_bytes == 2) {
         const uint16_t *cr = static_cast<const uint16_t *>(c) + r * N;
         for (; j + 16 <= N; j += 16) {
-          __m256i raw = _mm256_stream_load_si256(
+          __m256i raw = _mm256_loadu_si256(
               reinterpret_cast<const __m256i *>(cr + j));
           __m256i lo = _mm256_slli_epi32(
               _mm256_cvtepu16_epi32(_mm256_castsi256_si128(raw)), 16);
@@ -478,7 +478,7 @@ void BertEncoder::dequant_act_bf16(const void *c, size_t c_bytes, int64_t N,
       } else {
         const float *cr = static_cast<const float *>(c) + r * N;
         for (; j + 8 <= N; j += 8) {
-          __m256i raw = _mm256_stream_load_si256(
+          __m256i raw = _mm256_loadu_si256(
               reinterpret_cast<const __m256i *>(cr + j));
           _mm256_storeu_ps(v + j, _mm256_add_ps(_mm256_castsi256_ps(raw),
                                                 _mm256_loadu_ps(bias + j)));
@@ -570,6 +570,13 @@ void BertEncoder::gemm(npu::Design &d, size_t islot, const std::vector<float> &a
   t0 = lap(t0, t_conv);
   }
   const float *c;
+  // The A DMA is OUTSIDE npu_mu on purpose. It addresses this lane's own slot
+  // by name (sync_slot_to_device), so it touches no state another lane reads,
+  // and dispatch_only() blocks on r.wait(), so the array finished with this
+  // lane's slot before we began filling it again. Holding the mutex across a
+  // 75 us copy is what cost 805 us per lane at --pipeline 4.
+  d.sync_slot_to_device(0, slot_a, a.size() * d.info().a_elem_bytes);
+  t0 = lap(t0, t_in);
   {
     std::unique_lock<std::mutex> lk;
     if (npu_mu) lk = std::unique_lock<std::mutex>(*npu_mu);
@@ -577,15 +584,15 @@ void BertEncoder::gemm(npu::Design &d, size_t islot, const std::vector<float> &a
     d.bind(0, slot_a);
     d.bind(1, wslot);
     d.bind(2, slot_c);
-    d.sync_to_device(0, a.size() * d.info().a_elem_bytes);
-    t0 = lap(t0, t_in);
     d.dispatch_only();
     t0 = lap(t0, t_disp);
-    const size_t cb = d.info().c_elem_bytes;
-    d.sync_from_device(2, static_cast<size_t>(rows) * N * cb);
-    t0 = lap(t0, t_out);
-    c = static_cast<const float *>(d.slot_ptr(2, slot_c));
   }
+  const size_t cb = d.info().c_elem_bytes;
+  // Likewise for C: r.wait() has returned, so this lane's C slot is final and
+  // private. Another lane dispatching concurrently writes its OWN slot.
+  d.sync_slot_from_device(2, slot_c, static_cast<size_t>(rows) * N * cb);
+  t0 = lap(t0, t_out);
+  c = static_cast<const float *>(d.slot_ptr(2, slot_c));
   if (i8 && fuse) {
     const int64_t Kn = fuse->gated ? N / 2 : N;
     if (inv_smooth_next.size() != static_cast<size_t>(Kn) ||
@@ -651,14 +658,17 @@ void BertEncoder::gemm(npu::Design &d, size_t islot, const std::vector<float> &a
                        bias, fuse_bf16->dst);
   } else if (d.info().c_elem_bytes == 2) {
     const uint16_t *cb16 = reinterpret_cast<const uint16_t *>(c);
-    par(size_t(rows), [&](size_t r0, size_t r1) {
-      for (size_t r = r0; r < r1; ++r) {
+    // par_rows, not par: par()'s 65536 threshold is calibrated in ELEMENTS and
+    // this call passes a ROW count, so rows=1024 always took par()'s serial
+    // fallback -- the single largest pass in the profile ran on one thread.
+    par_rows(rows, [&](int64_t r0, int64_t r1) {
+      for (int64_t r = r0; r < r1; ++r) {
         const uint16_t *cr = cb16 + r * N;
         float *o = out.data() + r * N;
         int64_t j = 0;
 #if defined(__AVX2__)
         for (; j + 16 <= N; j += 16) {
-          __m256i raw = _mm256_stream_load_si256(
+          __m256i raw = _mm256_loadu_si256(
               reinterpret_cast<const __m256i *>(cr + j));
           __m256i lo = _mm256_slli_epi32(
               _mm256_cvtepu16_epi32(_mm256_castsi256_si128(raw)), 16);
@@ -676,14 +686,15 @@ void BertEncoder::gemm(npu::Design &d, size_t islot, const std::vector<float> &a
       }
     });
   } else {
-    par(size_t(rows), [&](size_t r0, size_t r1) {
-      for (size_t r = r0; r < r1; ++r) {
+    // Same unit mismatch as the bf16 branch above -- rows, not elements.
+    par_rows(rows, [&](int64_t r0, int64_t r1) {
+      for (int64_t r = r0; r < r1; ++r) {
         const float *cr = c + r * N;
         float *o = out.data() + r * N;
         int64_t j = 0;
 #if defined(__AVX2__)
         for (; j + 8 <= N; j += 8) {
-          __m256i raw = _mm256_stream_load_si256(
+          __m256i raw = _mm256_loadu_si256(
               reinterpret_cast<const __m256i *>(cr + j));
           _mm256_storeu_ps(o + j, _mm256_add_ps(_mm256_castsi256_ps(raw),
                                                 _mm256_loadu_ps(bias + j)));

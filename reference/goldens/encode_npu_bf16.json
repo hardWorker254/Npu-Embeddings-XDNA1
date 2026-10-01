@@ -1,0 +1,33 @@
+{
+  "kind": "hardware measurement",
+  "milestone": "M6",
+  "format": "bf16",
+  "cols": 4,
+  "gelu": "npu",
+  "source_sha256": "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db",
+  "npu_gemms": {
+    "256x384x1152": 6,
+    "256x384x384": 6,
+    "256x384x1536": 6,
+    "256x1536x384": 6
+  },
+  "host_gemms": {
+    "64x32x64": 288,
+    "64x64x32": 288
+  },
+  "npu_gemm_calls": 24,
+  "host_gemm_calls": 576,
+  "npu_gelu_calls": 6,
+  "npu_layernorm_calls": 13,
+  "npu_softmax_calls": 6,
+  "worst_1_minus_cos_vs_hf": 0.00033972828506401154,
+  "max_similarity_shift": 0.004097595246105678,
+  "embedding_rel_fro": 0.02521434455752878,
+  "tolerance": 0.001,
+  "pass": true,
+  "wall_seconds": 8.242722199996933,
+  "npu_seconds": 8.170385000121314,
+  "host_seconds": 0.07233719987561926,
+  "sequences": 4,
+  "seq_per_s": 0.4852765752558649
+}

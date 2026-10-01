@@ -17,6 +17,10 @@
 
 #include "device.hpp"
 
+namespace xrt {
+class bo;
+}
+
 namespace npu {
 
 struct DesignInfo {
@@ -52,7 +56,7 @@ struct DesignInfo {
   bool datapath_recorded = false;
   // Which NPU generation this design was built for. `arch` is 1 or 2 and
   // `device` is the toolchain's device name ("npu1"/"npu2"); both are written
-  // by tools/export_gemm_rtp.py. The *_recorded flags separate "the design
+  // by tools/export/export_gemm_rtp.py. The *_recorded flags separate "the design
   // says npu1" from "the design predates the field", so the status line can
   // report UNRECORDED instead of guessing.
   int64_t arch = 0;
@@ -97,7 +101,23 @@ public:
   void sync_to_device(size_t index, size_t bytes = 0);
   void sync_from_device(size_t index, size_t bytes = 0);
 
+  // Sync a NAMED slot rather than whichever one is currently bound.
+  //
+  // sync_to_device()/sync_from_device() resolve their BO through the current
+  // bind, so they are only safe to call while holding npu_mu -- and holding
+  // npu_mu across a DMA is what serialises --pipeline lanes (measured: the
+  // same A upload costs 75 us uncontended and 805 us at 4 lanes, i.e. 90% of
+  // the cost was queueing, not the copy).
+  //
+  // These two address a lane's own xrt::bo directly, so they need no bind and
+  // no mutex. Sound because dispatch_only() blocks on r.wait(): once a
+  // dispatch has returned, the array is provably done with that lane's A and C
+  // buffers, and no other lane ever names them.
+  void sync_slot_to_device(size_t arg_index, size_t slot, size_t bytes = 0);
+  void sync_slot_from_device(size_t arg_index, size_t slot, size_t bytes = 0);
+
 private:
+  xrt::bo &slot_bo(size_t arg_index, size_t slot);
   struct Impl;
   std::unique_ptr<Impl> impl_;
   Device *dev_ = nullptr;

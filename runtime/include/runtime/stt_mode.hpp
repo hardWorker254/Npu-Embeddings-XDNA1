@@ -183,7 +183,7 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
         "--npu-extra-ops conv asked for conv1/conv2 on the array, but " + art +
         "/gemm_rtp has no [rows, d, d] stream to run them on: "
         + session.conv_device() +
-        ". Re-export the encoder set with tools/export_gemm_rtp.py, or drop "
+        ". Re-export the encoder set with tools/export/export_gemm_rtp.py, or drop "
         "conv from --npu-extra-ops and run the host front end.");
 
   // WHERE EVERY OPERATION RUNS, and why. One row per op, the device it runs on,

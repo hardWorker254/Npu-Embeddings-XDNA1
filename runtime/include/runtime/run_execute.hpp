@@ -96,7 +96,7 @@ inline int maybe_probe_streams(RunContext &ctx) {
     if (tile_n <= 0 || cols <= 0)
       throw std::runtime_error(
           "--probe-streams: this design.json records no tile_n/cols -- it "
-          "predates the fields. Re-export the set (tools/export_gemm_rtp.py); "
+          "predates the fields. Re-export the set (tools/export/export_gemm_rtp.py); "
           "refusing to substitute a guess (T47).");
     const int64_t mrows = 4, tm = 64;      // design rows, tile m
     std::printf("\n  probe-streams -- %d repeats, no host work, A/B %s, "
@@ -178,6 +178,63 @@ inline int maybe_embed(RunContext &ctx) {
     const double el = now_s() - t0;
     std::printf("  embedded   %zu texts in %.2f s  ->  %.1f seq/s\n",
                 texts.size(), el, texts.size() / el);
+
+    // WHERE IT WENT. The per-site timers were already being accumulated
+    // (BertEncoder::reset_timers/timings) and this is the only place they can
+    // be read, so this block is the measurement that every optimisation
+    // question about this path has to start from. Summed over lanes -- the
+    // lanes share one NPU mutex, so the SUM is what the array was asked for,
+    // while the wall clock above is what the caller waits for, and the ratio
+    // between them is the pipelining actually achieved.
+    {
+      npue::BertEncoder::Timings t;
+      for (auto *e : svc.all) {
+        auto u = e->timings();
+        t.qk += u.qk; t.av += u.av; t.npu += u.npu; t.attn += u.attn;
+        t.conv += u.conv; t.in += u.in; t.disp += u.disp; t.out += u.out;
+        t.bias += u.bias;
+        t.hostln += u.hostln; t.hostsm += u.hostsm; t.hostgelu += u.hostgelu;
+        t.dispatch += u.dispatch;
+      }
+      const double ms = 1e3;
+      // t_attn ALREADY contains qk + av (bert_encoder.cpp adds to both), so
+      // counting all three double-counts every attention pass. Count it once.
+      const double busy = t.conv + t.in + t.disp + t.out + t.bias +
+                          t.hostln + t.hostsm + t.hostgelu + t.attn;
+      std::printf("\n  time split (summed over %zu lanes; wall was %.0f ms)\n",
+                  svc.all.size(), el * ms);
+      std::printf("    %-22s %8.1f ms  %5.1f%%\n", "gemm + epilogue", t.conv * ms,
+                  100 * t.conv / (busy ? busy : 1));
+      std::printf("    %-22s %8.1f ms  %5.1f%%\n", "  A upload (sync)", t.in * ms,
+                  100 * t.in / (busy ? busy : 1));
+      std::printf("    %-22s %8.1f ms  %5.1f%%\n", "  dispatch (wait)", t.disp * ms,
+                  100 * t.disp / (busy ? busy : 1));
+      std::printf("    %-22s %8.1f ms  %5.1f%%\n", "  C download", t.out * ms,
+                  100 * t.out / (busy ? busy : 1));
+      std::printf("    %-22s %8.1f ms  %5.1f%%\n", "attention (all)", t.attn * ms,
+                  100 * t.attn / (busy ? busy : 1));
+      std::printf("    %-22s %8.1f ms  %5.1f%%\n", "  QK^T (of attention)", t.qk * ms,
+                  100 * t.qk / (busy ? busy : 1));
+      std::printf("    %-22s %8.1f ms  %5.1f%%\n", "  A*V (of attention)", t.av * ms,
+                  100 * t.av / (busy ? busy : 1));
+      std::printf("    %-22s %8.1f ms  %5.1f%%\n", "host LayerNorm", t.hostln * ms,
+                  100 * t.hostln / (busy ? busy : 1));
+      std::printf("    %-22s %8.1f ms  %5.1f%%\n", "host softmax", t.hostsm * ms,
+                  100 * t.hostsm / (busy ? busy : 1));
+      std::printf("    %-22s %8.1f ms  %5.1f%%\n", "host GELU", t.hostgelu * ms,
+                  100 * t.hostgelu / (busy ? busy : 1));
+      std::printf("    %-22s %8.1f ms  %5.1f%%\n", "bias epilogue", t.bias * ms,
+                  100 * t.bias / (busy ? busy : 1));
+      std::printf("    %-22s %8.1f ms   (whole attention block as counted "
+                  "by the NPU path)\n", "t_npu", t.npu * ms);
+      std::printf("    %-22s %8.1f ms   (sum of the rows above)\n", "busy", busy * ms);
+      std::printf("    %-22s %8d     (count, not a time)\n", "dispatches",
+                  t.dispatch);
+      if (busy > 0)
+        std::printf("    %-22s %8.2f x   (sum of passes / wall -- the "
+                    "pipelining achieved)\n", "busy / wall", busy / (el ? el : 1));
+      std::printf("\n");
+    }
 
     if (!out_path.empty()) {
       std::ofstream of(out_path, std::ios::binary);
@@ -320,7 +377,7 @@ inline int run_bench_or_check(RunContext &ctx) {
   if (ctx.bench > 0) ctx.need_goldens();
 
   // A timed run REFUSES to start when the array is not ours. tasks/0044 read
-  // 221.4 seq/s against a true 694.0 because a leftover npuembed.exe from an
+  // 221.4 seq/s against a true 694.0 because a leftover npuembeddings.exe from an
   // earlier session still held an Active hw_context, and nothing in this
   // banner said so. See include/npu_contention.hpp.
   if (ctx.bench > 0) {

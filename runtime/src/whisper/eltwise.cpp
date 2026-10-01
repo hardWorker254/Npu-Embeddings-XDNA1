@@ -22,14 +22,14 @@ void NpuEltwise::alloc_buffers() {
         in.name + ": this op reads bf16 in and writes bf16 out, and the design "
         "says " + std::to_string(in.a_elem_bytes * 8) + "/" +
         std::to_string(in.c_elem_bytes * 8) +
-        " bits. Re-export it with tools/export_eltwise.py.");
+        " bits. Re-export it with tools/export/export_eltwise.py.");
   cols_ = in.cols;
   rows_ = in.row_capacity;
   if (cols_ <= 0 || rows_ <= 0)
     throw std::runtime_error(in.name +
                              "/design.json records no row width or row "
                              "capacity (`cols`, `row_capacity`): re-export "
-                             "with tools/export_eltwise.py, which writes both");
+                             "with tools/export/export_eltwise.py, which writes both");
   if (in.buffer_bytes.size() < 2)
     throw std::runtime_error(in.name + ": fewer than two buffers");
   if (in.buffer_bytes[0] < static_cast<size_t>(rows_) * cols_ * 2 ||

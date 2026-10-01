@@ -193,14 +193,37 @@ inline bool encoder_implemented(const std::string &arch) {
          // instead is BOTH design sets, which pick_artifacts() does not know
          // how to look for; the state column says "stt" and the notes line
          // below the table says what to export.
-         arch == "whisper_encdec_gelu";
+         arch == "whisper_encdec_gelu" ||
+         // arch=5, a ViT. Same shape of answer as arch=4 and for the same
+         // first reason -- it is not an embedder, it takes pixels and returns a
+         // label -- with ONE difference that matters: it needs only ONE design
+         // set, the gemm_rtp its four streams are byte-identical to
+         // bge-base's. So the state column says "cls" and there is no
+         // two-export instruction to print. It is here rather than absent for
+         // the same reason arch=4 is: a table that prints "no encoder" for a
+         // container that classifies perfectly well is a lie of exactly the
+         // shape this whitelist exists to prevent.
+         arch == "vit_patch16_prenorm_gelu";
 }
 
 // True for a container this build runs through a mode of its own rather than
 // through the embedding pipeline. `list` and the usage text both need the
 // distinction, and it is a property of the architecture, not of the model.
+//
+// is_stt_arch is arch=4 and this is arch=5, kept apart rather than one
+// predicate over both: the two share nothing but the word "not an embedder" --
+// two design sets against one, a 30-second windowed schedule against a single
+// image, a decoder that generates text against a head that does not -- and a
+// predicate that merged them would have to branch again at the first use.
 inline bool is_stt_arch(const std::string &arch) {
   return arch == "whisper_encdec_gelu";
+}
+
+// True for an IMAGE CLASSIFIER's container: arch=5. Same reason as
+// is_stt_arch, and the third architecture in this tree that owns a mode rather
+// than a pipeline.
+inline bool is_vit_arch(const std::string &arch) {
+  return arch == "vit_patch16_prenorm_gelu";
 }
 
 inline bool config_flag(const npue::File &f, const char *key, bool fallback) {
@@ -287,6 +310,13 @@ inline void set_model_shape(npue::File &m) {
   // run_gemma_mode(), not by this BERT-family path -- a gemma container
   // reaching here means that diversion was bypassed, and running it through
   // the setup below would be the exact fail-open this guard exists to stop.
+  //
+  // arch=5 is in the whitelist AND is diverted, exactly like arch=1, and for
+  // the same reason plus one of its own: run_vit_mode() owns it, and its
+  // input is an [n_patches, patch_dim] matrix where this function's callers
+  // assume [batch, seq] token ids. Reading one as the other is silent -- both
+  // are [rows, 768] and every gate downstream passes -- so this is a hard
+  // refusal that names the command instead.
   if (!encoder_implemented(arch) || arch == "gemma3_mqa_rope_geglu")
     throw std::runtime_error(
         "container architecture '" + arch + "' has no encoder in this build. "
@@ -294,6 +324,14 @@ inline void set_model_shape(npue::File &m) {
         "and shapes are shared with BERT on purpose -- but running it through "
         "the BERT encoder would silently return embeddings for the wrong "
         "model. Refusing.");
+  if (is_vit_arch(arch))
+    throw std::runtime_error(
+        "container architecture '" + arch +
+        "' is an image classifier, and this is the embedding path: it wants a "
+        "[batch, seq] matrix of token ids and this container wants an "
+        "[n_patches, 768] matrix of pixels. Both are [rows, 768] and nothing "
+        "downstream would tell, which is why this is refused. Use "
+        "`npuembeddings classify <model> <image.png>`.");
 
   g_layers = m.config_int("num_layers");
   g_hidden = m.config_int("hidden");
@@ -328,7 +366,7 @@ inline void set_model_shape(npue::File &m) {
           "true -- refusing rather than running a plain (ungated) FFN over "
           "a fused fc11|fc12 weight");
     // swiglu_halves pins which half of the fused ffn_up gets SiLU. READ IT,
-    // do not trust the constant -- tools/pack_npue.py writes this exact
+    // do not trust the constant -- tools/pack/pack_npue.py writes this exact
     // string today, but a packer that silently changed the fusion order
     // would otherwise compute out = silu(fc11(x)) * fc12(x), the wrong
     // candidate tasks/0068 Q2 measured at rel_fro 4.022e+00 (2.5e7x worse).
@@ -383,7 +421,7 @@ inline void set_model_shape(npue::File &m) {
           "gte_new_rope_geglu container carries no 'rope_inv_freq' -- the "
           "frequency set is not derivable from rope_theta (wrong by 1.9e-02 "
           "relfro at layer 0, tasks/0134), so refusing rather than falling "
-          "back. Repack with tools/pack_npue.py");
+          "back. Repack with tools/pack/pack_npue.py");
     }
     const npue::json::Value v = npue::json::parse(raw_freq);
     for (const auto &e : v.as_array())

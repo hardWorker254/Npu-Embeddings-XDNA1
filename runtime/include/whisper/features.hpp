@@ -9,7 +9,7 @@
 // fixed function of the samples, and a container that computed a different one
 // would be a model that transcribes nothing while looking perfectly healthy.
 // So the constants are Whisper's own, they are named here, and the gate
-// (tools/verify_whisper_features.py) holds the output against
+// (tools/verify/verify_whisper_features.py) holds the output against
 // transformers' WhisperFeatureExtractor plus the checkpoint's own conv weights.
 //
 // THE PIPELINE, IN THE ORDER THAT MATTERS

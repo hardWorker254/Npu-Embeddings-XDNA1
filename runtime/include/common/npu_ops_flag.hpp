@@ -11,7 +11,7 @@
 // ONE SPELLING, BOTH SIDES
 // -----------------------
 // The runtime's flag and the exporter's are the SAME STRING on purpose.
-// `tools/export_gemm_rtp.py --npu-extra-ops gelu` BUILDS the design that lets
+// `tools/export/export_gemm_rtp.py --npu-extra-ops gelu` BUILDS the design that lets
 // `--npu-extra-ops gelu` RUN conv1/conv2, LayerNorm or GELU on the array, and
 // one name for one idea is the whole point: a user who has built the design
 // types the same word to use it. It used to be the other way round -- the
@@ -48,7 +48,7 @@
 // ---------------------------------
 // The exporter that builds these sets is Python and this parser is C++, and
 // neither can include the other. So the table is written twice -- here and in
-// tools/npu_ops.py -- with each pointing at the other. The failure mode of that
+// tools/lib/npu_ops.py -- with each pointing at the other. The failure mode of that
 // duplication is a refusal by name, not a wrong number: an unknown code throws
 // and lists the valid ones on both sides, and a design directory that does not
 // exist is refused with the command that builds it.
@@ -73,7 +73,7 @@ struct NpuOp {
 };
 
 inline const std::vector<NpuOp> &npu_op_table() {
-  // Keep in sync with tools/npu_ops.py -- see the header.
+  // Keep in sync with tools/lib/npu_ops.py -- see the header.
   static const std::vector<NpuOp> table = {
       {"gelu", "gelu", "GELU"},
       {"layn", "layernorm", "LayerNorm"},
@@ -182,9 +182,9 @@ inline void refuse_removed_op_flags(const std::vector<std::string> &args) {
 
 // THE STT-ONLY ELTWISE FLAG, REFUSED AT RUN TIME
 // ----------------------------------------------
-// `--extra-ops` is tools/export_eltwise.py's own spelling, and it stays that
+// `--extra-ops` is tools/export/export_eltwise.py's own spelling, and it stays that
 // tool's: the gate that checks the exporters requires it (see
-// tools/parity_exporters.py REQUIRED_FLAGS_ELT), and renaming a flag there would
+// tools/verify/parity_exporters.py REQUIRED_FLAGS_ELT), and renaming a flag there would
 // make this tree's exporter disagree with every revision the gate compares
 // against. The runtime's flag is `--npu-extra-ops`, which is the same string the
 // GEMM exporter already took, so the one name a user has to know is the one that
@@ -203,7 +203,7 @@ inline void refuse_exporter_only_flags(const std::vector<std::string> &args) {
       if (a == r.first)
         throw std::runtime_error(
             std::string(r.first) +
-            " is tools/export_eltwise.py's BUILD flag: at run time it selected "
+            " is tools/export/export_eltwise.py's BUILD flag: at run time it selected "
             "nothing and was dropped without a word, so a command line that "
             "asked for an op quietly ran without it. To send ops to the array, "
             "use " + r.second + ".");

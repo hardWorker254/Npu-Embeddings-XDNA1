@@ -57,7 +57,7 @@ inline int64_t device_arch(const std::string &device) {
 
 // WHERE A MODEL'S DESIGN SET LIVES IN THE PER-MODEL LAYOUT (subtask 4).
 //
-// tools/export_gemm_rtp.py --target writes <out>/<model>/artifacts_npu<N>/,
+// tools/export/export_gemm_rtp.py --target writes <out>/<model>/artifacts_npu<N>/,
 // so a design set is two levels below the root; the old one-level layouts
 // (<root>/gemm_rtp, <root>/<set>/gemm_rtp) still ship and still win when the
 // root itself is a set. These are candidates, not answers: pick_artifacts

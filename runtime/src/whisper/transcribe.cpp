@@ -42,7 +42,7 @@ std::vector<app::StreamEntry> load_streams(npu::Design &d,
   if (streams.empty())
     throw std::runtime_error(dir +
                              "/design.json lists no streams -- re-export with "
-                             "tools/export_gemm_rtp.py");
+                             "tools/export/export_gemm_rtp.py");
   std::sort(streams.begin(), streams.end(),
             [](const app::StreamEntry &a, const app::StreamEntry &b) {
               return a.slot < b.slot;
@@ -64,7 +64,7 @@ const app::StreamEntry &find_op(const std::vector<app::StreamEntry> &streams,
   throw std::runtime_error(
       "no " + op + " stream at batch tier " + std::to_string(batch) + " -- " +
       op + " is missing at that tier; re-export the design set (see "
-      "tools/npu_targets.json kinds.stt.streams)");
+      "tools/data/npu_targets.json kinds.stt.streams)");
 }
 
 std::vector<int64_t> tiers_of(const std::vector<app::StreamEntry> &streams) {
@@ -160,7 +160,7 @@ std::string resolve_stt_artifacts(const std::string &root,
       (looked.empty() ? root : looked) +
       ". A speech-to-text model needs TWO sets: gemm_rtp for the encoder stack "
       "and gemm_rtp_dec for the decoder's seven streams. Export both with "
-      "tools/export_gemm_rtp.py for this model and generation, or name one "
+      "tools/export/export_gemm_rtp.py for this model and generation, or name one "
       "with --artifacts.");
 }
 
@@ -206,7 +206,7 @@ Session::Session(npue::File &model, const std::string &model_name,
           std::to_string(geom_.d_model) +
           ". The kernel's row width is compiled in, so this design normalises "
           "the wrong number of channels. Re-export it for this model: "
-          "python tools/export_gemm_rtp.py --target " + name_ +
+          "python tools/export/export_gemm_rtp.py --target " + name_ +
           " --arch 1 --npu-extra-ops " + code);
     if (kind == EltwiseKind::LayerNorm) {
       const double want = geom_.ln_eps;
@@ -308,7 +308,7 @@ Session::Session(npue::File &model, const std::string &model_name,
           std::to_string(batch) +
           ", so --npu-extra-ops attn cannot run attention on the array here. "
           "Re-export this model with the code in the list: python "
-          "tools/export_gemm_rtp.py --target " + name_ + " --arch 1 "
+          "tools/export/export_gemm_rtp.py --target " + name_ + " --arch 1 "
           "--npu-extra-ops attn");
     if (qk->M != rows_here)
       throw std::runtime_error(
@@ -364,7 +364,7 @@ Session::Session(npue::File &model, const std::string &model_name,
           std::to_string(etiers[0]) +
           ", so --npu-extra-ops mproj cannot run the mel bank on the array "
           "here. Re-export this model with the code in the list: python "
-          "tools/export_gemm_rtp.py --target " + name_ +
+          "tools/export/export_gemm_rtp.py --target " + name_ +
           " --arch 1 --npu-extra-ops mproj");
     if (mp->K < kMelBins || mp->N < geom_.mel_bins)
       throw std::runtime_error(
@@ -394,7 +394,7 @@ Session::Session(npue::File &model, const std::string &model_name,
           std::to_string(etiers[0]) +
           ", so --npu-extra-ops fft cannot run the transform on the array "
           "here. Re-export this model with the code in the list: python "
-          "tools/export_gemm_rtp.py --target " + name_ +
+          "tools/export/export_gemm_rtp.py --target " + name_ +
           " --arch 1 --npu-extra-ops fft");
     if (df->K < kNfft)
       throw std::runtime_error(
@@ -526,7 +526,7 @@ Session::Session(npue::File &model, const std::string &model_name,
           std::to_string(dtiers.front()) +
           ", so --npu-extra-ops logit cannot run the projection on the array. "
           "Re-export this model with the code in the list: python "
-          "tools/export_gemm_rtp.py --target " + name_ +
+          "tools/export/export_gemm_rtp.py --target " + name_ +
           " --arch 1 --npu-extra-ops logit");
     std::vector<size_t> lslots;
     int64_t chunk_n = 0;
@@ -705,7 +705,7 @@ Transcript Session::transcribe_samples(const std::vector<float> &samples,
         " encoder positions, and this container's position table holds " +
         std::to_string(geom_.max_seq) + ".\n"
         "  Re-pack it with the full table -- that is the fix:\n"
-        "    python tools/pack_npue.py --model-dir <ckpt> --out <this file> "
+        "    python tools/pack/pack_npue.py --model-dir <ckpt> --out <this file> "
         "--device <npu1|npu2> --max-seq " +
         std::to_string(geom_.max_seq) + "\n"
         "  Shrinking --chunk-seconds to " +

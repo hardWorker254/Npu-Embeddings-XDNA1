@@ -2,8 +2,52 @@
 //
 // Host-side numerics shared by every encoder, split out of main.cpp (code
 // verbatim): bf16 conversion, int8 quantisation/dequantisation, GELU, the
-// small AVX2 reductions, timing, and the fixture readers. The AVX2 paths are
-// bit-identical to their scalar fallbacks.
+// small AVX2 reductions, timing, and the fixture readers.
+//
+// THE AVX2 PATHS ARE *NOT* ALL BIT-IDENTICAL TO THEIR SCALAR FALLBACKS, and
+// this line used to claim they were. Measured, by tools/verify/verify_i8_kernels.py,
+// which builds one probe three ways from this header and diffs the bytes:
+//
+//   quantise_a_int8            bit-identical. The vector head clips in float
+//                               and rounds once, the scalar tail rounds then
+//                               clips, and for a value already inside +/-127
+//                               the two orders give the same integer.
+//   dequantise_c               NOT bit-identical. 112 of 448 elements (25%)
+//                               differ, every one of them by exactly 1 ULP
+//                               (max relative 1.19e-07). The vector path
+//                               contracts `cf*sa*wscale + bias` into an FMA,
+//                               which rounds the final add once; the scalar
+//                               tail at the bottom of the loop rounds it
+//                               twice. Both were reproduced exactly: AVX2
+//                               matches round-then-FMA 448/448, scalar matches
+//                               round-round-round 448/448.
+//   dequant_act_quant          same cause, and it PROPAGATES: its sa_next is
+//                               an absmax over the dequantised values, so a
+//                               1-ULP difference upstream moves the scale and
+//                               therefore the int8 payload of the NEXT
+//                               operand. An int8 embedding is not bit-
+//                               reproducible across host CPUs.
+//
+// `dequantise_c`'s `bias` IS NOT NULLABLE, and that is not an oversight left
+// for the reader: `_mm256_loadu_ps(bias + j)` in the vector path and `bias[j]`
+// in the scalar tail both fault on a null, so a caller that passes one gets a
+// SIGSEGV rather than a refusal. Every call site in the tree loads the bias out
+// of the container (`name + ".bias"`, and File::raw throws when it is absent),
+// so it is unreachable today -- but it was reached once while writing
+// runtime/tests/test_vit_model.cpp, which is why it is written down. The
+// accumulate form that genuinely has no bias is NpuGemm::run_accum, a
+// different function.
+//
+// That is a reproducibility statement, not an accuracy one: 1 ULP of fp32 is
+// four orders below the 2e-03 gate. It matters because a golden captured on an
+// AVX2 host cannot be compared bit-for-bit against a non-AVX2 one, and because
+// an A/B between two builds is confounded by which host ran it. If you want
+// the two paths to agree, the fix is `std::fma` in the scalar tails -- a
+// numerics change to the fallback, deliberately not made here.
+//
+// The alignment precondition the vector paths rely on is stated, and checked,
+// at the top of this file. It is a crash, not a wrong number, and it only
+// crashes on the hosts that have the fast path.
 //
 // SPDX-License-Identifier: Apache-2.0
 //===----------------------------------------------------------------------===//
@@ -14,6 +58,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <stdexcept>
 #include <cstring>
 #include <ctime>
 #include <fstream>
@@ -34,6 +79,54 @@
 #endif
 
 namespace app {
+
+// THE STREAMING-LOAD PRECONDITION, stated once and checked at every entry point
+// that needs it.
+//
+// `_mm256_stream_load_si256` is `vmovntdqa`, which requires a 32-byte aligned
+// address and FAULTS otherwise -- it is not a slow path, it is a SIGSEGV. The
+// scalar fallbacks load element by element and do not care, so the same call
+// crashes on a host with AVX2 and returns the right answer on one without. A
+// bug that only reproduces on the machines that have the fast path is the worst
+// shape a bug can have, so the condition is checked rather than assumed.
+//
+// TWO conditions, not one, and the second is the one that is easy to miss:
+//
+//   1. the base pointer is 32-byte aligned, and
+//   2. the ROW STRIDE `N * c_bytes` is a multiple of 32 -- because the kernels
+//      address row r at `c + r * N`, so every row has to land on a 32-byte
+//      boundary too. Equivalently N % 8 == 0 for an int32 C and N % 16 == 0
+//      for a bf16 C.
+//
+// MEASURED, not reasoned: a C buffer skewed by one int32 faults under AVX2
+// and returns a correct result without it; and N=53 with an int32 C gives a
+// row stride of 212 bytes, so row 1 starts 20 bytes into a 32-byte block and
+// faults on the very first row past row 0. tools/verify/verify_i8_kernels.py reproduces
+// both. See the ASan backtrace in that gate's header comment.
+//
+// Cost: two integer operations per GEMM, not per row. Every current call site
+// passes an XRT host BO slot straight through (page-aligned, and every N in this
+// project is a multiple of 16), so this never fires today -- which is exactly
+// why it needs to be a refusal rather than a comment.
+inline void require_stream_aligned(const void *c, int64_t N, size_t c_bytes,
+                                   const char *who) {
+#if defined(__AVX2__)
+  const uintptr_t base = reinterpret_cast<uintptr_t>(c);
+  const uintptr_t stride = static_cast<uintptr_t>(N) * c_bytes;
+  if ((base & 31u) || (stride & 31u))
+    throw std::runtime_error(
+        std::string(who) + ": C is not stream-load addressable -- base " +
+        std::to_string(base) + " is " + std::to_string(base & 31u) +
+        " mod 32 bytes, row stride N=" + std::to_string(N) + " * " +
+        std::to_string(c_bytes) + " = " + std::to_string(stride) + " is " +
+        std::to_string(stride & 31u) + " mod 32. Both must be 0 (N % 8 for an "
+        "int32 C, N % 16 for a bf16 C). The AVX2 path faults on this and the "
+        "scalar path does not, so it would only ever reproduce on the hosts "
+        "that have the fast path.");
+#else
+  (void)c; (void)N; (void)c_bytes; (void)who;
+#endif
+}
 
 inline std::vector<float> read_f32(const std::string &path, size_t count) {
   std::ifstream f(path, std::ios::binary | std::ios::ate);
@@ -58,7 +151,7 @@ inline std::vector<int32_t> read_i32(const std::string &path, size_t count) {
   return v;
 }
 
-// fp32 -> bf16, round-to-nearest-even. The rounding tools/npue.py uses when
+// fp32 -> bf16, round-to-nearest-even. The rounding tools/lib/npue.py uses when
 // packing; truncation would bias every value toward zero.
 inline uint16_t to_bf16(float x) {
   uint32_t u;
@@ -191,7 +284,7 @@ void quantise_a_int8(const float *a, int64_t rows, int64_t K, const float *ias,
             invv);
         v = _mm256_min_ps(_mm256_max_ps(v, lo), hi);
         // cvtps_epi32 rounds per MXCSR, i.e. nearest-even by default -- the
-        // same rule tools/pack_npue.py's np.rint uses on the weights, so the
+        // same rule tools/pack/pack_npue.py's np.rint uses on the weights, so the
         // two halves of the product round the same way.
         __m256i i32 = _mm256_cvtps_epi32(v);
         __m128i p16 = _mm_packs_epi32(_mm256_castsi256_si128(i32),
@@ -298,6 +391,7 @@ inline void dequant_act_quant(const void *c, size_t c_bytes, int64_t rows, int64
                        const float *sa_up, const float *wscale,
                        const float *bias, const float *ias_next,
                        int8_t *dst, float *sa_next, ParRows par_rows) {
+  require_stream_aligned(c, N, c_bytes, "dequant_act_quant");
   par_rows(rows, [&](int64_t r0, int64_t r1) {
     std::vector<float> row(static_cast<size_t>(N));
     for (int64_t r = r0; r < r1; ++r) {
@@ -343,6 +437,13 @@ inline void dequant_act_quant(const void *c, size_t c_bytes, int64_t rows, int64
         const float cf = c_bytes == 2
             ? from_bf16(static_cast<const uint16_t *>(c)[r * N + j])
             : static_cast<float>(static_cast<const int32_t *>(c)[r * N + j]);
+        // NOT bit-identical to the FMA above, on purpose and for the record:
+        // this rounds the final add TWICE where `_mm256_fmadd_ps` rounds it
+        // once. 1 ULP, 25% of elements, measured by tools/verify/verify_i8_kernels.py,
+        // and it moves sa_next -- see the file header. Do not "fix" this into
+        // an fma or a plain rewrite without updating that gate: the two paths
+        // are a reproducibility fact, and changing either one silently is
+        // exactly what the gate exists to catch.
         v[j] = cf * sa * wscale[j] + bias[j];
       }
       // 2. the activation, in place, narrowing to out_n.
@@ -412,6 +513,7 @@ template <typename ParRows>
 inline void dequantise_c(const void *c, size_t c_bytes, int64_t rows, int64_t N,
                   const float *a_scale, const float *wscale, const float *bias,
                   float *out, ParRows par_rows, bool sim_bf16 = false) {
+  require_stream_aligned(c, N, c_bytes, "dequantise_c");
   if (c_bytes == 2) {
     const uint16_t *cb = static_cast<const uint16_t *>(c);
     par_rows(rows, [&](int64_t r0, int64_t r1) {
@@ -443,7 +545,7 @@ inline void dequantise_c(const void *c, size_t c_bytes, int64_t rows, int64_t N,
         }
 #endif
         for (; j < N; ++j)
-          o[j] = from_bf16(cr[j]) * sa * wscale[j] + bias[j];
+          o[j] = from_bf16(cr[j]) * sa * wscale[j] + bias[j];   // 2 roundings; see the file header
       }
     });
     return;
@@ -489,7 +591,7 @@ inline void dequantise_c(const void *c, size_t c_bytes, int64_t rows, int64_t N,
           u = (u + 0x7FFFu + ((u >> 16) & 1u)) & 0xFFFF0000u;
           std::memcpy(&cf, &u, 4);
         }
-        o[j] = cf * sa * wscale[j] + bias[j];
+        o[j] = cf * sa * wscale[j] + bias[j];   // 2 roundings; see the file header
       }
     }
   });

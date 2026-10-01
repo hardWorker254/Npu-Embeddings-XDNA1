@@ -9,7 +9,7 @@
 // <|transcribe|>, <|translate|>, <|endoftext|>, and the ~1600 timestamp and
 // language tokens -- lives in added_tokens.json with ids from 50258 up. Both
 // are packed into ONE binary table at container build time
-// (tools/whisper_bpe.py is the single definition of its layout), and this
+// (tools/lib/whisper_bpe.py is the single definition of its layout), and this
 // class is its only reader.
 //
 // So the class is constructed from a table blob, not from a checkpoint
@@ -18,8 +18,8 @@
 //
 // WHAT IS VERIFIED, AND HOW
 // -------------------------
-// tools/whisper_tokenizer_ref.py is the executable specification for this
-// file, byte for byte, over the same blob; tools/verify_whisper_tokenizer.py
+// tools/lib/whisper_tokenizer_ref.py is the executable specification for this
+// file, byte for byte, over the same blob; tools/verify/verify_whisper_tokenizer.py
 // holds this implementation against it AND against HuggingFace's own
 // tokenizer over an adversarial corpus (Cyrillic, CJK, emoji, CRLF, digit
 // runs, contractions, long repeats). The gate is exact token ids, because a
@@ -82,7 +82,7 @@ private:
 
   // The GPT-2 pattern, hand-rolled. std::regex cannot run it: libstdc++ has no
   // \p{L} and mis-handles the lookahead. See
-  // tools/gen_whisper_unicode_tables.py. Order of the alternatives is the
+  // tools/gen/gen_whisper_unicode_tables.py. Order of the alternatives is the
   // pattern's, and it is load-bearing.
   std::vector<std::string> pretokenize(const std::string &text) const;
 

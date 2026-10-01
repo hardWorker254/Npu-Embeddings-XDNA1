@@ -136,12 +136,38 @@ struct CatalogEntry {
   // route a whisper checkpoint through a BERT packer that reads tensors which do
   // not exist and writes a container with no decoder in it.
   //
-  // LAST in the struct on purpose: every catalogue row initialises these fields
-  // POSITIONALLY, so a new field inserted in the middle silently reinterprets
-  // every row after it -- which is exactly what happened the first time this
-  // was written, and it showed up as a narrowing error three rows away from the
-  // change.
+  // STT IS NOT LAST, because `datapath` (a std::string) sits between `gte`
+  // and it -- and aggregate initialisation is positional, so every catalogue
+  // row must state
+  //     gated, gemma, gated_ffn, qkv_n, gte, datapath, stt, cls
+  // in that order, in full, and may only stop short at a MEMBER boundary.
+  // The Whisper rows below used to carry
+  //     /*gated=*/false, /*gemma=*/false, /*gte=*/false, /*stt=*/true
+  // which is FOUR values for gated / gemma / gated_ffn / qkv_n -- so `stt`
+  // stayed false and `qkv_n` became 1. A row may leave the trailing defaults
+  // off, but only up to a member boundary: `stt` being placed last in this
+  // struct does not make it the fifth field, and a new flag inserted in the
+  // middle would silently reinterpret every row after it -- which is exactly
+  // what happened the first time this was written, and it showed up as a
+  // narrowing error three rows away from the change.
   bool stt = false;
+
+  // CLS selects an IMAGE CLASSIFIER's file list and, at pack time, the same
+  // refusal `stt` gets: there is no C++ packer for arch=5. Kept as its own bit,
+  // and LAST for the same reason `stt` is last -- every row initialises these
+  // fields positionally, so a new flag inserted anywhere earlier silently
+  // reinterprets every row after it.
+  //
+  // It is a separate bit and not a mode of `stt` because the file lists share
+  // nothing: a ViT needs preprocessor_config.json (its resize and mean/std are
+  // part of the model, and a container normalised with another set's numbers
+  // classifies noise) and needs NO tokenizer, no vocab table and no
+  // 1_Pooling/config.json. A flag meaning "some other family" would route a ViT
+  // through Whisper's BPE files and then through a packer that looks for
+  // encoder_attention_heads.
+  //
+  // TRULY LAST, and that is the only ordering constraint in this struct.
+  bool cls = false;
 };
 
 // True when this row's weights are NOT checksum-verified. Only ever true for

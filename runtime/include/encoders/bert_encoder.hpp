@@ -56,6 +56,28 @@ public:
   int64_t use_tier(int64_t want);
   void reset_timers();
 
+  // Where the time went, per site, since reset_timers().
+  //
+  // Exists because every optimisation decision in this area is a question
+  // about WHICH pass is expensive, and the timers were already being filled in
+  // (bert_encoder.cpp) but had no way out. Guessing costs more than printing.
+  struct Timings {
+    double qk = 0, av = 0;            // attention: QK^T and A*V
+    double npu = 0, attn = 0;         // the whole attention block, and its share
+    double conv = 0, in = 0, disp = 0, out = 0, bias = 0;
+    double hostln = 0, hostsm = 0, hostgelu = 0;   // host-side elementwise
+    int dispatch = 0;
+  };
+  Timings timings() const {
+    Timings t;
+    t.qk = t_qk; t.av = t_av; t.npu = t_npu; t.attn = t_attn;
+    t.conv = t_conv; t.in = t_in; t.disp = t_disp; t.out = t_out;
+    t.bias = t_bias;
+    t.hostln = t_hostln; t.hostsm = t_hostsm; t.hostgelu = t_hostgelu;
+    t.dispatch = n_dispatch;
+    return t;
+  }
+
   // Active fields set by setup_encoder() or design selection.
   bool unified = false;
   size_t is_qkv = 0, is_ao = 0, is_fu = 0, is_fd = 0;

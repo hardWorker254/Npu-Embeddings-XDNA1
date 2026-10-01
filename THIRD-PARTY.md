@@ -17,7 +17,7 @@ more**:
 
 | file | longest shared run | of our | upstream origin |
 |---|---:|---:|---|
-| `tools/gemm_pretiled.py` | 11 | 574 | `programming_examples/basic/matrix_multiplication/whole_array/whole_array.py` |
+| `tools/lib/gemm_pretiled.py` | 11 | 574 | `programming_examples/basic/matrix_multiplication/whole_array/whole_array.py` |
 
 Everything else in this repository is original work. Files below the
 threshold share only API idiom — the same includes, the same

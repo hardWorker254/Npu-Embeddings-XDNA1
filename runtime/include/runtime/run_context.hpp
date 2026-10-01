@@ -133,7 +133,7 @@ struct RunContext {
           "no golden check vectors under " + val +
           " -- this build can run --embed, --serve, --tokenize and "
           "--encode-file, but not the golden check or --bench. Generate them "
-          "with tools/export_validation.py.");
+          "with tools/export/export_validation.py.");
   }
 };
 

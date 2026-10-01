@@ -1,9 +1,9 @@
 //===- cli/subcommand.hpp --------------------------------------------*- C++ -*-===//
 //
 // Subcommand dispatch: routes `list`, `serve`, `embed`, `add`,
-// `tokenize` to their handlers. Handlers are registered by the
-// application and called with the original argc/argv so they can
-// translate subcommand args to flag form and fall through to the
+// `tokenize`, `transcribe`, `classify` to their handlers. Handlers are
+// registered by the application and called with the original argc/argv so they
+// can translate subcommand args to flag form and fall through to the
 // same code path.
 //
 // SPDX-License-Identifier: Apache-2.0
@@ -33,10 +33,10 @@ private:
     std::map<std::string, Handler> handlers_;
 };
 
-// Registers the built-in subcommands: list, serve, embed, add, tokenize.
-// Each handler translates its subcommand arguments into the flag form
-// and falls through to the same Runtime::run code path the flag form
-// uses, so there is no second dispatch path to drift out of agreement.
+// Registers the built-in subcommands: list, serve, embed, add, tokenize,
+// transcribe, classify. Each handler translates its subcommand arguments into
+// the flag form and falls through to the same Runtime::run code path the flag
+// form uses, so there is no second dispatch path to drift out of agreement.
 void register_default_subcommands(SubcommandDispatcher &dispatcher);
 
 }  // namespace app

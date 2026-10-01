@@ -57,6 +57,11 @@ cd C:\dev\mlir-aie
 cd <path-to>\NpuEmbeddings
 ```
 
+Not sure which of the Python steps comes next? `python tools/pipeline.py` prints
+the map — task to command — and `python tools/pipeline.py check` reports what
+this machine is still missing. The steps below are the same ones, in order, with
+the reasoning.
+
 ### 2.1 Python environments
 
 Two are used, deliberately kept apart so that a `pip install` accident cannot
@@ -81,10 +86,10 @@ The checkpoint is already fetched into `models/`; this fork has no separate
 fetch step. `pack_npue.py` reads it directly.
 
 ```sh
-python tools/gen_tokenizer_tables.py   # Unicode tables -> runtime/include/
-python tools/pack_npue.py --device npu1   # -> models/all-MiniLM-L6-v2.npue
-python tools/verify_npue.py            # bit-exact round trip, layout guard, goldens
-python tools/export_validation.py      # golden check vectors for the runtime
+python tools/gen/gen_tokenizer_tables.py   # Unicode tables -> runtime/include/
+python tools/pack/pack_npue.py --device npu1   # -> models/all-MiniLM-L6-v2.npue
+python tools/verify/verify_npue.py            # bit-exact round trip, layout guard, goldens
+python tools/export/export_validation.py      # golden check vectors for the runtime
 ```
 
 `pack_npue.py` produces the `.npue` container: weights converted to bf16 and
@@ -108,14 +113,14 @@ exporter and the packer for the same generation, and re-pack when you switch
 
 ```sh
 # both generations, both implementations, byte for byte
-python tools/verify_pack_parity.py --device npu1
-python tools/verify_pack_parity.py --device npu2
+python tools/verify/verify_pack_parity.py --device npu1
+python tools/verify/verify_pack_parity.py --device npu2
 ```
 
 ### 2.3 Compile the NPU designs
 
 ```powershell
-python tools\export_gemm_rtp.py --batch 128 --batches 4,16,32,128 `
+python tools/export/export_gemm_rtp.py --batch 128 --batches 4,16,32,128 `
                                 --cols 8 --out runtime\artifacts_b128il
 ```
 
@@ -148,20 +153,20 @@ demand Boost.
 
 ```powershell
 # the golden check: does the C++ path reproduce the HuggingFace reference?
-runtime\build\npuembed.exe . --artifacts artifacts_b128il --threads 24 --pipeline 2
+runtime\build\npuembeddings.exe . --artifacts artifacts_b128il --threads 24 --pipeline 2
 
 # the two model packers must agree BYTE FOR BYTE (Python reference vs the
 # C++ one a release uses) -- a disagreement would be right-sized weights in
 # the wrong order, which no tolerance check catches
-& "C:\Users\vegar\.conda\envs\iron\python.exe" tools\verify_pack_parity.py
+& "C:\Users\vegar\.conda\envs\iron\python.exe" tools/verify/verify_pack_parity.py
 
 # the Whisper audio front end against transformers: samples, log-mel, the mel
 # filter bank, both convolutions, and the four refusals (stereo, 8-bit, wrong
 # rate, not-audio). Needs ffmpeg for the conversion case
-python tools\verify_whisper_features.py
+python tools/verify/verify_whisper_features.py
 
 # the Whisper tokenizer three ways: C++, the reference, HuggingFace
-python tools\verify_whisper_tokenizer.py
+python tools/verify/verify_whisper_tokenizer.py
 
 # the Whisper NPU stacks against transformers: the encoder's hidden states, one
 # teacher-forced decoder step at a time (state AND logits AND top-1), the greedy
@@ -178,42 +183,75 @@ python tools\verify_whisper_tokenizer.py
 # own max-abs tolerance (that path is bf16, not fp32) and the whole encoder run
 # a second time on it, which is the run that says `--npu-extra-ops conv` is a default
 # rather than a curiosity.
-python tools\verify_whisper_model.py
+python tools/verify/verify_whisper_model.py
 
 # the same thing one level up, where a request sees it: the `transcribe` CLI and
 # POST /v1/audio/transcriptions against transformers' generate() per window and
 # its own merge -- the long-form window schedule, the per-window text, the
-# merged text, and ten refusals. Needs a BUILT runtime (runtime\build\npuembed
+# merged text, and ten refusals. Needs a BUILT runtime (runtime\build\npuembeddings
 # by default; --exe to point at another)
-python tools\verify_whisper_cli.py
+python tools/verify/verify_whisper_cli.py
 
 # the ANSWER, not another program's opinion: word error rate against a HUMAN
 # transcript, with transformers' WER on the same audio printed beside ours so a
 # regression is distinguishable from a bad reference. No audio is committed --
 # the corpus lives outside the tree:
-#   python tools\verify_whisper.py --audio C:\clips\a.wav --ref "the words"
-#   python tools\verify_whisper.py --corpus C:\speech-corpus --max-wer 0.20
+#   python tools/verify/verify_whisper.py --audio C:\clips\a.wav --ref "the words"
+#   python tools/verify/verify_whisper.py --corpus C:\speech-corpus --max-wer 0.20
 # --npu-ops conv passes conv through to the runtime's --npu-extra-ops, so the same
 # audio says whether the device moved the transcript
-#   python tools\verify_whisper.py --corpus C:\speech-corpus --npu-ops conv
+#   python tools/verify/verify_whisper.py --corpus C:\speech-corpus --npu-ops conv
 
 # does the design set COMPUTE what it claims to? random matrices through the
 # exported instruction streams, compared with numpy. Needs the NPU, and needs
 # no model: this is the only check that sees a B operand packed for the wrong
 # generation, because it does not involve a container at all. Add
 # `--npue models/<m>.npue --tensor qkv=<tensor>` to also stage real weights
-python tools\verify_design_numerics.py
+python tools/verify/verify_design_numerics.py
+
+# the image classifier's PACKER and forward pass against transformers, on both
+# weight schemes. The bf16 half is the pool + attention + pre-LN stack and the
+# host head; the int8 half is the same with every I8 panel's four scheme
+# invariants and the top-1 agreement with fp32. im2col is composed against HF's
+# OWN Conv2d, which is the only place in the tree that knows the pixel half of
+# the patch layout and the weight half at the same time. Needs the checkpoint
+# and a container, and no NPU -- the host kernels are what this checks
+python tools/verify/verify_vit.py --container models/vit-base-patch16-224.npue \
+    --model-dir models/vit-base-patch16-224
+
+# the image front end (decode, resize, normalise, im2col) against PIL, which is
+# the library transformers' own image processor calls. The decode is EXACT on
+# every format both sides read; the resize is PIL-equivalent within one 8-bit
+# LSB for all four codes this build implements (LANCZOS, BILINEAR, BICUBIC,
+# BOX) and exactly zero on a constant raster; normalise and im2col are
+# bit-identical to numpy and to vit_int8.im2col_patches. NEAREST, HAMMING, a
+# 16-bit PNG, a fake PNG, a truncated PNG and a text file are all refused BY
+# NAME -- this gate is why HAMMING is a refusal and not a kernel. Needs g++ with
+# libpng and libjpeg headers; no NPU
+python tools/verify/verify_vit_image.py --npue models/vit-base-patch16-224.npue
+
+# the HOST-ONLY half of the image path, and the one that catches a silent bug:
+# the container contract read_geometry enforces, the classifier head's stride,
+# and the int8 host kernels on a real 197x768 operand. Built twice from one
+# source (AVX2 and scalar). The head case is the point: classifier.weight is
+# [d_model, num_labels] and the checkpoint holds it the other way round, so a
+# transpose there is a finite wrong answer at full confidence -- the probe
+# prints both and this gate REQUIRES them to differ, so the check is known to be
+# able to fail. Needs g++, numpy and a container; no NPU, no design set
+#   pass the --int8 container, or the SmoothQuant divisor fold is not exercised
+#   and the gate says so rather than passing quietly
+python tools/verify/verify_vit_model.py --npue models/vit-base-patch16-224.npue
 
 # semantics without a reference: same-topic texts must rank closer than
 # different-topic ones; stdlib only, so it runs on a cold release too
-python tools\verify_semantics.py
+python tools/verify/verify_semantics.py
 
 # the tail: no single input may come back badly wrong (per-model p99 ratchet)
-python tools\verify_tail.py
+python tools/verify/verify_tail.py
 
 # the endpoint, driven by the official OpenAI client
-runtime\build\npuembed.exe . --artifacts artifacts_b128il --pipeline 2 --serve 8420
-& ".\.venv-ref\Scripts\python.exe" tools\verify_endpoint.py --port 8420
+runtime\build\npuembeddings.exe . --artifacts artifacts_b128il --pipeline 2 --serve 8420
+& ".\.venv-ref\Scripts\python.exe" tools/verify/verify_endpoint.py --port 8420
 ```
 
 Expected: `1-cos` ≈ 1.086e-05 against the reference.
@@ -230,7 +268,7 @@ ships no packaging script; the staging is done by hand.
 from HuggingFace, verifies its sha256 against the catalogue compiled into the
 binary (`runtime/src/hub.cpp`), cross-checks the checkpoint's own `config.json`
 against that catalogue, and builds the container — the same layout as
-`tools/pack_npue.py`, byte for byte, with no Python on the user's machine.
+`tools/pack/pack_npue.py`, byte for byte, with no Python on the user's machine.
 
 > **Why not a script.** Until 0.1.x this was `get-model.cmd`: `curl` to fetch
 > a binary, then `certutil -hashfile` compared against a hardcoded digest.
@@ -256,11 +294,11 @@ worth reading before quoting any number. The short version:
 
 ```powershell
 # end-to-end throughput, five encodes
-runtime\build\npuembed.exe . --artifacts artifacts_b128il --threads 24 --pipeline 2 --bench 5
+runtime\build\npuembeddings.exe . --artifacts artifacts_b128il --threads 24 --pipeline 2 --bench 5
 
 # where the time goes, per design and per stage
-runtime\build\npuembed.exe . --artifacts artifacts_b128il --bench 5      # prints the split
-runtime\build\npuembed.exe . --probe-design artifacts_b128il/gemm_rtp    # dispatch vs switch
+runtime\build\npuembeddings.exe . --artifacts artifacts_b128il --bench 5      # prints the split
+runtime\build\npuembeddings.exe . --probe-design artifacts_b128il/gemm_rtp    # dispatch vs switch
 ```
 
 ---

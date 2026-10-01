@@ -151,6 +151,25 @@ const std::vector<CatalogEntry> &table() {
       // `ffn` are the ENCODER stack's, because that is the half whose GEMM
       // shape an embedder shares.
       //
+      // THE TRAILING FLAGS ARE SPELLED OUT IN FULL, EVERY FIELD, POSITIONALLY,
+      // and that is a fix rather than a style: these rows used to carry
+      //     /*gated=*/false, /*gemma=*/false, /*gte=*/false, /*stt=*/true
+      // which is FOUR values for gated / gemma / gated_ffn / qkv_n -- so
+      // `stt` stayed false and `qkv_n` became 1. Aggregate initialisation is
+      // positional and cannot skip a member, so the labels on those four were
+      // describing a layout that did not exist. The consequences were real and
+      // all on the fetch path: `stt == false` selected kFiles (vocab.txt and
+      // 1_Pooling/config.json, which openai/whisper-* does not have) instead of
+      // kFilesWhisper, and verify_config then compared hidden_size /
+      // num_hidden_layers against a Whisper config.json that spells them
+      // d_model / encoder_layers. Nothing caught it because the pack dispatch
+      // below ALSO tests model_type == "whisper" from config.json, so the
+      // "no C++ packer" message still appeared correct while the download
+      // could not have succeeded. The eight-field trailing shape used below is
+      // the one in hub.hpp, and it is not a style preference: `datapath` is a
+      // std::string sitting between `gte` and `stt`, so a seven-value
+      // initialiser cannot skip past it.
+      //
       // Each needs BOTH design sets (gemm_rtp and gemm_rtp_dec) exported with
       // --target <name> --arch 1, and `list` says so per row: a set carrying
       // only the encoder half cannot transcribe anything, and a decoder-only
@@ -159,32 +178,81 @@ const std::vector<CatalogEntry> &table() {
        "7ebd0e69e78190ffe1438491fa05cc1f5c1aa3a4c4db3bc1723adbb551ea2395",
        "n/a", 384, 4, 6, 1536, 32, 151.0,
        "smallest Whisper: 4+4 layers, 80 mel bins; greedy, no timestamps",
-       /*gated=*/false, /*gemma=*/false, /*gte=*/false, /*stt=*/true},
+       /*gated=*/false, /*gemma=*/false, /*gated_ffn=*/false, /*qkv_n=*/0,
+       /*gte=*/false, /*datapath=*/"bf16", /*stt=*/true},
       {"whisper-base", "openai/whisper-base",
        "07cadb9f25677c8d50df603e66a98fbd842cce45047139baeb16e6219a1e807b",
        "n/a", 512, 6, 8, 2048, 32, 290.0,
        "6+6 layers; clearly better than tiny on real speech",
-       /*gated=*/false, /*gemma=*/false, /*gte=*/false, /*stt=*/true},
+       /*gated=*/false, /*gemma=*/false, /*gated_ffn=*/false, /*qkv_n=*/0,
+       /*gte=*/false, /*datapath=*/"bf16", /*stt=*/true},
       {"whisper-small", "openai/whisper-small",
        "1d7734884874f1a1513ed9aa760a4f8e97aaa02fd6d93a3a85d27b2ae9ca596b",
        "n/a", 768, 12, 12, 3072, 32, 968.0,
        "12+12 layers; the first size where quality clearly beats base",
-       /*gated=*/false, /*gemma=*/false, /*gte=*/false, /*stt=*/true},
+       /*gated=*/false, /*gemma=*/false, /*gated_ffn=*/false, /*qkv_n=*/0,
+       /*gte=*/false, /*datapath=*/"bf16", /*stt=*/true},
       {"whisper-medium", "openai/whisper-medium",
        "62f73550fa6db24b0c6f6c5962bd0dae80fa644e93cde9cd9c3792971b47fd28",
        "n/a", 1024, 24, 16, 4096, 32, 3100.0,
        "24+24 layers; 4x the dispatches of base for a modest gain",
-       /*gated=*/false, /*gemma=*/false, /*gte=*/false, /*stt=*/true},
+       /*gated=*/false, /*gemma=*/false, /*gated_ffn=*/false, /*qkv_n=*/0,
+       /*gte=*/false, /*datapath=*/"bf16", /*stt=*/true},
       {"whisper-large-v3", "openai/whisper-large-v3",
        "a8e94b85976e5864ba3e9525c7e6c83b2a1eca42d4b797a0c7c24d778e40fd95",
        "n/a", 1280, 32, 20, 5120, 32, 3100.0,
        "32+32 layers, 128 mel bins; the audio frontend dominates its runtime",
-       /*gated=*/false, /*gemma=*/false, /*gte=*/false, /*stt=*/true},
+       /*gated=*/false, /*gemma=*/false, /*gated_ffn=*/false, /*qkv_n=*/0,
+       /*gte=*/false, /*datapath=*/"bf16", /*stt=*/true},
       {"whisper-large-v3-turbo", "openai/whisper-large-v3-turbo",
        "542566a422ae4f3fd23f1ba11add198fca01bbf82e66e6a2857b3f608b1eb9d1",
        "n/a", 1280, 32, 20, 5120, 32, 1620.0,
        "large-v3's encoder with a 4-layer decoder: ~4x the speed, some cost",
-       /*gated=*/false, /*gemma=*/false, /*gte=*/false, /*stt=*/true},
+       /*gated=*/false, /*gemma=*/false, /*gated_ffn=*/false, /*qkv_n=*/0,
+       /*gte=*/false, /*datapath=*/"bf16", /*stt=*/true},
+      // arch=5, an IMAGE CLASSIFIER (vision -> one of 1000 labels). The second
+      // modality in this tree and the first that takes pixels rather than
+      // tokens.
+      //
+      // WHY IT IS NOT arch=0 WITH A DIFFERENT FRONT END: the normalisation
+      // order. Every row above is post-LN -- residual, then normalise. A ViT
+      // layer normalises BEFORE each sub-block and adds after, so a container
+      // with BERT's tensor names and ViT's order would be read happily by
+      // BertEncoder and compute a different model. tools/pack/packers/vit.py
+      // gives this family its OWN tensor names (`layer.i.*`, `frontend.*`) so a
+      // name collision is impossible, and app_state.hpp's arch check is the
+      // only gate that stands between the two.
+      //
+      // WHAT THE ARRAY RUNS, and it is the whole point of the row: the SAME
+      // four streams at the SAME shapes as bge-base-en-v1.5 -- qkv 768x2304,
+      // attn_out 768x768, ffn_up 768x3072, ffn_down 3072x768 -- plus a fifth
+      // GEMM, the patch embedding, which is [M,768]x[768,768] and therefore
+      // RIDES attn_out's stream rather than asking for a new one. That is why
+      // tile_n is 48 here and 32 for Whisper: every N in {768, 2304, 3072} is a
+      // multiple of tile_n*cols = 48*4 = 192, so no operand needs padding, and
+      // the design set this row names is the one bge-base already has.
+      //
+      // `pooling` is "n/a" like a Whisper row's, and for a related reason: the
+      // CLS row IS the classifier's input, not a pooling mode a
+      // 1_Pooling/config.json chooses. verify_config() skips the pooling
+      // cross-check for this row for the same reason it skips it for STT -- the
+      // file's absence IS the statement.
+      //
+      // `ffn` 3072 with `gated_ffn=false`: a ViT's FFN is a plain GELU MLP, and
+      // tools/data/npu_targets.json refuses a gated `cls` entry for the same
+      // reason. `qkv_n` 0 means 3*hidden = 2304, stated as 0 because that is
+      // what every MHA row here does and a reader should not have to check.
+      //
+      // sha256 measured against the bytes on disk with hashlib, and it is the
+      // same digest the container records as source_sha256
+      // (1cea0711...6162ccb5d) -- two independent statements of one fact.
+      {"vit-base-patch16-224", "google/vit-base-patch16-224",
+       "1cea07110a4a47edc51420b2dda6f3b8b58e7256e8f44b4ea6aa9696162ccb5d",
+       "n/a", 768, 12, 12, 3072, 48, 346.3,
+       "image classifier: 4 GEMMs/layer on the SAME designs as bge-base, "
+       "patch_embed rides attn_out; 197 positions, head on the host",
+       /*gated=*/false, /*gemma=*/false, /*gated_ffn=*/false, /*qkv_n=*/0,
+       /*gte=*/false, /*datapath=*/"bf16", /*stt=*/false, /*cls=*/true},
     };
 
     // THE bfp16 ADOPTION (tasks/0104, T23), set by NAME rather than by
@@ -275,7 +343,7 @@ const Want kFilesGte[] = {
     {"modules.json", true},
 };
 
-// Whisper's file set (arch=4), and it is EXACTLY what tools/packers/whisper.py
+// Whisper's file set (arch=4), and it is EXACTLY what tools/pack/packers/whisper.py
 // opens: config.json (geometry), preprocessor_config.json (the audio constants),
 // vocab.json + merges.txt + added_tokens.json (the byte-level BPE table), and
 // generation_config.json (REQUIRED -- it carries the decoding policy
@@ -298,6 +366,28 @@ const Want kFilesWhisper[] = {
     {"vocab.json", true},
     {"added_tokens.json", true},
     {"merges.txt", true},
+};
+
+// An image classifier's file set (arch=5, vit_patch16_prenorm_gelu), and it is
+// EXACTLY what tools/pack/packers/vit.py opens: config.json (the geometry AND
+// model_type), preprocessor_config.json (the image front end's own size,
+// resample, mean and std), model.safetensors, and nothing else.
+//
+// NOTABLY ABSENT, and each absence is a statement rather than an omission:
+//   * no tokenizer, no vocab table, no 1_Pooling/config.json -- a ViT has no
+//     tokens and the CLS row IS its pooling, so the row below sets `pooling` to
+//     "n/a" the way a Whisper row does;
+//   * no labels file. The 1000 class names come out of config.json's id2label,
+//     which the packer reads and writes as labels.table. Fetching a separate
+//     file would be a second source for the same 1000 strings, and two sources
+//     can disagree.
+// preprocessor_config.json is REQUIRED, not optional: tools/lib/vit_int8.py
+// refuses a checkpoint directory without one, because the normalisation
+// constants are part of the model's definition.
+const Want kFilesVit[] = {
+    {"model.safetensors", true},
+    {"config.json", true},
+    {"preprocessor_config.json", true},
 };
 
 #ifdef _WIN32
@@ -812,7 +902,19 @@ void verify_config(const CatalogEntry &e, const std::filesystem::path &dir) {
   // A speech-to-text model has no pooling mode and no 1_Pooling/config.json, so
   // there is nothing to agree about. Skipping it is the whole check, not a
   // weakened one: the file's absence IS the statement.
-  if (e.stt) return;
+  //
+  // An image classifier is skipped for the SAME reason and not because its
+  // pooling needs no checking: the CLS row IS its classifier input, so there is
+  // no mode for 1_Pooling/config.json to be choosing between, and the container
+  // records `"pooling": "cls"` itself. What a cls row DOES get checked above is
+  // the geometry, and it gets checked with the BERT key names
+  // (hidden_size / num_hidden_layers / num_attention_heads / intermediate_size),
+  // which are the ones a ViT config.json actually uses -- unlike Whisper's
+  // d_model / encoder_layers, which is why this is a separate condition and
+  // not `e.cls` folded into the `e.stt ?` key selection above. Getting that
+  // wrong would compare 768 against a key the file does not contain and refuse
+  // a correct checkpoint.
+  if (e.stt || e.cls) return;
 
   // Pooling is read from the checkpoint, never assumed -- 0038 made this a
   // rule after `mean` had been a literal. The catalogue's value only has to
@@ -1022,6 +1124,8 @@ std::string ensure_model(const std::string &root, const std::string &name,
       return std::vector<Want>(std::begin(kFilesGte), std::end(kFilesGte));
     if (e->stt)
       return std::vector<Want>(std::begin(kFilesWhisper), std::end(kFilesWhisper));
+    if (e->cls)
+      return std::vector<Want>(std::begin(kFilesVit), std::end(kFilesVit));
     return std::vector<Want>(std::begin(kFiles), std::end(kFiles));
   }();
   for (const auto &w : fetch_list) {
@@ -1116,13 +1220,46 @@ std::string ensure_model(const std::string &root, const std::string &name,
     // the user does not fetch it twice.
     throw std::runtime_error(
         e->name + ": the checkpoint is downloaded and verified (CHECKPOINT.json "
-        "written), but a whisper container is packed by tools/pack_npue.py -- "
+        "written), but a whisper container is packed by tools/pack/pack_npue.py -- "
         "there is no C++ packer for arch=4. Run:\n"
-        "    python tools/pack_npue.py --model-dir " + dir.string() +
+        "    python tools/pack/pack_npue.py --model-dir " + dir.string() +
         "\n        --out " + container.string() + " --device " +
         app::running_device() + " --max-seq 1500\n"
         "  (--max-seq 1500 is the model's own max_source_positions; the "
         "default of 256 produces a container the encoder refuses.)");
+  }
+  if (e->cls) {
+    // Same shape of refusal as Whisper above, and for a STRONGER reason.
+    //
+    // Whisper's C++ packer is missing because arch=4 needed a second design set
+    // and a BPE table; arch=5's is missing because the int8 path cannot be
+    // written in C++ at all: tools/lib/vit_int8.py measures per-input-channel
+    // activation maxima with forward pre-hooks on a torch model over an image
+    // corpus. There is no C++ equivalent of any of those three, so a C++ ViT
+    // packer could only ever produce the bf16 container -- and a `cls` row that
+    // quietly cannot be packed with --int8 is a worse failure than one that
+    // refuses, because the int8 container is the one that halves the file and
+    // the layout_hash with it, so the two must not look interchangeable.
+    //
+    // The front end is the other reason and it is not a technicality:
+    // preprocessor_config.json's mean/std/resample are read by the packer and
+    // stamped into the container as the normalisation the model expects. A
+    // packer that did not read it would be guessing, and a container carrying
+    // the wrong numbers classifies noise with total confidence.
+    throw std::runtime_error(
+        e->name + ": the checkpoint is downloaded and verified (CHECKPOINT.json "
+        "written), but an arch=5 container is packed by "
+        "tools/pack/pack_npue.py -- there is no C++ packer for it, and the "
+        "--int8 form cannot be written in C++ at all (its calibration needs "
+        "torch forward hooks over an image corpus). Run:\n"
+        "    python tools/pack/pack_npue.py --model-dir " + dir.string() +
+        "\n        --out " + container.string() + " --device " +
+        app::running_device() + "\n"
+        "  add --int8 for the 90 MB container (from 175 MB) whose layout_hash "
+        "is 8f858f40... rather than 52a4adad...; the runtime refuses the pair "
+        "if they disagree.\n"
+        "  There is deliberately NO --max-seq: a ViT's position count is fixed "
+        "at (224/16)^2 + 1 = 197 by the image size, not by the caller.");
   }
   if (e->gemma) {
     prepare_model_gemma(dir.string(), container.string(), e->repo, nullptr,

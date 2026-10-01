@@ -8,7 +8,7 @@
 // kernels/gelu_poly.cc is a degree-8 fit of the even part, and it measures
 // 2.49e-3 relative against exact erf -- which is the bf16 output floor times
 // 1.01 on an embedder and a DIFFERENT ACTIVATION on a Whisper. The packer
-// refuses a checkpoint whose `activation` is not `gelu`, and tools/packers/
+// refuses a checkpoint whose `activation` is not `gelu`, and tools/pack/packers/
 // whisper.py:345 is what makes that binding: this model runs the erf GELU, so a
 // tanh-polynomial GELU is not a faster version of the same function, it is a
 // different model, and its 2.5e-3 is larger than the error the bf16 datapath

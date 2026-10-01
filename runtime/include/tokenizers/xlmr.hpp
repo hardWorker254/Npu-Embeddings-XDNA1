@@ -12,7 +12,7 @@
 // trie), WhitespaceSplit + Metaspace pre-tokenization, and <s>...</s>
 // wrapping. The third tokenizer family in this repo (T52).
 //
-// THE EXECUTABLE SPEC IS tools/xlmr_tokenizer_ref.py. This class is its
+// THE EXECUTABLE SPEC IS tools/lib/xlmr_tokenizer_ref.py. This class is its
 // line-for-line C++ port -- same method boundaries (normalize /
 // pre_tokenize / viterbi / encode), same quirks, so the two can be diffed
 // function by function (the gemma two-implementation discipline). Where

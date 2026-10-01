@@ -51,7 +51,7 @@
 namespace npue::whisper {
 
 // One instruction-stream slot per op, at one batch tier. The seven names are
-// the `stt` kind's stream list in tools/npu_targets.json.
+// the `stt` kind's stream list in tools/data/npu_targets.json.
 struct DecoderStreams {
   size_t self_qkv = 0, self_attn_out = 0, cross_q = 0, cross_kv = 0,
          cross_attn_out = 0, ffn_up = 0, ffn_down = 0;

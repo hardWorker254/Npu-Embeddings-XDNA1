@@ -1,0 +1,301 @@
+{
+  "_doc": "Single source of truth for per-model NPU export geometry. Consumed by tools/export/export_gemm_rtp.py (S2+). Geometry MUST match runtime/src/common/hub.cpp (catalog table lines 52-142 and the bfp16 adoption list lines 161-168); tools/verify_targets.py (S7) enforces parity. Mapping rules: datapath 'bfp16' -> --emulate-bfp16 --c-bf16; datapath 'bf16' -> --c-bf16 only; qkv_n null -> --qkv-n omitted (means 3*hidden); model.overrides.* beats defaults.* for that model; arches[N] supplies --cols/--batch/--batches; max_batch is a hard per-arch ceiling. datapath flag mapping lives in code (S2), not here, to avoid duplication. WHISPER (kind 'stt') adds keys the embedders do not have: heads/head_dim/enc_layers/dec_layers/mel_bins, `frames` (the model's TRUE encoder length, 1500, from max_source_positions -- the number of positions that must be computed, not the number of rows a design holds) and `max_target` (448 decoder positions). Whisper's encoder is NOT one dispatch. A shim has 16 DMA buffer descriptors and a design's live count grows with its AIE row-block count, so a single dispatch cannot exceed FOUR row-blocks: measured on npu1 with m=64/rows=4, M=256/512/1024 build and run, M=1536 and M=2048 fail to compile with \\'Too many simultaneously active buffer descriptors\\' and M=1536 with the derived C-path ping-pong additionally times out with ERT_CMD_STATE_TIMEOUT. 1500 rows therefore becomes 3 dispatches of 512, and `overrides.seq` is 512 -- the per-dispatch row tile, NOT frames. The runtime loops ceil(padded_frames / design.seq) times; the last chunk is padded and its extra rows are masked, which is exact because every encoder GEMM is row-independent (attention lives on the host over all 1500 positions). The padded total is 1536, i.e. 2.4% waste; a 1024-wide design would cut dispatch count to 2 at the price of 36.5% wasted arithmetic, which is the worse trade by two orders of magnitude at these sizes. The DECODER is a second design set (kinds.stt, written to gemm_rtp_dec/): its M is tokens per step, not frames, and it uses m=16 rather than 64 so its smallest M is 64 rather than 256 -- see tools/export/exporters/gemm_rtp/geometry.py for why it still uses four AIE rows. Per-model `batches` exists because an STT model's unit of work is one audio file, not a batch of texts, so its tiers may be 1. tile_k 64 / tile_n 32 is forced by Whisper's geometry, not chosen: d % 64 == 0 and (d/32) % 4 == 0 for every d in {384,512,768,1024,1280}, so no operand needs padding; tile_n 48 does not divide large-v3's 5120 FFN. IMAGE CLASSIFIER (kind 'cls', arch 5 vit_patch16_prenorm_gelu) -- vit-base-patch16-224 is the fourth family and the second MODALITY. Its geometry is an embedder's geometry: the same four streams at the same shapes (768x2304, 768x768, 768x3072, 3072x768), because its patch-embedding conv is rewritten as an exact GEMM that RIDES attn_out's stream [M,768]x[768,768] rather than asking the array for a convolution it has no role for. That rewrite is exact on one ground and one only: stride equals kernel with padding 0, so the 196 windows neither overlap nor skip and im2col is a PERMUTATION, not a sum. What is new is the front end (decode, resize, normalise, im2col) and the head (a 768x1000 matvec on the host, because 1000 is not a multiple of tile_n*cols so no B panel of that width exists on this array, and one host matvec costs less than the ~150 us a dispatch would). Its overrides.seq of 256 is a ROW TILE, not a sequence length: a ViT's position count is FIXED at (image_size/patch_size)^2 + 1 = 197 (196 patches plus the CLS row), which is why no --max-seq-style knob exists for this family, and the runtime pads 197 up to 256 and masks the remainder -- exact, because every GEMM here is row-independent and attention lives on the host over all 197 positions. batch 4 gives M = 1024 in one dispatch, the npu1 ceiling measured above. This repo has no attention measurement above seq 64 and 197 is three times that, so this entry's throughput is UNMEASURED and the entry says so rather than implying otherwise.",
+  "schema": 1,
+  "defaults": {
+    "seq": 64,
+    "tile_m": 64,
+    "tile_k": 64,
+    "tile_n": 48,
+    "identity_threshold": 128,
+    "c_bf16": true
+  },
+  "arches": {
+    "1": {
+      "device": "npu1",
+      "cols": 4,
+      "batch": 16,
+      "batches": [
+        4,
+        8,
+        16
+      ],
+      "max_batch": 16
+    },
+    "2": {
+      "device": "npu2",
+      "cols": 8,
+      "batch": 128,
+      "batches": [
+        4,
+        16,
+        32,
+        128
+      ],
+      "max_batch": null
+    }
+  },
+  "models": {
+    "all-MiniLM-L6-v2": {
+      "hidden": 384,
+      "intermediate": 1536,
+      "gated_ffn": false,
+      "qkv_n": null,
+      "datapath": "bfp16"
+    },
+    "bge-small-en-v1.5": {
+      "hidden": 384,
+      "intermediate": 1536,
+      "gated_ffn": false,
+      "qkv_n": null,
+      "datapath": "bf16"
+    },
+    "bge-base-en-v1.5": {
+      "hidden": 768,
+      "intermediate": 3072,
+      "gated_ffn": false,
+      "qkv_n": null,
+      "datapath": "bfp16"
+    },
+    "bge-large-en-v1.5": {
+      "hidden": 1024,
+      "intermediate": 4096,
+      "gated_ffn": false,
+      "qkv_n": null,
+      "datapath": "bfp16",
+      "overrides": {
+        "tile_n": 32
+      }
+    },
+    "nomic-embed-text-v1.5": {
+      "hidden": 768,
+      "intermediate": 3072,
+      "gated_ffn": true,
+      "qkv_n": null,
+      "datapath": "bfp16"
+    },
+    "embeddinggemma-300m": {
+      "hidden": 768,
+      "intermediate": 1152,
+      "gated_ffn": true,
+      "qkv_n": 1536,
+      "datapath": "bfp16"
+    },
+    "gte-multilingual-base": {
+      "hidden": 768,
+      "intermediate": 3072,
+      "gated_ffn": true,
+      "qkv_n": 2304,
+      "datapath": "bfp16"
+    },
+    "whisper-tiny": {
+      "kind": "stt",
+      "layer_norm_eps": 1e-05,
+      "vocab": 51865,
+      "hidden": 384,
+      "intermediate": 1536,
+      "gated_ffn": false,
+      "qkv_n": null,
+      "datapath": "bfp16",
+      "heads": 6,
+      "head_dim": 64,
+      "enc_layers": 4,
+      "dec_layers": 4,
+      "mel_bins": 80,
+      "frames": 1500,
+      "max_target": 448,
+      "overrides": {
+        "seq": 512,
+        "tile_k": 64,
+        "tile_n": 32,
+        "batch": 1,
+        "batches": [
+          1
+        ]
+      }
+    },
+    "whisper-base": {
+      "kind": "stt",
+      "layer_norm_eps": 1e-05,
+      "vocab": 51865,
+      "hidden": 512,
+      "intermediate": 2048,
+      "gated_ffn": false,
+      "qkv_n": null,
+      "datapath": "bfp16",
+      "heads": 8,
+      "head_dim": 64,
+      "enc_layers": 6,
+      "dec_layers": 6,
+      "mel_bins": 80,
+      "frames": 1500,
+      "max_target": 448,
+      "overrides": {
+        "seq": 512,
+        "tile_k": 64,
+        "tile_n": 32,
+        "batch": 1,
+        "batches": [
+          1
+        ]
+      }
+    },
+    "whisper-small": {
+      "kind": "stt",
+      "layer_norm_eps": 1e-05,
+      "vocab": 51865,
+      "hidden": 768,
+      "intermediate": 3072,
+      "gated_ffn": false,
+      "qkv_n": null,
+      "datapath": "bfp16",
+      "heads": 12,
+      "head_dim": 64,
+      "enc_layers": 12,
+      "dec_layers": 12,
+      "mel_bins": 80,
+      "frames": 1500,
+      "max_target": 448,
+      "overrides": {
+        "seq": 512,
+        "tile_k": 64,
+        "tile_n": 32,
+        "batch": 1,
+        "batches": [
+          1
+        ]
+      }
+    },
+    "whisper-medium": {
+      "kind": "stt",
+      "layer_norm_eps": 1e-05,
+      "vocab": 51865,
+      "hidden": 1024,
+      "intermediate": 4096,
+      "gated_ffn": false,
+      "qkv_n": null,
+      "datapath": "bfp16",
+      "heads": 16,
+      "head_dim": 64,
+      "enc_layers": 24,
+      "dec_layers": 24,
+      "mel_bins": 80,
+      "frames": 1500,
+      "max_target": 448,
+      "overrides": {
+        "seq": 512,
+        "tile_k": 64,
+        "tile_n": 32,
+        "batch": 1,
+        "batches": [
+          1
+        ]
+      }
+    },
+    "whisper-large-v3": {
+      "kind": "stt",
+      "layer_norm_eps": 1e-05,
+      "vocab": 51866,
+      "hidden": 1280,
+      "intermediate": 5120,
+      "gated_ffn": false,
+      "qkv_n": null,
+      "datapath": "bfp16",
+      "heads": 20,
+      "head_dim": 64,
+      "enc_layers": 32,
+      "dec_layers": 32,
+      "mel_bins": 128,
+      "frames": 1500,
+      "max_target": 448,
+      "overrides": {
+        "seq": 512,
+        "tile_k": 64,
+        "tile_n": 32,
+        "batch": 1,
+        "batches": [
+          1
+        ]
+      }
+    },
+    "whisper-large-v3-turbo": {
+      "kind": "stt",
+      "layer_norm_eps": 1e-05,
+      "vocab": 51866,
+      "hidden": 1280,
+      "intermediate": 5120,
+      "gated_ffn": false,
+      "qkv_n": null,
+      "datapath": "bfp16",
+      "heads": 20,
+      "head_dim": 64,
+      "enc_layers": 32,
+      "dec_layers": 4,
+      "mel_bins": 128,
+      "frames": 1500,
+      "max_target": 448,
+      "overrides": {
+        "seq": 512,
+        "tile_k": 64,
+        "tile_n": 32,
+        "batch": 1,
+        "batches": [
+          1
+        ]
+      }
+    },
+    "vit-base-patch16-224": {
+      "kind": "cls",
+      "hidden": 768,
+      "intermediate": 3072,
+      "gated_ffn": false,
+      "qkv_n": null,
+      "datapath": "bf16",
+      "heads": 12,
+      "head_dim": 64,
+      "enc_layers": 12,
+      "image_size": 224,
+      "patch_size": 16,
+      "layer_norm_eps": 1e-12,
+      "overrides": {
+        "seq": 256,
+        "batch": 4,
+        "batches": [
+          4
+        ]
+      }
+    }
+  },
+  "kinds": {
+    "cls": {
+      "exporter": "export_gemm_rtp",
+      "streams": [
+        "qkv",
+        "attn_out",
+        "ffn_up",
+        "ffn_down"
+      ],
+      "note": "arch 5, vit_patch16_prenorm_gelu. The stream list is gemm_rtp's VERBATIM and that is the claim being made: this family's five GEMMs ride the four streams an embedder already has, at the embedder's shapes -- patch_embed is [M,768]x[768,768], which IS attn_out's shape, and qkv / attn_out / ffn_up / ffn_down are [768,2304] / [768,768] / [768,3072] / [3072,768]. A new modality here is a new FRONT END (decode, resize, im2col) and a new HEAD (1000 logits on the host), not a new array. `seq` here is the per-dispatch ROW TILE the 197 positions are padded into, not a text sequence length: 196 patches + 1 CLS = 197, padded to 256. batch 4 puts M = 1024 in one dispatch, which is the npu1 ceiling -- a shim has 16 DMA buffer descriptors and a design's live count grows with its AIE row-block count, so four row-blocks is the measured maximum and M=1536 fails to compile."
+    },
+    "gemm_rtp": {
+      "exporter": "export_gemm_rtp",
+      "streams": [
+        "qkv",
+        "attn_out",
+        "ffn_up",
+        "ffn_down"
+      ]
+    },
+    "stt": {
+      "exporter": "export_gemm_rtp",
+      "streams": [
+        "self_qkv",
+        "self_attn_out",
+        "cross_q",
+        "cross_kv",
+        "cross_attn_out",
+        "ffn_up",
+        "ffn_down"
+      ]
+    }
+  }
+}

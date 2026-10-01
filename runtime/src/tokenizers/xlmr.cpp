@@ -4,7 +4,7 @@
 // tokenizers/xlmr.hpp for the pipeline summary and design rationale.
 // SPDX-License-Identifier: Apache-2.0
 //
-// LINE-FOR-LINE PORT of tools/xlmr_tokenizer_ref.py (the executable spec,
+// LINE-FOR-LINE PORT of tools/lib/xlmr_tokenizer_ref.py (the executable spec,
 // tasks/0127). The section order below follows that file's -- grapheme
 // classifier, White_Space set, Darts trie, then the tokenizer's stages in
 // pipeline order -- so the two can be diffed side by side. Comments repeat

@@ -374,6 +374,28 @@ void Design::sync_from_device(size_t index, size_t bytes) {
   b.sync(XCL_BO_SYNC_BO_FROM_DEVICE, bytes, 0);
 }
 
+xrt::bo &Design::slot_bo(size_t arg_index, size_t slot) {
+  if (slot > impl_->alt.at(arg_index).size())
+    throw std::runtime_error(info_.name + ": no staged slot " +
+                             std::to_string(slot));
+  return slot == 0 ? impl_->bos.at(arg_index)
+                   : impl_->alt.at(arg_index).at(slot - 1);
+}
+
+void Design::sync_slot_to_device(size_t arg_index, size_t slot,
+                                 size_t bytes) {
+  xrt::bo &b = slot_bo(arg_index, slot);
+  if (bytes == 0) bytes = b.size();
+  b.sync(XCL_BO_SYNC_BO_TO_DEVICE, bytes, 0);
+}
+
+void Design::sync_slot_from_device(size_t arg_index, size_t slot,
+                                   size_t bytes) {
+  xrt::bo &b = slot_bo(arg_index, slot);
+  if (bytes == 0) bytes = b.size();
+  b.sync(XCL_BO_SYNC_BO_FROM_DEVICE, bytes, 0);
+}
+
 void Design::dispatch_only() {
   const double t_enter = now_s();
   const size_t ai = impl_->active_instr;

@@ -29,7 +29,7 @@ void NpuLogits::set_streams(const std::vector<size_t> &slots, int64_t rows,
                              std::to_string(slots_.size()) +
                              " logits streams and this run wants " +
                              std::to_string(n_chunks_) +
-                             ". The chunk count comes from tools/npu_ops.py; "
+                             ". The chunk count comes from tools/lib/npu_ops.py; "
                              "re-export the set so the two agree.");
 }
 

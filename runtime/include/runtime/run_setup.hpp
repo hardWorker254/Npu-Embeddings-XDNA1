@@ -23,7 +23,7 @@ namespace app {
 
 inline void load_designs(RunContext &ctx) {
   // Unified mode: art/gemm_rtp holds ONE xclbin whose four instruction
-  // streams are the four GEMM shapes (tools/export_gemm_rtp.py). Every design
+  // streams are the four GEMM shapes (tools/export/export_gemm_rtp.py). Every design
   // reference below binds to that one Design; the eltwise ops are forced onto
   // the host, and the encode runs in a single hw_context -- zero switches.
   const bool unified =
@@ -111,8 +111,8 @@ inline void load_designs(RunContext &ctx) {
             std::string("--npu-extra-ops ") + code + " (" + op->long_name +
             ") asks for it on the array, but " + dir +
             "/design.json does not exist -- build it with "
-            "tools/export_gemm_rtp.py --npu-extra-ops " + code +
-            " (or tools/export_eltwise.py --extra-ops " + code +
+            "tools/export/export_gemm_rtp.py --npu-extra-ops " + code +
+            " (or tools/export/export_eltwise.py --extra-ops " + code +
             "), or drop it from the list and run the host path, which is the "
             "measured-faster one");
       *dst = std::make_unique<npu::Design>(*ctx.dev, dir);
@@ -192,7 +192,7 @@ inline void load_designs(RunContext &ctx) {
   if (d_qkv.info().seq <= 0)
     throw std::runtime_error(
         "this design set records no sequence length -- re-export it with "
-        "tools/export_gemm_rtp.py, or add \"seq\": 64 to its design.json if "
+        "tools/export/export_gemm_rtp.py, or add \"seq\": 64 to its design.json if "
         "you know it was built for seq 64");
   set_design_seq(d_qkv.info().seq);
 

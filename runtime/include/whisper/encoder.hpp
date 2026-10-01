@@ -23,7 +23,7 @@
 // Whisper is pre-LN: residual, LayerNorm, attention, add. BertEncoder is
 // post-LN and also owns its LayerNorm and GELU in separate eltwise designs.
 // These design sets have no eltwise streams at all -- kind stt in
-// tools/npu_targets.json lists seven GEMM streams and nothing else -- so the
+// tools/data/npu_targets.json lists seven GEMM streams and nothing else -- so the
 // norm and the activation are host passes here, fused into the row loop that
 // feeds the next GEMM. That is a schedule change, not a numerical one: the
 // arithmetic is the same fp32 LayerNorm and the same exact-erf GELU the front

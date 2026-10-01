@@ -1,0 +1,270 @@
+{
+  "kind": "simulation",
+  "m2_hardware_reference": {
+    "shape": [
+      256,
+      256,
+      256
+    ],
+    "bf16_f32_rel_fro": 1.213e-07,
+    "bfp16_rel_fro": 0.0104,
+    "inputs": "uniform [0,1) bf16, iron.rand"
+  },
+  "calibration": {
+    "sweep": [
+      {
+        "block": 8,
+        "mant_bits": 3,
+        "rel_fro": 0.12006381123083906,
+        "ratio_vs_hw": 11.544597233734526
+      },
+      {
+        "block": 8,
+        "mant_bits": 4,
+        "rel_fro": 0.03140041151184545,
+        "ratio_vs_hw": 3.0192703376774475
+      },
+      {
+        "block": 8,
+        "mant_bits": 5,
+        "rel_fro": 0.008982088310446439,
+        "ratio_vs_hw": 0.8636623375429269
+      },
+      {
+        "block": 8,
+        "mant_bits": 6,
+        "rel_fro": 0.002675977675593054,
+        "ratio_vs_hw": 0.2573055457301014
+      },
+      {
+        "block": 8,
+        "mant_bits": 7,
+        "rel_fro": 0.0011028600806410236,
+        "ratio_vs_hw": 0.10604423852317535
+      },
+      {
+        "block": 8,
+        "mant_bits": 8,
+        "rel_fro": 0.0005560222662302003,
+        "ratio_vs_hw": 0.05346367944521157
+      },
+      {
+        "block": 8,
+        "mant_bits": 9,
+        "rel_fro": 0.0001878371675702216,
+        "ratio_vs_hw": 0.01806126611252131
+      },
+      {
+        "block": 16,
+        "mant_bits": 3,
+        "rel_fro": 0.11839827470471583,
+        "ratio_vs_hw": 11.38444949083806
+      },
+      {
+        "block": 16,
+        "mant_bits": 4,
+        "rel_fro": 0.030802086286991114,
+        "ratio_vs_hw": 2.961739066056838
+      },
+      {
+        "block": 16,
+        "mant_bits": 5,
+        "rel_fro": 0.009039936962540903,
+        "ratio_vs_hw": 0.8692247079366253
+      },
+      {
+        "block": 16,
+        "mant_bits": 6,
+        "rel_fro": 0.0026607410213867,
+        "ratio_vs_hw": 0.25584048282564426
+      },
+      {
+        "block": 16,
+        "mant_bits": 7,
+        "rel_fro": 0.0011373079910972112,
+        "ratio_vs_hw": 0.10935653760550108
+      },
+      {
+        "block": 16,
+        "mant_bits": 8,
+        "rel_fro": 0.000561754544858517,
+        "ratio_vs_hw": 0.05401486008254971
+      },
+      {
+        "block": 16,
+        "mant_bits": 9,
+        "rel_fro": 0.00019346875361073452,
+        "ratio_vs_hw": 0.018602764770262938
+      },
+      {
+        "block": 32,
+        "mant_bits": 3,
+        "rel_fro": 0.11461454513464203,
+        "ratio_vs_hw": 11.020629339869426
+      },
+      {
+        "block": 32,
+        "mant_bits": 4,
+        "rel_fro": 0.029848777627982378,
+        "ratio_vs_hw": 2.8700747719213826
+      },
+      {
+        "block": 32,
+        "mant_bits": 5,
+        "rel_fro": 0.008840077854273513,
+        "ratio_vs_hw": 0.8500074859878378
+      },
+      {
+        "block": 32,
+        "mant_bits": 6,
+        "rel_fro": 0.0026808021915398082,
+        "ratio_vs_hw": 0.2577694414942123
+      },
+      {
+        "block": 32,
+        "mant_bits": 7,
+        "rel_fro": 0.001153103979868046,
+        "ratio_vs_hw": 0.11087538267961981
+      },
+      {
+        "block": 32,
+        "mant_bits": 8,
+        "rel_fro": 0.0005750793081561973,
+        "ratio_vs_hw": 0.05529608732271128
+      },
+      {
+        "block": 32,
+        "mant_bits": 9,
+        "rel_fro": 0.00020793343828375279,
+        "ratio_vs_hw": 0.01999359983497623
+      },
+      {
+        "block": 64,
+        "mant_bits": 3,
+        "rel_fro": 0.10782109174619522,
+        "ratio_vs_hw": 10.367412667903388
+      },
+      {
+        "block": 64,
+        "mant_bits": 4,
+        "rel_fro": 0.028750324464138294,
+        "ratio_vs_hw": 2.764454275397913
+      },
+      {
+        "block": 64,
+        "mant_bits": 5,
+        "rel_fro": 0.008472439082704977,
+        "ratio_vs_hw": 0.8146576041062478
+      },
+      {
+        "block": 64,
+        "mant_bits": 6,
+        "rel_fro": 0.0028053442933445426,
+        "ratio_vs_hw": 0.2697446435908214
+      },
+      {
+        "block": 64,
+        "mant_bits": 7,
+        "rel_fro": 0.0012014519858395201,
+        "ratio_vs_hw": 0.11552422940764617
+      },
+      {
+        "block": 64,
+        "mant_bits": 8,
+        "rel_fro": 0.0006114589393341155,
+        "ratio_vs_hw": 0.0587941287821265
+      },
+      {
+        "block": 64,
+        "mant_bits": 9,
+        "rel_fro": 0.00024036393096101724,
+        "ratio_vs_hw": 0.023111916438559352
+      }
+    ],
+    "chosen": {
+      "block": 8,
+      "mant_bits": 5,
+      "rel_fro": 0.008982088310446439,
+      "ratio_vs_hw": 0.8636623375429269
+    },
+    "bf16_sim_rel_fro": 1.2093011448922164e-07,
+    "mant_bits_fitted_on_real_hardware": 7,
+    "m5_hardware_real_rel_fro": 0.00902,
+    "m5_hardware_uniform_rel_fro": 0.01057,
+    "note": "The encoder numbers use the REAL-data fit. The uniform fit is kept only to show why the distribution-sensitivity claim was an artifact."
+  },
+  "distribution_comparison": {
+    "single_gemm": {
+      "uniform [0,1)  (M2's test data)": {
+        "rel_fro": 0.00841567651458173,
+        "median_block_dynamic_range_A": 10.724830619279686
+      },
+      "real activations x real weights": {
+        "rel_fro": 0.05051688043702152,
+        "median_block_dynamic_range_A": 18.199335026105345
+      }
+    },
+    "real_over_uniform": 6.0027117664862235,
+    "verdict": "WORSE"
+  },
+  "encoder": {
+    "per_tensor": [
+      {
+        "tensor": "emb.ln",
+        "bf16": 0.0,
+        "bfp16": 0.0
+      },
+      {
+        "tensor": "L0.ln2",
+        "bf16": 0.0023672757842374626,
+        "bfp16": 0.022212066102874448
+      },
+      {
+        "tensor": "L1.ln2",
+        "bf16": 0.003071593970801463,
+        "bfp16": 0.03105112256032967
+      },
+      {
+        "tensor": "L2.ln2",
+        "bf16": 0.003560913227202066,
+        "bfp16": 0.03662586813477836
+      },
+      {
+        "tensor": "L3.ln2",
+        "bf16": 0.003994028155838149,
+        "bfp16": 0.04340363572622017
+      },
+      {
+        "tensor": "L4.ln2",
+        "bf16": 0.0043789029971928696,
+        "bfp16": 0.046940473085703115
+      },
+      {
+        "tensor": "L5.ln2",
+        "bf16": 0.005719011695817429,
+        "bfp16": 0.059874513498532206
+      },
+      {
+        "tensor": "last_hidden_state",
+        "bf16": 0.005719011695817429,
+        "bfp16": 0.059874513498532206
+      }
+    ],
+    "summary": {
+      "bf16": {
+        "min_cos_vs_fp32": 0.9999872949558726,
+        "max_1mcos_vs_fp32": 1.270504412742568e-05,
+        "min_cos_vs_hf": 0.9999872534374157,
+        "max_abs_sim_shift": 0.0005869418382644653,
+        "embedding_rel_fro": 0.004695256356851419
+      },
+      "bfp16": {
+        "min_cos_vs_fp32": 0.9982270793584885,
+        "max_1mcos_vs_fp32": 0.0017729206415114662,
+        "min_cos_vs_hf": 0.9982270370605529,
+        "max_abs_sim_shift": 0.0064919330179691315,
+        "embedding_rel_fro": 0.05327870758400465
+      }
+    }
+  }
+}

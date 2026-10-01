@@ -19,6 +19,7 @@ the other generation is refused rather than loaded.
 - [What to move to the NPU](#what-to-move-to-the-npu)
 - [Command-line reference](#command-line-reference)
 - [Speech to text](#speech-to-text)
+- [Image classification](#image-classification)
 - [Models](#models)
 - [Building design sets](#building-design-sets)
 - [Accuracy](#accuracy)
@@ -83,7 +84,7 @@ without it.
 
 ```bash
 # unified GEMM set — this is the mandatory one
-python tools/export_gemm_rtp.py --target all-MiniLM-L6-v2 --arch 1 --out runtime
+python tools/export/export_gemm_rtp.py --target all-MiniLM-L6-v2 --arch 1 --out runtime
 ```
 
 This writes `runtime/all-MiniLM-L6-v2/artifacts_npu1/gemm_rtp/`.
@@ -100,7 +101,7 @@ not want any of them.
 Preview what would be built, without invoking the toolchain:
 
 ```bash
-python tools/export_gemm_rtp.py --target all-MiniLM-L6-v2 --arch 1 --out runtime --dry-run
+python tools/export/export_gemm_rtp.py --target all-MiniLM-L6-v2 --arch 1 --out runtime --dry-run
 ```
 
 ### 2. Build the runtime
@@ -110,7 +111,7 @@ cmake -S runtime -B runtime/build -DCMAKE_BUILD_TYPE=Release
 cmake --build runtime/build -j"$(nproc)"
 ```
 
-Produces `runtime/build/npuembeddings` (and a copy named `npuembed`).
+Produces `runtime/build/npuembeddings` — one executable, one name.
 
 ### 3. Run it
 
@@ -216,7 +217,7 @@ it worked.
 
 `--npu-extra-ops` needs one sibling design set per named op next to `gemm_rtp/`
 (`layernorm/`, `softmax/`, `gelu/`), built by
-`tools/export_gemm_rtp.py --npu-extra-ops CODES`. A missing one is **refused by
+`tools/export/export_gemm_rtp.py --npu-extra-ops CODES`. A missing one is **refused by
 name** — it never silently falls back to the host, because a flag whose whole
 point is "put this on the array" must not quietly not do that. Each op also
 costs one more `hw_context` out of six.
@@ -421,13 +422,13 @@ the three commands below.
 #    max_source_positions (1500). The embedder default (256) writes a container
 #    whose position table is shorter than one audio window, and the packer
 #    refuses that by name rather than writing it.
-python tools/pack_npue.py --model-dir models/whisper-base \
+python tools/pack/pack_npue.py --model-dir models/whisper-base \
     --out models/whisper-base.npue --device npu1
 
 # 2. the design sets -- BOTH, and one invocation writes both, because a Whisper
 #    target resolves to an encoder pass and a decoder pass (their M differs by
 #    8x, so one xclbin cannot serve both).
-python tools/export_gemm_rtp.py --target whisper-base --arch 1 --out runtime
+python tools/export/export_gemm_rtp.py --target whisper-base --arch 1 --out runtime
 
 # 3. transcribe.
 ./runtime/build/npuembeddings transcribe whisper-base recording.wav
@@ -484,7 +485,7 @@ costs no extra `hw_context`. Measured per 30 s window, 16 host workers:
 
 The output is bf16 rather than fp32, which is the design's C precision: the
 tensor matches `transformers` to 1-cos 1.5e-6 and 1.4e-2 max-abs at whisper-tiny
-(`tools/verify_whisper_model.py` checks both, the array path at its own max-abs
+(`tools/verify/verify_whisper_model.py` checks both, the array path at its own max-abs
 tolerance), and the encoder fed from it still matches at the same 1-cos as the
 host-fed one. A design set with no `[rows, d, d]` stream cannot run them, and
 asking for it there is **refused by name** rather than answered from the host.
@@ -551,6 +552,140 @@ does on your behalf.
 
 ---
 
+## Image classification
+
+A `google/vit-base-patch16-224` container is an **image classifier**, not an
+embedder: it answers "label for this picture", it has no pooling mode a caller
+can ask for, and it runs through a mode of its own. `npuembeddings list` shows
+that row as `cls`.
+
+It is the same ViT that any embedding ViT would be — a 224x224 image becomes
+196 patches of 16x16 px plus one `[CLS]` token, so 197 tokens of width 768,
+through 12 pre-LayerNorm transformer layers. What makes it a classifier is the
+last step: the `[CLS]` vector is multiplied by a stored `[768, 1000]` matrix and
+the argmax is a class index. This build ships **only** that; the 768-number
+embedding is not exposed, and adding it is a head change, not a new design set.
+
+The 1000 classes are ImageNet-1k and nothing else. The model must answer with
+one of them even for a picture that belongs to none, so on an out-of-distribution
+input it returns a confident wrong label rather than a refusal. Every accuracy
+claim below is therefore about ImageNet-distribution images.
+
+### What a user has to download
+
+**Only `model.safetensors`.** One small file is committed:
+`preprocessor_config.json`, because its `image_size`, resample code and mean/std
+*are* the front end — the packer refuses a checkpoint without it, and no other
+file in the tree carries those numbers, so a wrong mean yields a container that
+classifies smoothly and wrongly. 160 bytes, identical for everyone. Geometry is
+deliberately **not** committed the way whisper's `config.json` is: an embedder's
+geometry has one owner, the checkpoint, which is re-read at pack time and pinned
+by `CHECKPOINT.json`.
+
+### Four commands, and the third one is the one people miss
+
+```bash
+# 1. the container. Do NOT pass --max-seq: it is REFUSED for this family by
+#    name, because a ViT's position count is (224/16)^2 + 1 = 197, fixed by the
+#    image size rather than by the caller.
+python tools/pack/pack_npue.py --model-dir models/vit-base-patch16-224 \
+    --out models/vit-base-patch16-224.npue --device npu1
+#    add --int8 for the 90 MB container (from 175 MB)
+
+# 2. the design set for the container you packed.
+python tools/export/export_gemm_rtp.py --target vit-base-patch16-224 --arch 1
+
+# 3. ONLY if you packed --int8: a SECOND design set, exported --int8.
+python tools/export/export_gemm_rtp.py --target vit-base-patch16-224 --arch 1 \
+    --int8 --out runtime/vit-base-patch16-224-i8
+mv runtime/vit-base-patch16-224-i8/vit-base-patch16-224/artifacts_npu1/gemm_rtp \
+   runtime/vit-base-patch16-224-i8/gemm_rtp
+
+# 4. classify.
+./runtime/build/npuembeddings classify vit-base-patch16-224 photo.png
+```
+
+**An int8 container needs its own design set, and this is not a detail.** The
+two containers have *identical* GEMM shapes, identical tiling and identical
+`tile_k 64, tile_n 48, mac_s 8, mac_t 4`; they differ in the operand dtype,
+`I8` against `BF16`. `b_layout_hash` covers the dtype, so the int8 container
+asks for hash `8f858f40...` and the bf16 one for `52a4adad...`, and a design set
+serves exactly one of them. Point an int8 container at the bf16 set and the run
+refuses by name rather than staging mismatched operands — see
+`design_selection.hpp`, tasks/0080.
+
+The `mv` in step 3 is not cosmetic. The exporter appends `<model>/artifacts_npu<arch>`
+to whatever `--out` says, which lands three levels deep, while the runtime's
+fallback scan looks for `runtime/*/gemm_rtp/design.json` two levels down. The
+bf16 set in step 2 is found by name, so it needs no moving.
+
+**`--max-seq` is refused for this family, by name.** It is refused rather than
+quietly honoured because there is no value to honour — 197 comes from arithmetic
+on the checkpoint's own `image_size` and `patch_size`, not from an argument —
+and the refusal names that number instead of leaving you to work it out. It used
+to be accepted and dropped, exiting 0 while doing nothing, which is the
+fail-open shape this repository treats as a defect elsewhere. Whisper is the
+family where the flag is genuinely dangerous — a table too short for one audio
+window is refused there too, and the argument is wired through and checked
+rather than discarded.
+
+`--arch 1` is `npu1`. `--arch 2` targets a different board (8 AIE columns) and
+cannot be built or run on a one-NPU machine.
+
+### What runs where
+
+| | on the NPU | on the host |
+|---|---|---|
+| patch embedding | yes — it rides `attn_out`'s stream | — |
+| 12 x qkv / attn_out / ffn | yes, 49 dispatches | — |
+| image front end | — | decode, PIL-equivalent resize to 224, `(x/255 - mean)/std`, im2col |
+| LayerNorm | — | fp32, with the container's own epsilon |
+| softmax, GELU | — | O(seq^2) attention on the host: 197x197 x 12 heads |
+| classifier head | — | 768x1000 matvec |
+
+The patch embedding is free: its shape `[196, 768] x [768, 768]` **is**
+`attn_out`'s shape, so it dispatches on that stream and costs no new design and
+no new stream. The head is on the host because 1000 is not a multiple of
+`tile_n * cols`, so no legal B panel of that width exists on this array — one
+host matvec costs less than the ~150 us a dispatch would.
+
+### Measured on npu1
+
+RyzenAI-npu1, firmware 1.5.5.391, XRT 2.26.0. 25 samples per container over 5
+images, alternating, warm-up discarded:
+
+| container | staged on the array | median | mean | range | dispatches |
+|---|---|---|---|---|---|
+| bf16 | 166.8 MB | 0.280 s | 0.2748 s | 0.25-0.30 s | 49 |
+| int8 | 85.2 MB | 0.190 s | 0.1864 s | 0.17-0.20 s | 49 |
+
+The distributions do not overlap (worst int8 0.20 beats best bf16 0.25), so
+**for this model the operand width does buy speed, not only memory** — 1.47x,
+32% less wall time per image. That is the opposite of what the Whisper branch
+of `pack_npue.py` says, and it is measured here rather than assumed: the design
+is fixed at M=1024 while the model has 197 rows, so the array runs a full-size
+design either way and i8 operands halve the bytes it has to move. The
+host/NPU split inside those numbers was **not** measured; the M=1024 explanation
+is the reason it is consistent, not a measurement of it.
+
+### What has NOT been measured
+
+Read this before quoting the table above as a result.
+
+- **No top-1 accuracy on ImageNet data.** Every image run in this repository so
+  far has been a PNG icon, a JPEG logo or a flat grey square — all outside the
+  training distribution. The runtime has never been checked against
+  `transformers` on the *dispatched* path, so no logit parity is claimed. A
+  transposed panel or a drifted `im2col` would print smooth, confident, entirely
+  wrong labels; `verify_vit_model.py` exists because that is the failure mode
+  that does not announce itself, and it holds the host half of it.
+- **Throughput is not predicted.** Same caveat as the Whisper section above: no
+  measurement in this repository exists above seq 64, and this container has 197
+  positions.
+- **`npu2` is untested.** No second board was available.
+
+---
+
 ## Models
 
 From `npuembeddings list` on this machine. `npu_targets.json` is the exporter's
@@ -583,13 +718,13 @@ about on every run.
 
 ## Building design sets
 
-### `tools/npu_targets.json`
+### `tools/data/npu_targets.json`
 
 Single source of truth for model geometry, per-generation defaults, and the
 stream list per `kind`. Inspect it:
 
 ```bash
-python tools/export_gemm_rtp.py --list-targets
+python tools/export/export_gemm_rtp.py --list-targets
 ```
 
 Per-generation defaults:
@@ -712,7 +847,7 @@ was not correct. Consecutive requests for the same input answered differently
 worse. The host LayerNorm path — the default — was never affected.
 
 **Root cause.** A `defect class` in the IRON program, not in the C++ runtime.
-In `tools/export_eltwise.py`, the LayerNorm worker acquired its gamma|beta
+In `tools/export/export_eltwise.py`, the LayerNorm worker acquired its gamma|beta
 object once and **never released it**:
 
 ```python
@@ -787,7 +922,7 @@ plain bf16 and bfp16-emulated agree, which is why it was never questioned: the
 datapath does not change the sub-tile, and the *board* does.
 
 **Fix.** The sub-tile is resolved from the target device in one place
-(`npue.MAC_BY_DEVICE`, mirrored in `exporters/common/consts.py` and
+(`npue.MAC_BY_DEVICE`, mirrored in `export/exporters/common/consts.py` and
 `npue_pack.cpp`), threaded into every operand by both packers
 (`pack_npue.py --device`, `packers/whisper.py`) and taken by every C++
 `prepare_model*`, and printed in every build log. The exporter picks the pair
@@ -795,7 +930,7 @@ from `--arch`, so `design.json`'s `b_layout_hash` now means what it says: a
 container packed for the other generation hashes differently and the runtime's
 existing check refuses it.
 
-**Verification.** `tools/verify_design_numerics.py`, added for this: it feeds
+**Verification.** `tools/verify/verify_design_numerics.py`, added for this: it feeds
 random matrices through the exported instruction streams and compares C with
 numpy. Before the fix, 37 of 37 whisper and MiniLM streams failed at
 `1 - cos` ≈ 0.87; after it, all 37 pass at `≤ 8.4e-06`, and the same check with
@@ -898,12 +1033,15 @@ host thread budget, so `--threads 8 --pipeline 4` gives each lane 2.
 ## Repository layout
 
 ```
-tools/                     Python: exporters, packer, verifiers (no C++ at run time)
-  export_gemm_rtp.py       unified GEMM design set, per arch and batch tier
-  export_eltwise.py        gelu / layernorm / softmax design sets
-  npu_targets.json         model geometry + per-arch defaults (exporter's source of truth)
-  pack_npue.py             build the .npue container
-  verify_*.py              correctness gates
+tools/                     Python: packer, exporters, gates (no C++ at run time)
+  pipeline.py              the way in: "I want to ..." -> the command for it
+  pack/pack_npue.py        build the .npue container
+  export/export_gemm_rtp.py  unified GEMM design set, per arch and batch tier
+  export/export_eltwise.py   gelu / layernorm / softmax design sets
+  verify/verify_*.py       correctness gates
+  gen/, research/          generators for committed files; experiments
+  lib/                     shared modules, imported not run
+  data/npu_targets.json    model geometry + per-arch defaults (exporter's source of truth)
 kernels/                   AIE device code (C++), compiled by aiecc via Peano
 runtime/
   include/runtime/         device, design, model container, encoder, pool, run_*

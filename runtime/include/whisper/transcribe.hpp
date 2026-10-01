@@ -78,8 +78,8 @@ struct TranscribeOptions {
   int stride_seconds = 5;            // HF's default for a 30 s window
   // conv1/conv2 on the NPU or on the host, from --npu-extra-ops conv. Off unless it
   // is asked for, because an op is on the host exactly when the flag does not
-  // name it; the host path is also the fp32 reference tools/
-  // verify_whisper_features.py holds the NPU path against.
+  // name it; the host path is also the fp32 reference
+  // tools/verify/verify_whisper_features.py holds the NPU path against.
   bool conv_npu = false;
 };
 

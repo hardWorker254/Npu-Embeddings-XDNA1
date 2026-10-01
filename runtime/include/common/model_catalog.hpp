@@ -139,7 +139,7 @@ inline std::string resolve_model_path(const std::string &root, int argc,
   if (models.empty())
     throw std::runtime_error(
         "no models/*.npue under " + root + " -- build one with "
-        "`npuembed --prepare-model <checkpoint-dir>`; see BUILD.md");
+        "`npuembeddings --prepare-model <checkpoint-dir>`; see BUILD.md");
 
   if (want.empty()) {
     // AMBIGUITY is what makes --model required. One installed model is not
