@@ -64,6 +64,48 @@ models/**
 # owner (the checkpoint, re-read at pack time) and CHECKPOINT.json pins it.
 !models/vit-base-patch16-224/preprocessor_config.json
 
+# THE ARGUMENT ABOVE, AND THE WHISPER SCOPE ABOVE THAT, WERE BOTH WRONG -- and
+# measurably so. "An embedder's geometry is pinned by CHECKPOINT.json and is
+# re-read from the checkpoint at pack time" describes packing from a FETCHED
+# checkpoint directory. Packing now starts from a hand-placed ONNX, and
+# tools/pack/pack_npue.py reads the geometry from models/<name>/config.json,
+# the pooling from 1_Pooling/config.json, the tokenizer from vocab.txt, the
+# task prompts from config_sentence_transformers.json, and the classifier's
+# labels out of config.json -- none of which a CHECKPOINT.json pin supplies,
+# and CHECKPOINT.json covers the ONNX only.
+#
+# Measured on a fresh `git clone` of this repository with the ONNX placed by
+# hand exactly as BUILD.md §2.2 says:
+#     pack_npue.py -> FileNotFoundError: models/all-MiniLM-L6-v2/config.json
+# so a checkout that could hold every weight it is allowed to hold still could
+# not build a container from them. tools/verify/verify_pack_parity.py (a
+# container-tier gate) is blocked by vocab.txt alone for the same reason.
+#
+# Everything whitelisted here is SMALL TEXT that makes a checkout runnable --
+# a vocab.txt is 231 KB, the largest config is 69 KB (vit's id2label) -- and
+# none of it is a weight: the model.safetensors / pytorch_model.bin /
+# tf_model.h5 / rust_model.ot duplicates beside them stay ignored by models/**.
+# ONE exception to "text", and it is the point of the list:
+#   gemma_tokenizer.bin (9 MB) is the table the packer embeds. Python cannot
+#   regenerate it (only `npuembeddings --prepare-model` can, from a
+#   tokenizer.json this file still does not commit), and pack_npue.py does not
+#   fail without it -- it prints a WARNING and writes a container with NO
+#   tokenizer at all, which is the quiet-wrong-answer failure this repo treats
+#   as the worst one.
+# Subdirectories need their own negation on top of their own directory: a rule
+# for `models/*/1_Pooling/` re-includes the directory but not what is in it,
+# because models/** still matches every path below models/.
+!models/*/config.json
+!models/*/vocab.txt
+!models/*/config_sentence_transformers.json
+!models/*/gemma_tokenizer.bin
+!models/*/1_Pooling/
+!models/*/1_Pooling/config.json
+!models/*/2_Dense/
+!models/*/2_Dense/config.json
+!models/*/3_Dense/
+!models/*/3_Dense/config.json
+
 # Full intermediate tap dump (~54 MB): a deterministic, CPU-only derivative of
 # the pinned checkpoint. The committed *_boundary.npz is the contract.
 #   & .\.venv-ref\Scripts\python.exe reference\make_goldens.py --taps
