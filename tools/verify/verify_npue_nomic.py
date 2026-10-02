@@ -336,6 +336,15 @@ def main():
 
     if not args.npue:
         args.npue = str(REPO / "models" / f"{args.model}.npue")
+    if not Path(args.npue).exists():
+        # SKIP, not a traceback. This is the arch=2 gate and that container
+        # simply has not been packed yet; nothing else in the "container"
+        # tier depends on it, so a missing file is a gap to report, not a
+        # failure to alarm on -- the same shape as verify_tail's SKIP.
+        print(f"SKIP -- no container ({args.npue}): this is the arch=2 gate, "
+              f"and {args.model} has not been packed. Pack it and this gate "
+              "runs; the rest of the tier does not depend on it")
+        return 0
     if not args.model_dir:
         with Reader(args.npue) as _r0:
             _repo = _r0.config["source_repo"]

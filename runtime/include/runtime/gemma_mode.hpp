@@ -27,6 +27,7 @@
 #include "encoders/gemma_npu_encoder.hpp"
 #include "common/host_kernels.hpp"
 #include "common/model_catalog.hpp"
+#include "common/npu_ops_flag.hpp"   // parse_npu_ops, the one --npu-extra-ops parser
 #include "runtime/npu_contention.hpp"
 #include "common/hub.hpp"
 #include "runtime/design.hpp"
@@ -114,6 +115,34 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
         "--prefix does not apply to `serve`: the task prompt is chosen per "
         "request now. Send \"prompt_name\" in the POST body instead, and GET "
         "/health lists the names this model accepts.");
+
+  // --npu-extra-ops is REFUSED here, not honoured -- and not by default
+  // either, which is the bug this block fixes. Every code it names is an
+  // eltwise design directory (gelu / layernorm / softmax), and an arch=1
+  // design set carries gemm_rtp and nothing else: GemmaNpuEncoder computes
+  // RMSNorm, softmax and GeGLU on the host and reads no per-op host/array
+  // choice at all, so there is no flag to switch and no stream to switch it
+  // to. The flag would parse, set nothing and change nothing -- measured as
+  // bit-identical output (max|d| 0.000e+00) for every one of the three codes
+  // plus `attn`, which this path did not even reject. That is the "the flag
+  // was there and nothing happened" failure run_setup.hpp refuses by name for
+  // the BERT path and vit_mode.hpp refuses for the classifier, so the codes
+  // that WOULD be ignored are named here too rather than silently run.
+  {
+    std::string listing;
+    for (int i = 1; i < argc - 1; ++i)
+      if (std::string(argv[i]) == "--npu-extra-ops") listing = argv[i + 1];
+    const std::set<std::string> codes = parse_npu_ops(listing);
+    if (!codes.empty())
+      throw std::runtime_error(
+          "--npu-extra-ops " + listing + ": this architecture runs RMSNorm, "
+          "softmax and GeGLU on the host, and its design set carries only "
+          "gemm_rtp -- no gelu/, layernorm/ or softmax/ directory -- so there "
+          "is nothing for these codes to move to. GemmaNpuEncoder has no "
+          "per-op host/array choice to read, so accepting the flag would "
+          "print nothing, change nothing and hand back identical vectors. "
+          "There is no export that would make them work here; drop it.");
+  }
 
   std::string layout;
   try {

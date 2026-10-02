@@ -569,13 +569,14 @@ void GemmaNpuEncoder::rms_norm(const float *xin, int64_t in_stride, float *xout,
       j = 0;
 #if defined(__AVX2__)
       const __m256 iv = _mm256_set1_ps(inv);
-      const __m256 one = _mm256_set1_ps(1.0f);
+      // w is the container's scale and already Gemma3RMSNorm's effective
+      // gain -- the export folded the `1 +` in, so there is nothing to add.
       for (; j + 8 <= dim; j += 8)
         _mm256_storeu_ps(o + j,
                            _mm256_mul_ps(_mm256_mul_ps(_mm256_loadu_ps(in + j), iv),
-                                         _mm256_add_ps(one, _mm256_loadu_ps(w + j))));
+                                         _mm256_loadu_ps(w + j)));
 #endif
-      for (; j < dim; ++j) o[j] = in[j] * inv * (1.0f + w[j]);
+      for (; j < dim; ++j) o[j] = in[j] * inv * w[j];
     }
   });
   t_norm += now_s() - t0;

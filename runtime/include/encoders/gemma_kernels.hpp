@@ -39,8 +39,16 @@
 
 namespace npue {
 
-// Gemma3RMSNorm: out[r,k] = x[r,k] * rsqrt(mean_k(x[r,:]^2) + eps) *
-// (1 + weight[k]), reduction over the last `dim` elements of each row.
+// RMSNorm: out[r,k] = x[r,k] * rsqrt(mean_k(x[r,:]^2) + eps) * weight[k],
+// reduction over the last `dim` elements of each row.
+//
+// `weight` is the container's scale, which is ALREADY Gemma3RMSNorm's
+// effective gain: HF computes x/rms * (1 + w) on the zero-centred `w` the
+// checkpoint stores, and the ONNX export folded that `1 +` into the scale
+// initializer (all 145 of them equal bf16(1 + w_checkpoint), std unchanged,
+// while every GEMM weight in the same file is a plain bf16 downcast). So
+// there is no `1 +` to apply here -- applying one counts it twice and moves
+// p99 1-cos against reference/tail from 3.8e-05 to 9.9e-01.
 //
 // The SAME function serves both RMSNorm uses in the model: the four
 // per-layer/per-token norms over the full hidden size (dim = 768, rows =

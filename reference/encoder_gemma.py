@@ -38,9 +38,18 @@
 #
 #  * RMSNorm is NOT `x/rms * w` (Llama-style). Gemma3RMSNorm computes
 #    `x/rms * (1 + w)` -- the weight is stored zero-centred so a freshly
-#    initialised model is the identity. Missing the `1 +` gives a plausible
-#    but completely wrong answer (everything scaled by whatever w happens to
-#    be near 0, not near 1). Confirmed in Gemma3RMSNorm.forward.
+#    initialised model is the identity. Confirmed in Gemma3RMSNorm.forward.
+#
+#    THE ONNX EXPORT ALREADY FOLDS THAT `+1` INTO THE SCALE. Its 145 norm
+#    tensors are `SimplifiedLayerNormalization`'s `scale` argument, i.e. the
+#    effective gain, and each one equals `bf16(1 + w_checkpoint)` with its
+#    std unchanged -- while every GEMM weight in the same file is a plain
+#    bf16 downcast of the checkpoint, so the `+1` is a parameterisation
+#    difference and not a precision artifact. Multiplying by `scale` directly
+#    is therefore the whole formula, and adding another 1 double-counts it:
+#    measured against reference/tail/embeddinggemma-300m.f32 that mistake
+#    alone moves p99 from 3.8e-05 to 9.9e-01. Do not "restore" the `1 +`
+#    here or in either C++ encoder -- it is already in the numbers.
 #
 #  * Attention is MQA/GQA: 3 query heads, 1 KV head, head_dim 256 (NOT
 #    hidden/num_heads=256 by coincidence of arithmetic -- head_dim is an
@@ -127,7 +136,13 @@ MASK_FILL = np.finfo(np.float32).min
 
 
 def rms_norm(x, weight, eps=1e-6):
-    """Gemma3RMSNorm: x/rms(x) * (1 + weight), reduction over the last axis.
+    """x/rms(x) * weight, reduction over the last axis.
+
+    `weight` is the ONNX scale, which already carries Gemma3RMSNorm's
+    `1 +` (see the file header): the export folded it into the initializer,
+    so the scale IS the effective gain and multiplying by it is the whole
+    formula. HF's own arithmetic is `x/rms * (1 + w)` on the zero-centred `w`
+    the checkpoint stores -- adding a 1 here would apply it twice.
 
     Computed in fp64 for the same reason encoder.py's layernorm() is: it is
     cheap insurance against a mean-of-squares reduction over 256-768 elements,
@@ -139,7 +154,7 @@ def rms_norm(x, weight, eps=1e-6):
     x64 = x.astype(np.float64)
     var = (x64 * x64).mean(axis=-1, keepdims=True)
     normed = x64 * (1.0 / np.sqrt(var + eps))
-    out = normed * (1.0 + weight.astype(np.float64))
+    out = normed * weight.astype(np.float64)
     return out.astype(np.float32)
 
 

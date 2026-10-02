@@ -42,6 +42,7 @@ import argparse
 import datetime
 import json
 import math
+import os
 import re
 import struct
 import subprocess
@@ -280,7 +281,9 @@ def main() -> int:
 
     root = Path(args.root).resolve() if args.root else REPO
     exe = (Path(args.exe).resolve() if args.exe
-           else REPO / "runtime" / "build" / "npuembeddings.exe")
+           else REPO / "runtime" / "build" /
+                ("npuembeddings.exe" if os.name == "nt"
+                 else "npuembeddings"))
     if not exe.exists():
         raise SystemExit(f"no runtime at {exe} -- build it, or pass --exe")
     ref_dir = Path(args.reference).resolve()

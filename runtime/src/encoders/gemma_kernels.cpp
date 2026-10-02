@@ -87,21 +87,20 @@ void rms_norm_cpu(const float *x, const float *weight, float *out,
     int64_t k = 0;
 #if defined(__AVX2__)
     const __m256d inv_rms_v = _mm256_set1_pd(inv_rms);
-    const __m256d one = _mm256_set1_pd(1.0);
     for (; k + 4 <= dim; k += 4) {
       __m128 vf = _mm_loadu_ps(row + k);
       __m128 wf = _mm_loadu_ps(weight + k);
       __m256d vd = _mm256_cvtps_pd(vf);
       __m256d wd = _mm256_cvtps_pd(wf);
-      __m256d res =
-          _mm256_mul_pd(_mm256_mul_pd(vd, inv_rms_v), _mm256_add_pd(wd, one));
+      // weight already is the gain -- see the contract in gemma_kernels.hpp.
+      __m256d res = _mm256_mul_pd(_mm256_mul_pd(vd, inv_rms_v), wd);
       __m128 resf = _mm256_cvtpd_ps(res);
       _mm_storeu_ps(orow + k, resf);
     }
 #endif
     for (; k < dim; ++k) {
       const double v = static_cast<double>(row[k]) * inv_rms *
-                        (1.0 + static_cast<double>(weight[k]));
+                        static_cast<double>(weight[k]);
       orow[k] = static_cast<float>(v);
     }
   }

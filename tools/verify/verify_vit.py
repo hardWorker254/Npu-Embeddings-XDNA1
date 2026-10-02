@@ -336,13 +336,27 @@ def labels_of(r):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--container", required=True)
+    ap.add_argument("--container",
+                    default=str(REPO / "models" / "vit-base-patch16-224.npue"),
+                    help="the arch=5 container to check. Defaults to the one "
+                         "in models/, so `gates --run` reaches this gate at "
+                         "all -- it was required, and the runner passes no "
+                         "arguments, so this gate could only ever be run by "
+                         "hand. Absent: SKIP, the same as verify_tail's "
+                         "\"no container\", instead of an argparse error.")
     ap.add_argument("--model-dir", default=None,
                     help="the checkpoint the container was packed from "
                          "(default: read source_repo off the container)")
     ap.add_argument("--n-images", type=int, default=4)
     ap.add_argument("--seed", type=int, default=17)
     args = ap.parse_args()
+
+    if not Path(args.container).exists():
+        print(f"SKIP -- no container ({args.container}): pack it with "
+              "`python tools/pipeline.py run pack_npue`, and this gate runs "
+              "the whole arch=5 stack -- pool, attention, pre-LN, head, both "
+              "layernorm schemes")
+        return 0
 
     r = Reader(args.container)
     cfg = r.config

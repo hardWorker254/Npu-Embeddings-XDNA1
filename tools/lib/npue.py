@@ -35,7 +35,9 @@ MAGIC = b"NPUE"
 VERSION = 1
 
 ARCH_BERT_ABS_GELU_POSTLN = 0
-# EmbeddingGemma-300M (Gemma3): RMSNorm x/rms*(1+w), MQA + RoPE (theta is PER
+# EmbeddingGemma-300M (Gemma3): RMSNorm x/rms*scale (HF's `x/rms*(1+w)`, with
+# the `+1` already folded into the scale the ONNX export carries -- see
+# encoder_gemma.py's header), MQA + RoPE (theta is PER
 # LAYER) + q_norm/k_norm between the projection and RoPE, GeGLU, and four
 # RMSNorms per layer rather than BERT's two LayerNorms.
 #

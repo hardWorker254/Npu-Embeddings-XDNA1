@@ -13,12 +13,13 @@
 #
 # Env: .venv-ref (openai, numpy, sentence-transformers)
 # Usage:
-#   npuembed .. --artifacts artifacts_b128il --pipeline 2 --serve 8420   (elsewhere)
-#   & ".\.venv-ref\Scripts\python.exe" tools\verify_endpoint.py --port 8420
+#   runtime/build/npuembeddings serve all-MiniLM-L6-v2 --port 8420
+#   .venv/bin/python tools/verify/verify_endpoint.py --port 8420
 
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import sys
 from pathlib import Path
@@ -61,10 +62,14 @@ def main() -> int:
     ap.add_argument("--model", default="all-MiniLM-L6-v2")
     ap.add_argument("--port", type=int, default=8420)
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--artifacts", default="artifacts_b128il",
+    ap.add_argument("--artifacts", default=None,
                     help="design set for the --embed cross-check in step 6. "
-                         "Was hardcoded, which limited this harness to "
-                         "hidden 384.")
+                         "Was hardcoded to artifacts_b128il, then defaulted to "
+                         "it -- which pinned step 6 to one machine's layout and "
+                         "made it the only part of this gate that could fail "
+                         "on a correct install. Default: none, so the runtime "
+                         "resolves the set from the container's geometry, the "
+                         "same way `serve` does.")
     ap.add_argument("--prompt-name", default=None,
                     help="task prompt to exercise (tasks/0118). Default: the "
                          "first name /health advertises, or none at all for a "
@@ -180,9 +185,16 @@ def main() -> int:
         d = Path(td)
         (d / "in.txt").write_text("\n".join(texts) + "\n", encoding="utf-8")
         run = subprocess.run(
-            [str(REPO / "runtime" / "build" / "npuembeddings.exe"), "..",
+            [str(REPO / "runtime" / "build" /
+                 ("npuembeddings.exe" if os.name == "nt"
+                  else "npuembeddings")), "..",
              "--model", args.model,
-             "--artifacts", args.artifacts, "--threads", "24",
+             # Omitted unless --artifacts was given: the runtime resolves the
+             # design set from the container's geometry, so passing the old
+             # hardcoded default here made step 6 the one part of this gate
+             # that fails on a correct install.
+             *(["--artifacts", args.artifacts] if args.artifacts else []),
+             "--threads", "24",
              # The same prompt the endpoint used, or this compares two
              # different questions and reports the difference as a bug.
              *(["--prefix", prompt] if prompt is not None else []),

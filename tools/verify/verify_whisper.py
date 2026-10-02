@@ -210,8 +210,18 @@ def main() -> int:
             return 2
         cases.append((args.audio, args.ref))
     if not cases:
-        print("nothing to do: pass --audio with --ref, or --corpus DIR")
-        return 2
+        # SKIP, not a failure -- and not a silent pass either, because the
+        # message says what would make this gate run. No audio is committed
+        # (that is why the tier entry says so), so a fresh clone has nothing
+        # to score and `gates --run` used to report that as rc=2, which made
+        # the whisper tier permanently red for a reason no red ever meant.
+        # Returning 0 prints the reason, and the word SKIP next to it, in the
+        # same shape as verify_tail's "SKIP -- no container".
+        print("SKIP -- no audio is committed, so there is no transcript to "
+              "score: pass --audio FILE --ref \"human transcript\" (or "
+              "--corpus DIR of *.wav + *.txt) and this gate runs the full "
+              "WER comparison against transformers")
+        return 0
 
     from npue import Reader
     rd = Reader(str(npue))
