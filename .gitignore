@@ -106,6 +106,21 @@ models/**
 !models/*/3_Dense/
 !models/*/3_Dense/config.json
 
+# THE ONE BIG PACK INPUT, and it is the exception that proves the rule above.
+# gte-multilingual-base is the only packer here that opens tokenizer.json (17
+# MB): `npuembeddings --prepare-model` reads it to build the xlmr_tokenizer.bin
+# blob, and unlike gemma -- where a pre-built table exists to commit, and the
+# 33 MB tokenizer.json that produced it stays on fetch -- gte has no pre-built
+# table. pack_npue.py refuses outright without that blob ("generate it first
+# with the C++ packer"), so a clone holding gte's ONNX but not this file cannot
+# pack the model at all.
+#
+# tokenizer.json stays ignored for every OTHER model, where no packer opens it
+# (2.5 MB per whisper, 33 MB for gemma, 711 KB for each bge): models/** above
+# already ignores it, and this negation names one directory rather than a
+# wildcard precisely so it cannot silently start importing the other four.
+!models/gte-multilingual-base/tokenizer.json
+
 # Full intermediate tap dump (~54 MB): a deterministic, CPU-only derivative of
 # the pinned checkpoint. The committed *_boundary.npz is the contract.
 #   & .\.venv-ref\Scripts\python.exe reference\make_goldens.py --taps

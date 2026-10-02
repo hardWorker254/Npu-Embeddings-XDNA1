@@ -133,9 +133,13 @@ def main():
         if got != want:
             problems.append(f"config.{k}: expected {want!r}, got {got!r}")
 
+    # The trailing newline keeps this byte-identical to the CHECKPOINT.json
+    # already committed for every other model -- without it a run that changed
+    # nothing still shows up in `git status` as "\ No newline at end of file".
     (local / "CHECKPOINT.json").write_text(
         json.dumps({"repo_id": repo_id, "file": files, "sha256": digest},
-                   indent=2),
+                   indent=2)
+        + "\n",
         encoding="utf-8",
     )
 

@@ -319,11 +319,19 @@ def main():
 
     # Pin it. Goldens and .npue files reference this; a changed digest must fail
     # loudly rather than quietly compare against a different checkpoint.
+    #
+    # The trailing newline is not cosmetic. Every committed CHECKPOINT.json in
+    # this tree ends with one, so a pin written without it dirtied three of
+    # them in a single `fetch_model.py` run and the whole diff was
+    # "\ No newline at end of file" -- a run that changed nothing, reported as
+    # a change, which is the sort of noise that teaches people to read git
+    # status with less care.
     (local / "CHECKPOINT.json").write_text(
         json.dumps(
             {"repo_id": args.model, "file": files, "sha256": digest},
             indent=2,
-        ),
+        )
+        + "\n",
         encoding="utf-8",
     )
 
