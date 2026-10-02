@@ -28,6 +28,7 @@
 
 #include "common/npue_pack.hpp"
 
+#include "common/onnx_read.hpp"
 #include "tokenizers/gemma_tokenizer_gen.hpp"
 #include "common/json_min.hpp"
 #include "tokenizers/xlmr_tokenizer_gen.hpp"
@@ -37,6 +38,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -57,167 +59,6 @@ constexpr uint32_t kAlign = 4096;
 // constant. It is only ever wrong NUMBERS. See npue_pack.hpp.
 constexpr MacGeom kMacNpu2{8, 8};
 constexpr MacGeom kMacNpu1{8, 4};
-
-// --- safetensors ----------------------------------------------------------
-// The format is deliberately simple: 8 bytes of little-endian header length,
-// that many bytes of JSON, then the tensor bytes. The JSON maps a name to
-// {dtype, shape, data_offsets}. Only F32 appears in this checkpoint, and an
-// unexpected dtype is refused rather than reinterpreted.
-struct Tensor {
-  std::string dtype;
-  std::vector<int64_t> shape;
-  const uint8_t *data = nullptr;
-  size_t bytes = 0;
-  // Set only when the source dtype was F16 or BF16 and this tensor was
-  // widened to fp32 at read time (0076). A shared_ptr so `data` survives the
-  // copies and moves a std::map does: the vector object is heap-allocated, so
-  // its `data()` is stable for as long as any Tensor holds a reference.
-  //
-  // WHY WIDEN AT ALL. Every one of the six built-in checkpoints happens to
-  // ship F32 safetensors, so the packer only ever needed to read F32. That is
-  // a property of those six, not of HuggingFace: the first finetune `add`
-  // reached (TaylorAI/bge-micro-v2) ships F16, and refusing it would have
-  // made `add` a demo rather than a feature. Widening is exact -- every F16
-  // and BF16 value is representable in fp32 -- and it happens once, offline,
-  // on a path that then bf16-rounds anyway.
-  std::shared_ptr<std::vector<float>> owned;
-  const float *f32() const { return reinterpret_cast<const float *>(data); }
-  int64_t rows() const { return shape.size() > 1 ? shape[0] : 1; }
-  int64_t cols() const { return shape.empty() ? 0 : shape.back(); }
-  int64_t count() const {
-    int64_t n = 1;
-    for (int64_t d : shape) n *= d;
-    return n;
-  }
-};
-
-std::string json_str_field(const std::string &s, size_t from, size_t to,
-                           const char *key) {
-  const std::string k = std::string("\"") + key + "\"";
-  size_t i = s.find(k, from);
-  if (i == std::string::npos || i > to) return {};
-  i = s.find('"', s.find(':', i) + 1) + 1;
-  return s.substr(i, s.find('"', i) - i);
-}
-
-std::vector<int64_t> json_int_array(const std::string &s, size_t from,
-                                    size_t to, const char *key) {
-  std::vector<int64_t> out;
-  const std::string k = std::string("\"") + key + "\"";
-  size_t i = s.find(k, from);
-  if (i == std::string::npos || i > to) return out;
-  i = s.find('[', i);
-  const size_t end = s.find(']', i);
-  size_t p = i + 1;
-  while (p < end) {
-    while (p < end && !(std::isdigit(static_cast<unsigned char>(s[p])) ||
-                        s[p] == '-')) ++p;
-    if (p >= end) break;
-    out.push_back(std::stoll(s.substr(p)));
-    while (p < end && (std::isdigit(static_cast<unsigned char>(s[p])) ||
-                       s[p] == '-')) ++p;
-  }
-  return out;
-}
-
-std::map<std::string, Tensor> read_safetensors(const std::vector<uint8_t> &buf) {
-  if (buf.size() < 8) throw std::runtime_error("safetensors: file too short");
-  uint64_t hlen = 0;
-  std::memcpy(&hlen, buf.data(), 8);
-  if (8 + hlen > buf.size())
-    throw std::runtime_error("safetensors: header length exceeds file");
-  const std::string js(reinterpret_cast<const char *>(buf.data() + 8),
-                       static_cast<size_t>(hlen));
-  const uint8_t *base = buf.data() + 8 + hlen;
-
-  std::map<std::string, Tensor> out;
-  size_t p = 0;
-  while (true) {
-    // Each entry is  "name":{...}. Find the next name at brace depth 1.
-    const size_t q1 = js.find('"', p);
-    if (q1 == std::string::npos) break;
-    const size_t q2 = js.find('"', q1 + 1);
-    if (q2 == std::string::npos) break;
-    const std::string name = js.substr(q1 + 1, q2 - q1 - 1);
-    const size_t ob = js.find('{', q2);
-    if (ob == std::string::npos) break;
-    const size_t cb = js.find('}', ob);
-    if (cb == std::string::npos) break;
-    p = cb + 1;
-    if (name == "__metadata__") continue;
-
-    Tensor t;
-    t.dtype = json_str_field(js, ob, cb, "dtype");
-    // A non-F32 tensor is not an error by itself -- this checkpoint carries
-    // embeddings.position_ids as I64 and nothing reads it. It becomes an
-    // error only if something asks for it, which get() enforces. Rejecting
-    // the whole file here would refuse a checkpoint that is perfectly usable;
-    // ignoring the dtype at read time would reinterpret integers as floats.
-    t.shape = json_int_array(js, ob, cb, "shape");
-    const auto off = json_int_array(js, ob, cb, "data_offsets");
-    if (off.size() != 2)
-      throw std::runtime_error("safetensors: " + name + " has no data_offsets");
-    t.data = base + off[0];
-    t.bytes = static_cast<size_t>(off[1] - off[0]);
-    if (t.dtype == "F32" && t.bytes != static_cast<size_t>(t.count()) * 4)
-      throw std::runtime_error("safetensors: " + name + " size disagrees with "
-                               "its shape");
-
-    // Widen F16/BF16 to fp32 here, once, so every consumer below sees F32 and
-    // none of them has to know. Both conversions are EXACT (fp32 has more
-    // exponent range and more mantissa than either), so this cannot be the
-    // source of any error measured downstream.
-    if (t.dtype == "F16" || t.dtype == "BF16") {
-      const size_t n = static_cast<size_t>(t.count());
-      if (t.bytes != n * 2)
-        throw std::runtime_error("safetensors: " + name + " size disagrees "
-                                 "with its shape");
-      t.owned = std::make_shared<std::vector<float>>(n);
-      const uint16_t *src = reinterpret_cast<const uint16_t *>(t.data);
-      float *dst = t.owned->data();
-      if (t.dtype == "BF16") {
-        // bf16 IS the top half of an fp32: shift, done. No rounding, no
-        // special cases -- NaN and Inf patterns come across unchanged.
-        for (size_t i = 0; i < n; ++i) {
-          const uint32_t bits = static_cast<uint32_t>(src[i]) << 16;
-          std::memcpy(&dst[i], &bits, 4);
-        }
-      } else {
-        // IEEE half -> float. Subnormals and the Inf/NaN exponent both need
-        // their own arm; getting either wrong is silent, so both are here
-        // rather than approximated by the fast path.
-        for (size_t i = 0; i < n; ++i) {
-          const uint16_t h = src[i];
-          const uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
-          uint32_t exp = (h >> 10) & 0x1Fu;
-          uint32_t man = h & 0x3FFu;
-          uint32_t bits;
-          if (exp == 0) {
-            if (man == 0) {
-              bits = sign;                       // +-0
-            } else {
-              // Subnormal half: normalise it into a normal float.
-              int shift = 0;
-              while (!(man & 0x400u)) { man <<= 1; ++shift; }
-              man &= 0x3FFu;
-              bits = sign | ((127 - 15 - shift + 1) << 23) | (man << 13);
-            }
-          } else if (exp == 0x1F) {
-            bits = sign | 0x7F800000u | (man << 13);   // Inf / NaN
-          } else {
-            bits = sign | ((exp + (127 - 15)) << 23) | (man << 13);
-          }
-          std::memcpy(&dst[i], &bits, 4);
-        }
-      }
-      t.data = reinterpret_cast<const uint8_t *>(dst);
-      t.bytes = n * 4;
-      t.dtype = "F32";
-    }
-    out.emplace(name, t);
-  }
-  return out;
-}
 
 // --- sha256 ---------------------------------------------------------------
 // The container records the checksum of the checkpoint it was built from, and
@@ -452,7 +293,7 @@ MacGeom mac_for_device(const std::string &device) {
 // The one C++ SHA-256, exposed. The downloader must verify a checkpoint with
 // EXACTLY the implementation that later records `source_sha256` into the
 // container -- a second copy is how the Python side ended up with four.
-// Streamed rather than slurped: `model.safetensors` is 438 MB for bge-base
+// Streamed rather than slurped: whisper-large-v3's external data is 2.5 GB
 // and there is no reason to hold it twice.
 std::string sha256_file(const std::string &path) {
   std::ifstream f(path, std::ios::binary);
@@ -466,6 +307,40 @@ std::string sha256_file(const std::string &path) {
       s.update(reinterpret_cast<const uint8_t *>(buf.data()), (size_t)got);
   }
   return s.hex();
+}
+
+// The ONE source fact a container records as `source_sha256`, and the same
+// number CHECKPOINT.json's `sha256` holds.
+//
+// Hashing `model.onnx` alone would pin the tensor NAMES and none of the
+// WEIGHTS: an export may keep its bytes in a side file next to a graph that
+// never changes, so swapping the checkpoint out under an unchanged graph
+// verifies clean. So this walks source_files() -- the graph first, then every
+// side file it points at, in declaration order -- and hashes each file's
+// basename, a NUL, its sha256 and a newline. The framing is what lets the
+// result be one number over a VARIABLE file set: without it, concatenating
+// two digests and concatenating one digests the same, and a checkpoint could
+// be re-partitioned across files to reproduce someone else's pin.
+//
+// Mirrors model_digest() in reference/onnx_io.py, byte for byte.
+std::string model_digest(const std::vector<std::string> &graphs) {
+  std::vector<std::string> files;
+  for (const std::string &g : graphs) {
+    const OnnxWeights w(g);
+    for (const std::string &f : w.source_files())
+      if (std::find(files.begin(), files.end(), f) == files.end())
+        files.push_back(f);
+  }
+  Sha256 outer;
+  for (const std::string &p : files) {
+    const std::string base = std::filesystem::path(p).filename().string();
+    const std::string hex = sha256_file(p);
+    outer.update(reinterpret_cast<const uint8_t *>(base.data()), base.size());
+    outer.update(reinterpret_cast<const uint8_t *>("\0"), 1);
+    outer.update(reinterpret_cast<const uint8_t *>(hex.data()), hex.size());
+    outer.update(reinterpret_cast<const uint8_t *>("\n"), 1);
+  }
+  return outer.hex();
 }
 
 // The [K,N] operand for a GEMM: transpose the checkpoint's [N,K] weight,
@@ -570,23 +445,22 @@ Layout gemm_b_layout(int64_t tile_k, int64_t tile_n, int64_t mac_s,
   return L;
 }
 
-void prepare_model(const std::string &safetensors, const std::string &vocab,
+void prepare_model(const std::string &model_dir, const std::string &vocab,
                    const std::string &config_json_path,
                    const std::string &pooling,
                    const std::string &source_repo,
-                   const std::string &out, const std::string &source_sha,
+                   const std::string &out,
                    const std::string &layout_json,
                    const std::string &layout_hash,
                    int64_t tile_k, int64_t tile_n, int64_t max_seq,
                    void (*log)(const std::string &), MacGeom mac) {
-  const auto st_buf = slurp(safetensors);
-  const auto src = read_safetensors(st_buf);
-  std::string sha = source_sha;
-  if (sha.empty()) {
-    Sha256 s;
-    s.update(st_buf.data(), st_buf.size());
-    sha = s.hex();
-  }
+  // Read the GRAPH, not a weight file, and hash exactly the files that read
+  // covered. Both happen here rather than being passed in so a container
+  // cannot record a digest of something this call did not actually read.
+  const std::string graph = std::string(model_dir) + "/" + kModelOnnx;
+  const OnnxWeights ck(graph);
+  const std::map<std::string, Tensor> &src = ck.tensors();
+  const std::string sha = model_digest({graph});
   auto get = [&](const std::string &n) -> const Tensor & {
     auto it = src.find(n);
     if (it == src.end())
@@ -758,11 +632,10 @@ void prepare_model_gemma(const std::string &model_dir, const std::string &out,
                          const std::string &source_repo,
                          void (*log)(const std::string &), int64_t tile_k,
                          int64_t tile_n, bool host_only, MacGeom mac) {
-  const auto st_buf = slurp(model_dir + "/model.safetensors");
-  const auto src = read_safetensors(st_buf);
-  Sha256 sh;
-  sh.update(st_buf.data(), st_buf.size());
-  const std::string sha = sh.hex();
+  const std::string graph = std::string(model_dir) + "/" + kModelOnnx;
+  const OnnxWeights ck(graph, embeddinggemma_options());
+  const std::map<std::string, Tensor> &src = ck.tensors();
+  const std::string sha = model_digest({graph});
 
   auto get = [&](const std::string &n) -> const Tensor & {
     auto it = src.find(n);
@@ -843,12 +716,14 @@ void prepare_model_gemma(const std::string &model_dir, const std::string &out,
   if (cfg.find("\"_sliding_window_pattern\"") != std::string::npos)
     swp = cfg_int("_sliding_window_pattern");
 
-  const auto d2_buf = slurp(model_dir + "/2_Dense/model.safetensors");
-  const auto d2 = read_safetensors(d2_buf);
-  const auto d3_buf = slurp(model_dir + "/3_Dense/model.safetensors");
-  const auto d3 = read_safetensors(d3_buf);
-  const Tensor &d2w = get_from(d2, "linear.weight");
-  const Tensor &d3w = get_from(d3, "linear.weight");
+  // The two post-pool Dense heads are not separate files in an ONNX export:
+  // the export folded them into the graph. pack_gemma() therefore reads them
+  // here by the spellings the export itself uses, which is exactly what
+  // tools/pack/pack_npue.py does -- the `2_Dense/` and `3_Dense/` subtrees
+  // only ever existed in the flat per-tensor-tree layout that model shipped
+  // in before the export.
+  const Tensor &d2w = get_from(src, "/model/st/dense_1.weight");
+  const Tensor &d3w = get_from(src, "/model/st/dense_2.weight");
   const int64_t dense_hidden = d2w.shape[0];
 
   if (log) {
@@ -866,6 +741,14 @@ void prepare_model_gemma(const std::string &model_dir, const std::string &out,
   // insertion order, and this must match it byte for byte.
   std::string cj;
   cj += "{\"arch\":\"gemma3_mqa_rope_geglu\"";
+  // The operand datapath, in the same POSITION pack_gemma() writes it --
+  // after `arch`, before `model_type` -- because json.dumps preserves
+  // insertion order and a key in the wrong place is a byte difference the
+  // layout hash cannot see. `int8` is a Python-only path (it needs a
+  // SmoothQuant calibration pass over a numpy oracle) and pack_gemma()
+  // writes "bf16" for both the plain and the host-only form, so here it is
+  // unconditional.
+  cj += ",\"a_dtype\":\"bf16\"";
   cj += ",\"model_type\":\"" + model_type + "\"";
   cj += ",\"source_repo\":\"" + source_repo + "\"";
   cj += ",\"source_sha256\":\"" + sha + "\"";
@@ -1181,11 +1064,10 @@ void prepare_model_nomic(const std::string &model_dir,
                          const std::string &layout_hash,
                          int64_t tile_k, int64_t tile_n, int64_t max_seq,
                          void (*log)(const std::string &), MacGeom mac) {
-  const auto st_buf = slurp(model_dir + "/model.safetensors");
-  const auto src = read_safetensors(st_buf);
-  Sha256 sh;
-  sh.update(st_buf.data(), st_buf.size());
-  const std::string sha = sh.hex();
+  const std::string graph = std::string(model_dir) + "/" + kModelOnnx;
+  const OnnxWeights ck(graph);
+  const std::map<std::string, Tensor> &src = ck.tensors();
+  const std::string sha = model_digest({graph});
 
   auto get = [&](const std::string &n) -> const Tensor & {
     auto it = src.find(n);
@@ -1544,12 +1426,13 @@ void prepare_model_gte(const std::string &model_dir,
                        const std::string &layout_hash,
                        int64_t tile_k, int64_t tile_n, int64_t max_seq,
                        void (*log)(const std::string &), MacGeom mac) {
-  const auto st_buf = slurp(model_dir + "/model.safetensors");
-  const auto src = read_safetensors(st_buf);   // widens this checkpoint's
-                                               // F16 to F32 at read time
-  Sha256 sh;
-  sh.update(st_buf.data(), st_buf.size());
-  const std::string sha = sh.hex();
+  // Widening this checkpoint's F16 to F32 is the reader's job, not this
+  // packer's -- see OnnxWeights: it happens exactly once, before anything is
+  // rounded to bf16, so a half-precision weight is never rounded twice.
+  const std::string graph = std::string(model_dir) + "/" + kModelOnnx;
+  const OnnxWeights ck(graph);
+  const std::map<std::string, Tensor> &src = ck.tensors();
+  const std::string sha = model_digest({graph});
 
   // pack_gte() strips the leading "new." from every checkpoint key (only
   // classifier.weight/classifier.bias lack it, and those are deliberately

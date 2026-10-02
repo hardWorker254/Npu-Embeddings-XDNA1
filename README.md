@@ -397,7 +397,7 @@ of its own. `npuembeddings list` shows those rows as `stt`.
 
 ### What a user has to download
 
-**Only `model.safetensors`.** Everything else a Whisper container is built from
+**Only the ONNX export.** Everything else a Whisper container is built from
 is committed: `config.json` (geometry), `preprocessor_config.json` (the audio
 constants), `generation_config.json` (the decoding policy) and the byte-level
 BPE table as `vocab.json` + `merges.txt` + `added_tokens.json` — 1.5 MB per
@@ -411,7 +411,8 @@ rather than in the download: a `generation_config.json` without its
 wrong audio. The packer refuses a checkpoint that lacks either, which is a
 good refusal — but it would leave anyone holding the weights with a dead end.
 
-So the flow is: download the weights, drop them in `models/<name>/`, and run
+So the flow is: download the export, drop it into `models/<name>/onnx/` — the
+graph, plus any side file it names, under that file's own basename — and run
 the three commands below.
 
 ### Three steps, once per model
@@ -573,7 +574,9 @@ claim below is therefore about ImageNet-distribution images.
 
 ### What a user has to download
 
-**Only `model.safetensors`.** One small file is committed:
+**Only the ONNX export.** It goes at
+`models/vit-base-patch16-224/onnx/model.onnx` (plus a side file if the graph
+names one, beside it under that basename). One small file is committed:
 `preprocessor_config.json`, because its `image_size`, resample code and mean/std
 *are* the front end — the packer refuses a checkpoint without it, and no other
 file in the tree carries those numbers, so a wrong mean yields a container that

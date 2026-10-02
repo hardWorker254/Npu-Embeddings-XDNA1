@@ -1,5 +1,5 @@
-# NpuEmbeddings -- read an ONNX checkpoint the way reference/safetensors_io.py
-# used to read a .safetensors one.
+# NpuEmbeddings -- read an ONNX checkpoint the way this file's predecessor
+# read a flat weight file.
 #
 # reference/ is the oracle: every golden, and every comparison of a kernel
 # against the thing it is supposed to compute, traces back to weights loaded
@@ -9,11 +9,11 @@
 # inside that boundary. (It walks the protobuf wire format itself rather than
 # importing onnx, both because onnx is not in the iron env and because
 # onnx.load() materialises the whole file: 212 MB resident for a 90 MB model,
-# measured, which is the OOM coin-flip the safetensors reader was written to
+# measured, which is the OOM coin-flip the previous reader was written to
 # avoid. The field numbers it hardcodes are checked against the installed
 # onnx package by tools/verify/verify_onnx_reader.py.)
 #
-# The signature is safetensors_io.load()'s on purpose: ({name: ndarray},
+# The signature is its predecessor load()'s on purpose: ({name: ndarray},
 # metadata). ONNX carries no metadata block, so the second element is always
 # {} -- and every call site in this tree already writes `w, _ = load(...)`,
 # discarding it, so nothing downstream had to change shape.

@@ -44,6 +44,14 @@ int main(int argc, char **argv) try {
     if (app::maybe_tokenize(root, argc, argv))
         return 0;
 
+    // --prepare-model builds a container from the ONNX export placed under a
+    // checkpoint directory. It runs after the utility flags above and BEFORE
+    // resolve_model_path(), because it does not consume an installed model --
+    // it produces one, and on a tree holding several containers
+    // resolve_model_path() would refuse to guess which one the caller meant.
+    if (app::maybe_prepare_model(args, argc, argv))
+        return 0;
+
     const std::string model_path =
         app::resolve_model_path(root, argc, argv);
     (void)npue::load_model(model_path);

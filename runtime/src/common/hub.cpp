@@ -14,6 +14,7 @@
 #include "common/hub.hpp"
 
 #include "common/json_min.hpp"
+#include "common/onnx_read.hpp"
 #include "common/npue_pack.hpp"
 #include "common/design_selection.hpp"  // app::running_device()
 
@@ -54,30 +55,33 @@ const std::vector<CatalogEntry> &table() {
   static const std::vector<CatalogEntry> v = [] {
     std::vector<CatalogEntry> rows = {
       {"all-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L6-v2",
-       "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db",
+       "75ba77256ecf2dbf7314c59adc785a002662e09a2062c2f3b3f650a80f1411b4",
        "mean", 384, 6, 12, 1536, 48, 90.9,
        "smallest and fastest; head_dim 32 keeps attention off the array"},
       {"bge-small-en-v1.5", "BAAI/bge-small-en-v1.5",
-       "3c9f31665447c8911517620762200d2245a2518d6e7208acc78cd9db317e21ad",
+       "1fd2e85dc29d4df6e4dbbe442ddbb80861f38d2ccc361095d7cbdd34625339d0",
        "cls", 384, 12, 12, 1536, 48, 133.5,
        "MiniLM's width at twice the depth; +2.99 MTEB points"},
       {"bge-base-en-v1.5", "BAAI/bge-base-en-v1.5",
-       "c7c1988aae201f80cf91a5dbbd5866409503b89dcaba877ca6dba7dd0a5167d7",
+       "9a26303ba8a2d6175aaefa94c0c10738b68eba2cee895e7f7cee1c8b780a4333",
        "cls", 768, 12, 12, 3072, 48, 438.0,
        "best geometric fit for this NPU: head_dim 64 and every N a "
        "multiple of 384"},
       {"bge-large-en-v1.5", "BAAI/bge-large-en-v1.5",
-       "45e1954914e29bd74080e6c1510165274ff5279421c89f76c418878732f64ae7",
+       "4bae895edc7be61910dc4c195de713e081592cbdd6fe9c3ca60a5b83430b0052",
        "cls", 1024, 24, 16, 4096, 32, 1340.0,
        "highest quality; N=1024 forces tile_n 32, and 24 layers cost "
        "dispatches", /*gated=*/false, /*gemma=*/false},
-      // Pin fetched and verified 2026-08-20 (tasks/0066): downloaded
-      // model.safetensors from the OFFICIAL gated google/embeddinggemma-300m
-      // with a real HF_TOKEN, sha256 cbf5a78393b6a033e0b8a63a57549964
-      // f7ed5c6fbeb4ba0694214f36123f2fd2 -- byte-identical to the
+      // Pin measured 2026-08-20 (tasks/0066) from the OFFICIAL gated
+      // google/embeddinggemma-300m repository with a real HF_TOKEN, and
+      // re-measured over the ONNX export now that weights are taken as ONNX
+      // (BUILD.md §2.2): the graph sits beside a 1.2 GB external-data file
+      // under the basename the graph itself names, and both are hashed, so
+      // the pin covers the weights rather than only the tensor names. The
       // unsloth/embeddinggemma-300m mirror tasks/0055-0065 verified all
-      // night, so every 1-cos/parity figure already on record for that
-      // checkpoint is valid for THIS one too, no re-verification needed.
+      // night was F32 and so is this one, so every 1-cos/parity figure
+      // already on record for that checkpoint is valid for THIS one too, no
+      // re-verification needed.
       // NPU path since tasks/0074: `gated_ffn` (GeGLU -- ffn_up emits both
       // halves, N = 2*1152) and `qkv_n` = 1536 (MQA's 1280-wide Q|K|V,
       // zero-padded so `N % (tile_n * n_aie_cols)` holds at tile_n=48). Both
@@ -85,25 +89,31 @@ const std::vector<CatalogEntry> &table() {
       // N=1152 and N=2304 on the wrong two streams and this row reports "no
       // design" against its own correct design set.
       {"embeddinggemma-300m", "google/embeddinggemma-300m",
-       "cbf5a78393b6a033e0b8a63a57549964f7ed5c6fbeb4ba0694214f36123f2fd2",
+       "e8f7805a291be4d0f67b8763e9b8fe38b66e8e5cb40038cea7361180c5966f2c",
        "mean", 768, 24, 3, 1152, 48, 1155.0,
        "MQA+RoPE+GeGLU on the array (4 GEMMs/layer); gated, needs HF_TOKEN",
        /*gated=*/true, /*gemma=*/true, /*gated_ffn=*/true, /*qkv_n=*/1536},
       // arch=2 (tasks/0068-0071): RoPE + gated SwiGLU, NOT the BERT-family
       // absolute-position + GELU the other four rows share -- but it packs
       // to the SAME layout_hash and runs on the SAME NPU designs (tasks/
-      // 0069). sha256 re-derived locally against the downloaded
-      // model.safetensors with npue::sha256_file (tasks/0071) -- matches
-      // the pin reference/fetch_model.py recorded when this checkpoint was
-      // first brought up (tasks/0068), CLAUDE.md rule 6. `gated_ffn=true`
+      // 0069). `gated_ffn=true`
       // is load-bearing: ffn_up emits 2*ffn (6144, not 3072), and without
       // this bit design_fits() cannot tell this model apart from
       // bge-base-en-v1.5's identical {768,3072} K set (tasks/0069 T31).
       // NEEDS a task prefix (--prefix, tasks/0071) -- omitting one is a
       // measured quality regression, not just a convention
       // (docs/04-model/README.md:24).
+      //
+      // EMPTY PIN, deliberately: this build places no ONNX for this model
+      // (same for gte-multilingual-base, whisper-small, whisper-medium), so
+      // there is no byte set to quote a digest of and models/<name>/
+      // CHECKPOINT.json says so with `sha256: null`. An empty pin is
+      // reportable -- `list` and `serve` warn -- where a digest of some OTHER
+      // byte set would have failed CLEANLY against a perfectly good ONNX
+      // export, which is worse than no pin at all. Place the export and
+      // re-pin with `npuembeddings add <repo> <digest>` to close it.
       {"nomic-embed-text-v1.5", "nomic-ai/nomic-embed-text-v1.5",
-       "9e7d262b1fe5ea350782829496efa831901b77486bbde1cea54a4c822d010d5c",
+       "",
        "mean", 768, 12, 12, 3072, 48, 546.9,
        "RoPE + gated SwiGLU (arch=2); same array designs as bge-base; "
        "needs --prefix (search_document / search_query / clustering / "
@@ -120,9 +130,11 @@ const std::vector<CatalogEntry> &table() {
       // qkv_n is stated explicitly per the container though it equals
       // 3*hidden, so 0 would behave identically in design_fits().
       //
-      // The model.safetensors pin below is the one ensure_model() enforces,
-      // like every other row (the table's scheme pins exactly that file).
-      // The tokenizer/config files were additionally pinned in tasks/0127
+      // The ONNX pin below is the one ensure_model() enforces, like every
+      // other row (the table's scheme pins exactly the checkpoint's bytes).
+      // It is EMPTY here for the same reason this build fetches no weights at
+      // all: there is no export on disk to measure. The tokenizer/config
+      // files were additionally pinned in tasks/0127
       // and re-verified against the local checkout in tasks/0138; recorded
       // here for traceability, NOT enforced by the fetch path:
       //   tokenizer.json           f59925fcb90c92b894cb93e51bb9b4a6105c5c24
@@ -134,7 +146,7 @@ const std::vector<CatalogEntry> &table() {
       //   config.json              711bdc81365fc25d30533cf05b9fdf588e5ba01f
       //                            18540fbbb1307d787597a313
       {"gte-multilingual-base", "Alibaba-NLP/gte-multilingual-base",
-       "f5a35a10faa54da7717870af1517c9b41e9bd8e3880bc5a8e9363d4c3c63e9b0",
+       "",
        "cls", 768, 12, 12, 3072, 48, 582.5,
        "multilingual, XLM-R tokenizer; NTK RoPE + gated GeGLU (arch=3); "
        "same array designs as bge-base/nomic",
@@ -145,9 +157,11 @@ const std::vector<CatalogEntry> &table() {
       // because Whisper's geometry forces (64, 32) for all six sizes -- d and
       // 4d both tile with no padding at 48 except d=1280 (5120/48 is not
       // whole), which would force a per-size repack and a per-size design set.
-      // The sha256 pins are the model.safetensors digests recorded in each
-      // models/<name>/CHECKPOINT.json: measured against the bytes this machine
-      // holds, not quoted from a repository page. `hidden`/`layers`/`heads`/
+      // The sha256 pins are the ONNX digests recorded in each
+      // models/<name>/CHECKPOINT.json -- measured against the bytes this
+      // machine holds, not quoted from a repository page. whisper-small and
+      // whisper-medium have no export placed, so theirs are empty for the
+      // reason spelled out above. `hidden`/`layers`/`heads`/
       // `ffn` are the ENCODER stack's, because that is the half whose GEMM
       // shape an embedder shares.
       //
@@ -175,37 +189,37 @@ const std::vector<CatalogEntry> &table() {
       // only the encoder half cannot transcribe anything, and a decoder-only
       // set cannot encode anything.
       {"whisper-tiny", "openai/whisper-tiny",
-       "7ebd0e69e78190ffe1438491fa05cc1f5c1aa3a4c4db3bc1723adbb551ea2395",
+       "eb6a1b7f608a845fe447d8f2be5183ca92e927cf09da48614ace1b6759c8bf66",
        "n/a", 384, 4, 6, 1536, 32, 151.0,
        "smallest Whisper: 4+4 layers, 80 mel bins; greedy, no timestamps",
        /*gated=*/false, /*gemma=*/false, /*gated_ffn=*/false, /*qkv_n=*/0,
        /*gte=*/false, /*datapath=*/"bf16", /*stt=*/true},
       {"whisper-base", "openai/whisper-base",
-       "07cadb9f25677c8d50df603e66a98fbd842cce45047139baeb16e6219a1e807b",
+       "f28875111fc17da2a849ae5cf89ea3d1a95c7e3ac13220adf0d774d5acc07220",
        "n/a", 512, 6, 8, 2048, 32, 290.0,
        "6+6 layers; clearly better than tiny on real speech",
        /*gated=*/false, /*gemma=*/false, /*gated_ffn=*/false, /*qkv_n=*/0,
        /*gte=*/false, /*datapath=*/"bf16", /*stt=*/true},
       {"whisper-small", "openai/whisper-small",
-       "1d7734884874f1a1513ed9aa760a4f8e97aaa02fd6d93a3a85d27b2ae9ca596b",
+       "",
        "n/a", 768, 12, 12, 3072, 32, 968.0,
        "12+12 layers; the first size where quality clearly beats base",
        /*gated=*/false, /*gemma=*/false, /*gated_ffn=*/false, /*qkv_n=*/0,
        /*gte=*/false, /*datapath=*/"bf16", /*stt=*/true},
       {"whisper-medium", "openai/whisper-medium",
-       "62f73550fa6db24b0c6f6c5962bd0dae80fa644e93cde9cd9c3792971b47fd28",
+       "",
        "n/a", 1024, 24, 16, 4096, 32, 3100.0,
        "24+24 layers; 4x the dispatches of base for a modest gain",
        /*gated=*/false, /*gemma=*/false, /*gated_ffn=*/false, /*qkv_n=*/0,
        /*gte=*/false, /*datapath=*/"bf16", /*stt=*/true},
       {"whisper-large-v3", "openai/whisper-large-v3",
-       "a8e94b85976e5864ba3e9525c7e6c83b2a1eca42d4b797a0c7c24d778e40fd95",
+       "e102c8c8d65a1a1523781a7d8a060b3e01fe29153e3c2f3f1d041134a1d04413",
        "n/a", 1280, 32, 20, 5120, 32, 3100.0,
        "32+32 layers, 128 mel bins; the audio frontend dominates its runtime",
        /*gated=*/false, /*gemma=*/false, /*gated_ffn=*/false, /*qkv_n=*/0,
        /*gte=*/false, /*datapath=*/"bf16", /*stt=*/true},
       {"whisper-large-v3-turbo", "openai/whisper-large-v3-turbo",
-       "542566a422ae4f3fd23f1ba11add198fca01bbf82e66e6a2857b3f608b1eb9d1",
+       "3bde99002f993a9a8a401b0107a74ce3e8eebc8bf9e7b29c960ec009a58c79bd",
        "n/a", 1280, 32, 20, 5120, 32, 1620.0,
        "large-v3's encoder with a 4-layer decoder: ~4x the speed, some cost",
        /*gated=*/false, /*gemma=*/false, /*gated_ffn=*/false, /*qkv_n=*/0,
@@ -243,11 +257,11 @@ const std::vector<CatalogEntry> &table() {
       // reason. `qkv_n` 0 means 3*hidden = 2304, stated as 0 because that is
       // what every MHA row here does and a reader should not have to check.
       //
-      // sha256 measured against the bytes on disk with hashlib, and it is the
-      // same digest the container records as source_sha256
-      // (1cea0711...6162ccb5d) -- two independent statements of one fact.
+      // sha256 measured against the bytes on disk, and it is the same digest
+      // the container records as source_sha256 (e1ea56c7...2d84f1eed) -- two
+      // independent statements of one fact.
       {"vit-base-patch16-224", "google/vit-base-patch16-224",
-       "1cea07110a4a47edc51420b2dda6f3b8b58e7256e8f44b4ea6aa9696162ccb5d",
+       "e1ea56c7b3f4748d06dce072fc8d59ccd138d0f9d5d5e9787565a262d84f1eed",
        "n/a", 768, 12, 12, 3072, 48, 346.3,
        "image classifier: 4 GEMMs/layer on the SAME designs as bge-base, "
        "patch_embed rides attn_out; 197 positions, head on the host",
@@ -294,12 +308,18 @@ const std::vector<CatalogEntry> &table() {
 // duplicate are several hundred megabytes of nothing. This mirrors
 // reference/fetch_model.py's ALLOW list, minus the files only the Python
 // reference path uses.
+//
+// NO WEIGHTS IN ANY OF THESE LISTS, and that is a decision rather than an
+// omission: ONNX exports are placed into models/<name>/onnx/ by hand
+// (BUILD.md §2.2), because the whole point is that a checkout never has to
+// be trusted for a binary it did not choose. This build therefore verifies
+// whatever ONNX is present against the catalogue pin and refuses to proceed
+// when there is none -- there is nothing here to download.
 struct Want {
   const char *rel;
   bool required;
 };
 const Want kFiles[] = {
-    {"model.safetensors", true},
     {"vocab.txt", true},
     {"config.json", true},
     {"1_Pooling/config.json", true},
@@ -309,19 +329,18 @@ const Want kFiles[] = {
 // tokenizer.json + tokenizer_config.json, packed at build time into
 // gemma_tokenizer.bin by tools/gen_gemma_tokenizer_table.py -- not fetched
 // here, since ensure_model() only fetches the CHECKPOINT, not the generated
-// table); needs the sentence-transformers prompt table and both Dense heads
-// (tasks/0064's two post-pooling projections).
+// table); needs the sentence-transformers prompt table and both Dense heads'
+// configs (the heads' own WEIGHTS are folded into the graph by the export,
+// so 2_Dense/ and 3_Dense/ contribute config only -- tasks/0064's two
+// post-pooling projections).
 const Want kFilesGemma[] = {
-    {"model.safetensors", true},
     {"config.json", true},
     {"tokenizer.json", true},
     {"tokenizer_config.json", true},
     {"config_sentence_transformers.json", true},
     {"1_Pooling/config.json", true},
     {"2_Dense/config.json", true},
-    {"2_Dense/model.safetensors", true},
     {"3_Dense/config.json", true},
-    {"3_Dense/model.safetensors", true},
 };
 
 // gte's file set (arch=3, model_type "new"): no vocab.txt -- its tokenizer
@@ -334,7 +353,6 @@ const Want kFilesGemma[] = {
 // here for the same reason kFiles' 1_Pooling/config.json already is:
 // download() creates the destination's parent directories.
 const Want kFilesGte[] = {
-    {"model.safetensors", true},
     {"config.json", true},
     {"tokenizer.json", true},
     {"tokenizer_config.json", true},
@@ -359,7 +377,6 @@ const Want kFilesGte[] = {
 // the entry is here only for a model directory that genuinely lacks them -- the
 // case where a user has just the weights.
 const Want kFilesWhisper[] = {
-    {"model.safetensors", true},
     {"config.json", true},
     {"generation_config.json", true},
     {"preprocessor_config.json", true},
@@ -371,7 +388,7 @@ const Want kFilesWhisper[] = {
 // An image classifier's file set (arch=5, vit_patch16_prenorm_gelu), and it is
 // EXACTLY what tools/pack/packers/vit.py opens: config.json (the geometry AND
 // model_type), preprocessor_config.json (the image front end's own size,
-// resample, mean and std), model.safetensors, and nothing else.
+// resample, mean and std), the ONNX export, and nothing else.
 //
 // NOTABLY ABSENT, and each absence is a statement rather than an omission:
 //   * no tokenizer, no vocab table, no 1_Pooling/config.json -- a ViT has no
@@ -385,7 +402,6 @@ const Want kFilesWhisper[] = {
 // refuses a checkpoint directory without one, because the normalisation
 // constants are part of the model's definition.
 const Want kFilesVit[] = {
-    {"model.safetensors", true},
     {"config.json", true},
     {"preprocessor_config.json", true},
 };
@@ -1139,18 +1155,42 @@ std::string ensure_model(const std::string &root, const std::string &name,
   }
 
   // The check that used to be `certutil` in a batch file. Same comparison,
-  // same pin, no script.
-  if (log) log("  hash  model.safetensors");
-  const std::string got =
-      npue::sha256_file((dir / "model.safetensors").string());
+  // same pin, no script -- except the fact being hashed is now the ONNX
+  // export plus every external-data file it points at, because that is where
+  // the WEIGHTS are. Hashing only the graph would pin the tensor names and
+  // none of the values: a checkpoint could be swapped out under an unchanged
+  // graph and verify clean.
+  //
+  // NO ONNX PLACED means no pin is possible at all, and saying so is the
+  // whole contract: everything the build knows how to fetch has been fetched
+  // by this point, and the one remaining step is one this build deliberately
+  // does not do for you (BUILD.md §2.2).
+  const npue::OnnxCheckpoint ck = npue::onnx_checkpoint(dir.string());
+  if (ck.empty()) {
+    throw std::runtime_error(
+        "no ONNX placed under " + dir.string() + "\n"
+        "  Everything else this model needs has just been fetched. Weights are\n"
+        "  an ONNX export placed by hand, because a checkout should never have\n"
+        "  to trust a binary it did not choose (BUILD.md §2.2). Put:\n"
+        "    " + (dir / npue::kModelOnnx).string() + "\n"
+        "  -- plus any external-data file the graph names, beside it -- and\n"
+        "  run this again. Nothing else is missing.");
+  }
+  if (log)
+    log("  hash  " + ck.files.front() +
+        (ck.files.size() == 1 ? ""
+                              : " +" + std::to_string(ck.files.size() - 1) +
+                                    " side file(s)"));
+  const std::string got = npue::model_digest(ck.graphs);
   if (unpinned(*e)) {
-    // NO PIN, BY THE USER'S CHOICE (`add <repo>` with no sha256). We cannot
-    // verify what we fetched, and pretending otherwise is worse than saying
-    // so -- this is the one place in the fetch path that fails OPEN, and it
-    // does it loudly. The digest is printed so it can be pinned afterwards.
+    // NO PIN, BY THE USER'S CHOICE (`add <repo>` with no sha256) or because
+    // this build ships no digest for the row. We cannot verify what we
+    // fetched, and pretending otherwise is worse than saying so -- this is
+    // the one place in the fetch path that fails OPEN, and it does it
+    // loudly. The digest is printed so it can be pinned afterwards.
     if (log) {
       log("");
-      log("  !! WARNING: '" + e->name + "' was added WITHOUT a sha256 pin.");
+      log("  !! WARNING: '" + e->name + "' has NO sha256 pin in this build.");
       log("  !! These weights were NOT verified against anything. Whatever");
       log("  !! " + e->repo + " served just now is what will be packed.");
       log("  !! Its digest is:");
@@ -1161,7 +1201,7 @@ std::string ensure_model(const std::string &root, const std::string &name,
     }
   } else if (got != e->sha256) {
     throw std::runtime_error(
-        "CHECKSUM MISMATCH for " + e->repo + "/model.safetensors\n"
+        "CHECKSUM MISMATCH for " + e->repo + "\n"
         "    expected " + e->sha256 + "\n"
         "    got      " + got + "\n"
         "  These are not the weights this build was verified against. "
@@ -1191,10 +1231,28 @@ std::string ensure_model(const std::string &root, const std::string &name,
     // evidence of which bytes it was built from. The distinction between
     // "verified against a pin" and "this is merely what arrived" lives in the
     // catalogue, which is where a reader can act on it.
+    //
+    // `file` is a LIST of exactly the files `sha256` covers -- see
+    // reference/onnx_io.py's checkpoint_files(). A bare string could not
+    // express a graph plus its external-data side file, let alone whisper's
+    // encoder AND decoder, and writing one anyway is how a pin ends up
+    // naming less than it claims to.
+    std::string files_json = "[]";
+    if (!ck.files.empty()) {
+      files_json = "[\n";
+      for (size_t i = 0; i < ck.files.size(); ++i)
+        files_json += "    \"" + ck.files[i] +
+                      (i + 1 == ck.files.size() ? "\"" : "\",\n");
+      files_json += "\n  ]";
+    }
+    const std::string digest = unpinned(*e) ? got : e->sha256;
     std::ofstream cf(dir / "CHECKPOINT.json", std::ios::binary);
     cf << "{\n  \"repo_id\": \"" << e->repo
-       << "\",\n  \"file\": \"model.safetensors\",\n  \"sha256\": \""
-       << (unpinned(*e) ? got : e->sha256) << "\"\n}";
+       << "\",\n  \"file\": " << files_json
+       << ",\n  \"sha256\": "
+       << (digest.empty() ? std::string("null")
+                          : "\"" + digest + "\"")
+       << "\n}";
   }
 
   if (log) log("  pack  " + container.filename().string());
@@ -1287,10 +1345,10 @@ std::string ensure_model(const std::string &root, const std::string &name,
                       nullptr, mac);
   } else {
     const Layout layout = gemm_b_layout(64, e->tile_n, mac.s, mac.t);
-    prepare_model((dir / "model.safetensors").string(),
+    prepare_model(dir.string(),
                   (dir / "vocab.txt").string(),
                   (dir / "config.json").string(), e->pooling, e->repo,
-                  container.string(), got, layout.json, layout.hash, 64,
+                  container.string(), layout.json, layout.hash, 64,
                   e->tile_n, 256, nullptr, mac);
   }
 

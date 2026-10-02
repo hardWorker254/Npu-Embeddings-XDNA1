@@ -197,7 +197,8 @@ def main() -> int:
                     default=str(REPO / "runtime" / "whisper-tiny" /
                                 "artifacts_npu1"))
     ap.add_argument("--checkpoint", default=str(REPO / "models" / "whisper-tiny"))
-    ap.add_argument("--exe", default=str(REPO / "runtime" / "build" / "npuembed"))
+    ap.add_argument("--exe",
+                    default=str(REPO / "runtime" / "build" / "npuembeddings"))
     ap.add_argument("--threads", type=int, default=16)
     ap.add_argument("--max-new", type=int, default=16,
                     help="cap on generated tokens per window; the same cap goes "

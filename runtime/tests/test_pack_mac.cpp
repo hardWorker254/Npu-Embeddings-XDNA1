@@ -18,7 +18,8 @@
 //
 // Build:
 //   g++ -std=c++17 -O1 -I runtime/include runtime/tests/test_pack_mac.cpp \
-//       runtime/src/common/npue_pack.cpp -o /tmp/test_pack_mac
+//       runtime/src/common/npue_pack.cpp runtime/src/common/onnx_read.cpp \
+//       -o /tmp/test_pack_mac
 // Run:
 //   /tmp/test_pack_mac <checkpoint-dir> <out-prefix>
 //
@@ -45,8 +46,8 @@ int main(int argc, char **argv) {
     const std::string out = prefix + "." + dev + ".npue";
     auto log = [](const std::string &m) { std::printf("  %s\n", m.c_str()); };
     try {
-      prepare_model(dir + "/model.safetensors", dir + "/vocab.txt",
-                    dir + "/config.json", "mean", "test/repo", out, "",
+      prepare_model(dir, dir + "/vocab.txt",
+                    dir + "/config.json", "mean", "test/repo", out,
                     lay.json, lay.hash, 64, 48, 256, log, mac);
     } catch (const std::exception &e) {
       std::printf("  %s: pack failed: %s\n", dev, e.what());

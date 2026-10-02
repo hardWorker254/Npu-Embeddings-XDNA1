@@ -132,7 +132,7 @@ echo
 "$PY" - <<'PY'
 import importlib.util as u, importlib.metadata as m, sys
 mods = ["numpy", "torch", "transformers", "scipy", "PIL", "openai",
-        "safetensors", "aie.iron", "triton", "onnx"]
+        "aie.iron", "triton", "onnx"]
 bad = [n for n in mods if u.find_spec(n) is None]
 for n in ("mlir-aie-no-rtti", "mlir-air", "triton-xdna", "llvm-aie"):
     print(f"    {n:<18} {m.version(n)}")

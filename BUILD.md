@@ -109,15 +109,37 @@ Two things the venv deliberately does **not** own, because they are not Python:
 ```powershell
 # a venv off your Python 3.13, inheriting numpy/torch rather than duplicating them
 python -m venv --system-site-packages .venv-ref
-& ".\.venv-ref\Scripts\python.exe" -m pip install transformers sentence-transformers safetensors
+& ".\.venv-ref\Scripts\python.exe" -m pip install transformers sentence-transformers
 # only needed for the accuracy gate and the endpoint test
 & ".\.venv-ref\Scripts\python.exe" -m pip install mteb openai
 ```
 
 ### 2.2 Pack the model
 
-The checkpoint is already fetched into `models/`; this fork has no separate
-fetch step. `pack_npue.py` reads it directly.
+**Weights are not fetched — you place them.** Every `models/<name>/` directory
+in this repository carries the config, the tokenizer and `CHECKPOINT.json`, but
+no weights: a checkout should never have to trust a binary it did not choose.
+Put the ONNX export there yourself, under the basenames the graph itself uses:
+
+```sh
+models/all-MiniLM-L6-v2/onnx/model.onnx          # the graph
+models/all-MiniLM-L6-v2/onnx/model.onnx_data      # only if the graph names one
+```
+
+An export that keeps its weights in a side file names it in `external_data`;
+place that file beside the graph under exactly that basename, and never rename
+or patch the graph to suit a layout. `CHECKPOINT.json` says which bytes are
+acceptable: `file` is a list of exactly the files `sha256` covers, graph first
+and then each side file, and both are empty (`file: []`, `sha256: null`) until
+a *complete* export is there. A graph without its weights is not a
+checkpoint, so a half-placed one is reported as absent rather than half-trusted.
+
+```sh
+python tools/verify/verify_onnx_reader.py   # the reader against onnx's own descriptors
+```
+
+Then pack. The checkpoint is read from `models/` directly; there is no
+separate fetch step.
 
 ```sh
 python tools/gen/gen_tokenizer_tables.py   # Unicode tables -> runtime/include/

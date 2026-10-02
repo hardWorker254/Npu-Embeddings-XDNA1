@@ -19,7 +19,7 @@
 # --- the reference stack -------------------------------------------------
 # numpy     every container gate, both exporters, the packer itself
 # torch     the reference encoders and the Whisper gates (CPU build)
-# transformers / tokenizers / safetensors / huggingface-hub
+# transformers / tokenizers / huggingface-hub
 #           reading the checkpoint; the tokenizer references; the golden gates
 # scipy     the image and audio front ends
 # pillow    tools/verify/verify_vit_image.py -- the decode/resize reference
@@ -29,7 +29,6 @@ scipy==1.18.1
 torch==2.11.0+cpu
 transformers==4.57.6
 tokenizers==0.22.2
-safetensors==0.8.0
 huggingface-hub==0.36.2
 pillow==12.3.0
 protobuf==7.36.1
@@ -51,7 +50,7 @@ regex==2026.9.3
 #          walks the protobuf wire format by hand instead, because onnx.load()
 #          materialises the entire file: measured on this machine, 212 MB
 #          resident for a 90 MB model, i.e. 2.35x the file -- and whisper-large
-#          is 3.1 GB, which would be a 7 GB spike the safetensors reader was
+#          is 3.1 GB, which would be a 7 GB spike the hand-written reader was
 #          written to avoid. The cost of hand-rolling is that a wrong field
 #          number would be SILENT (protobuf returns a different tensor rather
 #          than complaining), so onnx earns its place in the other direction:

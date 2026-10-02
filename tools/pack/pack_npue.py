@@ -54,15 +54,15 @@ def load(path, strip="", rename=()):
     `strip` and `rename` are handed to the reader: a root the export ADDED
     and the checkpoint does not have comes off, and the export's mid-name
     rewrites go back to the checkpoint's spelling, so what lands in the dict
-    is what the safetensors dict always was. Only embeddinggemma needs either
+    is what this dict always held. Only embeddinggemma needs either
     ("model." plus EMBEDDINGGEMMA_RENAME -- pass both together); see
     OnnxWeights for the other direction (a root the export dropped).
 
     The reader is tools/lib/onnx_weights.py, which serves every tensor under
-    the name AND the orientation the safetensors checkpoint used, so the dict
-    built here is the dict this file has always built. That is the whole point
-    of the reader's contract: the source of the .npue changed from safetensors
-    to ONNX and no packer changed shape.
+    the name AND the orientation the checkpoint used, so the dict built here
+    is the dict this file has always built. That is the whole point of the
+    reader's contract: the source of the .npue changed to ONNX and no packer
+    changed shape.
 
     Two things about this function are load-bearing and easy to undo:
 
@@ -71,14 +71,15 @@ def load(path, strip="", rename=()):
         name that is not there yet makes the whole file unimportable, and
         then every architecture -- not just the one that needed it -- fails
         with a bare ImportError instead of a message naming what is missing.
-      * no .copy() here, unlike the safetensors version of this function.
-        OnnxWeights.array() promises an OWNED array on purpose (see its
-        docstring: a view outlives close() and then faults), so copying would
-        double the peak on a 1.2 GB gemma checkpoint for nothing. If that
-        promise is ever relaxed, this call site is where it starts to bite.
+      * no .copy() here, unlike the version of this function that read a flat
+        file (whose result was a view that outlived close()). OnnxWeights.
+        array() promises an OWNED array on purpose (see its docstring: a view
+        outlives close() and then faults), so copying would double the peak on
+        a 1.2 GB gemma checkpoint for nothing. If that promise is ever
+        relaxed, this call site is where it starts to bite.
 
     Returns (dict, metadata) with the metadata empty: that pair is the shape
-    reference/safetensors_io.load used to return, every call site in this file
+    this function's predecessor returned, every call site in this file
     discards the second element, and keeping it costs nothing.
     """
     from onnx_weights import OnnxWeights
@@ -338,7 +339,8 @@ def add_gemm_b_host(w, name, mat):
     that: an entry with no "layout" key, which npue.py's Reader.tensor() and
     the C++ loader both already treat as "not tiled, read [K,N] row-major".
     F32, not bf16: this checkpoint's own weights are F32 on disk (verified in
-    tasks/0055 by direct safetensors inspection, contradicting an earlier
+    tasks/0055 by direct inspection of the checkpoint's bytes, contradicting
+    an earlier
     assumption that it shipped bf16 -- see this task's TASK.md), and the
     point of this task is a correctness gate, not a size/speed one; a bf16
     weight path is future work the container format does not block.

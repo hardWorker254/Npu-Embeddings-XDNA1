@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # There are two implementations of the .npue layout: tools/pack/pack_npue.py (the
-# reference, used at build time) and `npuembed --prepare-model` (C++, so a
+# reference, used at build time) and `npuembeddings --prepare-model` (C++, so a
 # downloaded release can build the container without Python).
 #
 # Two implementations of one binary layout is a real risk. A disagreement would
@@ -70,11 +70,16 @@ def main() -> int:
     # any platform this project supports building on except Windows -- so the
     # gate died with FileNotFoundError before comparing anything, on Linux and
     # macOS, every time. Picking the suffix from the host makes `pipeline run
-    # verify_pack_parity` mean the same thing everywhere.
+    # verify_pack_parity` mean the same thing everywhere. It also has to name
+    # the target CMake actually builds: runtime/CMakeLists.txt renamed the
+    # executable to `npuembeddings`, and a gate pointed at the old name runs
+    # whatever happens to be left in build/ -- which on a fresh clone is
+    # nothing, and here was a binary built before the pack path existed.
+    # Testing the wrong program is not a pass.
     ap.add_argument("--exe",
                     default=str(REPO / "runtime" / "build" /
-                                ("npuembed.exe" if os.name == "nt"
-                                 else "npuembed")))
+                                ("npuembeddings.exe" if os.name == "nt"
+                                 else "npuembeddings")))
     # Tile size stopped being a constant when bge-large arrived: its N in
     # {1024, 3072, 4096} makes tile_n 48 illegal, so it packs at 32. A gate
     # that only ever checked 48 would not have covered the packer's newest
@@ -105,7 +110,7 @@ def main() -> int:
     # rather than BERT's absolute-position + GELU, but it needs the SAME two
     # files as the BERT family (the ONNX model, vocab.txt) -- no special
     # file list, and neither packer takes a different CLI shape for it: both
-    # tools/pack/pack_npue.py's main() and `npuembed --prepare-model` dispatch on
+    # tools/pack/pack_npue.py's main() and `npuembeddings --prepare-model` dispatch on
     # config.json's OWN model_type internally, so the subprocess calls below
     # are identical regardless of arch. This flag exists only to make the
     # printed diagnosis say which arch was actually compared.
@@ -156,7 +161,7 @@ def main() -> int:
                             "--model", model_dir.name],
                            capture_output=True, text=True)
         if r.returncode != 0:
-            print(f"npuembed --prepare-model failed:\n{r.stdout}\n{r.stderr}")
+            print(f"npuembeddings --prepare-model failed:\n{r.stdout}\n{r.stderr}")
             return 2
 
         a, b = sha256(py_out), sha256(cc_out)

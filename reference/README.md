@@ -20,8 +20,8 @@ accident must not break the toolchain that took the most work to get running.
 | `check_reference.py` | **iron** | numpy only — running it there is the proof the boundary holds |
 | `precision_study.py` | **iron** | numpy only |
 
-`safetensors_io.py` is our own ~80-line reader/writer, so the consuming side
-needs no `safetensors` package. M4/M7 parse this format from C++ anyway.
+`onnx_io.py` is our own streaming reader/writer, so the consuming side
+needs no graph runtime. M4/M7 parse this format from C++ anyway.
 
 ## Files
 
@@ -29,7 +29,7 @@ needs no `safetensors` package. M4/M7 parse this format from C++ anyway.
 |---|---|
 | `encoder.py` | `BertModel` + mean pool + L2 norm. Every decision from [`docs/04-model`](../docs/04-model/README.md) implemented where it matters, with the reason in a comment. QKV fused as M4 will bake it; `1/√32` deliberately *not* folded, so M4's fold stays provable. All six NPU-bound GEMMs route through a swappable `self.gemm`. |
 | `corpus.py` | Four frozen sentences chosen to hit the tokenizer traps (accents, CJK, `##` decomposition, ragged padding). Changing it invalidates every golden. |
-| `fetch_model.py` | Downloads the checkpoint and **asserts it against the docs** — config, all 101 architecture tensors, shapes, dtypes. Pins the sha256 into `CHECKPOINT.json`. |
+| `fetch_model.py` | Fetches the config and tokenizer, then **asserts them against the docs** — config, all 101 architecture tensors, shapes, dtypes. The ONNX export is placed by hand; `fetch_model.py` pins its sha256 into `CHECKPOINT.json`. |
 | `make_goldens.py` | Writes the goldens. `--taps` adds the full 75-tensor intermediate dump. |
 | `check_reference.py` | **The M3 gate.** Reference vs HuggingFace, tensor by tensor. |
 | `precision_study.py` | What bf16 / bfp16 cost the embedding. Calibrated against M2's hardware measurement first — a simulation that cannot reproduce the measurement has no standing to predict. |
@@ -38,17 +38,18 @@ needs no `safetensors` package. M4/M7 parse this format from C++ anyway.
 
 | file | size | in git |
 |---|---|---|
-| `goldens/minilm_l6_s64_boundary.safetensors` | 3.2 MB | **yes** — the contract |
+| `goldens/minilm_l6_s64_boundary.npz` | 3.2 MB | **yes** — the contract |
 | `goldens/precision_study.json` | small | **yes** |
-| `goldens/minilm_l6_s64_taps.safetensors` | 54 MB | no — regenerate with `--taps` |
+| `goldens/minilm_l6_s64_taps.npz` | 54 MB | no — regenerate with `--taps` |
 
-Both carry the checkpoint sha256 in their metadata. `check_reference.py` refuses
-to run against a checkpoint that does not match.
+Both carry the checkpoint sha256 in their metadata (`__meta__`, read with
+`allow_pickle=False`). `check_reference.py` refuses to run against a checkpoint
+that does not match.
 
 ## Reproduce from scratch
 
 ```powershell
-& ".\.venv-ref\Scripts\python.exe" -m pip install transformers safetensors sentence-transformers huggingface_hub
+& ".\.venv-ref\Scripts\python.exe" -m pip install transformers sentence-transformers huggingface_hub
 & ".\.venv-ref\Scripts\python.exe" reference\fetch_model.py
 & ".\.venv-ref\Scripts\python.exe" reference\make_goldens.py
 & "C:\Users\vegar\.conda\envs\iron\python.exe" reference\check_reference.py     # the gate

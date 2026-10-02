@@ -56,6 +56,7 @@ add_executable(npuembeddings
   src/pool.cpp
   # Subtask 10: shared utilities under common/.
   src/common/npue_pack.cpp
+  src/common/onnx_read.cpp
   src/npu_contention.cpp
   src/common/hub.cpp
   # Subtask 2: tokenizer system (base interface + WordPiece + XLM-R + Gemma).

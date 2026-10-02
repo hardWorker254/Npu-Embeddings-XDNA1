@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace npue {
 
@@ -69,14 +70,30 @@ constexpr MacGeom kMacDefault{8, 8};
 
 // The one C++ SHA-256. Exposed so the downloader (src/hub.cpp) verifies a
 // checkpoint with exactly the implementation that records `source_sha256`
-// into the container. Streams the file; safe on the 438 MB checkpoints.
+// into the container. Streams the file; safe on the 2.5 GB side files.
 std::string sha256_file(const std::string &path);
 
-void prepare_model(const std::string &safetensors, const std::string &vocab,
+// The one source digest: sha256 over the framed (basename, sha256) pairs of
+// every file `graphs`' weights live in -- the graph first, then each external
+// data file it points at. This is the number that lands in a container's
+// `source_sha256` AND in CHECKPOINT.json's `sha256`, so the two can never
+// disagree.
+//
+// `graphs` are graph file paths; side files are discovered from them by
+// reading their `external_data` entries. Mirrors model_digest() in
+// reference/onnx_io.py exactly -- including the framing, which is what stops
+// a checkpoint's bytes being re-partitioned across files to reproduce an
+// unrelated pin.
+std::string model_digest(const std::vector<std::string> &graphs);
+
+// `model_dir` holds the ONNX export (onnx/model.onnx plus any external data
+// file it names), vocab.txt, config.json and the pooling config as placed by
+// hand -- see BUILD.md §2.2.
+void prepare_model(const std::string &model_dir, const std::string &vocab,
                    const std::string &config_json_path,
                    const std::string &pooling,
                    const std::string &source_repo,
-                   const std::string &out, const std::string &source_sha,
+                   const std::string &out,
                    const std::string &layout_json,
                    const std::string &layout_hash,
                    int64_t tile_k, int64_t tile_n, int64_t max_seq,
@@ -84,9 +101,9 @@ void prepare_model(const std::string &safetensors, const std::string &vocab,
                    MacGeom mac = kMacDefault);
 
 // arch=1 (EmbeddingGemma / Gemma3 MQA+RoPE+GeGLU) mirror of
-// tools/pack/pack_npue.py's pack_gemma(). `model_dir` must hold
-// model.safetensors, config.json, 2_Dense/model.safetensors,
-// 3_Dense/model.safetensors and (optionally) gemma_tokenizer.bin.
+// tools/pack/pack_npue.py's pack_gemma(). `model_dir` must hold the ONNX
+// export under onnx/model.onnx, config.json and (optionally)
+// gemma_tokenizer.bin.
 // `source_repo` is resolved by the caller exactly as for the BERT path
 // (CHECKPOINT.json or --source-repo), so both packers agree on it.
 //

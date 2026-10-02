@@ -6,11 +6,12 @@
 # has to carry its own provenance, because a golden compared against a
 # different checkpoint is worse than no golden.
 #
-# It used to be a .safetensors file. .npz is numpy's own container: a zip of
-# .npy arrays, so dtypes and shapes round-trip exactly, `allow_pickle=False`
-# on read keeps it data rather than code, and numpy is in both environments
-# already. The string metadata map that lived in safetensors' `__metadata__`
-# becomes one uint8 array holding the JSON, under META_KEY.
+# It used to be a flat tensor-container file. .npz is numpy's own container: a
+# zip of .npy arrays, so dtypes and shapes round-trip exactly,
+# `allow_pickle=False` on read keeps it data rather than code, and numpy is in
+# both environments already. The string metadata map that such a container
+# used to carry in its header becomes one uint8 array holding the JSON, under
+# META_KEY.
 #
 # Env: numpy only.
 # Usage:

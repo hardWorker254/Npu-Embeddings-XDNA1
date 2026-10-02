@@ -65,21 +65,21 @@ models/**
 !models/vit-base-patch16-224/preprocessor_config.json
 
 # Full intermediate tap dump (~54 MB): a deterministic, CPU-only derivative of
-# the pinned checkpoint. The committed *_boundary.safetensors is the contract.
+# the pinned checkpoint. The committed *_boundary.npz is the contract.
 #   & .\.venv-ref\Scripts\python.exe reference\make_goldens.py --taps
-reference/goldens/*_taps.safetensors
+reference/goldens/*_taps.npz
 
 # Same idea, EmbeddingGemma-300M spike (tasks/0055) -- ~382 MB, regenerate:
 #   & .\.venv-ref\Scripts\python.exe reference\make_goldens_gemma.py --taps
-reference/goldens_gemma/*_taps.safetensors
+reference/goldens_gemma/*_taps.npz
 
 # Same idea, nomic-embed-text-v1.5 (tasks/0069) -- regenerate:
 #   & .\.venv-ref\Scripts\python.exe reference\make_goldens_nomic.py --taps
-reference/goldens_nomic/*_taps.safetensors
+reference/goldens_nomic/*_taps.npz
 
 # Same policy for arch=3; regenerate:
 #   .venv-ref python reference/make_goldens_gte.py --taps
-reference/goldens_gte/*_taps.safetensors
+reference/goldens_gte/*_taps.npz
 
 # Exported ONNX graphs -- 90-133 MB each, and a deterministic derivative of a
 # sha256-pinned checkpoint, exactly like the taps goldens above.

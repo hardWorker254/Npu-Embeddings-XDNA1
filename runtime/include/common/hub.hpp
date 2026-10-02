@@ -46,7 +46,7 @@ namespace hub {
 struct CatalogEntry {
   std::string name;         // container stem, and what `serve <name>` takes
   std::string repo;         // HuggingFace repo id
-  std::string sha256;       // pin for model.safetensors
+  std::string sha256;       // pin over the ONNX export: model_digest()
   std::string pooling;      // "cls" or "mean" -- cross-checked against the
                             // downloaded 1_Pooling/config.json
   int64_t hidden = 0, layers = 0, heads = 0, ffn = 0;

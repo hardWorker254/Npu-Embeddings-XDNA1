@@ -1,7 +1,7 @@
 # NpuEmbeddings -- a minimal, streaming ONNX weight reader.
 #
 # WHY THIS EXISTS: the project packs `.npue` from an ONNX checkpoint rather
-# than a safetensors one, and every reason that made safetensors_mmap.py
+# than a flat one, and every reason that made the reader this replaces
 # hand-rolled applies here -- more so.
 #
 #   1. The iron env is numpy and nothing else (CLAUDE.md). torch, transformers
@@ -9,23 +9,23 @@
 #      in a protobuf runtime, and `onnx.load()` parses the WHOLE file into RAM.
 #      Measured on this machine: 212 MB resident for a 90 MB model -- 2.35x the
 #      file. whisper-large-v3 is 3.1 GB of checkpoint, so a reader that
-#      materialises it is the exact OOM coin-flip safetensors_mmap.py was
+#      materialises it is the exact OOM coin-flip a streaming reader was
 #      written to avoid. This reader walks the protobuf wire format to FIND
 #      each tensor's byte range, then reads it through a memory map: constant
 #      memory, nothing copied until array() is called, and the 3 GB of weights
 #      are never resident unless somebody asks for them.
 #
-#   2. The interface is deliberately identical to SafeTensors -- keys(),
+#   2. The interface is deliberately the established one -- keys(),
 #      __contains__(), info(), raw(), array(), close(), context manager -- so a
-#      call site swaps `SafeTensors(p)` for `OnnxWeights(p)` and nothing else
+#      call site swaps the old reader for `OnnxWeights(p)` and nothing else
 #      moves. Every tensor is presented under the name AND the orientation the
-#      safetensors checkpoint used, which is what makes the swap safe: the
+#      checkpoint used, which is what makes the swap safe: the
 #      packers, the verifiers and the goldens keep working unchanged, and the
 #      equivalence is testable byte-for-byte against the old checkpoint.
 #
-# WHAT ONNX COSTS THAT SAFETENSORS DOES NOT
+# WHAT ONNX COSTS THAT A FLAT DICT DOES NOT
 # -----------------------------------------
-# safetensors is a flat dict {name: bytes}. ONNX is a graph, and exporters do
+# A flat container is a dict {name: bytes}. ONNX is a graph, and exporters do
 # not keep the checkpoint's names or its layout:
 #
 #   (a) NAMES DIE. HF's exports rewrite every nn.Linear into MatMul, which
@@ -40,7 +40,7 @@
 #       GEMM operand arrives with K and N swapped.
 #
 #   (c) THE ROOT CAN BE MISSING. whisper's encoder was exported as a submodule,
-#       so it carries `layers.0...` where safetensors says
+#       so it carries `layers.0...` where the checkpoint says
 #       `model.encoder.layers.0...`. Pass `prefix="model.encoder."`.
 #
 # Both (a) and (b) are recovered from the GRAPH, never guessed from a name or a
@@ -64,7 +64,7 @@
 #
 # Nothing is guessed on failure either: the tensor stays under its generated
 # name and a request for the real one raises a KeyError naming the file, which
-# is safetensors_mmap.py's behaviour and what every gate here expects.
+# is what every gate here expects.
 #
 # Env: numpy only, plus the standard library.
 # Usage:
@@ -100,7 +100,7 @@ WHISPER_DECODER_ONNX = "onnx/decoder_model.onnx"
 # `strip` alone is not enough for this export: it drops a root the checkpoint
 # does not have (see OnnxWeights.strip), but it also RENAMES three families of
 # tensors mid-name, and no amount of prefix surgery reaches those. The names
-# the packers and encoder_gemma.py ask for are the safetensors inventory
+# the packers and encoder_gemma.py ask for are the checkpoint's own inventory
 # recorded in tasks/0055 -- that inventory is the ground truth, so the mapping
 # belongs here rather than in four separate call sites.
 #
@@ -130,13 +130,13 @@ EMBEDDINGGEMMA_RENAME = (
     ("layers.24.final_norm_layernorm.weight", "norm.weight"),
 )
 
-# ONNX TensorProto.DataType -> (numpy dtype, the safetensors tag it maps to).
+# ONNX TensorProto.DataType -> (numpy dtype, the .npue tag it maps to).
 #
-# info() hands back the safetensors tag on purpose: callers that switch on
-# `dt == "BF16"` or `dt == "F32"` were written for the safetensors reader and
+# info() hands back the .npue tag on purpose: callers that switch on
+# `dt == "BF16"` or `dt == "F32"` were written for the container reader and
 # must not have to know which container they are standing in.
 #
-# ONNX also has UINT16/UINT32/UINT64. safetensors has no tag for those, so they
+# ONNX also has UINT16/UINT32/UINT64. The .npue tag set has no entry for those, so they
 # are refused rather than retyped -- inventing a tag would let a mismatched
 # tensor through a shape check that exists to catch exactly that.
 # ---------------------------------------------------------------------------
@@ -153,7 +153,7 @@ ONNX_TO_ST = {
     16: ("<u2", "BF16"),   # BFLOAT16: no numpy dtype, kept as raw bits
 }
 
-# Inlined-data field -> (numpy dtype, safetensors tag). Reached only for
+# Inlined-data field -> (numpy dtype, .npue tag). Reached only for
 # tensors small enough that the exporter wrote typed fields instead of
 # raw_data, which is how torch emits scalar constants.
 _INLINED = {
@@ -417,7 +417,7 @@ def _transpose_for(uses, orig, dims, bias0):
 class OnnxWeights:
     """Read-only, mmap-backed view of an ONNX model, under checkpoint names.
 
-    Same contract as safetensors_mmap.SafeTensors: nothing is copied until
+    Same contract as the reader this replaces: nothing is copied until
     array() is called, array() copies exactly one tensor, and close() releases
     the mapping -- which matters because a dict of views into a closed mapping
     faults on first read rather than raising.
@@ -608,7 +608,8 @@ class OnnxWeights:
 
         THE RETURN VALUE IS OWNED, never a view into the mapping.
 
-        safetensors_mmap.py returns a view for a same-dtype read and documents
+        The flat-file reader this replaces returned a view for a same-dtype read
+        and documents
         that the caller must copy before close(), because close() UNMAPS the
         memory out from under a live array and the next read faults -- which is
         a real hazard: packers hold `st.array(...)` results across close(). This
@@ -702,7 +703,7 @@ class OnnxWeights:
 
 
 class Combined:
-    """Two or more OnnxWeights behind one SafeTensors-shaped surface.
+    """Two or more OnnxWeights behind one shared read-only surface.
 
     whisper ships its encoder and its decoder as separate ONNX files against a
     single checkpoint, and pack_whisper() reads both inside one function: it
@@ -782,7 +783,7 @@ class Combined:
 def _tag_of(t):
     if t["dtype"] not in ONNX_TO_ST:
         raise ValueError(f"onnx: tensor {t['orig']!r} has data_type "
-                         f"{t['dtype']}, for which safetensors has no tag")
+                         f"{t['dtype']}, which this container has no tag for")
     return ONNX_TO_ST[t["dtype"]][1]
 
 

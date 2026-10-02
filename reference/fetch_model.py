@@ -13,7 +13,7 @@
 # inventory check still runs: without it, "the model works" and "we happened
 # to pick up someone else's file" are indistinguishable.
 #
-# Env: .venv-ref  (huggingface_hub -- no safetensors package needed: the
+# Env: .venv-ref  (huggingface_hub -- no weight package needed: the
 #      checkpoint is read by reference/onnx_io.py, numpy only)
 # Usage:
 #   & .\.venv-ref\Scripts\python.exe reference\fetch_model.py
@@ -229,7 +229,8 @@ def check(local, expect_layers):
             want[f"{prefix}.{i}.{suffix}"] = shape
 
     # The inventory is checked against the ONNX, not against a list of what
-    # safetensors happened to hold: ONNX exports drop the two pooler tensors
+    # an earlier, flat weight file happened to hold: ONNX exports drop the two
+    # pooler tensors
     # and the position_ids buffer (all three are in IGNORABLE -- dead weight
     # sentence-transformers never calls), so their absence is expected and
     # their presence would be the surprise.

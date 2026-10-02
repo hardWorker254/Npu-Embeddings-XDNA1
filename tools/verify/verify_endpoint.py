@@ -180,7 +180,7 @@ def main() -> int:
         d = Path(td)
         (d / "in.txt").write_text("\n".join(texts) + "\n", encoding="utf-8")
         run = subprocess.run(
-            [str(REPO / "runtime" / "build" / "npuembed.exe"), "..",
+            [str(REPO / "runtime" / "build" / "npuembeddings.exe"), "..",
              "--model", args.model,
              "--artifacts", args.artifacts, "--threads", "24",
              # The same prompt the endpoint used, or this compares two
