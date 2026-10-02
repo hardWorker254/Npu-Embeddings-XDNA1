@@ -83,8 +83,10 @@ models/**
 #
 # Everything whitelisted here is SMALL TEXT that makes a checkout runnable --
 # a vocab.txt is 231 KB, the largest config is 69 KB (vit's id2label) -- and
-# none of it is a weight: the model.safetensors / pytorch_model.bin /
-# tf_model.h5 / rust_model.ot duplicates beside them stay ignored by models/**.
+# none of it is a weight: every framework export in those directories
+# (pytorch_model.bin, tf_model.h5, rust_model.ot, and the multi-hundred-MB
+# tensor file each checkpoint ships as its primary one) stays ignored by
+# models/**, as does the ONNX the packer actually reads.
 # ONE exception to "text", and it is the point of the list:
 #   gemma_tokenizer.bin (9 MB) is the table the packer embeds. Python cannot
 #   regenerate it (only `npuembeddings --prepare-model` can, from a
