@@ -49,6 +49,34 @@ std::string ensure(const std::string &root, const std::string &name,
         token);
 }
 
+// A NAME and a PATH are different things, and this is where the difference is
+// decided for every subcommand that takes a model argument.
+//
+//   <name>  resolved under <root>/models/<name>.npue by hub::ensure_model(),
+//           which FETCHES whatever the catalogue knows and the tree lacks.
+//   <path>  used as given, because it already names a file that exists.
+//           Routing it through the name resolver is what made
+//               embed models/all-MiniLM-L6-v2.npue in.txt
+//           fail with "no model named ... is installed" plus the whole model
+//           table -- a path's stem is not a model name, and the answer offered
+//           a list of models to a user who was already holding the file. A path
+//           that does not exist is refused by path (throw_missing_container)
+//           rather than silently re-read as a name: `embed ./builds/mine.npue`
+//           with a typo must not embed a DIFFERENT model that happens to be
+//           installed.
+//
+// Silence about pins is deliberate and is the same silence the flag form has:
+// hub::find() says nothing about a file the user points at ("not an error,
+// because a user may have packed their own container"). The runtime names a
+// path-held model after the FILE (runtime.cpp: g_model_name = path stem),
+// which is also how it finds runtime/<stem>/artifacts_npu<N>.
+std::string resolve_container(const std::string &root, const std::string &arg,
+                              const std::string &token) {
+    if (is_container_path(arg)) return arg;
+    if (looks_like_container_path(arg)) throw_missing_container(arg, root);
+    return ensure(root, arg, token);
+}
+
 // THE FLAGS THAT CARRY A VALUE, one list, named. Two call sites need it -- the
 // forwarder below, and run_classify()'s positional scan -- and a second
 // hand-written copy is exactly the drift this file's comment about whitelists
@@ -137,10 +165,11 @@ int run_serve(int argc, char **argv) {
         if (std::string(argv[i]) == "--token") cli_token = argv[i + 1];
     }
     if (argc < 3 || argv[2][0] == '-')
-        throw std::runtime_error("`serve` needs a model name");
+        throw std::runtime_error(
+            "`serve` needs a model name or a path to a .npue container");
     const std::string model_name = argv[2];
-    warn_if_unpinned(model_name);
-    const std::string container = ensure(root, model_name, cli_token);
+    if (!is_container_path(model_name)) warn_if_unpinned(model_name);
+    const std::string container = resolve_container(root, model_name, cli_token);
     std::vector<std::string> store = {"--model", container,
         "--threads", "24", "--pipeline", "4", "--bind", bind,
         "--serve", std::to_string(port)};
@@ -161,14 +190,15 @@ int run_embed(int argc, char **argv) {
         if (std::string(argv[i]) == "--token") cli_token = argv[i + 1];
     }
     if (argc < 3 || argv[2][0] == '-')
-        throw std::runtime_error("`embed` needs a model name");
+        throw std::runtime_error(
+            "`embed` needs a model name or a path to a .npue container");
     const std::string model_name = argv[2];
     if (argc < 4 || argv[3][0] == '-')
         throw std::runtime_error(
             "`embed` needs a file: npuembeddings embed <model> <in.txt> "
             "[out.f32]");
-    warn_if_unpinned(model_name);
-    const std::string container = ensure(root, model_name, cli_token);
+    if (!is_container_path(model_name)) warn_if_unpinned(model_name);
+    const std::string container = resolve_container(root, model_name, cli_token);
     std::vector<std::string> store = {"--model", container,
         "--threads", "24", "--pipeline", "4", "--embed", argv[3]};
     if (argc > 4 && argv[4][0] != '-') store.push_back(argv[4]);
@@ -188,7 +218,8 @@ int run_transcribe(int argc, char **argv) {
         if (std::string(argv[i]) == "--token") cli_token = argv[i + 1];
     }
     if (argc < 3 || argv[2][0] == '-')
-        throw std::runtime_error("`transcribe` needs a model name");
+        throw std::runtime_error(
+            "`transcribe` needs a model name or a path to a .npue container");
     const std::string model_name = argv[2];
     if (argc < 4 || argv[3][0] == '-')
         throw std::runtime_error(
@@ -196,8 +227,8 @@ int run_transcribe(int argc, char **argv) {
             "    npuembeddings transcribe <model> <audio.wav> [--language en]\n"
             "  (--convert ingests through ffmpeg, for mp3/m4a/webm and for WAVs "
             "the reader refuses)");
-    warn_if_unpinned(model_name);
-    const std::string container = ensure(root, model_name, cli_token);
+    if (!is_container_path(model_name)) warn_if_unpinned(model_name);
+    const std::string container = resolve_container(root, model_name, cli_token);
     // No --threads/--pipeline defaults here: the STT mode splits host work over
     // one pool and knows its own shape, and `serve`'s "24 threads, 4 lanes" is
     // an embedding-lane statement that means nothing to an autoregressive
@@ -226,7 +257,8 @@ int run_classify(int argc, char **argv) {
         if (std::string(argv[i]) == "--token") cli_token = argv[i + 1];
     }
     if (argc < 3 || argv[2][0] == '-')
-        throw std::runtime_error("`classify` needs a model name");
+        throw std::runtime_error(
+            "`classify` needs a model name or a path to a .npue container");
     const std::string model_name = argv[2];
     if (argc < 4 || argv[3][0] == '-')
         throw std::runtime_error(
@@ -234,8 +266,8 @@ int run_classify(int argc, char **argv) {
             "    npuembeddings classify <model> <image.png> [more.png ...]\n"
             "  (PNG and JPEG; anything else is refused rather than guessed at. "
             "--top-k prints the runners-up to stderr, --json to stdout)");
-    warn_if_unpinned(model_name);
-    const std::string container = ensure(root, model_name, cli_token);
+    if (!is_container_path(model_name)) warn_if_unpinned(model_name);
+    const std::string container = resolve_container(root, model_name, cli_token);
     std::vector<std::string> store = {"--model", container};
     // Every leading non-flag argument is an image, so
     // `classify <model> a.png b.png --top-k` classifies both. A flag's VALUE is
@@ -330,13 +362,22 @@ int run_tokenize(int argc, char **argv) {
             max_len = std::atoi(argv[i + 1]);
     }
     if (argc < 3 || argv[2][0] == '-')
-        throw std::runtime_error("`tokenize` needs a model name");
+        throw std::runtime_error(
+            "`tokenize` needs a model name or a path to a .npue container");
     model_name = argv[2];
     if (argc < 4 || argv[3][0] == '-')
         throw std::runtime_error(
             "`tokenize` needs a file: npuembeddings tokenize <model> "
             "<in.txt> [--max-len N]");
-    std::string model_path = resolve_model_path(root, argc, argv);
+    // The POSITIONAL is the model, so resolve that -- not argv's "--model",
+    // which this form does not have. Reading --model made `tokenize <name>
+    // <file>` print the whole model table and refuse ("several models are
+    // installed; say which with --model") on any machine with two models, and
+    // made a path to a container unusable here when the flag form already
+    // took one. Same resolution as `--model`, one source: resolve_model_path()
+    // accepts a name or a .npue path, and does not fetch, which is what
+    // `--tokenize` on the flag form does today.
+    const std::string model_path = resolve_model_path(root, model_name);
     auto model = npue::load_model(model_path);
     auto tok = model->make_tokenizer();
     std::ifstream in(argv[3], std::ios::binary);

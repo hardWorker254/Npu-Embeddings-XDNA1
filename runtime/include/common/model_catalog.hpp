@@ -14,7 +14,9 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "common/app_state.hpp"
@@ -122,18 +124,49 @@ inline void print_model_table(const std::vector<ModelEntry> &v) {
               "  measured throughput and MTEB for each are in docs/.\n\n");
 }
 
-// Resolve --model to a container. Accepts a name as printed in the table or a
-// path to a .npue directly.
-inline std::string resolve_model_path(const std::string &root, int argc,
-                               char **argv) {
-  std::string want;
-  for (int i = 1; i < argc - 1; ++i)
-    if (std::string(argv[i]) == "--model") want = argv[i + 1];
+// Does this argument NAME A FILE rather than a model? A ".npue" suffix, or any
+// path separator: model names in this tree are flat (models/<name>.npue, one
+// level, no dots in the stem), so anything with a separator or a container
+// suffix is a path or a mistake -- and mistaking it for a name is what made
+// `embed ./builds/mine.npue in.txt` print the model table instead of saying the
+// file is not there.
+inline bool looks_like_container_path(const std::string &arg) {
+  if (arg.empty()) return false;
+  if (arg.size() > 5 && arg.compare(arg.size() - 5, 5, ".npue") == 0)
+    return true;
+  return arg.find('/') != std::string::npos ||
+         arg.find('\\') != std::string::npos;
+}
 
-  if (!want.empty() && want.size() > 5 &&
-      want.compare(want.size() - 5, 5, ".npue") == 0 &&
-      std::ifstream(want).good())
-    return want;
+// ...and is that file actually there?
+inline bool is_container_path(const std::string &arg) {
+  if (!looks_like_container_path(arg)) return false;
+  std::error_code ec;
+  return std::filesystem::is_regular_file(arg, ec) && !ec;
+}
+
+// ONE message for "you pointed at a file that is not there", from the flag form
+// and from the subcommands alike: two spellings of the same refusal is how they
+// drift apart.
+[[noreturn]] inline void throw_missing_container(const std::string &want,
+                                                 const std::string &root) {
+  throw std::runtime_error(
+      "no such container: " + want + "\n"
+      "  A path is used exactly as given, so the file has to exist where you\n"
+      "  said it does. A model NAME has no separator and no .npue suffix, and\n"
+      "  is looked up under " + root + "/models/<name>.npue");
+}
+
+// Resolve a NAME (or a path to a .npue) to a container under `root`. A path
+// wins over a name of the same spelling, because a path names a FILE and a
+// name names a row in <root>/models/ -- and they need not be the same file:
+// `--model ./builds/mine.npue` must not be re-resolved against models/.
+inline std::string resolve_model_path(const std::string &root,
+                                      const std::string &want) {
+  if (looks_like_container_path(want)) {
+    if (is_container_path(want)) return want;
+    throw_missing_container(want, root);
+  }
 
   const auto models = discover_models(root);
   if (models.empty())
@@ -161,6 +194,16 @@ inline std::string resolve_model_path(const std::string &root, int argc,
     }
   print_model_table(models);
   throw std::runtime_error("no model named '" + want + "' is installed");
+}
+
+// Resolve --model to a container. Accepts a name as printed in the table or a
+// path to a .npue directly.
+inline std::string resolve_model_path(const std::string &root, int argc,
+                               char **argv) {
+  std::string want;
+  for (int i = 1; i < argc - 1; ++i)
+    if (std::string(argv[i]) == "--model") want = argv[i + 1];
+  return resolve_model_path(root, want);
 }
 
 }  // namespace app
