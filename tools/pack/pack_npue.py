@@ -43,15 +43,19 @@ from npue import (ARCH_GEMMA3_MQA_ROPE_GEGLU, ARCH_GTE_NEW_ROPE_GEGLU,  # noqa: 
                   ARCH_NOMIC_ROPE_SWIGLU, MAC_BY_DEVICE, MAC_DEFAULT_DEVICE,
                   Writer, gemm_b_layout, layout_hash, mac_for_device, tile_b,
                   to_bf16_bits)
-from onnx_weights import MODEL_ONNX, model_digest            # noqa: E402
+from onnx_weights import (EMBEDDINGGEMMA_RENAME,             # noqa: E402
+                          EMBEDDINGGEMMA_STRIP, MODEL_ONNX,
+                          model_digest)
 
 
-def load(path, strip=""):
+def load(path, strip="", rename=()):
     """Read an ONNX checkpoint into a plain dict of numpy arrays.
 
-    `strip` is handed to the reader: a root the export ADDED and the checkpoint
-    does not have comes off, so what lands in the dict is what the safetensors
-    dict always was. Only embeddinggemma needs it ("model."); see
+    `strip` and `rename` are handed to the reader: a root the export ADDED
+    and the checkpoint does not have comes off, and the export's mid-name
+    rewrites go back to the checkpoint's spelling, so what lands in the dict
+    is what the safetensors dict always was. Only embeddinggemma needs either
+    ("model." plus EMBEDDINGGEMMA_RENAME -- pass both together); see
     OnnxWeights for the other direction (a root the export dropped).
 
     The reader is tools/lib/onnx_weights.py, which serves every tensor under
@@ -78,7 +82,7 @@ def load(path, strip=""):
     discards the second element, and keeping it costs nothing.
     """
     from onnx_weights import OnnxWeights
-    w = OnnxWeights(path, strip=strip)
+    w = OnnxWeights(path, strip=strip, rename=rename)
     try:
         return {k: w.array(k) for k in w.keys()}, {}
     finally:
@@ -435,11 +439,15 @@ def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
     """
     model_dir = Path(model_dir)
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    # strip="model.": this export KEEPS a root the checkpoint does not have.
-    # encoder_gemma.py:208 records that as the verified ground truth for these
-    # names, so the root comes off here rather than the packers and the
-    # reference encoder being rewritten to match one exporter's convention.
-    src, _ = load(model_dir / MODEL_ONNX, strip="model.")
+    # EMBEDDINGGEMMA_STRIP + EMBEDDINGGEMMA_RENAME: this export KEEPS a root
+    # the checkpoint does not have and also renames three families of tensors
+    # mid-name. encoder_gemma.py:208 records the prefixless, checkpoint-
+    # spelled names as the verified ground truth, so both come off here rather
+    # than the packers and the reference encoder being rewritten to match one
+    # exporter's convention. They are passed as a pair because stripping
+    # without renaming would hand this function the export's spelling back.
+    src, _ = load(model_dir / MODEL_ONNX, strip=EMBEDDINGGEMMA_STRIP,
+                  rename=EMBEDDINGGEMMA_RENAME)
     src_sha = model_digest(model_dir / MODEL_ONNX)
     # The sentence-transformers head is no longer a checkpoint of its own: its
     # two matrices were fused into the export and ride beside the rest of the

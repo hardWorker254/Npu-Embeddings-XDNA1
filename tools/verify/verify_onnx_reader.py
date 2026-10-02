@@ -200,12 +200,22 @@ def crosscheck_onnx(model, path, prefix):
     def digest(a):
         return hashlib.sha256(np.ascontiguousarray(a).tobytes()).digest()
 
-    # both orientations indexed, so a correctly transposed weight still lands
+    # Both orientations indexed, so a correctly transposed weight still lands.
+    # A SET of shapes per digest rather than one: two tensors can be
+    # byte-identical and differently shaped, and keeping only whichever shape
+    # was indexed first then calls a correct read wrong. embeddinggemma's
+    # export carries exactly that -- the scalar `INT64/0` and the one-element
+    # `INT64/[0]` are the same eight bytes, likewise 1/[1] and 2/[2]: three
+    # such pairs among 343 tensors, and no byte-level check can separate them.
+    # So this asks the question bytes CAN answer -- does the file hold a
+    # tensor with these bytes at this shape or its transpose? Orientation and
+    # naming stay out of it on purpose; the goldens prove those (above).
     index = {}
     for r in want:
-        index.setdefault(digest(r), r.shape)
+        index.setdefault(digest(r), set()).add(r.shape)
         if r.ndim == 2:
-            index.setdefault(digest(np.ascontiguousarray(r.T)), r.T.shape)
+            index.setdefault(digest(np.ascontiguousarray(r.T)), set()).add(
+                r.T.shape)
 
     got = OnnxWeights(path, prefix=prefix)
     try:
@@ -219,9 +229,10 @@ def crosscheck_onnx(model, path, prefix):
             # close() runs is a BufferError (and on a reader that allowed it, a
             # fault), which is the hazard array()'s own docstring exists for.
             a = np.array(got.raw(k))
-            if digest(a) not in index:
+            shapes = index.get(digest(a))
+            if shapes is None:
                 bad.append(f"{k}: these bytes are not in the file")
-            elif index[digest(a)] not in (a.shape, a.shape[::-1]):
+            elif a.shape not in shapes and a.shape[::-1] not in shapes:
                 bad.append(f"{k}: shape {a.shape} matches nothing in the file")
             else:
                 checked += 1

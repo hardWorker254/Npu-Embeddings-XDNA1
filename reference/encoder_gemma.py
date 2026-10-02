@@ -404,16 +404,19 @@ def load_reference(model_dir):
     import json
     from pathlib import Path
 
-    from onnx_io import MODEL_ONNX, load
+    from onnx_io import (EMBEDDINGGEMMA_RENAME, EMBEDDINGGEMMA_STRIP,
+                         MODEL_ONNX, load)
 
     model_dir = Path(model_dir)
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    # strip="model.": this export KEEPS a root the checkpoint does not have.
-    # The prefixless names are the verified ground truth (recorded at
-    # GemmaEmbeddingReference, from tasks/0055's checkpoint inventory), so the
-    # root comes off here rather than this reference being rewritten to match
-    # one exporter's convention.
-    w, _ = load(model_dir / MODEL_ONNX, strip="model.")
+    # EMBEDDINGGEMMA_STRIP + EMBEDDINGGEMMA_RENAME: this export KEEPS a root
+    # the checkpoint does not have and renames three families of tensors
+    # mid-name. The prefixless, checkpoint-spelled names are the verified
+    # ground truth (recorded at GemmaEmbeddingReference, from tasks/0055's
+    # checkpoint inventory), so both come off here rather than this reference
+    # being rewritten to match one exporter's convention.
+    w, _ = load(model_dir / MODEL_ONNX, strip=EMBEDDINGGEMMA_STRIP,
+                rename=EMBEDDINGGEMMA_RENAME)
     # The sentence-transformers head is no longer a sibling checkpoint: its two
     # matrices were fused into the export and ride beside the rest of the
     # weights as /model/st/dense_1 and /model/st/dense_2, numbered in

@@ -23,7 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from encoder_gemma import GemmaEmbeddingReference   # noqa: E402
 from npz_io import load as load_goldens            # noqa: E402
-from onnx_io import MODEL_ONNX, load, model_digest               # noqa: E402
+from onnx_io import (EMBEDDINGGEMMA_RENAME, EMBEDDINGGEMMA_STRIP,  # noqa: E402
+                     MODEL_ONNX, load, model_digest)
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -78,12 +79,15 @@ def main():
     print(f"  sha256   : {digest[:16]}... matches")
 
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    # strip="model.": this export keeps a root the checkpoint does not have
-    # (see encoder_gemma.py: the prefixless names are the verified ground
-    # truth, so the root comes off rather than this being rewritten).
-    # The two Dense heads are no longer sibling checkpoints -- fused into the
-    # export as /model/st/dense_1 and dense_2, in modules.json order.
-    w, _ = load(model_dir / MODEL_ONNX, strip="model.")
+    # EMBEDDINGGEMMA_STRIP + EMBEDDINGGEMMA_RENAME: this export keeps a root
+    # the checkpoint does not have AND renames three families of tensors
+    # mid-name (see encoder_gemma.py: the prefixless, checkpoint-spelled names
+    # are the verified ground truth, so both are undone rather than this being
+    # rewritten). The two Dense heads are no longer sibling checkpoints --
+    # fused into the export as /model/st/dense_1 and dense_2, in modules.json
+    # order.
+    w, _ = load(model_dir / MODEL_ONNX, strip=EMBEDDINGGEMMA_STRIP,
+                rename=EMBEDDINGGEMMA_RENAME)
     dense_w = {"2": w["/model/st/dense_1.weight"],
                "3": w["/model/st/dense_2.weight"]}
 

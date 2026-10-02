@@ -91,7 +91,7 @@ def main():
               "with a token instead).")
 
     from huggingface_hub import snapshot_download
-    from onnx_io import MODEL_ONNX, model_digest
+    from onnx_io import MODEL_ONNX, checkpoint_digest, checkpoint_files
 
     local = Path(args.dest)
     print(f"fetching {repo_id} -> {local}")
@@ -109,8 +109,21 @@ def main():
               f"  {local / MODEL_ONNX} (BUILD.md §2.2) and re-run; the "
               "configs and\n  tokenizer have been fetched.")
         return 1
-    digest = model_digest(src)
-    print(f"  {MODEL_ONNX:<21}: {src.stat().st_size / 1e6:.1f} MB")
+
+    # `file` is a LIST, and it names exactly the bytes `sha256` covers --
+    # see checkpoint_files(). This used to write the bare string MODEL_ONNX,
+    # which happened to read as one file for a single-graph model and could
+    # not name encoder + decoder + their side files at all.
+    files = checkpoint_files(local)
+    if not files:
+        print(f"\nFAIL -- {src} exists but its external-data side file does "
+              "not.\n  A graph without its weights is not a checkpoint: "
+              "CHECKPOINT.json stays\n  unpinned (file: [], sha256: null) "
+              "until both files are here.")
+        return 1
+    digest = checkpoint_digest(local)
+    for f in files:
+        print(f"  {f:<21}: {(local / f).stat().st_size / 1e6:.1f} MB")
     print(f"  sha256                : {digest}")
 
     cfg = json.loads((local / "config.json").read_text(encoding="utf-8"))
@@ -121,7 +134,7 @@ def main():
             problems.append(f"config.{k}: expected {want!r}, got {got!r}")
 
     (local / "CHECKPOINT.json").write_text(
-        json.dumps({"repo_id": repo_id, "file": MODEL_ONNX, "sha256": digest},
+        json.dumps({"repo_id": repo_id, "file": files, "sha256": digest},
                    indent=2),
         encoding="utf-8",
     )

@@ -94,6 +94,42 @@ MODEL_ONNX = "onnx/model.onnx"
 WHISPER_ENCODER_ONNX = "onnx/encoder_model.onnx"
 WHISPER_DECODER_ONNX = "onnx/decoder_model.onnx"
 
+# ---------------------------------------------------------------------------
+# How the onnx-community EmbeddingGemma export spells the checkpoint's names.
+#
+# `strip` alone is not enough for this export: it drops a root the checkpoint
+# does not have (see OnnxWeights.strip), but it also RENAMES three families of
+# tensors mid-name, and no amount of prefix surgery reaches those. The names
+# the packers and encoder_gemma.py ask for are the safetensors inventory
+# recorded in tasks/0055 -- that inventory is the ground truth, so the mapping
+# belongs here rather than in four separate call sites.
+#
+#   (".attn.", ".self_attn.")
+#       the export shortens the attention module: model.layers.0.attn.q_proj
+#       .MatMul.weight where the checkpoint says model.layers.0.self_attn
+#       .q_proj.weight. `_recover()`'s tier 1 has already dropped the
+#       `.MatMul` by the time this runs.
+#   (".layernorm.weight", ".weight")
+#       the export wraps each norm in a `.layernorm` submodule: q_norm and
+#       k_norm become `...q_norm.layernorm.weight`. This fires on NOTHING
+#       else -- the four per-layer norms are spelled `input_layernorm.weight`
+#       and friends, where `layernorm` is preceded by `_`, not `.`.
+#   ("layers.24.final_norm_layernorm.weight", "norm.weight")
+#       the post-stack norm is filed as one more layer: the checkpoint's
+#       `model.norm.weight` arrives as `model.layers.24.` + the module path.
+#       24 IS num_hidden_layers (one past the last block, layers 0..23) and
+#       reference/fetch_model_gemma.py::EXPECT_CONFIG asserts it, so a
+#       different Gemma checkpoint fails the lookup loudly instead of packing
+#       some other tensor into the final norm's slot.
+#
+# Both facts have to travel together, so call sites pass both.
+EMBEDDINGGEMMA_STRIP = "model."
+EMBEDDINGGEMMA_RENAME = (
+    (".attn.", ".self_attn."),
+    (".layernorm.weight", ".weight"),
+    ("layers.24.final_norm_layernorm.weight", "norm.weight"),
+)
+
 # ONNX TensorProto.DataType -> (numpy dtype, the safetensors tag it maps to).
 #
 # info() hands back the safetensors tag on purpose: callers that switch on
@@ -400,15 +436,25 @@ class OnnxWeights:
                                 ground truth -- has none (documented at
                                 encoder_gemma.py:208). The export added a root.
 
-    A strip that makes two tensors collide is refused by _build() rather than
-    resolved, because silently keeping one would pack one weight into the
-    other's slot.
+    `rename` is the third disagreement, one prefix surgery cannot express: a
+    sequence of (old, new) pairs, each applied with str.replace to the name
+    AFTER prefix/strip have had their say. embeddinggemma needs it for three
+    families of mid-name rewrites; see EMBEDDINGGEMMA_RENAME, which is what
+    every caller passes alongside EMBEDDINGGEMMA_STRIP. Nothing is applied
+    implicitly -- a caller that forgets it gets the export's spelling back and
+    a KeyError naming the file, which is the same failure the reader has
+    always produced for a name it does not know.
+
+    A strip or a rename that makes two tensors collide is refused by _build()
+    rather than resolved, because silently keeping one would pack one weight
+    into the other's slot.
     """
 
-    def __init__(self, path, prefix="", strip=""):
+    def __init__(self, path, prefix="", strip="", rename=()):
         self.path = str(path)
         self.prefix = prefix
         self.strip = strip
+        self.rename = tuple(rename)
         self._ext = {}
         self._tensors = {}
         self._order = []
@@ -481,6 +527,8 @@ class OnnxWeights:
             if self.strip and fixed.startswith(self.strip):
                 fixed = fixed[len(self.strip):]
             fixed = self.prefix + fixed
+            for old, new in self.rename:
+                fixed = fixed.replace(old, new)
             t["how"] = how
             named.setdefault(fixed, []).append(t)
             t["_uses"] = uses

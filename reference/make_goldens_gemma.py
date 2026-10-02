@@ -38,7 +38,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from corpus_gemma import SENTENCES, SEQ_LEN as DEFAULT_SEQ_LEN  # noqa: E402
 from encoder_gemma import PROMPTS               # noqa: E402
 from npz_io import save, load as load_goldens    # noqa: E402
-from onnx_io import MODEL_ONNX, load, model_digest            # noqa: E402
+from onnx_io import (EMBEDDINGGEMMA_RENAME, EMBEDDINGGEMMA_STRIP,  # noqa: E402
+                     MODEL_ONNX, load, model_digest)
 
 REPO = Path(__file__).resolve().parent.parent
 GOLDENS = REPO / "reference" / "goldens_gemma"
@@ -118,13 +119,16 @@ def main():
     # dense_2, numbered in modules.json order -- dense_1 is 2_Dense, dense_2 is
     # 3_Dense (3072x768 and 768x3072 once the MatMul transpose is undone, the
     # shapes recorded at encoder_gemma.GemmaEmbeddingReference). The leading
-    # slash is the exporter's and strip="model." only removes a leading
+    # slash is the exporter's and EMBEDDINGGEMMA_STRIP only removes a leading
     # `model.`, so these are looked up verbatim. Loaded once here and reused
     # by the --taps branch below: this file is 1.2 GB.
     #
-    # strip="model." because this export KEEPS a root the checkpoint does not
-    # have, and the prefixless names are the verified ground truth (tasks/0055).
-    w, _ = load(model_dir / MODEL_ONNX, strip="model.")
+    # EMBEDDINGGEMMA_STRIP + EMBEDDINGGEMMA_RENAME because this export KEEPS a
+    # root the checkpoint does not have and renames three families of tensors
+    # mid-name, and the prefixless names are the verified ground truth
+    # (tasks/0055).
+    w, _ = load(model_dir / MODEL_ONNX, strip=EMBEDDINGGEMMA_STRIP,
+                rename=EMBEDDINGGEMMA_RENAME)
     dense2 = pooled @ torch.from_numpy(w["/model/st/dense_1.weight"]).T
     dense3 = dense2 @ torch.from_numpy(w["/model/st/dense_2.weight"]).T
     manual_embedding = torch.nn.functional.normalize(dense3, p=2, dim=1)

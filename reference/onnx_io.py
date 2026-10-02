@@ -34,24 +34,26 @@ _LIB = Path(__file__).resolve().parent.parent / "tools" / "lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
-from onnx_weights import (MODEL_ONNX,                       # noqa: E402
+from onnx_weights import (EMBEDDINGGEMMA_RENAME,             # noqa: E402
+                          EMBEDDINGGEMMA_STRIP, MODEL_ONNX,
                           WHISPER_DECODER_ONNX, WHISPER_ENCODER_ONNX,
                           OnnxWeights, model_digest, sha256_file)
 
-__all__ = ["MODEL_ONNX", "WHISPER_ENCODER_ONNX", "WHISPER_DECODER_ONNX",
+__all__ = ["EMBEDDINGGEMMA_RENAME", "EMBEDDINGGEMMA_STRIP", "MODEL_ONNX",
+           "WHISPER_ENCODER_ONNX", "WHISPER_DECODER_ONNX",
            "checkpoint_digest", "checkpoint_files", "load", "model_digest",
            "reader", "sha256_file"]
 
 
-def reader(model_dir, prefix="", strip=""):
+def reader(model_dir, prefix="", strip="", rename=()):
     """An OPEN OnnxWeights for a checkpoint directory, for callers that want
     to stream rather than materialise. The caller owns the handle and must
     close it (or use it as a context manager)."""
     return OnnxWeights(Path(model_dir) / MODEL_ONNX, prefix=prefix,
-                       strip=strip)
+                       strip=strip, rename=rename)
 
 
-def load(path, strip=""):
+def load(path, strip="", rename=()):
     """Read one ONNX file into ({name: ndarray}, {}).
 
     Materialises every tensor, which is what the previous reader did and
@@ -61,10 +63,12 @@ def load(path, strip=""):
     out, which matters at gemma's 1.2 GB.
 
     `strip` is a root the export ADDED and the checkpoint does not have; only
-    embeddinggemma needs it. See OnnxWeights for the other direction (a root
-    the export dropped).
+    embeddinggemma needs it, and it needs `rename` with it for the three
+    mid-name rewrites prefix surgery cannot reach. Pass both together as
+    EMBEDDINGGEMMA_STRIP / EMBEDDINGGEMMA_RENAME. See OnnxWeights for the
+    other direction (a root the export dropped).
     """
-    w = OnnxWeights(path, strip=strip)
+    w = OnnxWeights(path, strip=strip, rename=rename)
     try:
         return {k: w.array(k) for k in w.keys()}, {}
     finally:

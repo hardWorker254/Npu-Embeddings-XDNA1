@@ -1,5 +1,8 @@
 {
   "repo_id": "unsloth/embeddinggemma-300m",
-  "file": [],
-  "sha256": null
+  "file": [
+    "onnx/model.onnx",
+    "onnx/model.onnx_data"
+  ],
+  "sha256": "e8f7805a291be4d0f67b8763e9b8fe38b66e8e5cb40038cea7361180c5966f2c"
 }

@@ -275,7 +275,7 @@ def main():
     args = ap.parse_args()
 
     from huggingface_hub import snapshot_download
-    from onnx_io import MODEL_ONNX, model_digest
+    from onnx_io import MODEL_ONNX, checkpoint_digest, checkpoint_files
 
     local = MODELS / args.model.split("/")[-1]
     print(f"fetching {args.model} -> {local}")
@@ -296,8 +296,22 @@ def main():
               "the config and tokenizer\n  have been fetched, and the "
               "structural check will run then.")
         return 1
-    digest = model_digest(src)
-    print(f"  {MODEL_ONNX:<21}: {src.stat().st_size / 1e6:.1f} MB")
+
+    # `file` is a LIST naming exactly the bytes `sha256` covers -- see
+    # checkpoint_files(). The bare string MODEL_ONNX written here before
+    # could not express whisper's encoder + decoder + side file, and for
+    # every other model it only read as a list by coincidence of the JSON
+    # being rewritten by hand afterwards.
+    files = checkpoint_files(local)
+    if not files:
+        print(f"\nFAIL -- {src} exists but its external-data side file does "
+              "not.\n  A graph without its weights is not a checkpoint: "
+              "CHECKPOINT.json stays\n  unpinned (file: [], sha256: null) "
+              "until both files are here.")
+        return 1
+    digest = checkpoint_digest(local)
+    for f in files:
+        print(f"  {f:<21}: {(local / f).stat().st_size / 1e6:.1f} MB")
     print(f"  sha256                : {digest}")
 
     problems = check(local, args.layers)
@@ -306,7 +320,7 @@ def main():
     # loudly rather than quietly compare against a different checkpoint.
     (local / "CHECKPOINT.json").write_text(
         json.dumps(
-            {"repo_id": args.model, "file": MODEL_ONNX, "sha256": digest},
+            {"repo_id": args.model, "file": files, "sha256": digest},
             indent=2,
         ),
         encoding="utf-8",
