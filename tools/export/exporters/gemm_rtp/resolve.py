@@ -43,17 +43,59 @@ def apply_datapath(
     ns: argparse.Namespace,
     datapath: str | None,
     defaults: dict | None = None,
+    *,
+    int8_explicit: bool = False,
 ) -> argparse.Namespace:
     """
     Derive the datapath flags from a target's `datapath` field.
 
     Mapping: 'bfp16' -> --emulate-bfp16 --c-bf16; 'bf16' -> --c-bf16 only.
     Flags explicitly passed on the command line are never overwritten.
+
+    EXCEPT THE ONE CASE WHERE THE DERIVED VALUE IS THE WRONG QUESTION, which is
+    a target whose datapath is bfp16 and an explicit --int8.
+
+    `datapath` in the targets file records the datapath a model SHIPS on. It is
+    a property of the model, not of the design: bge-base-en-v1.5 is bfp16
+    because bfp16 measured better than plain bf16 on it, and that verdict is
+    about the shipped design. --int8 is a request for a different MMAC -- one
+    whose operands are int8 -- and the bfp16 emulation is an MLIR pass that
+    REPLACES that MMAC (`emulate_bf16_mmul_with_bfp16`). They are the same
+    array, configured two ways, so they cannot both be on; geometry.py refused
+    the combination, which was right about the physics and wrong about the
+    cause.
+
+    The consequence of leaving it as a refusal was not a refusal. pack_npue.py
+    packs int8 containers for every one of these models without asking the
+    exporter anything, so 13 of the 16 supported models produced an int8
+    container that NO design could ever run: the datapath is bfp16, so the
+    runtime asks for a bfp16 design whose b_layout_hash is the int8 one
+    177088d6, and the only int8 design sets in the tree are the two belonging
+    to the three models whose datapath is plain bf16. The Question-1 sweep
+    reported those 13 cells as OK, because "packs" and "runs" are different
+    questions and only the first was asked.
+
+    So an explicit --int8 suppresses the DERIVED emulate_bfp16 -- and only the
+    derived one. A caller who types both still gets both, because they are two
+    independent compile parameters and this exporter has never second-guessed
+    that (parity_exporters pins it).
     """
     default_c = None if defaults is None else defaults.get("c_bf16")
 
     if datapath == "bfp16":
-        if ns.emulate_bfp16 is None:
+        if int8_explicit and ns.emulate_bfp16 is None:
+            # Only the DERIVED value is dropped, and only while it is still
+            # pending -- `is None` is exactly "the caller did not type it".
+            # A caller who types both gets both, because they are two
+            # independent compile parameters (`dtype_in_str` and
+            # `emulate_bf16_mmul_with_bfp16`) rather than one setting with two
+            # names, and this exporter has always passed both through when both
+            # were given -- parity_exporters pins that case against the
+            # pre-split monolith, which emits both and exits 0. Whether that
+            # combination COMPILES is a question for a compile, not for
+            # argument resolution.
+            ns.emulate_bfp16 = False
+        elif ns.emulate_bfp16 is None:
             ns.emulate_bfp16 = True
         if ns.c_bf16 is None:
             ns.c_bf16 = True if default_c is None else bool(default_c)
@@ -127,6 +169,18 @@ def resolve_args(args: argparse.Namespace) -> list[ResolvedArch]:
             ns.stream_set = getattr(args, "stream_set", None) or "gemm_rtp"
             ns.set_name = ns.stream_set
             ns.stt_tiers = ns.stream_set == "stt"
+            # A pose design has no batch axis either, for the same underlying
+            # reason: its unit of work is one IMAGE and M is a convolution's
+            # output pixel count rather than batch*seq. Both flags exist to tell
+            # the validator not to compute M as a product, so they are set
+            # together rather than as two spellings of one condition.
+            ns.pose_tiers = ns.stream_set == "pose"
+            if ns.pose_tiers:
+                # `batch` must equal the largest tier, and the pose tier list is
+                # [1]. Overriding it here rather than making every caller pass
+                # --batch 1 keeps a manual `--stream-set pose` invocation from
+                # failing on a number that means nothing for this set.
+                ns.batch = 1
 
             ns.identity_threshold = (
                 FALLBACK_IDENTITY_THRESHOLD
@@ -303,12 +357,42 @@ def resolve_args(args: argparse.Namespace) -> list[ResolvedArch]:
         ns.int8 = bool(args.int8)
         ns.c_bf16 = args.c_bf16
         ns.emulate_bfp16 = args.emulate_bfp16
-        apply_datapath(ns, model_spec.get("datapath"), defaults)
+        apply_datapath(ns, model_spec.get("datapath"), defaults,
+                       int8_explicit=bool(args.int8))
         ns.stream_set = "gemm_rtp"
         ns.set_name = "gemm_rtp"
         # An STT model's unit of work is one audio file, so its ENCODER tiers are
         # utterance counts too, not text batches. See common/validate.py.
         ns.stt_tiers = model_spec.get("kind") == "stt"
+        # A pose model's unit of work is one image and it has no batch axis, so
+        # it takes the same branch as STT for the same underlying reason. The
+        # difference is which M the validator computes, and that is decided by
+        # `kind` here rather than by a flag the caller passes.
+        ns.pose_tiers = model_spec.get("kind") == "pose"
+        if ns.pose_tiers:
+            ns.stream_set = "pose"
+            ns.set_name = "gemm_rtp"
+            ns.batch = 1
+            # A pose target declares no hidden or intermediate width (see
+            # common/targets.py), so the values the namespace carries for an
+            # embedder have to be set to something for the code paths that read
+            # them unconditionally. They are read only where an embedder's are
+            # read: apply_datapath's branching and the --hidden handed to
+            # export_eltwise, which a pose export never reaches because it asks
+            # for no eltwise op. Zero rather than a plausible width, because a
+            # plausible width would be a lie that survives into a log line.
+            ns.hidden = 0
+            ns.intermediate = 0
+            ns.gated_ffn = False
+            ns.qkv_n = None
+            # ONE tier, and `batches` is what actually produces the list --
+            # parse_tiers() reads ns.batches and only falls back to ns.batch when
+            # it is empty, so setting ns.batch = 1 above while leaving the
+            # arch's "4,8,16" in place would have produced tiers [4,8,16] with a
+            # batch of 1 and failed the "batch must be the largest tier" check
+            # for the right reason at the wrong layer. A pose design has one row
+            # count, so it has one tier.
+            ns.batches = "1"
 
         tiers = parse_tiers(ns)
         max_batch = arch_spec.get("max_batch")

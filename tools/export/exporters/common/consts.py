@@ -35,13 +35,24 @@ ARCH_DEVICES = {
 
 ARCHES = ("1", "2")
 
-# The B panel's sub-tile, per generation. Recorded in design.json's b_layout so
-# the runtime's layout_hash check compares like with like -- that check is only
-# worth anything if BOTH sides derive the descriptor from the device, and the
-# value is not the same on both boards. See npue.MAC_BY_DEVICE for the
-# measurement; this is the same table, kept next to ARCH_DEVICES because that is
-# what says which device an arch means.
-MAC_BY_ARCH = {"1": (8, 4), "2": (8, 8)}
+# The B panel's sub-tile, per generation AND per operand dtype. Recorded in
+# design.json's b_layout so the runtime's layout_hash check compares like with
+# like -- that check is only worth anything if BOTH sides derive the descriptor
+# from the same device and the same dtype, and the value is not the same on
+# every combination. See npue.MAC_BY_DEVICE for the measurement; this delegates
+# there rather than keeping a fourth copy, because a table that is edited in one
+# place and read in three is exactly how a design shipped whose every product
+# was wrong while every check agreed. `mac_for_arch` is the only accessor.
+def mac_for_arch(arch, dtype):
+    """(mac_s, mac_t) for `arch` with B operand `dtype` -- npue's table, not a
+    copy of it. `dtype` is required: the int8 pair differs from bf16's on npu1,
+    so defaulting it is the bug this indirection exists to prevent."""
+    from npue import mac_for_device
+
+    a = str(arch)
+    if a not in ARCH_DEVICES:
+        raise SystemExit(f"unknown arch {arch!r}: {', '.join(ARCHES)}")
+    return mac_for_device(ARCH_DEVICES[a], dtype)
 
 DEFAULT_SEQ = 64
 
@@ -141,7 +152,12 @@ STT_MODEL_KEYS = {"kind", "heads", "head_dim", "enc_layers", "dec_layers",
 # Note the stream list below is gemm_rtp's verbatim. That is the point of the
 # kind: if a cls entry ever needed a stream an embedder does not have, the kind
 # would be lying about the claim this file exists to make.
-KNOWN_KINDS = {"gemm_rtp", "stt", "cls"}
+# "pose" is in here because arch 6 is a real target with its own exporter and
+# its own stream set, and because the check that a kind HAS an exporter is the
+# one that stops a new architecture from being silently treated as an
+# embedder -- which is what would happen if a pose entry arrived as a kind with
+# no entry here.
+KNOWN_KINDS = {"gemm_rtp", "stt", "cls", "pose"}
 
 DEFAULT_CACHE_ROOT = Path.home() / ".npu" / "cache"
 

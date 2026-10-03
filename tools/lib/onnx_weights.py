@@ -164,6 +164,17 @@ _INLINED = {
     11: ("<u8", "I64"),    # uint64_data, surfaced as I64 (never a weight)
 }
 
+# The integer members of that map. A PACKED repeated integer field is LEB128 --
+# one varint per element -- while a packed float/double field is just the fixed
+# -width values laid end to end. Both arrive as protobuf wire type 2, so the
+# WIRE TYPE ALONE CANNOT SAY HOW TO READ THE BYTES; the field number can. Both
+# readers here used to branch on wire type alone, which reads a packed int32_data
+# as native little-endian and turns every value >= 256 into a different number
+# (and a 1-byte varint into a 4-byte read that runs off the end of the field).
+# `_read_inlined` and onnx_read.cpp's LocKind::kInline are the two sites.
+_INLINE_VARINT_FIELDS = frozenset(f for f, (_dt, _tag) in _INLINED.items()
+                                 if _tag in ("I32", "I64"))
+
 
 def from_bf16_bits(bits):
     """bf16 bit pattern -> fp32. Exact: bf16 is a strict subset of fp32."""
@@ -511,6 +522,14 @@ class OnnxWeights:
                         seen.append(c)
             n["out_consumers"] = seen
 
+        # Node outputs, as a SET, for anyone who needs to ask whether a given
+        # name in this graph is computed. Not enough on its own to tell a weight
+        # from a folded constant -- see the note in tools/lib/onnx_torch.py,
+        # which is where that classification is made and why it cannot be made
+        # here. Kept because it is free and it is the only record of which
+        # values this graph actually computes.
+        self._node_outputs = {o for n in nodes for o in n["outputs"]}
+
         base = os.path.dirname(os.path.abspath(self.path))
         named = {}
         for t in inits:
@@ -555,6 +574,22 @@ class OnnxWeights:
                     f"disagree, refusing to pack")
             self._tensors[fixed] = t
             self._order.append(fixed)
+
+    # -- reading ------------------------------------------------------------
+
+    def is_computed(self, name: str) -> bool:
+        """True if some node in this graph produces `name`.
+
+        The graph's own statement of what it computes. It is NOT the test for
+        "is this initializer a folded constant rather than a weight" -- see
+        `_split` in tools/lib/onnx_torch.py for why, which is a measured
+        failure and not a subtlety: optimum's exporter folds a Constant node's
+        output into an initializer AND rewires the consumer, so the folded name
+        never appears as any node's output. On whisper-medium's decoder, 0 of
+        602 initializers are named by a node output, while 30 of them are
+        folded constants.
+        """
+        return name in self._node_outputs
 
     # -- reading ------------------------------------------------------------
 
@@ -651,14 +686,46 @@ class OnnxWeights:
         _, no, wt, ps, pe = loc
         d = np.dtype(_INLINED[no][0])
         buf = self._map
-        if wt == 2:                                    # packed
-            flat = np.frombuffer(buf, dtype=d, count=(pe - ps) // d.itemsize,
-                                 offset=ps)
-        elif wt == 0:                                  # single varint
-            v, _ = _varint(buf, ps)
-            flat = np.array([v], dtype=d)
-        else:                                          # 32-/64-bit fixed
-            flat = np.frombuffer(buf, dtype=d, count=1, offset=ps)
+        count = 1
+        for dim in t["dims"]:
+            count *= int(dim)
+        name = t["orig"]
+        # HOW THE BYTES ARE ENCODED is decided by the FIELD, not the wire type.
+        # A packed integer field is LEB128; a packed float field is fixed-width
+        # values end to end; both are wire type 2. Reading a packed int32_data
+        # as native little-endian silently returns a different number for every
+        # value >= 256, and reads past the end of the field for a short one --
+        # which is what a uint8 zero_point of 128, encoded `80 01`, is.
+        if no in _INLINE_VARINT_FIELDS and wt in (0, 2):
+            vals = []
+            j = ps
+            while j < pe:
+                v, j = _varint(buf, j)
+                vals.append(v)
+            if len(vals) != count:
+                raise ValueError(
+                    f"{self.path}: {name!r} holds {len(vals)} packed varints "
+                    f"but its shape claims {count} elements; the file "
+                    f"disagrees with itself")
+            flat = np.array(vals, dtype=d)
+        else:
+            # Native layout, and here the byte length is checkable against the
+            # shape. C++ refuses all of these too (onnx_read.cpp's
+            # LocKind::kInline); the two halves must agree on what a malformed
+            # file is, or a checkpoint the runtime refuses becomes one the
+            # packer accepts.
+            need = count * d.itemsize
+            if wt == 2 and pe - ps != need:
+                raise ValueError(
+                    f"{self.path}: {name!r} inline payload is {pe - ps} B but "
+                    f"its shape needs {need} B ({count} x {d.name}); the file "
+                    f"disagrees with itself")
+            if wt != 2 and (count != 1 or pe - ps < d.itemsize):
+                raise ValueError(
+                    f"{self.path}: {name!r} inline fixed field is {pe - ps} B "
+                    f"but holds one {d.name}; the file disagrees with itself")
+            flat = np.frombuffer(buf, dtype=d, count=need // d.itemsize
+                                 if wt == 2 else 1, offset=ps)
         return flat.reshape(t["dims"])
 
     def source_files(self):

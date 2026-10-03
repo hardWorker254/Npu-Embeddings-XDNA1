@@ -9,8 +9,16 @@ def validate_positive_args(args: argparse.Namespace) -> None:
         raise SystemExit("--batch must be positive")
     if args.cols <= 0:
         raise SystemExit("--cols must be positive")
-    if args.hidden <= 0:
-        raise SystemExit("--hidden must be positive")
+    # `hidden` is checked here for every kind but pose. A pose target declares no
+    # hidden width because it has none -- its streams are twenty-one convolutions
+    # with their own channel counts -- and resolve.py sets it to 0 precisely so
+    # that no invented width reaches a log line or a design field. Requiring it
+    # positive would force exactly the fiction this check exists to prevent, so
+    # it is skipped for that one kind and the refusal below names the reason.
+    if args.hidden <= 0 and not getattr(args, "pose_tiers", False):
+        raise SystemExit(
+            "--hidden must be positive. A pose target is exempt because it has "
+            "no hidden width to give; every other kind does.")
     if args.seq <= 0:
         raise SystemExit("--seq must be positive")
     if args.m <= 0:
@@ -25,7 +33,10 @@ def validate_positive_args(args: argparse.Namespace) -> None:
         raise SystemExit("--identity-threshold must be >= 0")
 
     if args.intermediate is not None and args.intermediate <= 0:
-        raise SystemExit("--intermediate must be positive")
+        # Exempt for pose on the same grounds as --hidden: there is no FFN width
+        # in a convolution-only network, and resolve.py's 0 is the honest value.
+        if not getattr(args, "pose_tiers", False):
+            raise SystemExit("--intermediate must be positive")
 
     if args.qkv_n is not None and args.qkv_n <= 0:
         raise SystemExit("--qkv-n must be positive")
@@ -54,9 +65,12 @@ def validate_tiers_and_seq(args: argparse.Namespace) -> list[int]:
     # A text batch of 4 is the floor for an embedder: the design was built around
     # four AIE rows and a tier below that left them idle. An STT model's unit of
     # work is one AUDIO FILE, so its tiers are 1 and the rule does not apply --
-    # `stt_tiers` is set by resolve.py for the decoder pass, and the real
-    # constraint (M must tile into m*rows) is checked right below either way.
-    floor = 1 if getattr(args, "stt_tiers", False) else 4
+    # `stt_tiers` is set by resolve.py for the decoder pass. A POSE model's unit
+    # of work is one IMAGE and it has no batch axis at all, so `pose_tiers`
+    # holds the same way -- and the real constraint (M must tile into m*rows) is
+    # checked below either way, against POSE_DISPATCH_M rather than b*seq.
+    floor = 1 if (getattr(args, "stt_tiers", False)
+                  or getattr(args, "pose_tiers", False)) else 4
     for b in tiers:
         if b <= 0:
             raise SystemExit(f"batch tier {b}: must be positive")
@@ -75,6 +89,32 @@ def validate_tiers_and_seq(args: argparse.Namespace) -> list[int]:
         )
 
     # M % (m * rows) == 0
+    #
+    # A POSE design's M is NOT batch*seq. Its M is the convolution's output
+    # pixel count -- a property of the stride -- and the runtime cuts every
+    # convolution into chunks of it, so `pose_tiers` sets tiers [1] and takes M
+    # from the stream set instead of from b*seq. It is a separate branch rather
+    # than a special value threaded through the loop because M = b*seq is not
+    # merely untrue here, it is the wrong quantity: a pose design has no batch
+    # and no sequence, and computing one from the other's product would check a
+    # number nothing uses.
+    if getattr(args, "pose_tiers", False):
+        from ..gemm_rtp.geometry import POSE_DISPATCH_M
+
+        M = POSE_DISPATCH_M
+        if M % (args.m * args.rows):
+            raise SystemExit(
+                f"POSE_DISPATCH_M = {M}, which is not a multiple of "
+                f"m*rows = {args.m * args.rows}. Change -m or --rows, or the "
+                f"dispatch chunk in gemm_rtp/geometry.py."
+            )
+        print(
+            f"  pose       M = {M} (the dispatch chunk, from POSE_DISPATCH_M). "
+            f"A pose design has no batch tier: M is a convolution's output "
+            f"pixel count and every convolution is cut into chunks of this."
+        )
+        return tiers
+
     for b in tiers:
         M = b * args.seq
         if M % (args.m * args.rows):

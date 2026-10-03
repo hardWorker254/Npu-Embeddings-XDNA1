@@ -26,6 +26,8 @@ your arguments, so the tools keep owning their own flags.
 | changed a **weight or a fusion** | `pack_npue`, then `verify_npue`, then `verify_pack_parity` | `BUILD.md` §2.5 |
 | changed a **kernel or the dataflow** | `export_gemm_rtp`, then `verify_design_numerics` (needs the NPU) | `BUILD.md` §2.3, §2.5 |
 | want **int8 (W8A8)** instead of bf16 | `pack_npue --int8`, `export_gemm_rtp --int8`, then `verify_i8_scheme`, `verify_i8_kernels`, `verify_npue` | [int8](#int8-w8a8-containers) below |
+| want **int4 (W4A8)** — half the weight bytes, still on the int8 array | `pack_npue --dtype i4 --int4-group 32`, then `verify_i4_scheme`, `verify_npue`; run it with an **int8** design set, no re-export | [int4](#int4-w4a8-containers) below |
+| want the **operand dtype stated** | `pack_npue --dtype {f32,bf16,i8,i4}` — `bf16` is the default, `i8` is `--int8` spelled the newer way, `i4` is the four per-layer GEMM operands stored as packed 4-bit weights over the same int8 datapath (it takes `--int4-group`), `f32` is the CPU control container (arch=1 only). fp16 is refused by name: the array's datapath is bf16 or int8, so a container claiming one could not be run. | `pack_npue --help` |
 | changed the **Whisper** path | `verify_whisper_tokenizer`, `verify_whisper_features`, `verify_whisper_model` | `BUILD.md` §2.5 |
 | are **about to ship** | `python tools/pipeline.py gates --only release` | `BUILD.md` §2.5–2.6 |
 | touched anything under **export/** | `parity_exporters` | [parity](#parity_exporterspy) below |
@@ -68,7 +70,7 @@ Two conventions hold across all of them:
 
 | File | Role | Invoked by |
 |---|---|---|
-| `pack/pack_npue.py` | HuggingFace checkpoint → pre-tiled, pre-fused `.npue`. `--int8` switches the four per-layer GEMM operands to int8. | `BUILD.md` §2.2; `verify_npue.py`, `verify_pack_parity.py`. |
+| `pack/pack_npue.py` | HuggingFace checkpoint → pre-tiled, pre-fused `.npue`. `--dtype {f32,bf16,i8,i4}` names the operand dtype: `bf16` (default) the pre-tiled panel the array runs, `i8` the four per-layer GEMM operands as per-channel int8 with SmoothQuant, `i4` the same four operands stored as packed 4-bit weights with per-group scales (takes `--int4-group`, default 32; `0` is one group over the whole K), `f32` plain row-major operands for the CPU control container (arch=1 only). `--int8` and `--gemma-host-only` are `i8` and `f32` spelled the older way; two spellings that disagree are refused rather than ranked. | `BUILD.md` §2.2; `verify_npue.py`, `verify_pack_parity.py`. |
 | `pack/packers/whisper.py` | The arch=4 packer: a Whisper checkpoint, with a conv frontend, a positional-embedding table, a second (decoder) stack and a tokenizer table. Split out of `pack_npue.py` rather than appended to it. | Imported by `pack_npue.py`. |
 
 ### export/ — the designs
@@ -87,10 +89,11 @@ commented list, and each row below says which tier it is in.
 
 | File | Role | Invoked by |
 |---|---|---|
-| `verify/verify_npue.py` | `.npue` gate: spec conformance, bit-exact round-trip, stale-layout guard, goldens. Handles both weight schemes: bf16 against the bf16 of the fused source, int8 against `rint(W*asmooth/wscale)` plus the scale, saturation and dead-column invariants, and refuses a container whose `a_dtype` disagrees with its own panels. | `BUILD.md` §2.5. |
+| `verify/verify_npue.py` | `.npue` gate: spec conformance, bit-exact round-trip, stale-layout guard, goldens. Handles all three weight schemes: bf16 against the bf16 of the fused source, int8 against `rint(W*asmooth/wscale)` plus the scale, saturation and dead-column invariants, int4 against the same int8 scale rule plus the group and payload rules, each with its own tail limit — and refuses a container whose `a_dtype` disagrees with its own panels. | `BUILD.md` §2.5. |
 | `verify/verify_pack_parity.py` | The Python and C++ packers must agree byte for byte. | `BUILD.md` §2.5. |
 | `verify/verify_i8_scheme.py` | The int8 scheme against itself, numpy only and no `reference/`: the round trip, the reader's dequantisation, and **seven injected packing faults** each of which the gate must name. A gate that has only ever seen a correct container is a gate whose sensitivity is unknown. | `BUILD.md` §2.5. |
 | `verify/verify_i8_kernels.py` | The runtime's int8 host kernels against themselves: builds `runtime/tests/test_int8_host_kernels.cpp` three ways from one source (AVX2+FMA, scalar, scalar with the compiler's FMA contraction) and diffs the bytes. Pins that `quantise_a_int8` **is** bit-identical, that `dequantise_c` is **not** (1 ULP, attributed exactly to the FMA), and that the stream-load alignment precondition refuses exactly the three cases that would otherwise be a SIGSEGV on AVX2 hosts only. Needs `g++`; no NPU, no XRT, no checkpoint. | `BUILD.md` §2.5. |
+| `verify/verify_i4_scheme.py` | The int4 scheme against itself, **and against C++**: builds `verify/int4_panel_probe.cpp` from `runtime/src/model.cpp` and requires `common/int4_panel.hpp`'s decode to equal `npue.fold_i4()` **byte for byte**, over group sizes 32/16/64/0/256 (0 = per-channel, 256 = larger than K) plus a bf16 operand for the non-decode path, then runs five C++ refusals. Sections 1–6 are the `verify_i8_scheme` question applied to the new scheme: the honest round trip, every group size, a zero padding column, an unsmoothed panel, **ten injected faults** each of which the gate must name, and the refusals. The point of the byte comparison is that int4 is the first format where the runtime does arithmetic the writer also did — a wrong nibble index, a wrong group row, a wrong sign extension or a tie broken the other way all still produce a right-sized, right-hashed panel of plausible numbers that no tolerance and no self-consistency check sees. Needs numpy and `g++`; no NPU, no checkpoint, no `reference/`. | `BUILD.md` §2.5. |
 | `verify/verify_design_numerics.py` | Feeds random matrices through an exported design set's own instruction streams and compares C against numpy; `--npue`/`--tensor` stages real container operands verbatim. The only check that a design *computes* what it claims to, and the only one that spans design, file and hardware at once; needs an NPU. | Run by hand after any `export_gemm_rtp.py` change, and per model when its design set is first built. |
 | `verify/verify_whisper_tokenizer.py` | Three-way gate on the Whisper tokenizer: C++, the reference, and HuggingFace, over an adversarial corpus (Cyrillic, CJK, emoji, CRLF, long runs, contractions). Exact ids, no tolerance: a transcript is text. | Run by hand; `BUILD.md` §2.5. |
 | `verify/verify_whisper_features.py` | Holds the C++ audio front end against `transformers`: the WAV reader and the ffmpeg path against Python's `wave`, the log-mel spectrogram against `WhisperFeatureExtractor`, the slaney filter bank on its own, and the two convolutions against torch with the container's own weights. The corpus includes a clip shorter than 30 s and one longer, because the padding and the cut are the whole story. | Run by hand; `BUILD.md` §2.5. |
@@ -127,8 +130,9 @@ specification is a program as well as a reference) and `whisper_int8.py` (whose
 
 | File | Role | Imported by |
 |---|---|---|
-| `lib/npue.py` | The `.npue` container: header, JSON directory, tiling, reader, writer. Reference the C++ loader must match. Also the `I8` dtype's meaning: `Reader.tensor()` on an int8 operand returns `Wq*wscale*asmooth`, the weight the array effectively multiplies, because the raw panel is not a weight. | `pack_npue.py`, `export_gemm_rtp.py`, `gemm_pretiled_research.py` and the `verify_*` gates. |
+| `lib/npue.py` | The `.npue` container: header, JSON directory, tiling, reader, writer. Reference the C++ loader must match. Also the `I8` dtype's meaning: `Reader.tensor()` on an int8 operand returns `Wq*wscale*asmooth`, the weight the array effectively multiplies, because the raw panel is not a weight. And `I4`: `pack_i4`/`unpack_i4` (low nibble first, values outside [-8, 7] refused rather than truncated), `fold_i4` (the group factor back in, `rint` = round-half-to-even), `GSCALE_SUFFIX`, and the accessor split — `raw()` **refuses** an I4 payload, `panel()` is the int8 panel the array multiplies, `tensor()` is the weight. | `pack_npue.py`, `export_gemm_rtp.py`, `gemm_pretiled_research.py` and the `verify_*` gates. |
 | `lib/gemm_i8.py` | The int8 scheme, shared by both packers: per-output-channel symmetric weights, per-row activations, an exact int32 accumulator, SmoothQuant folded into the weights rather than into LayerNorm (BERT is post-LN). `check_i8_operand` is its gate — four invariants, each with its own message. | `pack_npue.py`, `packers/whisper.py`, `verify_npue.py`, `verify_i8_scheme.py`. |
+| `lib/gemm_i4.py` | The int4 scheme, **weight-only** W4A8: the int8 scheme's `.wscale` rule kept unchanged, a per-(group, column) `s4 = max\|M\|/7` for the nibbles, and `.gscale` = `s4/wscale` as the sidecar stage() folds in while it still knows where each nibble sits. `add_gemm_b_int4` is the emitter, `check_i4_operand` its gate — five invariants. The layout dict is written as `dtype: "I8"` on purpose, because `layout` describes the panel the ARRAY consumes after widening and its hash must equal the int8 designs' `b_layout_hash`; the entry's own `dtype: "I4"` is what says how the bytes are stored. `emit_gemm_b` in `pack_npue.py` is the one place all three schemes branch. | `pack_npue.py`, `packers/vit.py`, `packers/whisper.py`, `verify_npue.py`, `verify_i4_scheme.py`. |
 | `lib/gemm_pretiled.py` | The production GEMM design library (`pretiled_array()`). | `export_gemm_rtp.py`; research driver in `gemm_pretiled_research.py`. |
 | `lib/npu_ops.py` | The op vocabulary shared with the runtime: code (`gelu`, `layn`, `softm`), the design directory each code means, and the flag names (`--npu-extra-ops` on both sides — it builds the design at export time and selects it at run time; `--extra-ops` is `export_eltwise`'s own spelling). Written twice on purpose — once here, once in `runtime/include/common/npu_ops_flag.hpp` — because the exporter is Python and the runtime's parser is C++; each file points at the other, and a typo is a refusal by name on both sides. | Imported by both exporters; change it in both places at once. |
 | `lib/onnx_weights.py` | The ONNX weight reader: walks the protobuf wire format itself (no protobuf runtime), recovers each tensor's checkpoint name and orientation from how the graph actually uses it, maps its external-data side files, and defines `model_digest()` — the one source digest. Memory-maps, so packing reads tensors without holding the file. | `pack_npue.py`, `packers/whisper.py`, `packers/vit.py`, `reference/onnx_io.py`, the `verify_*` gates. |
@@ -223,6 +227,94 @@ model the per-row activation quantisation the array also does. For the full
 int8 error, run the design's own instruction streams:
 `verify_design_numerics.py --npue`, which needs an NPU.
 
+## int4 (W4A8) containers
+
+int4 is a **storage** format, not a datapath. The array has no 4-bit MAC: the
+payload is stored two values per byte, widened to an int8 panel at `stage()`
+time, and every other part of the stack — the design set, the instruction
+streams, the dispatch, the container's own `a_dtype: "i8"` — is the int8 one,
+unchanged. That is what the `layout` dict says: it is written with
+`dtype: "I8"` because `layout` describes the panel the **array** consumes after
+the widening, so its hash equals the int8 designs' `b_layout_hash` and an int4
+container runs on an existing int8 design set with **no re-export**. The
+entry's own `dtype: "I4"` is what says how the bytes are stored. Two facts, two
+places, deliberately not one.
+
+The scheme (`tools/lib/gemm_i4.py`), with `M = W·fold·asmooth`:
+
+```
+wscale[j]  = max_k |M[k,j]| / 127      the INT8 rule, kept unchanged
+s4[g,j]    = max_{k in g} |M[k,j]| / 7  one scale per (group of rows, column)
+t[k,j]     = clip(rint(M[k,j] / s4[g,j]), -7, 7)   the stored nibble
+gscale[g,j]= s4[g,j] / wscale[j]        ≤ 127/7, written as `.gscale`
+q[k,j]     = clip(rint(t[k,j] · gscale[k // group, j]), -127, 127)   ← the array
+```
+
+`.wscale` keeps the int8 rule rather than taking the int4 one because with
+`gscale` in front of it `|t · gscale| ≤ 7 · 127/7 = 127` by construction, so
+`q` lands inside int8's range without a clip that could bite — and
+`check_i4_operand` then verifies `.wscale` against the *same* bit-exact rule
+`check_i8_operand` does, so both schemes' containers are held by one invariant
+rather than two similar ones. Folding `gscale` in at **pack** time would mean
+writing int8, i.e. not packing int4 at all; folding it at read time needs the
+group, which is config's `int4_group`, written **only** by an i4 pack.
+
+```sh
+# 1. the container (group 32 by default; 0 = one group over the whole K)
+python tools/pack/pack_npue.py --dtype i4 --int4-group 32 \
+    --out models/all-MiniLM-L6-v2.i4.npue
+
+# 2. the gates — numpy and a C++ compiler, no NPU and no checkpoint
+python tools/verify/verify_i4_scheme.py   # scheme, ten faults, C++ parity
+python tools/verify/verify_npue.py        # spec, round trip, layout, goldens
+
+# 3. run it against an INT8 design set (see below: no re-export needed)
+```
+
+**What it covers: the same four per-layer GEMM operands** as int8 (`qkv`,
+`attn_out`, `ffn_up`, `ffn_down`) and nothing else — the embedding tables,
+attention's host-side fp32 work and the elementwise design sets are untouched.
+
+**What it buys.** On MiniLM the operands drop 10.6 MB → 5.3 MB, the `.gscale`
+sidecar costs 1.3 MB, and the container goes 58.68 MB (int8) → 54.73 MB, or
+69.02 MB (bf16) → 54.73 MB. Like int8 it buys no throughput: the bottleneck is
+the per-dispatch cost, and widening two nibbles to an int8 value is not on the
+critical path.
+
+**What it costs: accuracy, with its own limit.** `verify_npue.py` gates an i4
+container on `INT4_WEIGHT_ONLY_LIMIT`, a number the file states and shows the
+measurement table for — it is a **weight-half** limit like int8's, and it is an
+order of magnitude looser because an int4 step is ~18× an int8 one. Measured
+weight-half `1-cos` at `--device npu1`, `--int4-group` 32 unless said
+otherwise:
+
+| model | int8 | int4 |
+|---|---|---|
+| `all-MiniLM-L6-v2` | 4.383e-04 | 3.676e-02 (g16 2.724e-02, g0 1.008e-01) |
+| `bge-small-en-v1.5` | — | 2.505e-02 |
+| `bge-large-en-v1.5` (`--tile-n 32`) | — | 1.905e-02 |
+
+**Group size is the knob.** Smaller groups track a row-varying weight more
+closely and shrink the error (32 → 16 moved MiniLM 3.676e-02 → 2.724e-02); the
+cost is `.gscale` rows, `ceil(K/group)` × N floats — 4× the sidecar at group 8.
+`--int4-group 0` is per-channel, one group over all of K, and measures worst of
+the three on every model tried.
+
+**Refusals worth knowing about.** `--dtype i4` without `--int8` is refused
+rather than accepted-and-ignored; `pack_gte` refuses the pair outright because
+its smoothing calibration has no `gte` oracle; a packer that takes
+`--int4-group` without `i4` names the flag and stops; `Reader.raw()` refuses an
+I4 payload (it would hand back half a panel of a neighbour's nibbles); and the
+runtime refuses an I4 panel staged against a non-int8 design, a payload with no
+`.gscale`, no layout, or a `int4_group` that `.gscale`'s rows contradict.
+
+The format's failure mode, and what `verify_i4_scheme.py` section 7 exists for:
+a wrong nibble index, a wrong group row, a sign extended from the wrong bit or a
+tie broken the other way all still produce a **right-sized, right-hashed** panel
+of plausible-looking numbers. So the gate compiles
+`runtime/include/common/int4_panel.hpp` and requires its decode to equal
+`npue.fold_i4()`'s byte for byte.
+
 ## Design export
 
 `export_gemm_rtp.py` builds each (shape × batch tier) design, then refusing
@@ -243,17 +335,19 @@ decorator.
 
 Spec: [`docs/04-model/npue-format.md`](../docs/04-model/npue-format.md).
 
-## The B operand's byte order depends on the generation
+## The B operand's byte order depends on the generation AND the operand dtype
 
 `layout_hash` is what makes a stale container fail loudly, and it covers the
 `mac_s`/`mac_t` of the B panel. Those two numbers are **not** the same on both
-boards. Measured, not assumed — `aie.iron.kernels.mm(...).mac_dims` returns
+boards, and — less obviously — not the same for both operand dtypes on the same
+board. Measured, not assumed — `aie.iron.kernels.mm(...).mac_dims` returns
 `(r, s, t)` and the B tile interior is stored in `(s, t)` order:
 
-| device | `mac_dims` | B panel order |
-|---|---|---|
-| `npu2` (aie2p) | `(8, 8, 8)` | `(s=8, t=8)` |
-| `npu1` (aie2) | `(4, 8, 4)` | `(s=8, t=4)` |
+| device | operand | `mac_dims` | B panel order |
+|---|---|---|---|
+| `npu2` (aie2p) | bf16, i8 | `(8, 8, 8)` | `(s=8, t=8)` |
+| `npu1` (aie2) | bf16 | `(4, 8, 4)` | `(s=8, t=4)` |
+| `npu1` (aie2) | i8 | `(4, 8, 8)` | `(s=8, t=8)` |
 
 `npue.gemm_b_layout`'s `(8, 8)` default is npu2's, and the packers used to pass
 that default straight through, so a container packed for `npu2` was read by an
@@ -264,8 +358,35 @@ was plausible. It is per-device now — `pack_npue.py --device`, and the exporte
 takes the pair from `--arch` — so the hash compares like with like and a
 cross-generation container is refused instead of misread.
 
-`verify_design_numerics.py` is what saw it, in one dispatch per stream, before
-any model was involved. It prints the mismatch by name:
+### The dtype half, and why it was missed
+
+The fix above made the table **per device** and stopped there. That is right for
+bf16 and wrong in general, and the wrongness is invisible for the same reason the
+original bug was: the int8 row of a device-keyed table is a *guess* that every
+layer reads, so when the guess is wrong every layer is wrong identically and all
+of them agree. An int8 container on `npu1` was therefore tiled `(s=8, t=4)` —
+bf16's pair — while the int8 MMAC consumed `(8, 8)`. Measured end to end on
+bge-small: `1 - cos` **8.6e-01**, against 6.3e-04 once the pair was right. Not
+one check objected. The exporter, the packer, the runtime's `layout_hash`
+comparison and `verify_design_numerics` all read the same constant, so
+`layout_hash` matched a layout the hardware does not use — the check did its job
+on the value it was given and that value was wrong.
+
+Two things follow, and both are now enforced rather than documented:
+
+- **`mac_for_device(device, dtype)` takes the dtype as a required argument.** The
+  bf16 answer is the tempting one and a default is how the int8 half got it. The
+  table lives in `npue.MAC_BY_DEVICE` only; `exporters/common/consts.py` used to
+  keep `MAC_BY_ARCH` beside it, and `verify_design_numerics.py` a third copy, and
+  `npue_pack.cpp` a fourth — a table edited in one place and read in four is
+  exactly how a wrong value comes to look like a settled fact.
+- **`verify_i4_scheme.py` section 8 re-measures the table** from
+  `aie.iron.kernels.mm` on every run, over four tile widths, and fails by name
+  if the table and the compiler disagree. It cannot see the `npu2` row on an
+  `npu1` machine and says so rather than implying it checked.
+
+`verify_design_numerics.py` is what saw the original, in one dispatch per stream,
+before any model was involved. It prints the mismatch by name:
 
 ```
 LAYOUT MISMATCH: b_layout records mac (s=8, t=8); device npu1 consumes

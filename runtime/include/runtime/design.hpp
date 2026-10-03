@@ -54,6 +54,23 @@ struct DesignInfo {
   int64_t cols = 0;
   bool emulate_bfp16 = false;
   bool datapath_recorded = false;
+  // THE MMAC THE DESIGN'S OWN VALUES SAY IT HAS, in the two words the status
+  // line prints. `a_dtype` names the operand width and `emulate_bfp16` the
+  // bfloat16 emulation on top of the bf16 path -- two different questions, and
+  // only the first one decides whether the MMAC is int8.
+  //
+  // Reading the name off `emulate_bfp16` alone, as the three call sites used
+  // to, calls an int8 design "bf16 MMAC": `--int8` writes
+  // emulate_bfp16=false because int8 and bfp16 are mutually exclusive
+  // datapath choices (exporters/gemm_rtp/geometry.py), so the flag's false is
+  // an ABSENCE, not a bf16 claim. That is the reports-the-intention failure
+  // these status lines exist to prevent (tasks/0042, 0081), pointed the other
+  // way: the line named a datapath the loaded design did not have. A label
+  // built from a value the loader already parsed cannot drift like that.
+  const char *datapath_name() const {
+    if (a_elem_bytes == 1) return "int8";
+    return emulate_bfp16 ? "bfp16-emulated" : "bf16";
+  }
   // Which NPU generation this design was built for. `arch` is 1 or 2 and
   // `device` is the toolchain's device name ("npu1"/"npu2"); both are written
   // by tools/export/export_gemm_rtp.py. The *_recorded flags separate "the design

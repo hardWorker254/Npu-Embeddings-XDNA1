@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "runtime/design.hpp"
@@ -49,11 +50,18 @@ public:
   // guessed: the design is what decides how many rows one dispatch computes.
   void alloc_buffers();
 
-  // Stage a [K, N] bf16 pre-tiled operand from the container. The recorded
+  // Stage a [K, N] pre-tiled operand from the container. The recorded
   // layout_hash must be the one the design consumes -- the cross-generation
   // packing failure is invisible everywhere else (same byte count, same shapes,
   // matching hash on both sides, plausible numbers), and this is the only
   // place both sides are in the same expression.
+  //
+  // On an int8 design this is ALSO where the operand's quantisation scales are
+  // read, and it is the only place that can: `.wscale` and `.asmooth` are
+  // per-operand tensors in the container, the runtime has no other source for
+  // them, and a GEMM that staged its A panel without them would have no way to
+  // put the right numbers back. They are kept against the B slot this call
+  // returns, which is what every GEMM call site already carries.
   size_t stage_operand(const npue::File &model, const std::string &name);
 
   // out[n_real, N] = A[n_real, k] @ B + bias, computed at the stream's own row
@@ -64,6 +72,11 @@ public:
   // holds there, and a stale row would put another call's activations into this
   // one's output. The tail is a padded row, so zero is the only value that
   // cannot be mistaken for a real position.
+  //
+  // ON AN INT8 DESIGN THIS DISPATCHES TO run_i8. That is the whole of it: the
+  // caller does not know or care which datapath it is on, the design does, and
+  // the eleven call sites that make up Whisper's encoder and decoder are exactly
+  // the ones that must not each grow a branch on it.
   void run(size_t instr, const float *a, int64_t n_real, int64_t rows, int64_t k,
            size_t wslot, const float *bias, int64_t n, float *out);
 
@@ -81,6 +94,8 @@ public:
   // SmoothQuant: the row scale is then set by the smoothed values, and the
   // weight was pre-multiplied by asmooth at pack time. Null means no smoothing,
   // which is what a container with all-ones asmooth carries.
+  //
+  // Called from run() for an int8 design. Reachable directly only by a test.
   void run_i8(size_t instr, const float *a, int64_t n_real, int64_t rows,
               int64_t k, size_t wslot, const float *bias, int64_t n, float *out,
               const float *wscale, const float *inv_smooth);
@@ -93,6 +108,15 @@ public:
   // both cheaper and more accurate than one dispatch over a fused K. The bias is
   // deliberately not added here -- a caller adding it per dispatch would add it
   // once per tap.
+  //
+  // bf16 DESIGNS ONLY, and the reason is the B panel rather than the A side:
+  // NpuConv1d::stage() builds this operand's B panel on the host, from the
+  // container's F32 conv weights, through a bf16 tiler. An int8 design's panel
+  // is I8 with a different MAC sub-tile, so that tiler would produce the right
+  // byte count in the wrong element type and the wrong order -- which is the
+  // silent-wrong-answer shape this tree treats as the worst outcome, and the
+  // reason an int8 design set carries no conv stream and stt_mode.hpp sends the
+  // front end to the host.
   void run_accum(size_t instr, const float *a, int64_t n_real, int64_t rows,
                  int64_t k, size_t wslot, int64_t n, float *acc);
 
@@ -105,6 +129,29 @@ public:
   double t_convert = 0.0;
 
 private:
+  // ONE OPERAND'S QUANTISATION SCALES, held against the B slot stage_operand
+  // returned for it.
+  //
+  // The key is a SLOT rather than an operand NAME because that is what every
+  // GEMM call site carries and the name is not in scope at any of them: keying
+  // by name would mean threading a string through eleven call sites to look up
+  // something they already hold. `inv_smooth` is stored by VALUE, not as a
+  // pointer into the container plus a one-deep cache of its reciprocal, because
+  // eleven operands of eleven different K lengths all live in one instance and
+  // a one-deep cache thrashes on every layer boundary -- which would recompute
+  // the reciprocal on every dispatch, exactly the cost the cache existed to
+  // avoid. Empty means the operand carries no asmooth.
+  struct OpScale {
+    const float *wscale = nullptr;
+    std::vector<float> inv_smooth;
+  };
+
+  // The scales for one staged operand, or a refusal naming the call that wanted
+  // them. Reaching the refusal means a GEMM was dispatched against a B slot that
+  // stage_operand never produced -- a slot from another design, or a hand-built
+  // one -- so the message says that rather than talking about packing.
+  const OpScale &scale_for(size_t wslot, const char *call) const;
+
   template <typename F> void par_rows(int64_t n, F &&f) const {
     if (pool_.size() == 1) { f(int64_t(0), n); return; }
     pool_.run([&](int w, int nw) {
@@ -117,11 +164,7 @@ private:
 
   npu::Design &d_;
   app::Pool &pool_;
-  // 1/asmooth per operand, cached across dispatches because the container's
-  // factor is a pointer into a mapping and the reciprocal is K divisions of work
-  // the array would otherwise pay per dispatch.
-  std::vector<float> inv_smooth_;
-  const float *inv_smooth_src_ = nullptr;
+  std::unordered_map<size_t, OpScale> scales_;
   std::vector<float> a_scale_;
 };
 

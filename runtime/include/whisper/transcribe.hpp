@@ -113,7 +113,8 @@ struct Transcript {
 // not a thing that can be half-done.
 std::string resolve_stt_artifacts(const std::string &root,
                                   const std::string &artifacts,
-                                  const std::string &model_name);
+                                  const std::string &model_name,
+                                  const std::string &want_layout = "");
 
 class Session {
 public:
@@ -209,8 +210,7 @@ public:
                                                                     : "?");
     if (!i.datapath_recorded)
       return "UNRECORDED (design predates the field), C as " + c;
-    return std::string(i.emulate_bfp16 ? "bfp16-emulated" : "bf16") +
-           " MMAC, C as " + c;
+    return std::string(i.datapath_name()) + " MMAC, C as " + c;
   }
 
   Transcript transcribe_file(const std::string &path,

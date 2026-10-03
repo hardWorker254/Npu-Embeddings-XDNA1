@@ -444,32 +444,38 @@ Image decode_jpeg(const std::vector<uint8_t> &bytes, const std::string &name) {
   return out;
 }
 
-Image decode_image(const std::string &path) {
-  const std::vector<uint8_t> bytes = slurp(path);
+Image decode_image_bytes(const std::vector<uint8_t> &bytes,
+                         const std::string &name) {
   if (bytes.size() < 8)
-    throw std::runtime_error(path + ": " + std::to_string(bytes.size()) +
+    throw std::runtime_error(name + ": " + std::to_string(bytes.size()) +
                              " bytes, too short to be an image");
-  // By MAGIC. A file whose extension disagrees with its content is common; a
-  // decoder that keys on the extension returns an error the user cannot act on.
+  // By MAGIC, not by name. A file whose extension disagrees with its content is
+  // common; a decoder that keys on the extension returns an error the user
+  // cannot act on.
   if (png_sig_cmp(const_cast<png_bytep>(bytes.data()), 0, 8) == 0)
-    return decode_png(bytes, path);
-  if (bytes[0] == 0xFF && bytes[1] == 0xD8) return decode_jpeg(bytes, path);
+    return decode_png(bytes, name);
+  if (bytes[0] == 0xFF && bytes[1] == 0xD8) return decode_jpeg(bytes, name);
   throw std::runtime_error(
-      path + ": not a PNG (signature) and not a JPEG (SOI marker). This "
+      name + ": not a PNG (signature) and not a JPEG (SOI marker). This "
       "runtime reads those two and refuses anything else rather than "
       "guessing -- re-save the image as PNG or JPEG.");
 }
 
-Image resize_square(const Image &src, int64_t side, Resample how) {
-  if (side <= 0) throw std::runtime_error("resize to " + std::to_string(side) +
-                                          " pixels");
+Image decode_image(const std::string &path) {
+  return decode_image_bytes(slurp(path), path);
+}
+
+Image resize_to(const Image &src, int64_t out_w, int64_t out_h, Resample how) {
+  if (out_w <= 0 || out_h <= 0)
+    throw std::runtime_error("resize to " + std::to_string(out_w) + "x" +
+                             std::to_string(out_h) + " pixels");
   if (src.empty())
     throw std::runtime_error("resize: the source image decoded to nothing");
   // PIL applies no filter when the size already matches, and neither do we: a
   // filter here would be a half-LSB change to a pipeline that did not ask for
   // one, and every downstream gate would be measuring our resize instead of
   // the model's.
-  if (src.width == side && src.height == side) return src;
+  if (src.width == out_w && src.height == out_h) return src;
 
   int64_t support_scale = 1;
   const Kernel kern = kernel_for(how, &support_scale);
@@ -529,25 +535,25 @@ Image resize_square(const Image &src, int64_t side, Resample how) {
   }
 
   const int64_t w = src.width, h = src.height;
-  // Horizontal first, into a h x side buffer, then vertical. The same order PIL
-  // uses, and the same reason: the horizontal pass is the wider of the two and
-  // doing it first keeps the intermediate at h*side rather than side*side.
-  std::vector<uint8_t> tmp(static_cast<size_t>(h) * side * 3);
+  // Horizontal first, into a h x out_w buffer, then vertical. The same order
+  // PIL uses, and the same reason: the horizontal pass is the wider of the two
+  // and doing it first keeps the intermediate at h*out_w rather than out_w*out_h.
+  std::vector<uint8_t> tmp(static_cast<size_t>(h) * out_w * 3);
   const double fscale_x =
-      std::max(1.0, static_cast<double>(w) / static_cast<double>(side));
+      std::max(1.0, static_cast<double>(w) / static_cast<double>(out_w));
   for (int64_t y = 0; y < h; ++y) {
     resample_axis(src.rgb.data() + static_cast<size_t>(y) * w * 3, w,
-                  tmp.data() + static_cast<size_t>(y) * side * 3, side, 3, 3, 3,
+                  tmp.data() + static_cast<size_t>(y) * out_w * 3, out_w, 3, 3, 3,
                   kern, fscale_x);
   }
   Image out;
-  out.width = side;
-  out.height = side;
-  out.rgb.resize(static_cast<size_t>(side) * side * 3);
+  out.width = out_w;
+  out.height = out_h;
+  out.rgb.resize(static_cast<size_t>(out_w) * out_h * 3);
   const double fscale_y =
-      std::max(1.0, static_cast<double>(h) / static_cast<double>(side));
-  for (int64_t x = 0; x < side; ++x)
-    // BOTH strides are side*3 and the output base is the COLUMN, because both
+      std::max(1.0, static_cast<double>(h) / static_cast<double>(out_h));
+  for (int64_t x = 0; x < out_w; ++x)
+    // BOTH strides are out_w*3 and the output base is the COLUMN, because both
     // buffers are row-major and consecutive OUTPUT indices are consecutive ROWS
     // here, not consecutive pixels. Writing stride_out = 3 -- the value the
     // horizontal pass above uses, and the one the two calls look
@@ -555,9 +561,17 @@ Image resize_square(const Image &src, int64_t side, Resample how) {
     // TRANSPOSE of the right answer: correctly shaped, entirely wrong, and
     // invisible on a flat raster. Both strides being equal is not a typo to be
     // tidied up later; it is the fact that makes the vertical pass vertical.
-    resample_axis(tmp.data() + x * 3, h, out.rgb.data() + x * 3, side,
-                  side * 3, side * 3, 3, kern, fscale_y);
+    resample_axis(tmp.data() + x * 3, h, out.rgb.data() + x * 3, out_h,
+                  out_w * 3, out_w * 3, 3, kern, fscale_y);
   return out;
+}
+
+// The square case, which is all arch=5 asks for: resize_to with one size twice.
+// There is therefore ONE resampler in this tree and ONE claim about its
+// agreement with PIL -- verify_vit_image.py gates resize_to, and resize_square is
+// a second name for the same measured function rather than a second kernel.
+Image resize_square(const Image &src, int64_t side, Resample how) {
+  return resize_to(src, side, side, how);
 }
 
 std::vector<float> normalise(const Image &im, const Geometry &g) {

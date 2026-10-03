@@ -159,8 +159,13 @@ def main() -> int:
                     "transcript, with transformers' WER on the same audio for "
                     "scale.")
     ap.add_argument("--npue", default=str(REPO / "models" / "whisper-tiny.npue"))
+    # runtime/artifacts/<model>/artifacts_npu<N>, where every model's sets live.
+    # The default used to be runtime/<model>/artifacts_npu<N>, the
+    # pre-relocation path: a directory that is simply not there, so this gate
+    # failed on a missing design set rather than on anything to do with
+    # transcription.
     ap.add_argument("--artifacts",
-                    default=str(REPO / "runtime" / "whisper-tiny" /
+                    default=str(REPO / "runtime" / "artifacts" / "whisper-tiny" /
                                 "artifacts_npu1"))
     ap.add_argument("--checkpoint", default=str(REPO / "models" / "whisper-tiny"))
     ap.add_argument("--exe",

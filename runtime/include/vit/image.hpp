@@ -71,6 +71,19 @@ Image decode_image(const std::string &path);
 Image decode_png(const std::vector<uint8_t> &bytes, const std::string &name);
 Image decode_jpeg(const std::vector<uint8_t> &bytes, const std::string &name);
 
+// The same dispatch by MAGIC, from bytes the caller already has.
+//
+// `decode_image` above is a path-based wrapper over this. It exists separately
+// because the HTTP endpoint receives an upload, not a file: an upload has no
+// path, and writing one to a temporary file just to read it back would put a
+// filesystem between the request and the decoder, with a name collision and a
+// cleanup path that has to be right on every error path.
+//
+// `name` is only ever used in error messages, and it is NOT consulted to decide
+// the format -- see above.
+Image decode_image_bytes(const std::vector<uint8_t> &bytes,
+                         const std::string &name);
+
 // PIL.Image.resize((side, side), resample), i.e. the resize transformers' ViT
 // image processor asks for, computed in float and rounded back to 8 bits.
 //
@@ -115,6 +128,16 @@ Image decode_jpeg(const std::vector<uint8_t> &bytes, const std::string &name);
 // bit-identical elsewhere, because PIL's 8-bit path is fixed-point with 22 bits
 // of fractional precision and this one accumulates in float64.
 Image resize_square(const Image &src, int64_t side, Resample how);
+
+// The general form: resize to an arbitrary (out_w, out_h). resize_square is
+// this with one size twice, so there is one resampler and one measured claim
+// about its agreement with PIL rather than two kernels and two claims.
+//
+// It exists because a letterbox RESIZES UNIFORMLY and PADS to a square, so its
+// intermediate is not square -- see pose/image.hpp. The refusals for NEAREST and
+// HAMMING are resize_to's, identically, and the header's reasons for them
+// apply here unchanged.
+Image resize_to(const Image &src, int64_t out_w, int64_t out_h, Resample how);
 
 // [0,255] RGB -> [3, S, S] fp32, (x/255 - mean[c]) / std[c].
 //

@@ -258,6 +258,20 @@ bool inline_tag(int no, std::string *tag, int *item) {
   }
 }
 
+// Whether a PACKED payload in field `no` is LEB128 rather than native bytes.
+// True for exactly the integer fields. A packed repeated integer is one varint
+// per element; a packed repeated float/double is fixed-width values laid end to
+// end. Both arrive as protobuf wire type 2, so the wire type alone cannot say
+// how to read the bytes -- and reading a packed int32_data as native
+// little-endian returns a DIFFERENT NUMBER for every value >= 256, and reads
+// past the end of the field for a short one. A uint8 zero_point of 128 is
+// encoded `80 01`, which is that exact case. Mirrors _INLINE_VARINT_FIELDS in
+// tools/lib/onnx_weights.py; the two must agree or the packer and the runtime
+// read the same checkpoint differently.
+inline bool inline_is_varint(int no) {
+  return no == 5 || no == 7 || no == 11;
+}
+
 // ONNX TensorProto.DataType -> the .npue tag it maps to. info() hands
 // back the .npue tag on purpose: callers that switch on `dt == "BF16"`
 // were written for the container reader and must not have to know which
@@ -766,20 +780,35 @@ OnnxWeights::OnnxWeights(const std::string &graph_path,
         break;
       }
       case LocKind::kInline: {
-        if (t.inl_wt == 0) {
-          // A single varint is not bytes at `ps` -- it is LEB128, and handing
-          // those bytes back as if they were the value would reinterpret a
-          // constant as a much larger one. Materialise it, little-endian, at
-          // the element's own width. One element only: the field carries one
-          // scalar, so a shape claiming more is a file that disagrees with
-          // itself.
-          if (count != 1)
-            throw std::runtime_error(path_ + ": '" + t.orig +
-                                     "' size disagrees with its shape");
+        // HOW THE BYTES ARE ENCODED is decided by the FIELD, not the wire type:
+        // a packed integer field is LEB128, a packed float field is fixed-width
+        // values end to end, and both are wire type 2. See inline_is_varint().
+        if (inline_is_varint(t.inl_no) &&
+            (t.inl_wt == 0 || t.inl_wt == 2)) {
+          // One varint per element, materialised little-endian at the element's
+          // own width. Counting them is also the only size check available: a
+          // packed field's byte length says nothing about how many values are in
+          // it, so the SHAPE is what has to agree, and a file where it does not
+          // is refused here rather than truncated.
+          scalar = std::make_shared<std::vector<uint8_t>>(need);
           size_t p = t.inl_ps;
-          const uint64_t v = read_varint(b, n, p);
-          scalar = std::make_shared<std::vector<uint8_t>>(t.item);
-          std::memcpy(scalar->data(), &v, static_cast<size_t>(t.item));
+          for (int64_t e = 0; e < count; ++e) {
+            if (p > t.inl_pe)
+              throw std::runtime_error(path_ + ": '" + t.orig +
+                                       "' packed varints run out before its "
+                                       "shape's element count; the file "
+                                       "disagrees with itself");
+            const uint64_t v = read_varint(b, n, p);
+            std::memcpy(scalar->data() + static_cast<size_t>(e) *
+                                             static_cast<size_t>(t.item),
+                        &v, static_cast<size_t>(t.item));
+          }
+          if (p != t.inl_pe)
+            throw std::runtime_error(path_ + ": '" + t.orig +
+                                     "' has packed varints left over after "
+                                     "its shape's element count; the file "
+                                     "disagrees with itself");
+          src = scalar->data();
         } else if (t.inl_wt == 2) {
           if (t.inl_pe - t.inl_ps != need)
             throw std::runtime_error(path_ + ": '" + t.orig +

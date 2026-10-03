@@ -55,6 +55,11 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "tools" / "lib"))
+
+# One default output location for every gate, rather than one directory
+# per task that asked for it. See tools/lib/gate_output.py for why.
+from gate_output import GATE_OUT                                 # noqa: E402
 
 BUILTIN = [
     "all-MiniLM-L6-v2",
@@ -135,7 +140,8 @@ def stats(e: list[float]) -> dict:
 
 def embed(exe: Path, root: Path, model: str, texts: list[str], hidden: int,
           prefix: str | None, threads: int,
-          artifacts: str | None) -> tuple[list[list[float]], dict]:
+          artifacts: str | None,
+          npu_ops: str | None = None) -> tuple[list[list[float]], dict]:
     """The shipped CLI form, and the datapath scraped from the runtime's OWN
     status line -- never restated from what this file asked for. Same
     discipline and same regex as verify_semantics.py."""
@@ -148,6 +154,8 @@ def embed(exe: Path, root: Path, model: str, texts: list[str], hidden: int,
             cmd += ["--artifacts", artifacts]
         if prefix is not None:
             cmd += ["--prefix", prefix]
+        if npu_ops:
+            cmd += ["--npu-extra-ops", npu_ops]
         r = subprocess.run(cmd, capture_output=True, text=True,
                            encoding="utf-8", errors="replace")
         if r.returncode != 0:
@@ -161,6 +169,23 @@ def embed(exe: Path, root: Path, model: str, texts: list[str], hidden: int,
                          line)
             if m and m.group(1) not in said:
                 said[m.group(1)] = m.group(2).strip()
+        # WHERE EACH ELTWISE OP ACTUALLY RAN, from the same status block. This
+        # is scraped rather than read back from --npu-ops for the reason the
+        # datapath is: the flag says which op sets were REQUESTED, and the
+        # question this gate asks is which ones the runtime actually DISPATCHED.
+        # Those are different claims -- an op whose design directory is missing
+        # can be requested and run on the host without a word -- and a ceiling
+        # keyed on the request would be measuring the wrong run.
+        #
+        # The three sibling-op codes, in the runtime's own spelling. The status
+        # line is "  gelu   GELU       on the ARRAY (gelu, arch 1 npu1)" or
+        # "... on the HOST (fp32) -- N fewer NPU dispatches".
+        on_array = []
+        for line in (r.stdout or "").splitlines():
+            m = re.match(r"\s{2}(gelu|softm|layn)\s{2,}.*on the ARRAY", line)
+            if m and m.group(1) not in on_array:
+                on_array.append(m.group(1))
+        said["ops_on_array"] = ",".join(sorted(on_array))
         vs = [unit(v) for v in read_f32(d / "out.f32", len(texts), hidden)]
         return vs, said
 
@@ -187,7 +212,7 @@ def check_model(model: str, ref_dir: Path, exe: Path, root: Path,
     ref = [unit(v) for v in read_f32(ref_dir / f"{model}.f32",
                                      len(texts), hidden)]
     vs, said = embed(exe, root, model, texts, hidden, prefix,
-                     args.threads, args.artifacts)
+                     args.threads, args.artifacts, args.npu_ops)
 
     e = [max(0.0, 1.0 - sum(a * b for a, b in zip(g, r)))
          for g, r in zip(vs, ref)]
@@ -200,6 +225,7 @@ def check_model(model: str, ref_dir: Path, exe: Path, root: Path,
         "prompt": prefix,
         "datapath_reported": said.get("datapath", "UNREPORTED"),
         "designs_reported": said.get("designs", "UNREPORTED"),
+        "ops_on_array": said.get("ops_on_array", ""),
         "overall": overall,
         "groups": per_group,
         "worst": [{"text": texts[i], "one_minus_cos": e[i]} for i in worst],
@@ -212,6 +238,17 @@ def check_model(model: str, ref_dir: Path, exe: Path, root: Path,
             "p99_ceiling": max(2e-3, 2.0 * overall["p99"]),
             "measured_date": datetime.date.today().isoformat(),
             "datapath": out["datapath_reported"],
+            # WHERE THE ELTWISE OPS RAN is part of what the ceiling describes,
+            # for the same reason the datapath is. gelu in bf16 on the array
+            # differs from gelu in fp32 on the host by ~7e-03 relfro measured on
+            # bge-base, and LayerNorm by ~2e-02 -- an order of magnitude over the
+            # default 2e-3 floor. A ceiling baselined with all three on the host
+            # would therefore FAIL a run that put them on the array, and the
+            # right response to that is not to loosen the ceiling but to
+            # re-baseline for that placement. Keying the record on the runtime's
+            # own report rather than on the flag is what keeps the two
+            # distinguishable after the fact.
+            "ops_on_array": out["ops_on_array"],
         }
         if model == "bge-large-en-v1.5":
             baseline["note"] = T51_NOTE
@@ -234,6 +271,21 @@ def check_model(model: str, ref_dir: Path, exe: Path, root: Path,
         return out
 
     out["baseline"] = baseline
+    # An older reference JSON has no ops_on_array, and means "" by that -- the
+    # host placement, which is exactly what every baseline predating this flag
+    # measured. Reading a missing key as "" rather than as a mismatch is what
+    # lets the committed references keep working unchanged.
+    if baseline.get("ops_on_array", "") != out["ops_on_array"]:
+        out["verdict"] = (
+            f"OP-PLACEMENT MISMATCH -- baseline was measured with the eltwise "
+            f"ops on [{baseline.get('ops_on_array', '') or 'host'}], this run "
+            f"reports [{out['ops_on_array'] or 'host'}]. A ceiling says nothing "
+            f"about a different set of kernels: gelu on the array is bf16 and "
+            f"gelu on the host is fp32, and they differ by an order of "
+            f"magnitude more than the 2e-3 floor. Re-baseline this placement "
+            f"(--npu-ops together with --write-baseline).")
+        out["pass"] = False
+        return out
     if (baseline["datapath"] != out["datapath_reported"]):
         # A ceiling measured on one datapath says nothing about another
         # (tasks/0129: int8 and bfp16 bge-large differ 10x at the median).
@@ -271,6 +323,15 @@ def main() -> int:
                     help="override the design set; by default the runtime "
                          "picks, which exercises pick_artifacts() too")
     ap.add_argument("--threads", type=int, default=24)
+    ap.add_argument("--npu-ops", default=None,
+                    help="op codes for the runtime's --npu-extra-ops, so this "
+                         "gate can measure a run with GELU/LayerNorm/softmax "
+                         "ON THE ARRAY instead of on the host. The placement "
+                         "is part of the baseline record: an op on the array "
+                         "computes in bf16 and on the host in fp32, and the "
+                         "two differ by more than the default ceiling, so a "
+                         "host baseline cannot judge an array run and says so "
+                         "instead of quietly comparing across them")
     ap.add_argument("--write-baseline", action="store_true",
                     help="measure p99 per model and record it in the "
                          "reference JSON as the ceiling's basis "
@@ -319,7 +380,9 @@ def main() -> int:
                   f"(p99 {b['p99_measured']:.3e} measured "
                   f"{b['measured_date']})"
                   + ("   [T51 waiver]" if b.get("note") else ""))
-        print(f"{'':>26}{r['datapath_reported']}")
+        print(f"{'':>26}{r['datapath_reported']}"
+                  + (f"   ops on array: {r['ops_on_array']}"
+                     if r.get("ops_on_array") else "   ops on array: none"))
         for g in ("words", "sentences", "phrases"):
             if g in r["groups"]:
                 s = r["groups"][g]
@@ -336,8 +399,7 @@ def main() -> int:
         raise SystemExit("no models checked")
 
     ok = all(r["pass"] for r in results)
-    out = Path(args.out) if args.out else (
-        REPO / "tasks" / "0132-t51-tail-gate" / "tail_gate.json")
+    out = Path(args.out) if args.out else GATE_OUT / "tail_gate.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({
         "kind": "hardware measurement -- tail gate, p99-gated per model",

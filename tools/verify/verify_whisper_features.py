@@ -173,7 +173,8 @@ def main() -> int:
     ap.add_argument("--exe", default=None)
     ap.add_argument("--artifacts", default=None,
                     help="design set root for the --front npu case; default "
-                         "runtime/<model>/artifacts_npu<N> when it exists")
+                         "runtime/artifacts/<model>/artifacts_npu<N> when "
+                         "it exists")
     ap.add_argument("--mel-atol-npu", type=float, default=1e-3,
                     help="tolerance for the mel bank on the array. It is the "
                          "HOST's tolerance on purpose: the bank's GEMM is inside "
@@ -276,8 +277,27 @@ def main() -> int:
     # array is different from the host.
     art = args.artifacts
     if art is None:
-        guess = REPO / "runtime" / npue.stem / "artifacts_npu1"
-        art = str(guess) if guess.is_dir() else None
+        # BOTH layouts, because a guess at only the old one turns this section
+        # into a silent skip: the path that no longer exists is not a directory,
+        # `art` stays None, and the gate reports the mel bank and the transform
+        # as host-only on a model whose design set carries both as streams. That
+        # is the worse of the two outcomes -- the array claim is the one this
+        # file exists to price, and it went unchecked while the gate still said
+        # what it always says. --artifacts overrides both.
+        #
+        # runtime/artifacts/<model>/artifacts_npu<N> is where the sets live now;
+        # runtime/<model>/artifacts_npu<N> is kept for a set exported by an older
+        # revision and not yet moved, because the runtime resolves both.
+        for guess in (REPO / "runtime" / "artifacts" / npue.stem / "artifacts_npu1",
+                      REPO / "runtime" / npue.stem / "artifacts_npu1"):
+            if guess.is_dir():
+                art = str(guess)
+                break
+        if art is None:
+            print(f"  note   no design set for {npue.stem} under "
+                  f"runtime/artifacts/ or runtime/, so the two front-end GEMMs "
+                  f"are not measured on the array here. Pass --artifacts to "
+                  f"point at one.")
     npu_probe = None
     if art and (Path(art) / "gemm_rtp" / "design.json").exists():
         have = json.loads((Path(art) / "gemm_rtp" / "design.json").read_text())

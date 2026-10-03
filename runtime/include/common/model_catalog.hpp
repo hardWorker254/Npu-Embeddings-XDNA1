@@ -40,6 +40,17 @@ struct ModelEntry {
   int64_t qkv_n = 0;
   bool gated_ffn = false;
   double mb = 0;
+  // "embed" | "stt" | "cls" | "pose" -- which SUBCOMMAND runs this container, or
+  // "" for a container that predates the key and is an embedder (every arch=0/2
+  // file ever written).
+  //
+  // It is a property of the CONTAINER, not of a list in this binary: the pose
+  // container says `"kind": "pose"`. Reading it is what stops `list` from
+  // printing a pose container as UNREADABLE -- a file that opens perfectly and
+  // is listed as broken, which is what happened to whisper containers before
+  // `pooling` was made optional and would happen again to every architecture
+  // that is not an embedder.
+  std::string kind;
 };
 
 
@@ -59,8 +70,31 @@ inline std::vector<ModelEntry> discover_models(const std::string &root) {
     // than one that is visibly broken.
     try {
       npue::File f(m.path);
-      m.repo = f.config_string("source_repo");
-      m.arch = f.config_string("arch");
+      // `arch` and `kind` FIRST, and both optional. Everything below them is an
+      // EMBEDDER's field: a pose container has no source_repo (it is packed from
+      // a local ONNX, not fetched from HuggingFace) and no num_layers, hidden or
+      // max_seq_len, and asking for the first one is what printed pose
+      // containers as UNREADABLE -- a container that opens fine, listed as
+      // broken, and reachable only by spelling out its path. Same shape of bug
+      // as `pooling` on arch=4, one architecture further on.
+      try {
+        m.arch = f.config_string("arch");
+      } catch (const std::exception &) {
+      }
+      try {
+        m.kind = f.config_string("kind");
+      } catch (const std::exception &) {
+      }
+      if (m.kind.empty())
+        m.kind = (m.arch == "yolov8_pose_c2f_silu_dfl") ? "pose"
+                : (m.arch == "whisper_encoder_decoder" ||
+                   m.arch == "whisper_decoder")            ? "stt"
+                                                          : "embed";
+      try {
+        m.repo = f.config_string("source_repo");
+      } catch (const std::exception &) {
+        m.repo = "n/a";   // packed from a local file, not fetched
+      }
       // `pooling` is an embedder's field. An arch=4 container answers "text
       // for audio" and has no pooling mode at all, so asking for the key was
       // what printed whisper containers as UNREADABLE -- a model that opens
@@ -70,28 +104,35 @@ inline std::vector<ModelEntry> discover_models(const std::string &root) {
         m.pooling = f.config_string("pooling");
       } catch (const std::exception &) {
       }
-      m.layers = f.config_int("num_layers");
-      m.hidden = f.config_int("hidden");
-      m.heads = f.config_int("num_heads");
-      m.head_dim = f.config_int("head_dim");
-      m.ffn = f.config_int("intermediate");
-      m.gated_ffn = config_flag(f, "gated_ffn", false);
-      try {
-        m.qkv_n = f.config_int("qkv_n");
-      } catch (const std::exception &) {
-        m.qkv_n = 0;   // predates the key; 3*hidden is right for those
+      // And so are the geometry keys. A pose container states its own -- the
+      // input size, the keypoint count, the strides -- under names this table
+      // has no column for, and asking for `num_layers` is the same mistake one
+      // line further down. They stay 0, and 0 is already how the table prints
+      // "not stated".
+      if (m.kind == "embed") {
+        m.layers = f.config_int("num_layers");
+        m.hidden = f.config_int("hidden");
+        m.heads = f.config_int("num_heads");
+        m.head_dim = f.config_int("head_dim");
+        m.ffn = f.config_int("intermediate");
+        m.gated_ffn = config_flag(f, "gated_ffn", false);
+        try {
+          m.qkv_n = f.config_int("qkv_n");
+        } catch (const std::exception &) {
+          m.qkv_n = 0;   // predates the key; 3*hidden is right for those
+        }
+        // Whether this container's GEMM operands are tiled bf16 for the array or
+        // plain row-major F32 for a host forward pass (tasks/0074). A container
+        // that predates the key is arch=1 host-only if it is Gemma, and tiled
+        // otherwise -- every arch=0/2 container ever written is tiled.
+        try {
+          m.gemm_layout = f.config_string("gemm_layout");
+        } catch (const std::exception &) {
+          m.gemm_layout = (m.arch == "gemma3_mqa_rope_geglu") ? "host"
+                                                                : "pretiled_bf16";
+        }
+        m.seq = f.config_int("max_seq_len");
       }
-      // Whether this container's GEMM operands are tiled bf16 for the array or
-      // plain row-major F32 for a host forward pass (tasks/0074). A container
-      // that predates the key is arch=1 host-only if it is Gemma, and tiled
-      // otherwise -- every arch=0/2 container ever written is tiled.
-      try {
-        m.gemm_layout = f.config_string("gemm_layout");
-      } catch (const std::exception &) {
-        m.gemm_layout = (m.arch == "gemma3_mqa_rope_geglu") ? "host"
-                                                            : "pretiled_bf16";
-      }
-      m.seq = f.config_int("max_seq_len");
       m.mb = f.data_length() / 1e6;
     } catch (const std::exception &e) {
       m.error = e.what();
@@ -116,9 +157,35 @@ inline void print_model_table(const std::vector<ModelEntry> &v) {
                   m.error.c_str());
       continue;
     }
+    // A container that is not an embedder gets its KIND in the pooling column
+    // and dashes where the geometry would be, and then a line saying which
+    // subcommand runs it. The columns are empty rather than zero-filled because
+    // a `0 layers` row reads as a claim -- a BERT-family container with no
+    // layers is a broken container -- and here it is a number the architecture
+    // does not have.
+    if (m.kind != "embed") {
+      std::printf("  %-24s %6s %7s %7s %6.0f %8s  %s\n", m.name.c_str(), "-",
+                  "-", m.kind.c_str(), m.mb, "-", m.repo.c_str());
+      continue;
+    }
     std::printf("  %-24s %6lld %7lld %7s %6.0f %8lld  %s\n", m.name.c_str(),
                 (long long)m.layers, (long long)m.hidden, m.pooling.c_str(),
                 m.mb, (long long)m.seq, m.repo.c_str());
+  }
+  // And the command, for the same reason the catalogue table carries a notes
+  // column: a row labelled `pose` with no subcommand next to it invites
+  // `embed yolov8n-pose`, which fails with a message about pooling rather than
+  // about the wrong mode.
+  for (const auto &m : v) {
+    if (!m.error.empty() || m.kind == "embed") continue;
+    const char *how = m.kind == "pose"  ? "npuembeddings pose"
+                      : m.kind == "cls"  ? "npuembeddings classify"
+                      : m.kind == "stt"  ? "npuembeddings transcribe"
+                                         : nullptr;
+    if (how)
+      std::printf("  %-24s   a %s container: `%s <name> <input>` is how it "
+                  "runs; `embed` is not.\n",
+                  m.name.c_str(), m.kind.c_str(), how);
   }
   std::printf("\n  Wider and deeper models score better and run slower; the\n"
               "  measured throughput and MTEB for each are in docs/.\n\n");

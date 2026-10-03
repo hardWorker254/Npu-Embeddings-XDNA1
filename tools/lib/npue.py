@@ -177,6 +177,25 @@ ARCH_WHISPER_ENC_DEC_GELU = 4
 # embedded, which is the difference the `classify` mode exists to express.
 ARCH_VIT_PATCH16_PRELN = 5
 
+# arch=6, body pose. The FIRST architecture in this tree whose container holds a
+# GRAPH rather than a shape: `pose`'s graph is an explicit list of ops (conv,
+# concat, add, maxpool, upsample, detect) because a conv net's structure is not
+# recoverable from any set of three numbers the way a transformer's is. The
+# runtime walks the list and refuses one whose operand counts do not typecheck --
+# see runtime/src/pose/geometry.cpp, which is where that check lives.
+#
+# The one thing this arch does NOT introduce is a new tensor role: every
+# convolution is stored as plain F32 `conv.N.w` / `conv.N.b`, exactly the
+# checkpoint's own [Cout, Cin, kh, kw], because the host backend indexes it
+# directly. A pre-tiled `gemm_b` panel is added ONLY under --npu, per
+# convolution, alongside the F32 copy -- never instead of it.
+#
+# The `kind` string is "pose": it selects no extra stream set in the exporter
+# (the array backend rides the same gemm_rtp directory name as every other
+# architecture), and it is what tells the runtime this container is posed rather
+# than embedded -- the difference the `pose` mode exists to express.
+ARCH_YOLOV8_POSE_C2F_SILU_DFL = 6
+
 FLAG_PRETILED = 1 << 0
 
 HEADER_FORMAT = "<4sIII QQQQ 16s"      # see SPEC CORRECTION above
@@ -199,6 +218,21 @@ NP_DTYPE = {"F32": np.dtype("<f4"), "I32": np.dtype("<i4"), "I64": np.dtype("<i8
             # meaningless, which is why the runtime refuses a container whose
             # operand dtype disagrees with the design's `a_dtype`.
             "I8": np.dtype("<i1"),
+            # I4 is the one tag here that is NOT one value per element: two
+            # int4 weights per byte, low nibble first (see pack_i4). What
+            # sits in the file is a byte, so the numpy dtype is u1 -- and
+            # frombuffer() over it yields HALF as many elements as the panel
+            # it decodes into, which is why raw() REFUSES an I4 entry rather
+            # than returning an array whose length contradicts the shape it
+            # was asked for. panel() is the accessor that decodes it.
+            #
+            # It is weight storage, not a datapath: the array still runs
+            # int8 x int8, and the nibbles are widened before stage(). So a
+            # container of I4 operands still carries config a_dtype "i8" and
+            # still matches an int8 design's b_layout_hash -- the scheme that
+            # produces the nibbles and the scales beside them is
+            # tools/lib/gemm_i4.py.
+            "I4": np.dtype("<u1"),
             # U8 carries opaque bytes -- the tokenizer vocabulary, so a
             # deployed model is ONE file rather than a file plus a
             # vocab.txt that must not get separated from it.
@@ -235,6 +269,97 @@ def from_bf16_bits(bits):
 # still looks plausible.
 WSCALE_SUFFIX = ".wscale"
 ASMOOTH_SUFFIX = ".asmooth"
+# int4 only: the per-(K-group, output-channel) factor that widens an int4
+# weight back into the int8 value the array multiplies. It rides as its own
+# tensor because the factor varies along BOTH axes and wscale is per-channel.
+GSCALE_SUFFIX = ".gscale"
+
+
+def pack_i4(q):
+    """int4 values held in an int8 panel -> packed bytes, LOW nibble first.
+
+        b[i] = (q[2i] & 0xF) | ((q[2i+1] & 0xF) << 4)
+
+    Two per byte, even index in the low nibble. This function and unpack_i4
+    are the only definitions of that order -- a container whose two halves
+    disagreed would still be the right size, still carry the right layout_hash
+    and would produce wrong numbers, which is the failure mode this format
+    spends most of its refusals on.
+
+    Values outside [-8, 7] are REFUSED, not truncated: silently dropping the
+    high bits of a 127 would turn an int8 payload into plausible int4 garbage.
+    """
+    flat = np.ascontiguousarray(q, dtype=np.int8).reshape(-1)
+    if flat.size % 2:
+        raise ValueError(
+            f"pack_i4: {flat.size} values cannot be paired; an int4 panel is "
+            f"tile_k*tile_n*blocks and both are even, so this is a tiling bug, "
+            f"not a shape this format cannot hold")
+    if flat.size and (int(flat.min()) < -8 or int(flat.max()) > 7):
+        raise ValueError(
+            f"pack_i4: values span [{int(flat.min())}, {int(flat.max())}], and "
+            f"int4 holds [-8, 7] -- quantise to int4 before packing, or the "
+            f"high bits are lost without a trace")
+    lo = (flat[0::2].astype(np.int16) & 0x0F).astype(np.uint8)
+    hi = (flat[1::2].astype(np.int16) & 0x0F).astype(np.uint8)
+    return (lo | (hi << 4)).astype(np.uint8)
+
+
+def unpack_i4(packed):
+    """Packed bytes -> the int8 panel's int4 values, sign-extended from 4 bits.
+
+    The exact inverse of pack_i4; `verify_i4_scheme` round-trips both through
+    every value in [-8, 7].
+    """
+    b = np.ascontiguousarray(packed, dtype=np.uint8).reshape(-1)
+    lo = (b & 0x0F).astype(np.int16)
+    hi = ((b >> 4) & 0x0F).astype(np.int16)
+    lo = np.where(lo > 7, lo - 16, lo).astype(np.int8)
+    hi = np.where(hi > 7, hi - 16, hi).astype(np.int8)
+    out = np.empty(b.size * 2, dtype=np.int8)
+    out[0::2] = lo
+    out[1::2] = hi
+    return out
+
+
+def fold_i4(t, gscale, group):
+    """int4 values in a LOGICAL [K, N] panel -> the int8 bytes the array gets.
+
+        q[k,j] = rint(t[k,j] * gscale[k // group, j])     clipped to +-127
+
+    `t` holds the int4 rounding; `gscale` (gemm_i4.add_gemm_b_int4) is the
+    ratio between that rounding's per-group scale and the per-column scale the
+    runtime multiplies by, so the product is the weight in units of wscale --
+    i.e. the same int8 panel an int8 container would carry, up to the int4
+    error that is the point of the format.
+
+    rint is round-half-to-EVEN, and the C++ unpack uses nearbyint under the
+    default FE_TONEAREST rounding mode, which is the same rule: the two sides
+    must produce byte-identical panels or a gate comparing them measures the
+    tie-break, not the packing.
+
+    `group` is config's int4_group: 0 means one group spanning the whole K
+    (per-channel int4), a positive N means groups of N rows.
+    """
+    t = np.asarray(t, dtype=np.int8)
+    if t.ndim != 2:
+        raise ValueError(f"fold_i4: panel is {t.shape}, expected a [K, N] matrix")
+    K, N = t.shape
+    gs = np.asarray(gscale, dtype=np.float32)
+    if gs.ndim != 2 or gs.shape[1] != N:
+        raise ValueError(
+            f"fold_i4: gscale is {gs.shape}, expected [ceil(K/group), {N}]")
+    g = int(group or K)
+    want_g = -(-K // g)
+    if gs.shape[0] != want_g:
+        raise ValueError(
+            f"fold_i4: gscale has {gs.shape[0]} group rows but K={K} with "
+            f"group={g} needs {want_g} -- the panel and its scales disagree "
+            f"about the group size, and folding at the wrong one would weight "
+            f"every row by its neighbour's scale")
+    row = (np.arange(K, dtype=np.int64) // g)
+    return np.clip(np.rint(t.astype(np.float32) * gs[row, :]), -127, 127
+                   ).astype(np.int8)
 
 
 def dequant_int8(q, wscale, asmooth=None):
@@ -284,6 +409,16 @@ def dequant_int8(q, wscale, asmooth=None):
 
 # -- tiling ----------------------------------------------------------------
 
+# The tile_n values this project actually ships a design at, in the order a
+# refusal should SUGGEST them. Used ONLY to turn a tiling refusal into a named
+# fix: 48 is the BERT-family default, 32 is what every whisper set uses, 64
+# divides most hidden sizes, and 16 is the last resort because a smaller tile_n
+# means more tiles and a worse DMA pattern -- it is offered, but last. A
+# refusal that says "N=1024 does not divide by 48" without saying what does
+# leaves the caller to guess, and guessing wrong costs an export.
+_TILE_N_CANDIDATES = (48, 32, 64, 16)
+
+
 def tile_b(b, tile_k, tile_n, s=None, t=None, order="k,n"):
     """Pre-tile a [K, N] GEMM operand into the order the DMA will stream it.
 
@@ -303,7 +438,28 @@ def tile_b(b, tile_k, tile_n, s=None, t=None, order="k,n"):
     """
     K, N = b.shape
     if K % tile_k or N % tile_n:
-        raise ValueError(f"[{K},{N}] does not tile into ({tile_k},{tile_n})")
+        # NAME THE FIX, and name the shape that failed. This refusal used to be
+        # a bare `[{K},{N}] does not tile into ({tile_k},{tile_n})` with no
+        # operand name and no hint, which made bge-large-en-v1.5 (hidden=1024)
+        # look un-packable when it is packable at --tile-n 32: the packer
+        # refused, the caller had to guess a flag, and nothing recorded that a
+        # flag was needed. A refusal that cannot be acted on gets worked around
+        # by picking a different model.
+        why = []
+        if K % tile_k:
+            why.append(f"K={K} is not a multiple of tile_k={tile_k}")
+        if N % tile_n:
+            fits = [t for t in _TILE_N_CANDIDATES if N % t == 0]
+            hint = (f"; --tile-n {fits[0]} would tile it"
+                    if fits else "; no tile_n in "
+                    f"{sorted(_TILE_N_CANDIDATES)} divides it either")
+            why.append(f"N={N} is not a multiple of tile_n={tile_n}{hint}")
+        raise ValueError(
+            f"[{K},{N}] does not tile into ({tile_k},{tile_n}): "
+            + " and ".join(why) + f". The operand here is {b.shape}, and the "
+            f"container and the design must be exported at the SAME tile_n, so "
+            f"change it on BOTH sides (pack_npue.py --tile-n and "
+            f"export_gemm_rtp.py -n), not one.")
 
     # [K,N] -> [kb, tile_k, nb, tile_n] -> [kb, nb, ...] or [nb, kb, ...]
     #
@@ -363,27 +519,102 @@ def gemm_b_layout(tile_k, tile_n, mac_s=8, mac_t=8, dtype="BF16"):
 
 
 # The B panel's byte order inside one (tile_k, tile_n) tile is the MMAC
-# sub-tile, and the MMAC sub-tile is not the same on both boards. MEASURED with
-# `aie.iron.kernels.mm(...).mac_dims`, which returns (r, s, t):
+# sub-tile. It depends on the OPERAND DTYPE as well as the board. MEASURED with
+# `aie.iron.kernels.mm(...).mac_dims`, which returns (r, s, t), at every tile
+# width this project builds (n = 16, 32, 48, 64 -- constant in n):
 #
-#     npu2 / aie2p : (8, 8, 8)      npu1 / aie2 : (4, 8, 4)
+#               npu1 / aie2                 npu2 / aie2p
+#     bf16      (4, 8, 4)  -> (8, 4)        (4, 8, 8)  -> (8, 8)
+#     i8        (4, 8, 8)  -> (8, 8)        (4, 8, 8)  -> (8, 8)
 #
-# and `tile_b`'s (s, t) is (mac_s, mac_t) here. A container packed with npu2's
-# pair and read by an npu1 design has every 64x32 panel's columns permuted: the
+# `tile_b`'s (s, t) is (mac_s, mac_t) here. A container packed with one pair and
+# read by a core built for the other has every panel's columns permuted: the
 # byte count is right, the shapes agree, both sides derive the same
 # `layout_hash` from the same wrong constant, and every product is plausible.
-# Nothing in the loader can see it, which is why it is resolved from the
-# target device in one place and printed by every packer.
-MAC_BY_DEVICE = {"npu1": (8, 4), "npu2": (8, 8)}
-MAC_DEFAULT_DEVICE = "npu2"  # what an unstated target means, and what shipped
+# Nothing in the loader can see it.
+#
+# WHY THE DTYPE KEY IS NOT OPTIONAL. The int8 row is not a cosmetic extra: on
+# npu1 the int8 MMAC's N sub-tile is 8, where bf16's is 4, so a table keyed by
+# device alone silently hands an int8 pack the bf16 pair. That shipped a
+# bge-small int8 design whose every product was wrong while every check passed
+# -- the exporter, the packer, the runtime's layout_hash comparison and
+# verify_design_numerics all agreed with each other and all disagreed with the
+# hardware, because all four read the same wrong constant. End to end it read as
+# 1-cos 8.6e-01 on a model whose bf16 path is 1e-05. `mac_for_device` therefore
+# REQUIRES the dtype rather than defaulting it: the bf16 answer is the tempting
+# one, and a default is how it got shipped.
+#
+# The int8 pair is also what an int4 (W4A8) container uses: its B panel is
+# widened to int8 before staging, so the bytes the core consumes are int8's.
+MAC_BY_DEVICE = {
+    "npu1": {"bf16": (8, 4), "i8": (8, 8)},
+    "npu2": {"bf16": (8, 8), "i8": (8, 8)},
+}
+MAC_DEFAULT_DEVICE = "npu1"  # what an unstated target means
+
+# AIE columns per device. A design's N must be a multiple of tile_n * cols, and
+# that product is what a B panel has to be padded UP to -- so a packer needs the
+# column count and cannot get it from mac_for_device, which knows the sub-tile
+# and not the array's width.
+#
+# The values are the exporter's own fallback columns (FALLBACK_COLS_BY_ARCH in
+# tools/export/exporters/common/consts.py: arch 1 -> 4, arch 2 -> 8), repeated
+# here rather than imported because tools/pack does not depend on tools/export
+# and this table is what makes that true rather than accidental. If one side
+# changes, the other has to, and the failure mode if they drift is the WORST
+# kind: a panel padded to 32 columns where the core reads 128, which reads past
+# the end of the tensor and returns plausible products.
+#
+# Every model this repository shipped until now had N already a multiple of 128
+# -- the embedders' widths are 384, 768, 1536 and 3072 -- so nothing had to pad
+# N past tile_n and this table had no reader. YOLOv8-pose is the first network
+# with output channels of 16, 32, 48, 51, 64, 96, 128, 192 and 256.
+COLS_BY_DEVICE = {"npu1": 4, "npu2": 8}
 
 
-def mac_for_device(device=None, mac_s=None, mac_t=None):
-    """(mac_s, mac_t) for `device`, with explicit values overriding it.
+def cols_for_device(device):
+    """AIE columns for `device`, or the default device's when unstated.
 
-    An unknown device is refused rather than defaulted: the whole point of the
-    table is that a wrong guess is invisible, and a typo'd --device must not
-    fall back to a layout that produces wrong numbers quietly.
+    Mirrors mac_for_device's signature on purpose: both are "what does this
+    device look like", both take an optional device that falls back to
+    MAC_DEFAULT_DEVICE, and both raise on a name neither knows rather than
+    guessing a width that would silently over- or under-pad every panel.
+    """
+    dev = device or MAC_DEFAULT_DEVICE
+    if dev not in COLS_BY_DEVICE:
+        raise SystemExit(
+            f"unknown device {dev!r}: the AIE column count is per-generation "
+            f"({', '.join(f'{k}={v}' for k, v in COLS_BY_DEVICE.items())}), and "
+            f"guessing one would size every B panel wrongly."
+        )
+    return COLS_BY_DEVICE[dev]
+# npu1, not npu2, and that is a change: every design set and every container
+# this repository ships is npu1, so defaulting to npu2 meant an omitted
+# --device produced a container whose layout_hash NO design in the tree
+# accepts. The failure is loud (the runtime refuses by name), which is what
+# kept it from being a wrong-numbers bug, but a default that cannot be used is
+# a default that gets passed over. npu2 stays reachable by name for anyone
+# building for that board.
+
+# Accepts either spelling: "I8" is the layout dict's, "i8" the CLI's.
+_MAC_DTYPE = {"bf16": "bf16", "i8": "i8", "int8": "i8"}
+
+
+def _mac_dtype(dtype):
+    key = _MAC_DTYPE.get(str(dtype).strip().lower())
+    if key is None:
+        raise SystemExit(
+            f"unknown B operand dtype {dtype!r}: the MMAC sub-tile is per "
+            f"operand dtype ({', '.join(sorted(set(_MAC_DTYPE)))}). The int8 "
+            f"pair is what an int4 container uses too, since it widens to int8.")
+    return key
+
+
+def mac_for_device(device, dtype, mac_s=None, mac_t=None):
+    """(mac_s, mac_t) for `device` and B operand `dtype`.
+
+    `dtype` has no default ON PURPOSE -- see MAC_BY_DEVICE. An explicit
+    mac_s/mac_t overrides the table.
     """
     if mac_s is not None and mac_t is not None:
         return (int(mac_s), int(mac_t))
@@ -393,12 +624,20 @@ def mac_for_device(device=None, mac_s=None, mac_t=None):
             f"unknown device {dev!r}: the B panel's sub-tile is per-generation "
             f"({', '.join(f'{k}={v}' for k, v in MAC_BY_DEVICE.items())}). "
             f"Pass one of those, or --mac-s/--mac-t if you know better.")
-    return MAC_BY_DEVICE[dev]
+    by_dtype = MAC_BY_DEVICE[dev]
+    dt = _mac_dtype(dtype)
+    if dt not in by_dtype:
+        raise SystemExit(
+            f"no measured MMAC sub-tile for device {dev!r} with B dtype {dt!r}: "
+            f"that combination is not in MAC_BY_DEVICE "
+            f"({', '.join(sorted(by_dtype))}), and guessing is what the "
+            f"layout_hash check cannot see.")
+    return by_dtype[dt]
 
 
 def gemm_b_layout_for_device(device, tile_k, tile_n, dtype="BF16",
                              mac_s=None, mac_t=None):
-    s, t = mac_for_device(device, mac_s, mac_t)
+    s, t = mac_for_device(device, dtype, mac_s, mac_t)
     return gemm_b_layout(tile_k, tile_n, s, t, dtype)
 
 
@@ -522,25 +761,100 @@ class Reader:
         return False
 
     def raw(self, name):
-        """The tensor exactly as stored -- tiled, bf16 as uint16. What DMA sees."""
+        """The tensor exactly as stored -- tiled, bf16 as uint16.
+
+        NOT the accessor for an I4 entry: those bytes hold two values each, so
+        a caller that unpacked them as the stored dtype would get an array half
+        the length of the panel it was promised and no error to explain it.
+        Use `panel()` for the panel and `tensor()` for the weight.
+        """
         e = self.entries[name]
+        if e["dtype"] == "I4":
+            raise ValueError(
+                f"{self.path}: {name} is I4, whose bytes are packed two int4 "
+                f"values per byte -- raw() would hand back {e['nbytes']} "
+                f"elements for a panel of {e['padded_shape'][0] * e['padded_shape'][1]}. "
+                f"panel() gives the int8 panel the array multiplies, tensor() "
+                f"the weight itself.")
         start = self.data_offset + e["offset"]
         buf = self._map[start:start + e["nbytes"]]
         return np.frombuffer(buf, dtype=NP_DTYPE[e["dtype"]])
 
+    def panel(self, name):
+        """The GEMM B panel as the ARRAY consumes it: flat, in the order
+        `layout` describes, one int8 value per element.
+
+        That is raw() for BF16 (uint16, widened by tensor()) and for I8. For I4
+        it is the decode -- nibbles unpacked, group scales folded in, tiled
+        back -- and the result is byte-for-byte what an I8 container would
+        hold at the same shape, up to the int4 error. This is the accessor
+        stage() corresponds to; tensor() is what additionally undoes the
+        scales, for callers that want the weight rather than the panel.
+        """
+        e = self.entries[name]
+        if e["dtype"] != "I4":
+            return self.raw(name)
+        K, N = e["padded_shape"]
+        lay = e.get("layout")
+        if not lay or lay.get("kind") != "block_panel":
+            raise ValueError(
+                f"{self.path}: {name} is I4 but carries no block_panel layout -- "
+                f"the nibbles' positions are what the layout describes, so "
+                f"without it there is no order to unpack into. Repack.")
+        gs_name = name + GSCALE_SUFFIX
+        if gs_name not in self.entries:
+            raise KeyError(
+                f"{self.path}: {name} is I4 but {gs_name} is not in the "
+                f"container -- the int4 weight has no way back to an int8 "
+                f"value, so its bytes are not a weight. Repack with "
+                f"tools/pack/pack_npue.py --dtype i4.")
+        packed = self._map[self.data_offset + e["offset"]:
+                           self.data_offset + e["offset"] + e["nbytes"]]
+        t = unpack_i4(packed)
+        if t.size != K * N:
+            raise ValueError(
+                f"{self.path}: {name} is I4 with {e['nbytes']} bytes -> "
+                f"{t.size} values, but its padded shape {K, N} needs "
+                f"{K * N} -- the payload and the panel disagree about their "
+                f"size, and half of it would be a neighbour's bytes")
+        t = t.reshape(K, N)
+        t = untile_b(t, K, N, lay["tile_k"], lay["tile_n"],
+                     lay.get("mac_s"), lay.get("mac_t"))
+        t = fold_i4(t, self.tensor(gs_name), self.config.get("int4_group", 0))
+        return tile_b(t, lay["tile_k"], lay["tile_n"],
+                      lay.get("mac_s"), lay.get("mac_t"))
+
+    def payload(self, name):
+        """The entry's bytes as uint8, for ANY dtype including I4.
+
+        The accessor `raw()` deliberately refuses: it widens bytes into elements,
+        which is wrong for a packed four-bit tensor, and a refusal there is what
+        keeps a caller from unpacking half a panel by accident. This one is the
+        escape hatch, and it exists for the same reason int4 has a pack/unpack
+        pair of its own -- the packed form has to be readable as bytes by
+        SOMETHING, and that something is a checker that wants to confirm the
+        packing rather than undo it.
+
+        Not a tensor: no dtype, no shape. A caller that wants one of those wants
+        `raw()` or `panel()`.
+        """
+        e = self.entries[name]
+        start = self.data_offset + e["offset"]
+        return np.asarray(self._map[start:start + e["nbytes"]])
+
     def tensor(self, name):
         """The logical tensor: de-tiled and widened to fp32. For verification
-        and for the Python encoder -- the C++ runtime uses raw() instead.
+        and for the Python encoder -- the C++ runtime uses panel() instead.
 
-        An I8 operand comes back DEQUANTISED (see `dequant_int8`): the panel
-        alone is not a weight, and a caller that got the raw int8 would
+        An I8 or I4 operand comes back DEQUANTISED (see `dequant_int8`): the
+        panel alone is not a weight, and a caller that got the raw int8 would
         multiply a number 1e-4 of the right size and report a plausible
         embedding. Missing sidecars raise rather than default, because a
         container whose smoothing is silently skipped is the failure this
         format's whole scale/smooth pair exists to make impossible.
         """
         e = self.entries[name]
-        x = self.raw(name)
+        x = self.panel(name)
         if e["dtype"] == "BF16":
             x = from_bf16_bits(x)
         lay = e.get("layout")
@@ -552,14 +866,15 @@ class Reader:
             x = x[:kl, :nl]
         else:
             x = x.reshape(e["logical_shape"])
-        if e["dtype"] == "I8":
+        if e["dtype"] in ("I8", "I4"):
             for suffix in (WSCALE_SUFFIX, ASMOOTH_SUFFIX):
                 if name + suffix not in self.entries:
                     raise KeyError(
-                        f"{self.path}: {name} is I8 but {name + suffix} is not "
-                        f"in the container -- its bytes carry no scale, so they "
-                        f"are not a weight. Repack with tools/pack/pack_npue.py "
-                        f"--int8.")
+                        f"{self.path}: {name} is {e['dtype']} but "
+                        f"{name + suffix} is not in the container -- its bytes "
+                        f"carry no scale, so they are not a weight. Repack with "
+                        f"tools/pack/pack_npue.py --dtype "
+                        f"{'i4' if e['dtype'] == 'I4' else 'i8'}.")
             x = dequant_int8(x, self.tensor(name + WSCALE_SUFFIX),
                              self.tensor(name + ASMOOTH_SUFFIX))
         # copy(), not ascontiguousarray(): the latter can hand back a view into

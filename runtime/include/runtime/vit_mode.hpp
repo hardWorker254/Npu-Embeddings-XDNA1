@@ -164,6 +164,14 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
   // from the container's own geometry, paired by its layout hash so an int8
   // container cannot land on a bf16 set.
   std::string art = flag("--artifacts");
+  // Read the container's B-operand layout once, for the explicit branch below.
+  // The implicit branch already had it; this is the fourth resolver that needed
+  // it and the second that did not have it.
+  std::string want_layout;
+  try {
+    want_layout = probe.info("layer.0.qkv").layout_hash;
+  } catch (const std::exception &) {
+  }
   if (!art.empty()) {
     // The same candidate list and the same "only gemm_rtp/design.json counts"
     // rule gemma_mode uses, because the same reason applies: this arch loads
@@ -171,13 +179,38 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
     // first one that EXISTS would accept `--artifacts bge-base-en-v1.5` and
     // then fail on the bare name, naming a path that never held a design.
     const std::vector<std::string> cands = artifacts_candidates(root, art);
-    std::string found;
+    auto usable = [](const std::string &c) {
+      return std::ifstream(c + "/gemm_rtp/design.json").good();
+    };
+    // AND FILTERED ON THE LAYOUT, which is the fourth resolver to have to learn
+    // it and the second to lack it. Taking the first candidate holding a
+    // design.json meant an int8 ViT container naming --artifacts
+    // vit-base-patch16-224 was handed the bf16 set, and the run died in the
+    // pairing check with a message that named the directory but not the
+    // mismatch as its subject.
+    //
+    // The note compares against the first USABLE candidate, not cands.front():
+    // the candidate list holds several spellings of one name and front() is the
+    // one that usually holds nothing, so comparing against it prints a
+    // correction on every run including the bf16 ones that need none.
+    std::string first_usable;
     for (const auto &c : cands)
-      if (std::ifstream(c + "/gemm_rtp/design.json").good()) { found = c; break; }
+      if (usable(c)) { first_usable = c; break; }
+    const std::string found = select_set_for_layout(cands, usable, want_layout);
     if (found.empty()) {
       std::string looked;
       for (size_t i = 0; i < cands.size(); ++i)
         looked += (i ? ", " : "") + cands[i];
+      bool saw_usable = false;
+      for (const auto &c : cands) saw_usable = saw_usable || usable(c);
+      if (saw_usable && !want_layout.empty())
+        throw std::runtime_error(
+            "--artifacts '" + art +
+            "' resolves only to design sets whose B-operand layout is not this "
+            "container's (" + want_layout.substr(0, 12) +
+            "...). They are the same shapes in different element types, so "
+            "nothing in them can execute this file; looked under " + looked +
+            ". Export a set for this datapath, or run a bf16 container.");
       throw std::runtime_error(
           "no design set found for --artifacts '" + art + "'; looked for "
           "gemm_rtp/design.json under " + looked + ". An image classifier "
@@ -186,6 +219,14 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
           "kinds.cls.streams), so a directory with only a qkv/ set, or with "
           "gemm_rtp_dec/ and no gemm_rtp/, cannot serve it.");
     }
+    if (found != first_usable && !want_layout.empty())
+      std::fprintf(stderr,
+                   "note: --artifacts %s resolves to a design set whose B "
+                   "layout is not this container's (%s vs %s); using %s "
+                   "instead.\n",
+                   art.c_str(),
+                   design_b_layout_hash(first_usable).substr(0, 12).c_str(),
+                   want_layout.substr(0, 12).c_str(), found.c_str());
     art = found;
   } else {
     std::string layout;

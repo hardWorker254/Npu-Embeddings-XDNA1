@@ -101,7 +101,19 @@ def load(path, strip="", rename=()):
 # products that look like embeddings. So the pair is a per-device value
 # (--device, defaulting to the npu2 behaviour) threaded into every operand
 # rather than a module constant.
-MAC_DEFAULT = MAC_BY_DEVICE[MAC_DEFAULT_DEVICE]
+MAC_DEFAULT = MAC_BY_DEVICE[MAC_DEFAULT_DEVICE]["bf16"]
+
+
+def b_layout_dtype(int8):
+    """The dtype a GEMM operand's B panel is tiled FOR -- "I8" for int8 and for
+    int4, which widens to int8 before staging, "BF16" otherwise.
+
+    One function because it is the other half of the (s, t) decision: the layout
+    hash covers the dtype AND the sub-tile, and the sub-tile is chosen by this
+    value. Three inline copies of the ternary is three chances to print one
+    layout's hash over another's tensors.
+    """
+    return "I8" if int8 else "BF16"
 
 # tile_n=48, not M2's winning 32. At 8 columns the design requires
 # N % (tile_n * n_cols) == 0, and MiniLM's N dims are 384 / 1152 / 1536:
@@ -201,16 +213,48 @@ def calibrate_smoothing(model_dir, alpha=0.5, n_texts=128, max_len=64,
     # wide; running it through BERT's forward pass would produce plausible
     # factors for the wrong activations -- exactly the failure mode the
     # "geometry from the checkpoint" note below already guards for depth.
+    #
+    # gte (arch=3) is the fourth: RoPE with an NTK-scaled frequency set that
+    # no single theta expresses, a gated GEGLU whose up_gate_proj arrives
+    # ALREADY FUSED from upstream, and biases on qkv and down_proj but not on
+    # up_gate_proj. Its four projections are the same four ops BERT's are,
+    # which is why it can share that op list -- but only because
+    # `gated_ffn_fused_upstream` means the oracle hands the array one wide
+    # tensor rather than two narrow ones. If that fusion were ever unpicked,
+    # gte would silently need nomic's five-site list, and the site counter below
+    # is what says so.
     if arch == "nomic":
         from encoder_nomic import load_reference, fp32_gemm       # noqa: E402
     elif arch == "gemma":
         from encoder_gemma import load_reference, fp32_gemm        # noqa: E402
+    elif arch == "gte":
+        from encoder_gte import load_reference, fp32_gemm         # noqa: E402
     else:
         from encoder import load_reference, fp32_gemm             # noqa: E402
     from transformers import AutoTokenizer                       # noqa: E402
 
-    corpus_path = corpus_path or (REPO / "tasks" / "0074-m13-gemma-on-npu"
-                                  / "corpus_520.txt")
+    # The default calibration corpus. It lives in tools/data/ beside the other
+    # build inputs, and used to live at tasks/0074-m13-gemma-on-npu/
+    # corpus_520.txt -- inside a directory named after the task that produced it,
+    # which made a live data file look like a work log and meant deleting the
+    # work log would silently break the packer. tools/data/ is where a file the
+    # build reads belongs; the task number it came from is in its name.
+    corpus_path = corpus_path or (REPO / "tools" / "data" / "gemma_corpus_520.txt")
+    # A corpus that was NAMED and cannot be read is refused by name. Without
+    # this, `read_text` raises and the traceback names a line number rather
+    # than the flag; and a caller who passed --gemma-corpus and mistyped it
+    # gets the one thing that must never happen here, which is a container
+    # quietly calibrated on the DEFAULT corpus while they believe it used
+    # theirs. The smoothing factors are the model's accuracy budget, so
+    # "calibrated on something else" is a wrong answer, not a fallback.
+    if not Path(corpus_path).is_file():
+        raise SystemExit(
+            f"{corpus_path}: no such calibration corpus. It was named "
+            f"explicitly (--int8-text-corpus), so this does not fall back to "
+            f"the default -- a container calibrated on a corpus you did not "
+            f"choose is a wrong container, not a degraded one. The default "
+            f"lives at {REPO / 'tools' / 'data' / 'gemma_corpus_520.txt'}; pass "
+            f"that path to use it.")
     texts = [t for t in pathlib_read_lines(corpus_path) if t][:n_texts]
     if len(texts) < 8:
         raise SystemExit(f"{corpus_path}: only {len(texts)} calibration texts")
@@ -282,6 +326,35 @@ def calibrate_smoothing(model_dir, alpha=0.5, n_texts=128, max_len=64,
         ref = load_reference(str(model_dir))
         ref.gemm = collect
         ref.encode(enc["input_ids"], enc["attention_mask"])
+    elif arch == "gte":
+        # gte also reads its own geometry from config.json, but it has a
+        # token-type embedding of size 1 and adds row 0 unconditionally inside
+        # embed(), so there is no token_type_ids argument to pass -- same as
+        # nomic and gemma, and for a different reason than BERT's.
+        #
+        # AND ITS encode() TAKES ONE SEQUENCE, not a batch. That is not an
+        # inconsistency to paper over: GteEncoder's whole interface is
+        # per-sequence (reference/check_reference_gte.py::run_batch loops for
+        # exactly this reason), because RoPE and the additive mask are both
+        # built per sequence. So the batch is looped here.
+        #
+        # ctr IS RESET PER SEQUENCE, and without that reset the calibration is
+        # almost entirely fiction. The call-site counter in `collect` is
+        # MONOTONIC -- it maps call N to (layer N/len(OPS), op N%len(OPS)) --
+        # which is right for the other three arches because their oracles
+        # vectorise the whole batch into ONE call per site, so call 0..47 is
+        # exactly one pass over the corpus. gte's four calls per layer happen
+        # PER SEQUENCE, so without the reset call 48 onward lands past
+        # n_sites, gets counted but not collected, and 127 of the 128
+        # calibration texts contribute nothing. The measured symptom would have
+        # been a smooth container that quietly calibrated on one sentence and
+        # packed to the right byte count: no error, no warning, wrong factors.
+        # The reset makes gte's call pattern the same shape as everyone else's,
+        # so the same counter is correct for all four.
+        ref = load_reference(str(model_dir), gemm=collect)
+        for b in range(enc["input_ids"].shape[0]):
+            ctr[0] = 0
+            ref.encode(enc["input_ids"][b], enc["attention_mask"][b])
     else:
         ref = load_reference(str(model_dir),
                              num_layers=_cfg["num_hidden_layers"],
@@ -322,6 +395,7 @@ def calibrate_smoothing(model_dir, alpha=0.5, n_texts=128, max_len=64,
 
 
 from gemm_i8 import add_gemm_b_int8  # noqa: E402,F401
+from gemm_i4 import add_gemm_b_int4  # noqa: E402
 
 
 def pathlib_read_lines(p):
@@ -348,6 +422,40 @@ def add_gemm_b_host(w, name, mat):
     mat = np.ascontiguousarray(mat, dtype=np.float32)
     K, N = mat.shape
     return w.add(name, mat.reshape(-1), "F32", "gemm_b_host", [K, N])
+
+
+def emit_gemm_b(w, name, mat, tile_k, tile_n, int8, int4_group=None,
+                mac=MAC_DEFAULT, fold=None, asmooth=None):
+    """Which scheme writes `name` -- the ONE place the operand scheme branches.
+
+        not int8                     -> add_gemm_b       bf16 panel
+        int8, int4_group is None     -> add_gemm_b_int8  int8 panel
+        int8, int4_group is not None -> add_gemm_b_int4  packed nibbles
+
+    Returns the operand's quantisation error for the two quantised schemes and
+    None for bf16, so each packer's `qerr` list keeps meaning exactly what it
+    means today: one entry per operand this pack QUANTISED.
+
+    Every packer here has its own `emit` closure with its own calibration
+    oracle, its own tile sizes and its own callers, and those differences are
+    real (arch=1 RMSNorm/MQA, arch=2 RoPE, arch=0 absolute positions). This
+    decision is not one of them: the same three-way branch existed three times
+    in this file and twice more in packers/, and a fourth copy would be a
+    place where `--dtype i4` could reach three packers and silently not the
+    fourth.
+
+    `int4_group` is None unless --dtype i4 was asked for. main() resolves it
+    (32 by default, --int4-group otherwise) BEFORE any packer runs, so no
+    packer parses the flag itself -- a packer takes a scheme, not a switch.
+    """
+    if not int8:
+        add_gemm_b(w, name, mat, tile_k, tile_n, fold=fold, mac=mac)
+        return None
+    if int4_group is not None:
+        return add_gemm_b_int4(w, name, mat, tile_k, tile_n, fold=fold,
+                               asmooth=asmooth, group=int4_group, mac=mac)
+    return add_gemm_b_int8(w, name, mat, tile_k, tile_n, fold=fold,
+                           asmooth=asmooth, mac=mac)
 
 
 def gemma_qkv_blocks(hidden, head_dim, kv_heads, tile_n, n_cols=8):
@@ -388,8 +496,8 @@ def gemma_qkv_blocks(hidden, head_dim, kv_heads, tile_n, n_cols=8):
 
 def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
                tile_n=None, host_only=False,
-               int8=False, smooth_alpha=0.5, smooth_texts=128,
-               mac=MAC_DEFAULT):
+               int8=False, int4_group=None, smooth_alpha=0.5, smooth_texts=128,
+               mac=MAC_DEFAULT, corpus_path=None):
     """Pack an EmbeddingGemma-300M-shaped checkpoint (arch=1).
 
     Deliberately NOT the BERT path above, reused only via helpers (Writer,
@@ -439,6 +547,28 @@ def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
     applied at its reference position (on the attention scores) and asserted
     NOT folded in the container's `fusions` block.
     """
+    # REFUSED HERE as well as in main(): this function is imported by tools,
+    # and `int8 and host_only` is exactly the pair that silently produced a
+    # bf16 host container -- the host encoder has no int8 datapath, so the
+    # flag would be accepted and not applied. main() catches it as a --dtype
+    # conflict; this catches a direct call.
+    if int8 and host_only:
+        raise SystemExit(
+            "int8 and a host-only container disagree: the host encoder runs "
+            "plain F32 operands and has no int8 datapath, so int8 would be "
+            "accepted and not applied. One dtype per container: pack with "
+            "int8=False for the f32 control, or host_only=False for the int8 "
+            "NPU container.")
+    if int4_group is not None and not int8:
+        # int4 is the int8 datapath with 4-bit weights (gemm_i4.py), so with
+        # int8=False there is no quantisation to attach a group size to. The
+        # emit closure below would emit bf16 and drop the flag -- refused
+        # rather than accepted and ignored, exactly as the guard two lines up.
+        raise SystemExit(
+            f"--int4-group {int4_group} was passed to a pack that does not "
+            f"quantise (int8=False); int4 is the int8 datapath with 4-bit "
+            f"weights, so it has nothing to attach to. Refusing rather than "
+            f"emitting a bf16 container that ignores it.")
     model_dir = Path(model_dir)
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     # EMBEDDINGGEMMA_STRIP + EMBEDDINGGEMMA_RENAME: this export KEEPS a root
@@ -494,7 +624,12 @@ def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
                     f"this is the constraint gemma_qkv_blocks() pads qkv to "
                     f"meet, and it does not hold for this shape")
 
-    mode = "HOST-only GEMMs" if host_only else f"NPU, tile ({tile_k}, {tile_n})"
+    # The dtype goes in the banner because that is the one line every pack log
+    # already carries -- the same "report the value, not the intention" rule
+    # the BERT branch states over its layout_hash line.
+    mode = ("HOST-only GEMMs, f32 operands" if host_only else
+            f"NPU, tile ({tile_k}, {tile_n}), "
+            f"{'i8' if int8 else 'bf16'} operands")
     print(f"packing {model_dir.name} -> {Path(out).name}  (arch=gemma3, {mode})")
     print(f"  hidden={hidden} heads={heads} kv_heads={kv_heads} head_dim={head_dim} "
           f"layers={L} inter={inter}")
@@ -515,7 +650,20 @@ def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
 
     config = {
         "arch": "gemma3_mqa_rope_geglu",
-        "a_dtype": "i8" if (int8 and not host_only) else "bf16",
+        # WHAT THE GEMM OPERANDS ARE, as the file itself states it. This used
+        # to say "bf16" for a host-only pack, i.e. a container carrying plain
+        # F32 panels that claimed the array's dtype -- the self-contradiction
+        # verify_npue's check B exists to catch on the BERT family, where
+        # nothing was reading it back. `gemm_layout` stays the discriminator
+        # the runtime switches on; this is the label next to it.
+        "a_dtype": "f32" if host_only else ("i8" if int8 else "bf16"),
+        # INT4 ONLY, and present only for an int4 pack: the K-group size the
+        # .gscale sidecars were built with. It is the one number without which
+        # a nibble cannot be widened back to an int8 value (npue.fold_i4), so
+        # leaving it out of an i4 config would be leaving the group size out of
+        # the container -- and it is deliberately absent everywhere else rather
+        # than written as null, so a config that carries it is an i4 config.
+        **({"int4_group": int4_group} if int4_group is not None else {}),
         "model_type": cfg["model_type"],
         "source_repo": source_repo,
         "source_sha256": src_sha,
@@ -635,7 +783,7 @@ def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
         print(f"  tokenizer.gemma_table  {tb.size / 1e6:.2f} MB")
     else:
         print(f"  WARNING: {tok_path} not found (generate it with the C++ "
-              f"packer, `npuembed --prepare-model`) -- .npue will have no "
+              f"packer, `npuembeddings --prepare-model`) -- .npue will have no "
               f"tokenizer table")
 
     # ONE emitter for the four per-layer operands, as in the BERT and nomic
@@ -648,7 +796,8 @@ def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
     # 1 rather than dividing by zero -- so a padded column stays exactly zero
     # through quantisation, which is what the host slicing by offset assumes.
     smooth = (calibrate_smoothing(model_dir, alpha=smooth_alpha,
-                                  n_texts=smooth_texts, arch="gemma")
+                                  n_texts=smooth_texts, arch="gemma",
+                                  corpus_path=corpus_path)
               if int8 and not host_only and smooth_alpha > 0 else {})
     qerr = []
 
@@ -656,9 +805,13 @@ def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
         if not int8 or host_only:
             add_gemm_b(w, name, mat, tile_k, tile_n, mac=mac)
             return
-        qerr.append((name, add_gemm_b_int8(w, name, mat, tile_k, tile_n,
-                                           asmooth=smooth.get((layer, op)),
-                                           mac=mac)))
+        # int8 or i4, whichever main() resolved -- emit_gemm_b is the single
+        # branch between the two, so gemma's NPU operands cannot end up one
+        # scheme behind the others.
+        err = emit_gemm_b(w, name, mat, tile_k, tile_n, int8=True,
+                          int4_group=int4_group,
+                          asmooth=smooth.get((layer, op)), mac=mac)
+        qerr.append((name, err))
     n_tiled = 0
     for i in range(L):
         p = f"layers.{i}."
@@ -773,14 +926,14 @@ def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
     print(f"  source     : {src_sha[:16]}...")
     if not host_only:
         print(f"  layout_hash: "
-              f"{layout_hash(gemm_b_layout(tile_k, tile_n, mac[0], mac[1], dtype='I8' if (int8 and not host_only) else 'BF16'))[:16]}..."
-              f"{'  (i8 operands)' if (int8 and not host_only) else ''}")
+              f"{layout_hash(gemm_b_layout(tile_k, tile_n, mac[0], mac[1], dtype=b_layout_dtype(int8)))[:16]}..."
+              f"{'  (i8 operands)' if int8 else ''}")
     return 0
 
 
 def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
-               int8=False, smooth_alpha=0.5, smooth_texts=128,
-               mac=MAC_DEFAULT):
+               int8=False, int4_group=None, smooth_alpha=0.5, smooth_texts=128,
+               mac=MAC_DEFAULT, corpus_path=None):
     """Pack a nomic-embed-text-v1.5-shaped checkpoint (arch=2).
 
     Emits the SAME tensor names and the SAME emission order as the BERT
@@ -809,6 +962,15 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
         before the GEMM and before RoPE is exact. tools/verify/verify_npue_nomic.py
         check E proves this numerically rather than assuming it.
     """
+    if int4_group is not None and not int8:
+        # int4 is the int8 datapath with 4-bit weights (gemm_i4.py); with
+        # int8=False this pack emits bf16 panels and the group size would be
+        # accepted and dropped. Refused rather than ignored.
+        raise SystemExit(
+            f"--int4-group {int4_group} was passed to a pack that does not "
+            f"quantise (int8=False); int4 is the int8 datapath with 4-bit "
+            f"weights, so it has nothing to attach to. Refusing rather than "
+            f"emitting a bf16 container that ignores it.")
     model_dir = Path(model_dir)
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     src, _ = load(model_dir / MODEL_ONNX)
@@ -898,6 +1060,7 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
     config = {
         "arch": "nomic_bert_rope_swiglu",
         "a_dtype": "i8" if int8 else "bf16",
+        **({"int4_group": int4_group} if int4_group is not None else {}),
         "model_type": cfg["model_type"],
         "source_repo": json.loads(
             (model_dir / "CHECKPOINT.json").read_text(encoding="utf-8"))["repo_id"],
@@ -993,7 +1156,8 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
     # wide, so BERT's forward pass would describe activations the array never
     # sees (tasks/0081).
     smooth = (calibrate_smoothing(model_dir, alpha=smooth_alpha,
-                                  n_texts=smooth_texts, arch="nomic")
+                                  n_texts=smooth_texts, arch="nomic",
+                                  corpus_path=corpus_path)
               if int8 and smooth_alpha > 0 else {})
     qerr = []
 
@@ -1001,9 +1165,10 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
         if not int8:
             add_gemm_b(w, name, mat, tile_k, tile_n, mac=mac)
             return
-        qerr.append((name, add_gemm_b_int8(w, name, mat, tile_k, tile_n,
-                                           asmooth=smooth.get((layer, op)),
-                                           mac=mac)))
+        err = emit_gemm_b(w, name, mat, tile_k, tile_n, int8=True,
+                          int4_group=int4_group,
+                          asmooth=smooth.get((layer, op)), mac=mac)
+        qerr.append((name, err))
     n_tiled = 0
     for i in range(L):
         p = f"encoder.layers.{i}."   # plural upstream, unlike BERT's "layer."
@@ -1080,13 +1245,14 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
     # tensors reports the intention rather than the value -- the same shape as
     # tasks/0042's `tile (64, 32)` and 0078's banner, both of which cost time.
     print(f"  layout_hash: "
-          f"{layout_hash(gemm_b_layout(tile_k, tile_n, mac[0], mac[1], dtype='I8' if int8 else 'BF16'))[:16]}..."
+          f"{layout_hash(gemm_b_layout(tile_k, tile_n, mac[0], mac[1], dtype=b_layout_dtype(int8)))[:16]}..."
           f"{'  (i8 operands)' if int8 else ''}")
     return 0
 
 
 def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
-             mac=MAC_DEFAULT):
+             mac=MAC_DEFAULT, int4_group=None, smooth_alpha=0.5,
+             smooth_texts=128, corpus_path=None):
     """Pack a gte-multilingual-base-shaped checkpoint (arch=3, model_type
     "new" -- the NewModel trust_remote_code implementation).
 
@@ -1128,11 +1294,16 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
     """
     model_dir = Path(model_dir)
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    if int8:
-        raise SystemExit(
-            "--int8 for arch=3 needs its own calibration oracle "
-            "(calibrate_smoothing has no 'gte' arch) -- not implemented in "
-            "0.5.0; pack bf16 or extend the oracle first")
+    # int8/int4 is REACHABLE HERE NOW, and used to be refused three lines below
+    # with the reason "calibrate_smoothing has no 'gte' arch". That reason was
+    # half true and the half that was true was the wrong half: there was no 'gte'
+    # BRANCH in calibrate_smoothing, but there was an oracle
+    # (reference/encoder_gte.py) sitting right next to it with no door in it --
+    # GteEncoder.linear called fp32_gemm directly, so there was nothing for a
+    # callback to replace. The fix was a hook and a branch, both of which now
+    # exist. What was NOT missing was an accuracy measurement, and that is what
+    # the packer's own qerr figure and the int8 MTEB gate are for: the oracle
+    # being present makes the factors well-defined, not good.
 
     raw, _ = load(model_dir / MODEL_ONNX)
     src_sha = model_digest(model_dir / MODEL_ONNX)
@@ -1140,7 +1311,18 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
     # pre-tiler and the F32 emitters both). Upcast once, losslessly.
     src = {}
     for k, v in raw.items():
-        kk = k[4:] if k.startswith("new.") else k       # strip 'new.'
+        # TWO prefixes, because two exporters wrote this checkpoint's ONNX and
+        # they disagree. `new.` is the trust_remote_code NewModel export; the
+        # `0.auto_model.` form is what torch.onnx.export produces through
+        # optimum, which wraps the module and prefixes every initializer with
+        # the traced scope. Without the second strip the packer died on
+        # KeyError 'embeddings.word_embeddings.weight' -- a raw traceback with
+        # no mention of a naming convention, on a checkpoint that packs fine.
+        # Only the 136 initializers carry it; the 630 `/0/auto_model/...`
+        # Constant traces do not, and they are activations this never reads.
+        kk = k[4:] if k.startswith("new.") else k
+        if kk.startswith("0.auto_model."):
+            kk = kk[len("0.auto_model."):]
         src[kk] = v.astype(np.float32) if v.dtype == np.float16 else v
 
     L = cfg["num_hidden_layers"]
@@ -1195,7 +1377,7 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
     if not tok_blob_path.exists():
         raise SystemExit(
             f"{tok_blob_path} not found -- generate it first with the C++ "
-            f"packer: `npuembed --prepare-model`")
+            f"packer: `npuembeddings --prepare-model`")
 
     print(f"packing {model_dir.name} -> {Path(out).name}  (arch=gte_new_rope_geglu)")
     print(f"  hidden={hidden} heads={H} head_dim={head_dim} layers={L} "
@@ -1248,7 +1430,6 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
             "position_embeddings_zeroed_rope_instead": True,
         },
         "not_implemented": [
-            "int8 datapath (calibrate_smoothing has no 'gte' oracle)",
             f"vocab rows 250002-{cfg['vocab_size'] - 1} are padding: "
             f"unreachable from the tokenizer, packed only so vocab_size and "
             f"the tensor agree",
@@ -1277,6 +1458,33 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
     w.add("embeddings.ln.bias", src["embeddings.LayerNorm.bias"],
           "F32", "layernorm", [hidden])
 
+    # ONE EMITTER for the four per-layer operands, exactly as the nomic and BERT
+    # paths -- so bf16, int8 and int4 differ here and nowhere else, and
+    # `--dtype i4` cannot reach three of this architecture's four projections and
+    # silently not the fourth.
+    #
+    # The calibration oracle is gte's OWN (arch="gte"). Running gte through
+    # BERT's forward pass would be worse than useless here rather than merely
+    # wrong: BERT is post-LN with absolute positions, gte is pre-LN with an
+    # NTK-scaled RoPE whose frequency set no single theta expresses, so the
+    # activation maxima collected would describe a different network's
+    # activations -- and they would still be plausible numbers. Four per layer,
+    # the right shapes, no error anywhere.
+    smooth = (calibrate_smoothing(model_dir, alpha=smooth_alpha,
+                                  n_texts=smooth_texts, arch="gte",
+                                  corpus_path=corpus_path)
+              if int8 and smooth_alpha > 0 else {})
+    qerr = []
+
+    def emit(name, mat, layer, op):
+        if not int8:
+            add_gemm_b(w, name, mat, tile_k, tile_n, mac=mac)
+            return
+        err = emit_gemm_b(w, name, mat, tile_k, tile_n, int8=True,
+                          int4_group=int4_group,
+                          asmooth=smooth.get((layer, op)), mac=mac)
+        qerr.append((name, err))
+
     n_tiled = 0
     for i in range(L):
         p = f"encoder.layer.{i}."
@@ -1292,13 +1500,13 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
             qkv = qkv.copy()
             qkv[:, :hidden] *= scale
             qkv_b[:hidden] *= scale
-        add_gemm_b(w, f"layer.{i}.qkv", qkv, tile_k, tile_n, mac=mac)
+        emit(f"layer.{i}.qkv", qkv, i, "qkv")
         w.add(f"layer.{i}.qkv.bias", qkv_b, "F32", "bias", [3 * hidden])
         n_tiled += 1
 
-        add_gemm_b(w, f"layer.{i}.attn_out",
-                   np.ascontiguousarray(src[at + "o_proj.weight"].T),
-                   tile_k, tile_n, mac=mac)
+        emit(f"layer.{i}.attn_out",
+             np.ascontiguousarray(src[at + "o_proj.weight"].T),
+             i, "attn_out")
         w.add(f"layer.{i}.attn_out.bias", src[at + "o_proj.bias"],
               "F32", "bias", [hidden])
         w.add(f"layer.{i}.ln1.weight", src[p + "attn_ln.weight"],
@@ -1310,15 +1518,15 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
         # up_gate_proj is already the fused [2*inter, hidden] the runtime
         # wants: transpose to [hidden, 2*inter]; up cols [0, inter), gate
         # cols [inter, 2*inter) -- the lo/hi order of `lo * act(hi)`.
-        add_gemm_b(w, f"layer.{i}.ffn_up",
-                   np.ascontiguousarray(src[p + "mlp.up_gate_proj.weight"].T),
-                   tile_k, tile_n, mac=mac)
+        emit(f"layer.{i}.ffn_up",
+             np.ascontiguousarray(src[p + "mlp.up_gate_proj.weight"].T),
+             i, "ffn_up")
         w.add(f"layer.{i}.ffn_up.bias", np.zeros(2 * inter, dtype=np.float32),
               "F32", "bias", [2 * inter])
 
-        add_gemm_b(w, f"layer.{i}.ffn_down",
-                   np.ascontiguousarray(src[p + "mlp.down_proj.weight"].T),
-                   tile_k, tile_n, mac=mac)
+        emit(f"layer.{i}.ffn_down",
+             np.ascontiguousarray(src[p + "mlp.down_proj.weight"].T),
+             i, "ffn_down")
         w.add(f"layer.{i}.ffn_down.bias", src[p + "mlp.down_proj.bias"],
               "F32", "bias", [hidden])
         w.add(f"layer.{i}.ln2.weight", src[p + "mlp_ln.weight"],
@@ -1345,14 +1553,93 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
     print(f"  data       : {info['data_length']/1e6:.2f} MB at {info['data_offset']}")
     print(f"  file       : {total/1e6:.2f} MB")
     print(f"  source     : {src_sha[:16]}...")
-    print(f"  layout_hash: "
-          f"{layout_hash(gemm_b_layout(tile_k, tile_n, mac[0], mac[1]))[:16]}...")
+    # b_layout_dtype(int8), NOT a bare gemm_b_layout(...): the layout hash
+    # covers the B operand's ELEMENT TYPE as well as its tiling, so an int8
+    # container has to report the int8 layout's hash. Printing the bf16 one over
+    # int8 operands is the single most confusing thing this line could say --
+    # it names a design set that cannot execute the file next to it, which is
+    # exactly what the int8 run then refuses to resolve.
+    # (Computed into a local first: the expression will not fit on one line and
+    # an f-string expression cannot span lines.)
+    lhash = layout_hash(gemm_b_layout(tile_k, tile_n, mac[0], mac[1],
+                                      dtype=b_layout_dtype(int8)))[:16]
+    print(f"  layout_hash: {lhash}..."
+          f"{'  (i8 operands)' if int8 else ''}")
+    if int8 and qerr:
+        worst = max(qerr, key=lambda t: t[1])
+        mean = sum(e for _, e in qerr) / len(qerr)
+        print(f"  quantised  : {len(qerr)} operands, weight rel_fro mean "
+              f"{mean:.4g}, worst {worst[1]:.4g} ({worst[0]})"
+              f"{', int4' if int4_group is not None else ''}")
     return 0
+
+
+# THE OPERAND DTYPES THIS PACKER CAN WRITE, and what each one asks of the
+# machine. `--dtype` is the single spelling; --int8 and --gemma-host-only stay
+# because they predate it, and all three resolve to ONE value in main() below
+# so a container's bytes cannot depend on which of them happened to be typed.
+#
+#   f32    plain row-major F32 operands, `gemm_layout: "host"` -- a container
+#          for the CPU control encoder, and the only one the host path can
+#          read. arch=1 ONLY: every other architecture has no host encoder in
+#          this build (runtime/src/runtime.cpp refuses --cpu by name for them),
+#          so packing f32 there would write a file nothing can run.
+#   bf16   pre-tiled bf16 panels for the array. The default, and what the
+#          shipped design sets are built for.
+#   i8     per-output-channel int8 with SmoothQuant calibration. The container
+#          must meet a design exported with export_gemm_rtp.py --int8; the pair
+#          is refused by name when it does not.
+#   i4     FOUR-BIT WEIGHT STORAGE over that same int8 datapath -- see
+#          tools/lib/gemm_i4.py. Not a third datapath: the array still runs
+#          int8 x int8, so i4 implies everything i8 implies (the same --int8
+#          design, the same calibration, a_dtype "i8", the same b_layout_hash).
+#          What differs is that the panel is written as packed nibbles plus a
+#          per-group `.gscale`, and widened in the loader. Groups of 32 rows
+#          per column by default; --int4-group N, 0 = one group over the whole
+#          K (per-channel).
+#
+# Not on the list, and not an oversight: fp16 and fp8. The array's datapath is
+# bf16 (optionally bfp16-emulated) or int8 -- see tools/export/exporters/
+# gemm_rtp/main.py's own flags -- so a container claiming a dtype no design can
+# be built for would only fail after the pack.
+#
+# What int4 is NOT is a pre-quantized ONNX reader. Quantisation happens HERE,
+# from F32/BF16 weights: an ONNX already carrying MatMulNBits/INT4 (or qint8
+# MatMulInteger) is still refused by tools/lib/onnx_weights.py before any of
+# this runs, because a container whose scheme came from the checkpoint cannot
+# be checked against anything in this repo.
+DTYPE_CHOICES = ("f32", "bf16", "i8", "i4")
+
+
+def dtype_arg(text):
+    """argparse `type` for --dtype. The refusal says what CAN be written.
+
+    `choices=` would print "choose from ..." and nothing about why the list is
+    that short. A caller asking for f16 or fp8 is asking for a datapath this
+    array does not have, and that is the fact worth printing -- before the
+    pack, not after it.
+    """
+    v = text.strip().lower()
+    if v not in DTYPE_CHOICES:
+        raise argparse.ArgumentTypeError(
+            f"--dtype {text!r}: not an operand dtype this packer writes. It "
+            f"writes {', '.join(DTYPE_CHOICES)} -- bf16 and i8 are the "
+            f"datapaths the array runs (f32 is the CPU control container; i4 "
+            f"is 4-bit weight storage over the int8 datapath, "
+            f"tools/lib/gemm_i4.py, and i8/i4 both want a design exported "
+            f"with export_gemm_rtp.py --int8). There is no fp16 or fp8 "
+            f"datapath to pack for: a container claiming one would be refused "
+            f"at load, having cost the pack first. Pick one of "
+            f"{', '.join(DTYPE_CHOICES)}.")
+    return v
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model-dir", default=str(REPO / "models" / "all-MiniLM-L6-v2"))
+    # None means "the model named by --out"; see where it is resolved. It is
+    # NOT a silent MiniLM default: that put one checkpoint's weights under
+    # another model's filename.
+    ap.add_argument("--model-dir", default=None)
     ap.add_argument("--out", default=str(REPO / "models" / "all-MiniLM-L6-v2.npue"))
     ap.add_argument("--tile-k", type=int, default=DEFAULT_TILE_K)
     ap.add_argument("--tile-n", type=int, default=DEFAULT_TILE_N)
@@ -1386,6 +1673,25 @@ def main():
     # a matching design set (tools/export/export_gemm_rtp.py --int8); the container's
     # and the design's b_layout_hash differ between the two, so a mismatched
     # pair is refused by the check that already exists.
+    ap.add_argument("--dtype", type=dtype_arg, default=None,
+                    # Derived, never spelled: a metavar written by hand is a
+                    # second copy of the choice list, and the two drifted the
+                    # moment i4 was added.
+                    metavar="{" + ",".join(DTYPE_CHOICES) + "}",
+                    help="operand dtype written into the container -- the ONE "
+                         "place this is stated. 'bf16' (the default) is the "
+                         "pre-tiled bf16 panel the array runs; 'i8' is "
+                         "per-output-channel int8 with SmoothQuant, and wants "
+                         "a design exported with export_gemm_rtp.py --int8; "
+                         "'i4' is four-bit WEIGHT storage over that same int8 "
+                         "datapath (tools/lib/gemm_i4.py), so it wants the "
+                         "same design and the same calibration; 'f32' is plain "
+                         "row-major F32 for the CPU control encoder, arch=1 "
+                         "only. Anything else -- f16, fp8 -- is refused here, "
+                         "because the array has no datapath to run it on. "
+                         "--int8 and --gemma-host-only are this flag's "
+                         "aliases; giving two spellings that disagree is "
+                         "refused too.")
     ap.add_argument("--int8", action="store_true",
                     help="quantise the per-layer GEMM operands to int8, per "
                          "output channel, with SmoothQuant. BERT-family: the "
@@ -1402,7 +1708,19 @@ def main():
                          "MEMORY on the STT path, and on the ViT path it was "
                          "additionally MEASURED to buy speed -- see the comment "
                          "at the vit branch below, which does not share the "
-                         "audio geometry.")
+                         "audio geometry. This is --dtype i8 spelled the "
+                         "older way; the two mean the same container, and "
+                         "giving both in AGREEING forms is accepted while "
+                         "disagreeing forms are refused.")
+    ap.add_argument("--int4-group", type=int, default=None,
+                    help="rows per int4 scale group along K (--dtype i4 only). "
+                         "Default 32; 0 means one group spanning the whole K, "
+                         "i.e. per-channel int4. Measured on MiniLM's 38 GEMM "
+                         "matrices, weight rel_fro: 1.60e-1 at 0, 1.02e-1 at "
+                         "32, 8.8e-2 at 16 (int8 is 9.0e-3). Every group adds "
+                         "one float per output channel to .gscale, so a smaller "
+                         "group trades container bytes back for accuracy. "
+                         "Refused with any other --dtype rather than ignored.")
     ap.add_argument("--int8-clips", type=int, default=8,
                     help="clips in the audio calibration (whisper --int8). "
                          "More clips cost linearly in calibration time and "
@@ -1416,17 +1734,70 @@ def main():
                          "synth_corpus), so a pack needs no external audio. A "
                          "deployment should pass the audio it will actually "
                          "see: the scales are only as good as the corpus.")
+    ap.add_argument("--int8-text-corpus", default=None,
+                    help="a text file of one calibration sentence per line, for "
+                         "the int8 smoothing factors of every TEXT model -- "
+                         "BERT, nomic and EmbeddingGemma alike. Default: "
+                         "tools/data/gemma_corpus_520.txt. Named to sit next "
+                         "to --int8-corpus, which is whisper's and is a "
+                         "DIRECTORY of WAVs: the two share no reader, so one "
+                         "passed to the other is a mistake worth naming rather "
+                         "than a silent fallback. The default's filename still "
+                         "says gemma because that is the model it was written "
+                         "for -- the BERT-family sentences suit all three.")
+    ap.add_argument("--gemma-corpus", default=None,
+                    help="deprecated spelling of --int8-text-corpus. Removed "
+                         "when this stops being confusing rather than now, "
+                         "because the flag is one command-line release old.")
     ap.add_argument("--int8-images", type=int, default=8,
                     help="images in the calibration (vit --int8). More images "
                          "cost linearly in calibration time and buy a better "
                          "estimate of each input channel's maximum; eight is "
                          "where the per-channel maxima stop moving between "
                          "runs. Ignored by every other family.")
-    ap.add_argument("--smooth-alpha", type=float, default=0.5,
-                    help="SmoothQuant alpha. 0 disables smoothing, which "
-                         "FAILS the gate at 2.864e-03; 0.4 also fails at "
-                         "2.356e-03; 0.5 is the measured minimum. Only "
-                         "meaningful with --int8.")
+    ap.add_argument("--smooth-alpha", type=float, default=None,
+                    help="SmoothQuant alpha: s_j = amax_j**alpha / "
+                         "wmax_j**(1-alpha), applied to the activation as "
+                         "x/s and folded into the weight so the pair is "
+                         "unchanged in exact arithmetic. Only meaningful "
+                         "with --int8. Left unset, each family gets its own "
+                         "measured default (SMOOTH_ALPHA_DEFAULT) and the "
+                         "one in force is printed by the packer.")
+
+    # SMOOTH_ALPHA_DEFAULT, PER FAMILY, MEASURED RATHER THAN INHERITED. The
+    # value 0.5 was chosen on the embedder family and was then applied to
+    # every other family by default, which for Whisper is simply wrong --
+    # its decoder carries a massive-activation channel whose calibrated
+    # maximum is ~22x the typical channel's, so alpha=0.5 (which halves that
+    # ratio in log terms, to 4.7x) still leaves a per-row int8 quantiser about
+    # four good bits for the bulk of a row, and the error it leaves is heavy
+    # tailed in the decoder state.
+    #
+    # Measured on whisper-tiny, 16 forced decoder tail tokens on a 3 s tone,
+    # hidden-state 1-cos against the SAME runs on the bf16 container (so this
+    # is a statement about the int8 datapath, not about transformers):
+    #
+    #   alpha          0.1     0.2     0.3     0.5     0.7     0.8     0.9
+    #   encoder      4.7e-3  4.0e-3  3.0e-3  1.9e-3  2.4e-3  2.6e-3  3.9e-3
+    #   tail median  1.0e-2  6.5e-3  5.1e-3  1.5e-2  1.5e-1  4.1e-1  4.5e-1
+    #   tail worst   2.1e-2  4.3e-2  1.0e-1  4.5e-1  5.6e-1  5.7e-1  5.5e-1
+    #
+    # 0.3 is the median's best and is picked: the tail, which is what a
+    # transcript is made of, is 3x better than 0.5's and 90x better than 0.9's,
+    # while the encoder pays 3.0e-3 against 1.9e-3 -- both an order below the
+    # bf16 datapath's 3e-4 and both dominated by the same effect. 0.2 is
+    # within noise of it on the median and better on the worst; the difference
+    # is one sample wide, which is why the whole table is here rather than a
+    # claim that 0.3 is optimal.
+    #
+    # TWO THINGS THIS IS NOT. It is measured on whisper-tiny; the
+    # massive-activation channel is a property of Whisper's decoder rather
+    # than of tiny, so the reasoning transfers, but the optimum need not be
+    # at the same alpha for base/small/medium/large. And it is NOT the case
+    # that the embedder families are wrong at 0.5 -- nothing here was measured
+    # on them, and their gates pass as shipped.
+    SMOOTH_ALPHA_DEFAULT = {"whisper": 0.3}
+    SMOOTH_ALPHA_FALLBACK = 0.5
     ap.add_argument("--smooth-texts", type=int, default=128,
                     help="calibration corpus size for --int8. More is not "
                          "obviously better: the factors are per-channel "
@@ -1435,20 +1806,279 @@ def main():
                     help="arch=1 only: emit PLAIN F32 row-major GEMM operands "
                          "for the CPU-only GemmaEncoder, as tasks/0064-0065 "
                          "shipped. The default is now the pre-tiled bf16 NPU "
-                         "container (tasks/0074); this rebuilds the control.")
+                         "container (tasks/0074); this rebuilds the control. "
+                         "This is --dtype f32 spelled the older way -- same "
+                         "container either way -- and the only architecture "
+                         "with a host encoder in this build, so --dtype f32 "
+                         "on any other checkpoint is refused by name.")
     ap.add_argument("--dry-run", action="store_true",
                     help="arch=4 only: report the tensor inventory and the "
                          "geometry, write nothing. The packing itself is cheap "
                          "and the checks in it are the point, so this exists to "
                          "inspect a checkpoint before committing the output.")
+    ap.add_argument("--pose-onnx", metavar="FILE", default=None,
+                    help="pack a YOLOv8-pose ONNX checkpoint (arch=6) from "
+                         "FILE. This is the one packer in this file whose input "
+                         "is a single ONNX file rather than a --model-dir with a "
+                         "config.json, so it says so with its own flag instead of "
+                         "by convention -- --model-dir with a directory that "
+                         "happens to contain a .onnx is the shape of the mistake "
+                         "the --out-derived default above was written to stop.")
+    ap.add_argument("--npu", action="store_true",
+                    help="arch=6 only: also stage the pre-tiled bf16 B panel "
+                         "for every convolution, and record the array stream "
+                         "each one runs on. The container runs on the CPU "
+                         "either way -- this is the array path's half-written, "
+                         "and the shape it takes is the same one the gemm_rtp "
+                         "exporter produces, so the design set can be built for "
+                         "it. UNMEASURED: the pose array path has not been run "
+                         "on hardware in this tree, and this flag does not change "
+                         "that.")
     args = ap.parse_args()
 
-    # Resolved once, here, and printed by every branch: a container whose B
-    # order is a guess is a container nobody can debug later.
-    mac = mac_for_device(args.device)
+    # Kept BEFORE the generic --int4-group defaulting below, which would
+    # otherwise resolve an unstyped flag to the GEMM packers' 32 and hand a pose
+    # container a group chosen for a different datapath. See
+    # POSE_I4_GROUP_DEFAULT for why the pose default is not 32 either.
+    pose_group_typed = args.int4_group
 
-    model_dir = Path(args.model_dir)
+    # The alias resolves rather than being accepted-and-ignored. A deprecated
+    # flag that parses and then does nothing is worse than one that is gone: the
+    # caller sees a clean run and a container calibrated on the default corpus.
+    if args.gemma_corpus is not None:
+        if args.int8_text_corpus is not None and \
+                args.int8_text_corpus != args.gemma_corpus:
+            raise SystemExit(
+                f"--gemma-corpus {args.gemma_corpus} and --int8-text-corpus "
+                f"{args.int8_text_corpus} are the same flag under two names and "
+                f"they disagree. Pass only --int8-text-corpus.")
+        print(f"  note  --gemma-corpus is the old name for "
+              f"--int8-text-corpus; using it as "
+              f"--int8-text-corpus {args.gemma_corpus}")
+        args.int8_text_corpus = args.gemma_corpus
+
+    # ONE operand dtype, resolved from --dtype and the two spellings that
+    # predate it. Disagreeing spellings are REFUSED rather than ranked: until
+    # now `--int8 --gemma-host-only` built a bf16 host container and exited 0,
+    # so the int8 a caller asked for was silently not there -- the same
+    # accepted-and-ignored shape as --max-seq on a ViT. Only one container
+    # comes out of a pack, so only one answer is allowed to go in.
+    typed = []
+    if args.dtype is not None:
+        typed.append(("--dtype", args.dtype))
+    if args.int8:
+        typed.append(("--int8", "i8"))
+    if args.gemma_host_only:
+        typed.append(("--gemma-host-only", "f32"))
+    if typed and len({v for _, v in typed}) > 1:
+        raise SystemExit(
+            "conflicting operand dtypes: "
+            + ", ".join(f"{f} -> {v}" for f, v in typed)
+            + ". A pack writes one container, so state the dtype once with "
+              f"--dtype {{{','.join(DTYPE_CHOICES)}}}; --int8 and "
+              "--gemma-host-only are that flag's aliases and mean i8 and f32 "
+              "on their own.")
+    dtype = typed[0][1] if typed else "bf16"
+    # Folded back into the two flags every branch below already reads, so each
+    # branch sees the same answer whichever spelling was typed. i4 IS the int8
+    # datapath -- the array multiplies int8 x int8 either way -- so it sets
+    # int8 too: the calibration, the design requirement and the container's
+    # a_dtype are shared, and only the panel's storage differs.
+    args.int8 = dtype in ("i8", "i4")
+    args.gemma_host_only = dtype == "f32"
+
+    # THE int4 GROUP, resolved once, because it is the second knob after the
+    # dtype and a knob that is accepted-and-ignored is the exact fail-open
+    # shape this packer refuses everywhere else (--max-seq on a ViT, a
+    # never-consumed --int8-corpus). None means "not an int4 pack" and every
+    # packer below treats it that way.
+    if args.int4_group is not None and dtype != "i4":
+        raise SystemExit(
+            f"--int4-group {args.int4_group} is the K-group size of the int4 "
+            f"weight scale, and only --dtype i4 writes int4 panels; this pack "
+            f"is --dtype {dtype}. Dropping the flag silently would make the "
+            f"container depend on a flag that did nothing. Use --dtype i4, or "
+            f"drop --int4-group.")
+    args.int4_group = (None if dtype != "i4"
+                       else 32 if args.int4_group is None else args.int4_group)
+    if dtype == "i4" and args.int4_group < 0:
+        raise SystemExit(
+            f"--int4-group {args.int4_group}: rows per group must be >= 0, "
+            f"where 0 means one group spanning the whole K (per-channel)")
+
+    # --npu stages array panels, and only the pose packer in this file has one.
+    # Refused by name elsewhere rather than ignored, because the flag reads as
+    # "make this run on the NPU" and a BERT pack that took it would still produce
+    # a host-only container with no mention of it.
+    if args.npu and not args.pose_onnx:
+        raise SystemExit(
+            "--npu stages the pre-tiled array panels, and only the pose packer "
+            "writes them (--pose-onnx FILE). Every other architecture here "
+            "targets the array by construction -- its containers carry no host "
+            "path at all -- so on those this flag would be a no-op that looks "
+            "like an opt-in.")
+
+    # arch=6 branch: a YOLOv8-pose checkpoint. Routed BEFORE the --model-dir
+    # resolution below because it has no --model-dir: its input is one ONNX
+    # file, not a directory with a config.json, and deriving a directory from
+    # --out for a model that was handed over as a single file would produce the
+    # refusal two lines down for a checkpoint that is sitting right there.
+    if args.pose_onnx:
+        # An UNSTATED dtype is f32 here, not the global "bf16". The global default
+        # is bf16 because every other packer in this file targets the array and
+        # bf16 is what the array multiplies; a pose convolution weight has no
+        # array format in this runtime at all -- the panels --npu stages are a
+        # SEPARATE tensor -- so "no --dtype" here has to mean the precision the
+        # host conv engine can actually read, which is fp32. Leaving it at bf16
+        # would make the shortest possible command, `--pose-onnx model.onnx`,
+        # refuse with a message about a format the operator never asked for.
+        if not typed:
+            dtype = "f32"
+            print(f"  dtype f32 -- the default for a pose pack, and NOT the "
+                  f"'bf16' default the rest of this file uses: there is no bf16 "
+                  f"convolution weight path in this runtime. --dtype i8 or i4 "
+                  f"if you want a smaller file.")
+        # Its OWN int4 default, and not the GEMM packers' 32, because the pose
+        # head is where the four-bit error lands and there is a cliff. Measured
+        # on bus.jpg against the fp32 container (tools/verify/
+        # verify_pose_quant.py), three detections in the reference:
+        #
+        #   dtype   file      score   box      keypoint   people
+        #   f32     13.5 MB     --      --        --         3
+        #   i8       4.0 MB   0.001   1.9 px    5.8 px      3
+        #   i4 g=8  4.2 MB   0.050   5.6 px   50.9 px      3
+        #   i4 g=16 3.4 MB   0.077  28.5 px   54.3 px      8
+        #   i4 g=32 3.0 MB   0.206  26.1 px   71.3 px      8
+        #   i4 g=64 2.8 MB   0.136  28.3 px   63.2 px      8
+        #   i4 g=0  2.7 MB   0.359  99.5 px  128.8 px      5
+        #   i4 g=1 15.6 MB  0.000   0.0 px    0.0 px      3
+        #
+        # THREE THINGS IN THAT TABLE ARE WORTH READING TWICE.
+        #
+        # The cliff is between group 8 and group 16: eight keeps three
+        # detections, sixteen finds eight in a photograph of three. Nothing
+        # warns of it -- the packing is valid at both, the file is smaller at
+        # sixteen, and the relative error on the weights only moves from 0.095
+        # to 0.12. Which is why the default is the last point before it.
+        #
+        # Group 1 is LOSSLESS -- one scale per weight, so the four bits are exact
+        # and the detections are bit-identical to fp32's -- and its file is
+        # 15.6 MB, LARGER than fp32's 13.5. Four bits per weight plus four bytes
+        # of scale per weight is more than the four bytes it replaced. A group
+        # too small to lose anything is a group that saves nothing, and the two
+        # facts are the same fact.
+        #
+        # And i8 is the only point on this table worth having: a third of the
+        # bytes, a 1.9 px box, and the same three people. i4 buys 0.7 MB more
+        # than i8 does -- the SMALLEST files here are the LEAST correct ones.
+        POSE_I4_GROUP_DEFAULT = 8
+        grp = (POSE_I4_GROUP_DEFAULT if pose_group_typed is None
+               else pose_group_typed)
+        # bf16 is in the top-level dtype vocabulary and has no meaning for a
+        # convolution weight here: there is no bf16 conv weight path in this
+        # runtime, and conv_quant refuses the spelling by name.
+        if dtype == "bf16":
+            raise SystemExit(
+                "--dtype bf16 is the array's GEMM operand format and there is no "
+                "bf16 CONVOLUTION weight path in this runtime. A pose "
+                "convolution weight is read as f32, i8 or i4 -- "
+                "tools/lib/conv_quant.py -- so bf16 here would be a container "
+                "whose weights are a precision nothing can multiply. Use "
+                "--dtype f32 (12.9 MiB), i8 (3.8 MiB) or i4.")
+        from packers.pose import pack_pose  # noqa: E402
+        return pack_pose(args.pose_onnx, args.out, device=args.device,
+                         npu=args.npu, dtype=dtype,
+                         # None unless i4, because the pose packer refuses an
+                         # --int4-group it cannot use rather than dropping it --
+                         # and this default is POSE_I4_GROUP_DEFAULT's business,
+                         # not something it should be told to ignore on f32.
+                         int4_group=grp if dtype == "i4" else None)
+
+    # Resolved ONCE PER LAYOUT DTYPE, here, and printed by every branch: a
+    # container whose B order is a guess is a container nobody can debug later.
+    #
+    # Two, not one, because the MMAC sub-tile is a function of the operand dtype
+    # as well as the board -- on npu1 int8 is (8, 8) where bf16 is (8, 4). A
+    # single `mac` for the whole run handed every int8 and int4 pack the bf16
+    # pair, which is the defect this fixes: bge-small on the int8 design came
+    # back at 1-cos 8.6e-01 with the layout hash, the exporter and the runtime
+    # all agreeing, because all three read the same single value.
+    mac_by_dtype = {"BF16": mac_for_device(args.device, "BF16"),
+                    "I8": mac_for_device(args.device, "I8")}
+    # The packer's own B-layout dtype, i.e. what a GEMM operand is tiled for.
+    # args.int8 is already True for int4 (line above sets it from the dtype
+    # family), and int4's panel is widened to int8 before staging, so the bytes
+    # the core consumes are int8's.
+    mac = mac_by_dtype[b_layout_dtype(args.int8)]
+
+    # Said ONCE, before the model is touched, because it is the one fact about
+    # an int4 pack that is not already on every other line of the pack output:
+    # the file still says config a_dtype "i8" and still carries the int8 layout
+    # hash -- it RUNS on the int8 datapath -- so nothing about it distinguishes
+    # it from an int8 pack except each entry's "I4" dtype, its .gscale sidecar,
+    # and this number.
+    if dtype == "i4":
+        grp = args.int4_group
+        how = ("one group over the whole K (per-channel)" if grp == 0
+               else f"{grp} rows per scale group along K")
+        print(f"  dtype i4 -- 4-bit weights over the int8 datapath, {how}; "
+              f'config a_dtype "i8", so the design is the one '
+              f"export_gemm_rtp.py --int8 exports, as for an int8 pack")
+
+    # An unstated --model-dir means the model NAMED BY --out, not MiniLM. The
+    # old default was the literal models/all-MiniLM-L6-v2 whatever --out said,
+    # so `--out bge-small.npue` with no --model-dir wrote MiniLM's weights under
+    # bge-small's name -- and the only thing that gave it away was the printed
+    # `source` digest. A default that silently substitutes one checkpoint for
+    # another is worse than no default, and --out is the thing the user typed.
+    # An absent models/<stem> is refused BY NAME rather than falling back.
+    if args.model_dir:
+        model_dir = Path(args.model_dir)
+    else:
+        model_dir = REPO / "models" / (Path(args.out).stem or "all-MiniLM-L6-v2")
+        if not (model_dir / "config.json").is_file():
+            raise SystemExit(
+                f"no checkpoint for --out {Path(args.out).name!r}: looked for "
+                f"{model_dir}/config.json, which does not exist. Pass "
+                f"--model-dir DIR explicitly. (This is not a fallback to "
+                f"another model: the default is derived from --out precisely so "
+                f"that cannot happen silently.)")
+    if not (model_dir / "config.json").is_file():
+        raise SystemExit(
+            f"no config.json in {model_dir} -- that is not a checkpoint "
+            f"directory. Pass --model-dir DIR pointing at models/<name>.")
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+
+    # RESOLVE --smooth-alpha ONCE, HERE, FROM THE CHECKPOINT'S OWN model_type.
+    # It was one global default until the whisper int8 measurement below showed
+    # 0.5 to be ten times worse than 0.3 on that family, and a per-family
+    # default is only expressible if "unset" is distinguishable from "0.5".
+    # The resolved value is printed by whichever packer runs, so a container
+    # never records an alpha that nothing named and a reader cannot see.
+    smooth_alpha = args.smooth_alpha
+    if smooth_alpha is None:
+        smooth_alpha = SMOOTH_ALPHA_DEFAULT.get(cfg.get("model_type"),
+                                                SMOOTH_ALPHA_FALLBACK)
+    elif cfg.get("model_type") == "whisper":
+        print(f"  smooth alpha {smooth_alpha} (--smooth-alpha; the measured "
+              f"whisper default is {SMOOTH_ALPHA_DEFAULT['whisper']})")
+
+    # --dtype f32 is a container FOR THE CPU, and only one architecture has a
+    # CPU encoder in this build. Packing it anywhere else would write a file
+    # the runtime cannot run: there is no host path for it, and the pre-tiled
+    # NPU path would be handed row-major F32. Refused here, by model_type,
+    # with the two dtypes that checkpoint CAN take.
+    if dtype == "f32" and cfg.get("model_type") != "gemma3_text":
+        raise SystemExit(
+            f"--dtype f32 writes a host-only container (plain row-major F32 "
+            f"GEMM operands, gemm_layout \"host\"), and only arch=1 "
+            f"(model_type 'gemma3_text') has a host encoder in this build -- "
+            f"runtime/src/runtime.cpp refuses --cpu for every other "
+            f"architecture. This checkpoint has model_type "
+            f"{cfg.get('model_type')!r}, so it would be packed into a file "
+            f"nothing can run. Use --dtype bf16 (default: the array) or "
+            f"--dtype i8 (the array, int8 datapath, wants a design exported "
+            f"with tools/export/export_gemm_rtp.py --int8).")
 
     # arch=1 branch (tasks/0064-m12-embeddinggemma-arch1-integration): a Gemma3-family checkpoint is a completely
     # different tensor shape and a completely different container -- routed
@@ -1462,8 +2092,10 @@ def main():
             out = str(model_dir.parent / (model_dir.name + ".npue"))
         return pack_gemma(model_dir, out, tile_k=args.tile_k,
                           tile_n=args.tile_n, host_only=args.gemma_host_only,
-                          int8=args.int8, smooth_alpha=args.smooth_alpha,
-                          smooth_texts=args.smooth_texts, mac=mac)
+                          int8=args.int8, int4_group=args.int4_group,
+                          smooth_alpha=smooth_alpha,
+                          smooth_texts=args.smooth_texts, mac=mac,
+                          corpus_path=args.int8_text_corpus)
 
     # arch=2 branch (tasks/0069-m13-nomic-arch2-container): nomic_bert is
     # RoPE + gated SwiGLU rather than BERT's absolute-position + GELU, so it
@@ -1479,8 +2111,10 @@ def main():
             out = str(model_dir.parent / (model_dir.name + ".npue"))
         return pack_nomic(model_dir, out, args.tile_k, args.tile_n,
                           max_seq_embedder, not args.no_fold_scale,
-                          int8=args.int8, smooth_alpha=args.smooth_alpha,
-                          smooth_texts=args.smooth_texts, mac=mac)
+                          int8=args.int8, int4_group=args.int4_group,
+                          smooth_alpha=smooth_alpha,
+                          smooth_texts=args.smooth_texts, mac=mac,
+                          corpus_path=args.int8_text_corpus)
 
     # arch=3 branch (0.5.0, tasks/0134/0135): model_type "new" is the
     # NewModel family (gte-multilingual-base). Same routing rule as the two
@@ -1492,7 +2126,10 @@ def main():
             out = str(model_dir.parent / (model_dir.name + ".npue"))
         return pack_gte(model_dir, out, args.tile_k, args.tile_n,
                         max_seq_embedder, not args.no_fold_scale, int8=args.int8,
-                        mac=mac)
+                        mac=mac, int4_group=args.int4_group,
+                        smooth_alpha=smooth_alpha,
+                        smooth_texts=args.smooth_texts,
+                        corpus_path=args.int8_text_corpus)
 
     # arch=4 branch: model_type "whisper" (openai/whisper-*). Speech-to-text,
     # so this one carries a conv frontend, a positional table, TWO stacks and a
@@ -1533,7 +2170,8 @@ def main():
                             fold_scale=not args.no_fold_scale,
                             dry_run=args.dry_run, device=args.device,
                             int8=args.int8,
-                            int8_alpha=args.smooth_alpha,
+                            int4_group=args.int4_group,
+                            int8_alpha=smooth_alpha,
                             int8_clips=args.int8_clips,
                             int8_corpus=args.int8_corpus)
 
@@ -1609,7 +2247,8 @@ def main():
             out = str(model_dir.parent / (model_dir.name + ".npue"))
         return pack_vit(model_dir, out, fold_scale=not args.no_fold_scale,
                         dry_run=args.dry_run, device=args.device,
-                        int8=args.int8, int8_alpha=args.smooth_alpha,
+                        int8=args.int8, int4_group=args.int4_group,
+                        int8_alpha=smooth_alpha,
                         int8_images=args.int8_images,
                         int8_corpus=args.int8_corpus)
 
@@ -1645,6 +2284,8 @@ def main():
         # tasks/0078, and every one of those is bf16 -- so the runtime reads
         # silence as "bf16" rather than defaulting blindly.
         "a_dtype": "i8" if args.int8 else "bf16",
+        **({"int4_group": args.int4_group}
+           if args.int4_group is not None else {}),
         "fusions": {
             "qkv_fused": True,
             "transposed_to_kn": True,
@@ -1688,15 +2329,19 @@ def main():
 
     # ONE emitter for the four per-layer operands, so bf16 and int8 differ in
     # exactly one place rather than in four (tasks/0078).
-    smooth = calibrate_smoothing(model_dir, alpha=args.smooth_alpha, n_texts=args.smooth_texts)         if args.int8 and args.smooth_alpha > 0 else {}
+    smooth = (calibrate_smoothing(model_dir, alpha=smooth_alpha,
+                                  n_texts=args.smooth_texts,
+                                  corpus_path=args.int8_text_corpus)
+              if args.int8 and smooth_alpha > 0 else {})
     qerr = []
     def emit(name, mat, layer, op):
         if not args.int8:
             add_gemm_b(w, name, mat, tk, tn, mac=mac)
             return
-        qerr.append((name, add_gemm_b_int8(w, name, mat, tk, tn,
-                                           asmooth=smooth.get((layer, op)),
-                                           mac=mac)))
+        err = emit_gemm_b(w, name, mat, tk, tn, int8=True,
+                          int4_group=args.int4_group,
+                          asmooth=smooth.get((layer, op)), mac=mac)
+        qerr.append((name, err))
 
     n_tiled = 0
     for i in range(L):
@@ -1752,7 +2397,8 @@ def main():
         # tensor is then visible here rather than as a puzzling MTEB delta.
         worst = max(qerr, key=lambda t: t[1])
         mean = sum(e for _, e in qerr) / len(qerr)
-        print(f"\n  int8: {len(qerr)} operands, weight rel_fro mean "
+        print(f"\n  {'int4' if args.int4_group is not None else 'int8'}: "
+              f"{len(qerr)} operands, weight rel_fro mean "
               f"{mean:.3e}, worst {worst[1]:.3e} ({worst[0]})")
     info = w.write(args.out)
 
@@ -1784,7 +2430,7 @@ def main():
     # "tile (64, 32)" banner over a tile-48 pack. Build the descriptor the same
     # way the emitter does.
     print(f"  layout_hash: "
-          f"{layout_hash(gemm_b_layout(tk, tn, mac[0], mac[1], dtype='I8' if args.int8 else 'BF16'))[:16]}..."
+          f"{layout_hash(gemm_b_layout(tk, tn, mac[0], mac[1], dtype=b_layout_dtype(args.int8)))[:16]}..."
           f"  ({'i8' if args.int8 else 'bf16'} operands)")
     return 0
 

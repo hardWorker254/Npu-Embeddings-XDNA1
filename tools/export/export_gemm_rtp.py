@@ -13,8 +13,8 @@
 # With --target <model> the model name becomes a subfolder so several models
 # can share one artifacts root without overwriting each other:
 #
-#   <out>/<model>/artifacts_npu1/gemm_rtp
-#   <out>/<model>/artifacts_npu2/gemm_rtp
+#   <out>/artifacts/<model>/artifacts_npu1/gemm_rtp
+#   <out>/artifacts/<model>/artifacts_npu2/gemm_rtp
 #
 # Usage:
 #   python tools/export/export_gemm_rtp.py --target gte-multilingual-base --arch 1

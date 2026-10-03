@@ -1,5 +1,7 @@
 {
   "repo_id": "TaylorAI/bge-micro-v2",
-  "file": [],
-  "sha256": null
+  "file": [
+    "onnx/model.onnx"
+  ],
+  "sha256": "9c5b85eed4d3d694acd2074e512ed4bc1fd5d829be8e1e2ba725c8d2c2bd53ca"
 }

@@ -322,8 +322,23 @@ def reference(model_dir, pixels):
     """
     import torch
     from transformers import ViTForImageClassification
-    m = ViTForImageClassification.from_pretrained(
-        str(model_dir), torch_dtype=torch.float32).eval()
+
+    import onnx_torch
+    from onnx_weights import MODEL_ONNX
+
+    # Weights come from the ONNX export, not from `from_pretrained`, and for the
+    # reason vit_int8.calibrate documents at length: this tree ships no
+    # `pytorch_model.bin` and no safetensors file -- the ONNX export is the only
+    # copy of the weights there is -- so from_pretrained raised an OSError from
+    # inside transformers listing five filenames, none of which exist, for a
+    # checkpoint whose weights were present one directory up. That OSError ended
+    # this gate halfway through, after its container-side checks had already
+    # passed, so the tree reported a failure whose cause was a file this
+    # repository does not use.
+    m = onnx_torch.build(model_dir, "ViTConfig",
+                         "ViTForImageClassification",
+                         [(Path(model_dir) / MODEL_ONNX, "")],
+                         what=f"verify_vit {Path(model_dir).name}").eval()
     with torch.no_grad():
         out = m(pixel_values=torch.from_numpy(pixels)).logits
     return out.numpy().astype(np.float32)
@@ -396,13 +411,33 @@ def main() -> int:
     print("\n1. the patch-embedding layout")
     import torch
     from transformers import ViTModel
-    hf = ViTModel.from_pretrained(str(model_dir),
-                                  torch_dtype=torch.float32).eval()
+
+    import onnx_torch
+    from onnx_weights import MODEL_ONNX
+
+    # The same ONNX-built model as the classifier above, and for the same
+    # reason. It is the CLASSIFIER tree rather than the bare ViTModel on
+    # purpose: this export names its initializers `vit.embeddings...` and
+    # `classifier.*`, which is exactly ViTForImageClassification's module tree,
+    # and offnx_torch refuses a load that maps a tensor to no parameter rather
+    # than leaving it randomly initialised. Against the bare ViTModel every one
+    # of those 198 tensors is unmapped -- the bare tree has `embeddings...`, with
+    # no `vit.` in front -- and a head costs nothing here, because the claim
+    # under test is the patch embedding's im2col layout and the head sits on top
+    # of it rather than in it.
+    hf = onnx_torch.build(model_dir, "ViTConfig",
+                          "ViTForImageClassification",
+                          [(Path(model_dir) / MODEL_ONNX, "")],
+                          what=f"verify_vit im2col "
+                               f"{Path(model_dir).name}").eval()
     with torch.no_grad():
         px = torch.zeros(1, 3, image, image)
         px[0, 0] = torch.arange(image, dtype=torch.float32).view(1, image) / image
         px[0, 1] = 1.0 - torch.arange(image, dtype=torch.float32).view(1, image) / image
-        conv = hf.embeddings.patch_embeddings.projection
+        # Under `.vit`, because this is the classification tree: its module
+        # names are `vit.embeddings...`, which is what the ONNX export's own
+        # tensor names are, and onnx_torch maps the two by equality.
+        conv = hf.vit.embeddings.patch_embeddings.projection
         # [1, oc, 14, 14] -> [196, oc] as (patch_row, patch_col), which is the
         # order im2col_patches enumerates. NOT flatten(1): that is oc-major, so
         # it returns a 196x768 matrix whose rows are output CHANNELS -- which

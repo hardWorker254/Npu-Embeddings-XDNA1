@@ -9,6 +9,7 @@
 #include "encoders/gemma_npu_encoder.hpp"
 
 #include "common/app_state.hpp"
+#include "common/int4_panel.hpp"
 
 using namespace app;
 
@@ -250,14 +251,18 @@ size_t GemmaNpuEncoder::stage_all() {
           ", container has " +
           (got.empty() ? std::string("(nothing stated)") : got.substr(0, 16)) +
           ". The bytes would be the right size and the wrong order.");
-    auto w = model_.raw(name);
-    slots.push_back(d.stage(1, w.data, w.bytes));
+    // bf16/I8 come straight out of the mapping; an I4 payload is widened to
+    // the int8 panel the array consumes first (common/int4_panel.hpp), so
+    // stage() sees the same bytes an int8 container would carry. The count is
+    // the staged size -- K*N for int8 and int4, K*N*2 for bf16.
+    const Panel panel = gemm_b_panel(model_, name, d.info().a_elem_bytes);
+    slots.push_back(d.stage(1, panel.bytes.data, panel.bytes.bytes));
     bias.push_back(model_.raw(name + ".bias").as<float>());
     if (i8) {
       wsc->push_back(model_.raw(name + ".wscale").as<float>());
       asm_->push_back(model_.raw(name + ".asmooth").as<float>());
     }
-    bytes += w.bytes;
+    bytes += panel.bytes.bytes;
   };
   for (int64_t L = 0; L < layers; ++L) {
     const std::string p = "layer." + std::to_string(L) + ".";

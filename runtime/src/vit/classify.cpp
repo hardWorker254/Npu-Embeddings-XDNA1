@@ -144,7 +144,11 @@ Session::Session(npue::File &model, const std::string &model_name,
   {
     const std::string a = model_.info("layer.0.qkv").dtype;
     const bool i8_design = di.a_elem_bytes == 1;
-    if ((a == "I8") != i8_design)
+    // I4 counts as an int8 container, because that is what it is at run time:
+    // gemm_b_panel widens the nibbles to an int8 panel before stage(), the
+    // scales alongside them are int8's, and the design is the int8 one. There
+    // is no third pairing to name.
+    if ((a == "I8" || a == "I4") != i8_design)
       throw std::runtime_error(
           "container/design pairing: " + name_ + "'s GEMM operands are " + a +
           " and " + artifacts + "/gemm_rtp is a " +

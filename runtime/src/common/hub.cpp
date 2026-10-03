@@ -62,6 +62,34 @@ const std::vector<CatalogEntry> &table() {
        "1fd2e85dc29d4df6e4dbbe442ddbb80861f38d2ccc361095d7cbdd34625339d0",
        "cls", 384, 12, 12, 1536, 48, 133.5,
        "MiniLM's width at twice the depth; +2.99 MTEB points"},
+      // bge-micro-v2: a 3-LAYER, 384-wide BERT, the cheapest encoder in the
+      // table and the one this build shipped a container for but had no row
+      // for. That gap is worth naming because it was SILENT in the worst way:
+      // pack_npue read models/bge-micro-v2/config.json and emitted a correct
+      // container (58 MB, layout_hash 52a4adad -- the shared 384-wide bf16
+      // layout, identical to MiniLM's and bge-small's), so every "does it
+      // quantize" check passed, while `embed bge-micro-v2` answered "not
+      // installed and is not a model this build knows how to fetch" and
+      // `--list-targets` showed 15 of the 16 models on disk. The container was
+      // therefore runnable and the MODEL was not nameable, which is exactly
+      // the split a per-file check cannot see.
+      //
+      // The geometry is identical to all-MiniLM-L6-v2 and bge-small-en-v1.5 --
+      // 384 wide, 1536 FFN, tile_n 48, every N a multiple of 48 -- so it packs
+      // to the same layout_hash and runs on the SAME design sets, and needs no
+      // export of its own. That is a coincidence of width, not a claim that
+      // the models are interchangeable: the weights differ, and the row exists
+      // so `serve <name>`, `--artifacts <name>` and the by-name design
+      // candidate list resolve a directory for it.
+      //
+      // MEAN pooling, unlike bge-small and bge-base next to it: this
+      // checkpoint's 1_Pooling/config.json sets pooling_mode_mean_tokens and
+      // leaves cls off. It is cross-checked against that file by
+      // verify_config, so this is checked rather than asserted.
+      {"bge-micro-v2", "TaylorAI/bge-micro-v2",
+       "9c5b85eed4d3d694acd2074e512ed4bc1fd5d829be8e1e2ba725c8d2c2bd53ca",
+       "mean", 384, 3, 12, 1536, 48, 69.0,
+       "3 layers at MiniLM's width; mean pooling; same designs as MiniLM"},
       {"bge-base-en-v1.5", "BAAI/bge-base-en-v1.5",
        "9a26303ba8a2d6175aaefa94c0c10738b68eba2cee895e7f7cee1c8b780a4333",
        "cls", 768, 12, 12, 3072, 48, 438.0,
@@ -295,6 +323,11 @@ const std::vector<CatalogEntry> &table() {
         "embeddinggemma-300m",      // MTEB +0.16 / worst -0.02
         "gte-multilingual-base",    // MTEB +0.06 / worst -0.06 (tasks/0137)
     };
+    // bge-micro-v2 is DELIBERATELY absent, and this allowlist is why that is a
+    // safe omission rather than an oversight: it is 384 wide, the width
+    // bge-small FAILS at (-0.5010 against the -0.5 line), and nobody has
+    // measured it. A new row landing here defaults to plain bf16 -- what
+    // bge-small ships -- until an MTEB verdict adds it.
     for (auto &e : rows)
       for (const char *n : kAdoptedBfp16)
         if (e.name == n) { e.datapath = "bfp16"; break; }

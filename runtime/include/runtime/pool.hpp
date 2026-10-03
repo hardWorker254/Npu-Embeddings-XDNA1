@@ -31,7 +31,11 @@ private:
   std::mutex m_;
   std::condition_variable cv_work_, cv_done_;
   std::function<void(int, int)> fn_;
-  int gen_ = 0, remaining_ = 0;
+  // The generation, and how many workers have FINISHED the work of a
+  // generation. Both are needed, and the second is cumulative rather than a
+  // countdown: see run() for why a countdown releases early.
+  int gen_ = 0;
+  long completed_ = 0;
   bool quit_ = false;
 };
 

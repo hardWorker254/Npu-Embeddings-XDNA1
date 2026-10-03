@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # "OpenAI-compatible" is a claim about a client that exists, not about a
-# response shape that looks about right. So this drives `npuembed --serve`
+# response shape that looks about right. So this drives `npuembeddings --serve`
 # with the official `openai` package, in the ways an application actually
 # uses it -- including base64, which the client requests by DEFAULT and which
 # a hand-rolled server will usually have got wrong.
@@ -33,6 +33,11 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "tools" / "lib"))
+
+# One default output location for every gate, rather than one directory
+# per task that asked for it. See tools/lib/gate_output.py for why.
+from gate_output import GATE_OUT                                 # noqa: E402
 def hidden_of(model: str) -> int:
     """Embedding width, from the container rather than a constant.
 
@@ -74,8 +79,7 @@ def main() -> int:
                     help="task prompt to exercise (tasks/0118). Default: the "
                          "first name /health advertises, or none at all for a "
                          "model with no prompts table.")
-    ap.add_argument("--out", default=str(REPO / "tasks" / "0037-m9-tiers-endpoint"
-                                         / "verify_endpoint.json"))
+    ap.add_argument("--out", default=str(GATE_OUT / "verify_endpoint.json"))
     args = ap.parse_args()
     hidden = hidden_of(args.model)
 

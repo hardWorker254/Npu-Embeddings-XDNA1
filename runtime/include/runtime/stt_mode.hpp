@@ -93,8 +93,47 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
   }
 
   const std::string model_name = fs::path(model_path).stem().string();
+  // The container's own B-operand layout, which is the one fact that separates
+  // this model's int8 design set from its bf16 one -- identical directory
+  // shape, identical stream list, identical everything except the element type
+  // the B panels hold. Passing it is what stops an int8 container resolving to
+  // the bf16 set and dying on the first encoder GEMM.
+  std::string want_layout;
+  try {
+    want_layout = probe.info("encoder.layers.0.qkv").layout_hash;
+  } catch (const std::exception &) {
+    // A container that does not name it is not a container this resolver can
+    // filter on; an empty answer means "cannot tell", not "does not match".
+  }
   const std::string art = npue::whisper::resolve_stt_artifacts(
-      root, flag("--artifacts"), model_name);
+      root, flag("--artifacts"), model_name, want_layout);
+
+  // WHISPER ON AN INT8 DESIGN SET. The GEMM streams run: NpuGemm reads each
+  // operand's .wscale and .asmooth at stage time and quantises the activation
+  // panel per row on the way into the A buffer, which is the same staging the
+  // BERT encoder has used since int8 landed (runtime/src/whisper/npu_ops.cpp).
+  //
+  // The ops that ride a stream of their own -- conv1/conv2, the array attention,
+  // the mel projection and the DFT -- do NOT, and the reason is a property of
+  // what the container holds, not of the runtime's willingness: conv weights
+  // are packed as F32 with no .wscale/.asmooth sidecars, so there is nothing to
+  // quantise them against, and an int8 design's B panel is I8 with its own MAC
+  // sub-tile, which the host-side bf16 tiler cannot fill. An int8 whisper design
+  // set therefore carries only the four (encoder) / seven (decoder) GEMM
+  // streams, and `npu_ops.count("conv")` -- which asks the DESIGN SET, not the
+  // user's flag -- is already 0 for it. The check below is what turns that
+  // absence into a stated decision rather than a silent host fallback, and what
+  // would refuse a design set that claimed a conv stream it cannot honour.
+  //
+  // Nothing here is refused any more: before this was wired the whole container
+  // was refused, with a message that named the missing step rather than a
+  // disagreement that did not exist.
+  bool int8_design = false;
+  {
+    const std::string a_dtype = app::design_field_string(
+        art + "/gemm_rtp/design.json", "a_dtype");
+    int8_design = !a_dtype.empty() && a_dtype != "bf16";
+  }
   const int threads = std::max(1, std::atoi(flag("--threads").empty()
                                                  ? "16"
                                                  : flag("--threads").c_str()));
@@ -181,10 +220,14 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
   if (opts.conv_npu && !session.conv_available())
     throw std::runtime_error(
         "--npu-extra-ops conv asked for conv1/conv2 on the array, but " + art +
-        "/gemm_rtp has no [rows, d, d] stream to run them on: "
-        + session.conv_device() +
-        ". Re-export the encoder set with tools/export/export_gemm_rtp.py, or drop "
-        "conv from --npu-extra-ops and run the host front end.");
+        "/gemm_rtp cannot run them: " + session.conv_device() +
+        ". For an int8 design set that is the operand type, not a missing "
+        "stream -- attn_out is still there and still the right shape, but "
+        "NpuConv1d::stage() tiles the conv panel from fp32 weights with a bf16 "
+        "tiler and an int8 panel is a different element type with a different "
+        "MAC sub-tile. Re-export the encoder set with "
+        "tools/export/export_gemm_rtp.py (no --int8), or drop conv from "
+        "--npu-extra-ops and run the host front end.");
 
   // WHERE EVERY OPERATION RUNS, and why. One row per op, the device it runs on,
   // and the thing that decides it -- the stream that exists, or the reason one
@@ -234,11 +277,24 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
     if (opts.conv_npu) {
       std::fprintf(stderr, "             %-26s %-5s %s\n", "conv1, conv2", "npu",
                    session.conv_device().c_str());
+    } else if (int8_design) {
+      std::fprintf(stderr,
+                   "             %-26s %-5s %s\n", "conv1, conv2", "host",
+                   "fp32; an int8 design set has no conv stream to bind");
     } else {
       std::fprintf(stderr,
                    "             %-26s %-5s %s\n", "conv1, conv2", "host",
                    "fp32, d^2 MACs; --npu-extra-ops conv sends it to the array");
     }
+    // The operand type of every GEMM row below it, named once rather than
+    // repeated on four lines: an int8 container on an int8 design set is the
+    // one configuration where "on the array" and "in bf16" are different
+    // claims, and a status block that cannot tell them apart is the block that
+    // let an unrunnable pairing look runnable.
+    if (int8_design)
+      std::fprintf(stderr,
+                   "             %-26s %-5s %s\n", "GEMM datapath", "npu",
+                   "int8 (W8A8), row-scaled activations, bf16 C");
     std::fprintf(stderr, "             %-26s %-5s %s\n",
                  ("encoder GEMMs, " + std::to_string(g.enc_layers) + " layers")
                      .c_str(),

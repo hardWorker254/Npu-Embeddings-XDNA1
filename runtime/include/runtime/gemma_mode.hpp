@@ -133,22 +133,62 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
     for (int i = 1; i < argc - 1; ++i)
       if (std::string(argv[i]) == "--npu-extra-ops") listing = argv[i + 1];
     const std::set<std::string> codes = parse_npu_ops(listing);
-    if (!codes.empty())
+    if (!codes.empty()) {
+      // The reason is the ENCODER, not the directories. An earlier version of
+      // this sentence led with "its design set carries only gemm_rtp -- no
+      // gelu/, layernorm/ or softmax/ directory", which was a claim about the
+      // filesystem and became FALSE the moment an export built those three for
+      // arch=1: they existed, the refusal still fired, and the true reason --
+      // that GemmaNpuEncoder has no host/array choice to read -- was no longer
+      // stated anywhere. A diagnostic that names the wrong cause sends the
+      // reader to delete a directory that is not the problem.
+      //
+      // Both sides now refuse on the same reason, so the exporter no longer
+      // builds sets for this architecture at all (tools/export/exporters/
+      // gemm_rtp/build.py refuses the same codes for the same arch).
+      std::string seen;
+      for (const auto &c : codes) { if (!seen.empty()) seen += ", "; seen += c; }
       throw std::runtime_error(
           "--npu-extra-ops " + listing + ": this architecture runs RMSNorm, "
-          "softmax and GeGLU on the host, and its design set carries only "
-          "gemm_rtp -- no gelu/, layernorm/ or softmax/ directory -- so there "
-          "is nothing for these codes to move to. GemmaNpuEncoder has no "
-          "per-op host/array choice to read, so accepting the flag would "
-          "print nothing, change nothing and hand back identical vectors. "
-          "There is no export that would make them work here; drop it.");
+          "softmax and GeGLU on the host. GemmaNpuEncoder has no per-op "
+          "host/array choice to read -- unlike the BERT encoder it takes no "
+          "flag per op -- so these codes would move nothing: accepting them "
+          "prints nothing, changes nothing and hands back identical vectors. "
+          "Asked for: " + seen + ". This is not a missing design set and "
+          "exporting one will not help; the exporter refuses the same codes "
+          "for the same reason. Drop them.");
+    }
   }
 
-  std::string layout;
+  // TWO DIFFERENT LAYOUTS, and one name for both of them was a live bug.
+  //
+  // `gemm_layout` is the container's own config field: "pretiled_bf16" or
+  // "host". It answers "were these operands pre-tiled for the array?", i.e.
+  // whether an NPU run is possible at all.
+  //
+  // `want_layout` is the B-operand LAYOUT HASH the container records --
+  // "52a4adadbddc..." for bf16, "177088d6bc9f..." for int8. It answers "which
+  // of this model's two design sets is mine?".
+  //
+  // These were one variable named `layout`, and a change made earlier in this
+  // file passed it to pick_artifacts() where the hash was wanted. The value it
+  // passed was the string "pretiled_bf16", which matches no set's
+  // b_layout_hash, so pick_artifacts() returned nothing, `art` stayed empty,
+  // use_npu went false, and a perfectly good NPU container was handed to
+  // gemma_host_encoder -- which then asked for layer.0.q_proj, a tensor only
+  // the host packer emits, and failed with "no tensor named layer.0.q_proj".
+  // The message points at the container and the cause is 200 lines earlier.
+  //
+  // The symptom only appears when --artifacts is NOT given: with it, `art` is
+  // already set and pick_artifacts() is never called. Every sweep in this
+  // session passed --artifacts (a container in /tmp has no sibling directory
+  // to be found through), so the broken path was the one path never taken --
+  // until the tail gate, which resolves by itself, hit it.
+  std::string gemm_layout;
   try {
-    layout = model.config_string("gemm_layout");
+    gemm_layout = model.config_string("gemm_layout");
   } catch (const std::exception &) {
-    layout = "host";        // a container packed before tasks/0074
+    gemm_layout = "host";    // a container packed before tasks/0074
   }
 
   // `--artifacts` is a NAME as often as a path -- every script in this repo
@@ -158,26 +198,72 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
   // artifacts_gemma/gemm_rtp/design.json", and the sweep then MISREPORTED that
   // exit code as a contention refusal.
   std::string art = flag_val("--artifacts", "");
+  std::string want_layout;
+  try {
+    want_layout = model.info("layer.0.qkv").layout_hash;
+  } catch (const std::exception &) {
+    // A container that does not name it cannot be filtered on. An empty answer
+    // means "cannot tell", which is not "does not match" -- see
+    // select_set_for_layout's three rules.
+  }
   if (!art.empty()) {
     // Same shared candidate list as the BERT path (design_selection.hpp), now
     // including the per-model <name>/artifacts_npu<arch> layout. Only
     // gemm_rtp/design.json counts here: this arch loads gemm_rtp and nothing
     // else, unlike the BERT path which also accepts a qkv/ set.
     const std::vector<std::string> cands = artifacts_candidates(root, art);
-    std::string found;
+    auto usable = [](const std::string &c) {
+      return std::ifstream(c + "/gemm_rtp/design.json").good();
+    };
+    // AND IT IS FILTERED ON THE CONTAINER'S B LAYOUT, not just on holding a
+    // design.json. This branch is the third place that had to learn this: it
+    // took the first candidate with a gemm_rtp, so an int8 gemma container named
+    // --artifacts embeddinggemma-300m, got the bf16 set of the same name, and
+    // died at the first GEMM with "B layout mismatch -- design wants
+    // 52a4adadbddc, container has 177088d6bc9f". Passing --artifacts is a
+    // statement about WHERE, not about WHICH DATAPATH, and this branch had been
+    // reading it as both. select_set_for_layout is shared with the BERT and
+    // Whisper resolvers so the three cannot drift again.
+    //
+    // The note below compares against the first USABLE candidate, not against
+    // cands.front(). Those are different things: artifacts_candidates proposes
+    // several spellings of one name and front() is <root>/<name>/artifacts_npu1,
+    // which usually holds nothing at all. Comparing against it prints a
+    // correction on every single run -- including the bf16 runs, where nothing
+    // was corrected -- and a note that is always true is a note nobody reads.
+    std::string first_usable;
     for (const auto &c : cands)
-      if (std::ifstream(c + "/gemm_rtp/design.json").good()) { found = c; break; }
+      if (usable(c)) { first_usable = c; break; }
+    std::string found = select_set_for_layout(cands, usable, want_layout);
     if (found.empty()) {
       std::string looked;
       for (size_t i = 0; i < cands.size(); ++i)
         looked += (i ? ", " : "") + cands[i];
+      bool saw_usable = false;
+      for (const auto &c : cands) saw_usable = saw_usable || usable(c);
+      if (saw_usable && !want_layout.empty())
+        throw std::runtime_error(
+            "--artifacts '" + art +
+            "' resolves only to design sets whose B-operand layout is not this "
+            "container's (" + want_layout.substr(0, 12) +
+            "...). They are the same shapes in different element types, so "
+            "nothing in them can execute this file; looked under " + looked +
+            ". Export a set for this datapath, or run a bf16 container.");
       throw std::runtime_error(
           "no design set found for --artifacts '" + art + "'; looked for "
           "gemm_rtp/design.json under " + looked);
     }
+    if (found != first_usable && !want_layout.empty())
+      std::fprintf(stderr,
+                   "note: --artifacts %s resolves to a design set whose B "
+                   "layout is not this container's (%s vs %s); using %s "
+                   "instead.\n",
+                   art.c_str(),
+                   design_b_layout_hash(first_usable).substr(0, 12).c_str(),
+                   want_layout.substr(0, 12).c_str(), found.c_str());
     art = found;
   }
-  if (art.empty() && layout == "pretiled_bf16") {
+  if (art.empty() && gemm_layout == "pretiled_bf16") {
     int64_t qn = 0;
     try { qn = model.config_int("qkv_n"); } catch (const std::exception &) {}
     // Look this model up by its catalogue name -- the container stem -- so
@@ -189,10 +275,16 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
         std::filesystem::path(model_path).stem().string();
     const auto *ce = npue::hub::find(mname);
     art = pick_artifacts(root, model.config_int("hidden"),
-                         model.config_int("intermediate"), true, qn, "",
+                         model.config_int("intermediate"), true, qn,
+                         // THE CONTAINER'S OWN B LAYOUT, and it is `want_layout` -- the hash from
+                         // tensor metadata -- not `gemm_layout`. See the note
+                         // where those two are declared: they were one
+                         // variable, and passing this one matched nothing.
+                         want_layout,
                          ce ? ce->datapath : "bf16", mname);
   }
-  const bool use_npu = !force_cpu && layout == "pretiled_bf16" && !art.empty();
+  const bool use_npu =
+      !force_cpu && gemm_layout == "pretiled_bf16" && !art.empty();
 
   std::printf("NpuEmbeddings C++ runtime -- EmbeddingGemma (arch=1)\n");
   std::printf("  model      %s\n", model_path.c_str());
@@ -246,7 +338,7 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
     // fast path.
     std::printf("  path       HOST-only (%s)\n",
                 force_cpu             ? "--cpu given"
-                : layout != "pretiled_bf16"
+                : gemm_layout != "pretiled_bf16"
                     ? "container holds row-major F32 operands"
                     : "no matching NPU design set found");
     std::printf("  NOTE: every op runs on the CPU. Any seq/s below is "
@@ -457,7 +549,7 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
                 enc.d.info().c_elem_bytes == 2 ? "bf16" : "fp32");
   else
     std::printf("  datapath   %s MMAC, C as %s\n",
-                enc.d.info().emulate_bfp16 ? "bfp16-emulated" : "bf16",
+                enc.d.info().datapath_name(),
                 enc.d.info().c_elem_bytes == 2 ? "bf16" : "fp32");
   // WHICH TOOLCHAIN BUILT THIS DESIGN (T39, tasks/0106) -- read off the
   // loaded design's toolchain.json, same UNRECORDED-not-guessed discipline

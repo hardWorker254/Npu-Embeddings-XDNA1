@@ -135,16 +135,27 @@ def load_targets(path: str | Path) -> dict:
                 raise SystemExit(
                     f"{ctx}: heads*head_dim = {spec['heads'] * spec['head_dim']}"
                     f" is not hidden = {spec['hidden']}")
-        _require_int(spec, "hidden", ctx)
-        _require_int(spec, "intermediate", ctx)
-        if not isinstance(spec.get("gated_ffn"), bool):
+        # A POSE target has no hidden width and no FFN. Its streams are twenty-one
+        # convolutions, so there is nothing for `hidden` or `intermediate` to
+        # describe, and requiring them here would mean writing a number that
+        # nothing reads -- the pose export path builds no eltwise design and no
+        # LayerNorm, so the only consumer of `hidden` (export_eltwise, reached
+        # only when --npu-extra-ops asks for an op) never runs for it. A required
+        # field whose value is fiction is worse than an absent one, so this is
+        # the one kind that does not carry them, and the check below is what
+        # says so rather than letting a missing key read as 0.
+        if kind != "pose":
+            _require_int(spec, "hidden", ctx)
+            _require_int(spec, "intermediate", ctx)
+        if not isinstance(spec.get("gated_ffn", False), bool):
             raise SystemExit(f"{ctx}: 'gated_ffn' must be a boolean")
         if kind == "stt" and spec["gated_ffn"]:
             raise SystemExit(
                 f"{ctx}: gated_ffn is true. Whisper's FFN is a plain GELU MLP; "
                 f"a gated entry here would export a 2*intermediate ffn_up the "
                 f"model does not have.")
-        _require_int(spec, "qkv_n", ctx, allow_none=True)
+        if kind != "pose":
+            _require_int(spec, "qkv_n", ctx, allow_none=True)
         if kind == "cls":
             # The attention scale is compiled into Q's weight, and it is
             # head_dim**-0.5 -- so a cls entry that omits the head geometry, or

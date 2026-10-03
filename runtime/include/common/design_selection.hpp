@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -57,13 +58,21 @@ inline int64_t device_arch(const std::string &device) {
 
 // WHERE A MODEL'S DESIGN SET LIVES IN THE PER-MODEL LAYOUT (subtask 4).
 //
-// tools/export/export_gemm_rtp.py --target writes <out>/<model>/artifacts_npu<N>/,
-// so a design set is two levels below the root; the old one-level layouts
-// (<root>/gemm_rtp, <root>/<set>/gemm_rtp) still ship and still win when the
-// root itself is a set. These are candidates, not answers: pick_artifacts
-// tests each with design_fits, so a wrong generation is rejected by the
-// design's own record rather than by the name. <arch> comes from the running
-// device (npu1->1), so only this generation's directory is proposed first.
+// tools/export/export_gemm_rtp.py --target writes
+// <root>/artifacts/<model>/artifacts_npu<N>/, so every per-model set in the
+// tree shares one parent directory (`runtime/artifacts/`) and is distinguishable
+// from runtime/'s hand-maintained source directories by name alone. That is what
+// `ARTIFACTS_DIR` in tools/export/exporters/common/paths.py is for; this is the
+// reader half of the same convention, and the two have to agree.
+//
+// The older layouts are still proposed, after it, because a design set is a
+// build artifact and a tree can legitimately hold both: <root>/<model>/
+// artifacts_npu<N> is where the exporter used to write, and <root>/<model>/
+// is where the int8 sets landed before this, because the scan below looks a
+// fixed depth down. These are CANDIDATES, not answers -- pick_artifacts tests
+// each with design_fits, so a wrong generation is rejected by the design's own
+// record rather than by its name. <arch> comes from the running device
+// (npu1->1), so only this generation's directory is proposed first.
 inline std::vector<std::string> model_set_candidates(
     const std::string &root, const std::string &model_name,
     const std::string &device = "") {
@@ -81,11 +90,33 @@ inline std::vector<std::string> model_set_candidates(
   };
   if (arch > 0) {
     const std::string sub = "artifacts_npu" + std::to_string(arch);
-    add(r / "runtime" / model_name / sub);
-    add(r / model_name / sub);
+    // The convention: runtime/artifacts/<model>/artifacts_npu<arch>.
+    //
+    // <model>-i8 is the SAME model with the int8 datapath, and it needs its own
+    // directory because one directory holds one design set and the two do not
+    // fit each other: `b_layout_hash` covers the B operand's dtype, so the int8
+    // set hashes 177088d6 and the bf16 set 52a4adad. Before this layout the two
+    // lived at runtime/<model>/artifacts_npu1/ and runtime/<model>-i8/gemm_rtp/,
+    // which is the same idea spelled two ways -- and the second spelling only
+    // worked because the fallback scan happened to be exactly two levels deep.
+    // Both are proposed so a container is matched against ITS OWN set: an int8
+    // container and a bf16 one for the same model both resolve, by name, and
+    // design_fits still refuses the mismatched pairing at stage time.
+    for (const std::string &name : {model_name, model_name + "-i8"}) {
+      add(r / "runtime" / "artifacts" / name / sub);
+      add(r / "artifacts" / name / sub);
+      // Where the exporter used to write, still proposed so an existing tree
+      // keeps working without a re-export.
+      add(r / "runtime" / name / sub);
+      add(r / name / sub);
+    }
   }
-  add(r / "runtime" / model_name);
-  add(r / model_name);
+  for (const std::string &name : {model_name, model_name + "-i8"}) {
+    add(r / "runtime" / "artifacts" / name);
+    add(r / "artifacts" / name);
+    add(r / "runtime" / name);
+    add(r / name);
+  }
   return out;
 }
 
@@ -93,8 +124,15 @@ inline std::vector<std::string> model_set_candidates(
 // shared by the BERT and arch=1 (EmbeddingGemma) paths so the two cannot
 // drift. `art` is tried verbatim (an absolute path), then under <root>, then
 // under <root>/runtime -- the three places this runtime ships. The per-model
-// layout adds <name>/artifacts_npu<arch> under both roots, which is what makes
+// layout adds <name>/artifacts_npu<arch> under both roots AND the current
+// <root>/artifacts/<name>/artifacts_npu<arch>, which is what makes
 // `--artifacts <model>` work now that export writes one level deeper.
+//
+// The artifacts/ entries are not optional bookkeeping: several gates pass
+// `--artifacts <model>` by NAME (verify_whisper_model.py does), so a list
+// without them resolves nothing for exactly the invocation those gates make --
+// and it fails as "no such directory" rather than as anything that points at
+// the layout being wrong.
 inline std::vector<std::string> artifacts_candidates(
     const std::string &root, const std::string &art,
     const std::string &device = "") {
@@ -102,13 +140,27 @@ inline std::vector<std::string> artifacts_candidates(
   if (art.empty()) return out;
   const std::string dev = device.empty() ? running_device() : device;
   const int64_t arch = device_arch(dev);
-  out.push_back(art);
-  out.push_back(root + "/" + art);
-  out.push_back(root + "/runtime/" + art);
-  if (arch > 0) {
-    const std::string sub = "artifacts_npu" + std::to_string(arch);
-    out.push_back(root + "/" + art + "/" + sub);
-    out.push_back(root + "/runtime/" + art + "/" + sub);
+  // A NAME IS PROPOSED BOTH AS ITSELF AND WITH THE int8 SUFFIX, so that naming
+  // a model means "this model's design set" rather than "the directory called
+  // exactly this". model_set_candidates has always done both; this list did not,
+  // and the two answering differently is how `--artifacts <model>` -- the form
+  // several gates pass -- could not reach an int8 container's set even when it
+  // was exported and sitting one directory away. The suffixed spellings come
+  // AFTER the plain ones, so a model whose two sets would both fit keeps
+  // choosing the plain one and nothing that worked before stops working.
+  for (const std::string &name : {art, art + "-i8"}) {
+    out.push_back(name);
+    out.push_back(root + "/" + name);
+    out.push_back(root + "/runtime/" + name);
+    if (arch > 0) {
+      const std::string sub = "artifacts_npu" + std::to_string(arch);
+      // The convention first, so a name that exists in both layouts resolves to
+      // the one the exporter writes today.
+      out.push_back(root + "/artifacts/" + name + "/" + sub);
+      out.push_back(root + "/runtime/artifacts/" + name + "/" + sub);
+      out.push_back(root + "/" + name + "/" + sub);
+      out.push_back(root + "/runtime/" + name + "/" + sub);
+    }
   }
   return out;
 }
@@ -145,6 +197,100 @@ struct StreamEntry {
   std::string op, file;
   int64_t batch = 0, slot = 0, M = 0, K = 0, N = 0;
 };
+
+// The B-operand layout hash a design set declares, or "" if it declares none.
+//
+// THIS EXISTS BECAUSE `--artifacts <path>` SELECTED A DESIGN WITHOUT CHECKING
+// IT AT ALL, and the hole was invisible until a container that could not run on
+// the set got as far as the first GEMM. An explicit --artifacts was resolved by
+// "does this directory contain a design.json" -- a test of the DIRECTORY, not
+// of the fit -- so `embed <int8 container of bge-base> --artifacts
+// bge-base-en-v1.5` resolved to the bf16 set and died at layer 0 with
+// "layout mismatch -- design gemm_rtp wants 52a4adad..., file has
+// 177088d6...". design_fits has compared b_layout_hash since tasks/0080, but
+// only on the path where the RUNTIME picks the set; naming one by hand skipped
+// it, which is the fail-open shape this file keeps meeting in a new place.
+//
+// Narrow on purpose: no geometry, no stream shapes, no datapath. Those are
+// design_fits' job and it already does them, on the path that reaches it. This
+// answers the one question design_fits cannot be asked here -- "is this
+// directory's declared layout the layout in the file I was handed?" -- and an
+// empty answer on either side is "cannot tell", which is not a mismatch.
+//
+// The set name is a parameter because a Whisper directory holds TWO gemm sets
+// (gemm_rtp and gemm_rtp_dec) and the decoder's is a different layout.
+inline std::string design_b_layout_hash(const std::string &design_dir,
+                                        const std::string &set = "gemm_rtp") {
+  std::ifstream f(design_dir + "/" + set + "/design.json");
+  if (!f) return std::string();
+  std::stringstream b;
+  b << f.rdbuf();
+  const std::string js = b.str();
+  const std::string k = "\"b_layout_hash\"";
+  const size_t a = js.find(k);
+  if (a == std::string::npos) return std::string();
+  const size_t q1 = js.find('"', js.find(':', a) + 1);
+  if (q1 == std::string::npos) return std::string();
+  const size_t q2 = js.find('"', q1 + 1);
+  if (q2 == std::string::npos) return std::string();
+  return js.substr(q1 + 1, q2 - q1 - 1);
+}
+
+// THE CANDIDATE WHOSE DECLARED B LAYOUT IS THE CONTAINER'S.
+//
+// `usable` is the caller's own test for "this directory is a design set I can
+// actually run" -- for an embedder that is a gemm_rtp/design.json, for Whisper
+// it is that file AND its gemm_rtp_dec sibling, because neither half
+// transcribes anything alone. The two tests genuinely differ, so the helper
+// takes the caller's rather than growing one that is right for neither.
+//
+// WHY IT EXISTS, having now been written three times' worth: every path that
+// picks a design set by hand did it by asking only whether the DIRECTORY holds
+// the right files, and never whether the DESIGN suits the container. That is
+// invisible for bf16, where one set per model is the whole story, and wrong the
+// moment a second set exists -- an int8 container resolved to the bf16 set of
+// the same name and the run died at the first GEMM on a layout hash. The
+// hash is on both sides and is the only thing that separates them, so it is
+// checked here, once, for every caller.
+//
+// THREE RULES, all of which came from being wrong about them:
+//   * An empty `want_layout` means the caller could not tell, and the first
+//     usable candidate wins -- every pre-int8 call site behaves exactly as it
+//     did before.
+//   * A design set with NO declared hash is accepted rather than excluded. It
+//     was exported before the field existed, so excluding it would break every
+//     older set in the tree, and "cannot tell" is not "does not match".
+//   * The candidate order is the caller's, untouched. Selection is a filter on
+//     that order, never a reordering -- so a model whose two sets would both fit
+//     still gets the one the caller proposed first.
+inline std::string select_set_for_layout(
+    const std::vector<std::string> &cands,
+    const std::function<bool(const std::string &)> &usable,
+    const std::string &want_layout) {
+  for (const std::string &c : cands) {
+    if (!usable(c)) continue;
+    if (want_layout.empty()) return c;
+    const std::string got = design_b_layout_hash(c);
+    if (got.empty() || got == want_layout) return c;
+  }
+  return std::string();
+}
+
+// One top-level string field of a design set's design.json, or "" if absent.
+// The design's `a_dtype` is what says which operand element type the array was
+// built for, and it is not the same question as the container's
+// `b_layout_hash`: the hash covers the B panels only, so a container and a
+// design can agree perfectly on the hash while the design still expects a bf16
+// A operand the runtime cannot supply. Reading the field directly is how that
+// stops being invisible.
+inline std::string design_field_string(const std::string &path,
+                                       const char *key) {
+  std::ifstream f(path);
+  if (!f) return std::string();
+  std::stringstream b;
+  b << f.rdbuf();
+  return json_field_string(b.str(), key);
+}
 
 inline std::vector<StreamEntry> parse_streams(const std::string &json) {
   std::vector<StreamEntry> out;
@@ -206,20 +352,40 @@ inline std::string default_root(const char *argv0) {
   // release. Everything worked and everything was wrong -- which is the
   // failure shape this project keeps meeting. A self-contained directory is
   // self-contained; the search only starts when there is nothing here.
+  // HOW DEEP, AND WHY THE CAP. The layouts this has to recognise, shallowest
+  // first:
+  //
+  //   <d>/gemm_rtp                                    a bare design set
+  //   <d>/<set>/gemm_rtp                              one level down
+  //   <d>/<model>/artifacts_npu<N>/gemm_rtp            the pre-2026 layout
+  //   <d>/artifacts/<model>/artifacts_npu<N>/gemm_rtp  the current one
+  //
+  // so three levels is the deepest, and the walk stops there. The cap is not
+  // only tidiness: this runs on whatever directory the process was launched
+  // from, and when that is the repository root the alternative is walking
+  // .git/objects. DOT-DIRECTORIES ARE SKIPPED for the same reason -- nothing
+  // this looks for is ever inside one, and .git has ~256 fan-out at two
+  // levels. The previous version was a hand-unrolled two-level loop; this is the
+  // same search with the depth written down once instead of in the shape of the
+  // code.
+  constexpr int kMaxDesignDepth = 3;
   auto has_design = [&](const fs::path &d) {
-    if (fs::exists(d / "gemm_rtp", ec)) return true;
-    // Several widths: one design set per subdirectory. And one level deeper
-    // for the per-model layout (<d>/<model>/artifacts_npu<N>/gemm_rtp), which
-    // is what a self-contained export of a single model looks like.
-    for (fs::directory_iterator it(d, ec), end; !ec && it != end;
-         it.increment(ec)) {
-      if (!it->is_directory(ec)) continue;
-      if (fs::exists(it->path() / "gemm_rtp", ec)) return true;
-      std::error_code ec2;
-      for (fs::directory_iterator jt(it->path(), ec2), jend;
-           !ec2 && jt != jend; jt.increment(ec2))
-        if (jt->is_directory(ec2) && fs::exists(jt->path() / "gemm_rtp", ec2))
-          return true;
+    std::vector<fs::path> level{d};
+    for (int depth = 0; depth <= kMaxDesignDepth && !level.empty(); ++depth) {
+      std::vector<fs::path> next;
+      for (const fs::path &p : level) {
+        std::error_code ec3;
+        if (fs::exists(p / "gemm_rtp", ec3)) return true;
+        if (depth == kMaxDesignDepth) continue;
+        for (fs::directory_iterator it(p, ec3), end;
+             !ec3 && it != end; it.increment(ec3)) {
+          if (!it->is_directory(ec3)) continue;
+          const std::string n = it->path().filename().string();
+          if (!n.empty() && n[0] == '.') continue;
+          next.push_back(it->path());
+        }
+      }
+      level.swap(next);
     }
     return false;
   };
@@ -340,15 +506,45 @@ inline bool design_fits(const std::string &design_dir, int64_t hidden,
   // and any explicit --artifacts override, which still wins over this
   // function entirely).
   if (!want_datapath.empty()) {
-    const size_t k = js.find("\"emulate_bfp16\"");
-    bool is_bfp16 = false;
-    if (k != std::string::npos) {
-      size_t p = js.find(':', k) + 1;
+    // AN INT8 SET IS NOT A THIRD DATAPATH, and asking it which one it is has
+    // no answer. `emulate_bfp16` says "run the MMACs as if the operands were
+    // bfp16", and on the int8 datapath there are no bfp16 operands to emulate,
+    // so the field is false there by construction -- not because this model
+    // chose the plain-bf16 datapath. Comparing it against a target's "bfp16"
+    // therefore refused the correct set for every int8 container of every
+    // bfp16 target: 13 of the 16 models, i.e. all of them but bge-small,
+    // bge-micro and the gemma/nomic pair that were not on bfp16. The symptom
+    // was pick_artifacts() returning nothing, which drops use_npu to false and
+    // hands an NPU container to the host encoder -- the same crash, from the
+    // same place, as passing gemm_layout where the hash belongs.
+    //
+    // SKIPPED ONLY WHEN THE HASH ALREADY PROVED THE DATATYPE. The check above
+    // returns false unless the design's b_layout_hash equals the container's,
+    // and those hashes differ between bf16 and int8 by construction, so
+    // reaching here with a non-empty want_layout means the two agree on element
+    // type and this comparison is redundant. With want_layout empty -- the
+    // pre-0080 callers -- the check still runs for int8 sets, because there the
+    // hash has NOT been established and "datapath" is the only discriminator
+    // left.
+    const size_t ki = js.find("\"int8\"");
+    bool is_int8 = false;
+    if (ki != std::string::npos) {
+      size_t p = js.find(':', ki) + 1;
       while (p < js.size() && (js[p] == ' ' || js[p] == '\n' || js[p] == '\t'))
         ++p;
-      is_bfp16 = js.compare(p, 4, "true") == 0;
+      is_int8 = js.compare(p, 4, "true") == 0;
     }
-    if ((is_bfp16 ? "bfp16" : "bf16") != want_datapath) return false;
+    if (!is_int8 || want_layout.empty()) {
+      const size_t k = js.find("\"emulate_bfp16\"");
+      bool is_bfp16 = false;
+      if (k != std::string::npos) {
+        size_t p = js.find(':', k) + 1;
+        while (p < js.size() && (js[p] == ' ' || js[p] == '\n' || js[p] == '\t'))
+          ++p;
+        is_bfp16 = js.compare(p, 4, "true") == 0;
+      }
+      if ((is_bfp16 ? "bfp16" : "bf16") != want_datapath) return false;
+    }
   }
 
   // tasks/0074: qkv's width was `3 * hidden`, which is true exactly when

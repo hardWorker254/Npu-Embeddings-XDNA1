@@ -54,6 +54,8 @@ from pathlib import Path
 
 import numpy as np
 
+from onnx_weights import MODEL_ONNX                              # noqa: E402
+
 REPO = Path(__file__).resolve().parents[2]
 
 # The GEMM sites the packer asks about, and the torch module whose INPUT is that
@@ -309,11 +311,22 @@ def calibrate(model_dir: str | Path, n_layers: int, images: list,
     scales were measured on are the same object.
     """
     import torch
-    from transformers import ViTForImageClassification
+
+    import onnx_torch
 
     mp = Path(model_dir)
-    model = ViTForImageClassification.from_pretrained(
-        str(mp), torch_dtype=torch.float32).eval()
+    # Weights come from the ONNX export, not from `from_pretrained`. This
+    # repository has no `model.safetensors` and no `pytorch_model.bin` -- ONNX
+    # is the only copy -- so the old call raised an OSError from inside
+    # transformers listing five filenames, none of which exist, for a checkpoint
+    # whose weights were present one directory up. The mapping is the identity
+    # because this export names every initializer after the module path it came
+    # from (`vit.encoder.layer.0.attention.attention.query.weight`), and
+    # onnx_torch refuses unless that is SET EQUALITY to the module tree's
+    # parameters rather than merely a plausible overlap.
+    model = onnx_torch.build(
+        mp, "ViTConfig", "ViTForImageClassification",
+        [(mp / MODEL_ONNX, "")], what=f"vit int8 {mp.name}")
 
     wanted = dict(site_keys(n_layers))
     hook_sites = {k: p for k, p in wanted.items() if k not in FRONT_END_SITES}

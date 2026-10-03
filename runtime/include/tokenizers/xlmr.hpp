@@ -39,12 +39,23 @@
 // input goes through the Unigram model instead of being extracted
 // verbatim. Embedding inputs are plain text, never templated.
 //
-// The table is GENERATED offline by tools/gen_xlmr_tokenizer_table.py from
-// the checkpoint's tokenizer.json (17 MB) into a flat XLMRTOK1 binary
-// (5.3 MB: charsmap trie + normalized-strings blob stored VERBATIM and
-// walked in place, f64 scores, length-prefixed pieces) -- no JSON at
-// runtime, CLAUDE.md rule 5. The C++ generator port is
-// xlmr_tokenizer_gen.hpp (fresh clones pack without Python).
+// The table is GENERATED offline from the checkpoint's tokenizer.json (17 MB)
+// into a flat XLMRTOK1 binary (5.3 MB: charsmap trie + normalized-strings
+// blob stored VERBATIM and walked in place, f64 scores, length-prefixed
+// pieces) -- no JSON at runtime, CLAUDE.md rule 5. The C++ generator is
+// xlmr_tokenizer_gen.hpp (fresh clones pack without Python), reached from
+// npue_pack.hpp, which reads models/gte-multilingual-base/xlmr_tokenizer.bin
+// when it is there and generates it otherwise.
+//
+// THIS USED TO NAME tools/gen_xlmr_tokenizer_table.py, which is not in this
+// repository and never was: a comment that tells a reader which program to run
+// to produce a build input, and which names a program that does not exist, is
+// worse than no comment, because it looks like a checked fact. The two
+// generators that DO exist are xlmr_tokenizer_gen.hpp (C++, the one the packer
+// uses) and tools/lib/xlmr_tokenizer_ref.py (the Python reference the
+// verifier compares against), and they are byte-identical -- which is the
+// statement worth having here, since it is what makes the cross-check
+// meaningful.
 //
 // STANDALONE ON PURPOSE: no XRT dependency, not wired into main.cpp's
 // Encoder or hub.cpp's catalogue. The arch-3 integration is a later task.

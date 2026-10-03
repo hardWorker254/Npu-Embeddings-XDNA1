@@ -144,6 +144,70 @@ def _lcm(a: int, b: int) -> int:
     return a * b // gcd(a, b) if a and b else max(a, b)
 
 
+# -- the pose stream set -------------------------------------------------------
+#
+# A convolution on the array is its im2col matrix as a GEMM:
+#
+#     [out_h * out_w, Cin*kh*kw] @ [Cin*kh*kw, Cout]
+#
+# so M is the OUTPUT PIXEL COUNT, not a batch and not a sequence length. That is
+# the whole difference from every other set in this file, and it is why a pose
+# design set cannot borrow a stream set: there is no batch tier to dispatch on,
+# and M is a property of the stride.
+#
+# TWO NUMBERS PER CONVOLUTION, NOT ONE. A YOLOv8-pose trunk strides 2, 4, 8, 16
+# and 32, and each stride fixes its own M: 102400, 25600, 6400, 1600, 400. Four
+# of the twenty-one padded (K, N) designs are used at TWO of those M values --
+# conv1152x128 and conv576x64 and conv192x32 and conv64x32 each appear both as a
+# stride-2 and as a stride-4 convolution. A stream has ONE M, so those are
+# twenty-FIVE streams, not twenty-one. Padding M up to the largest instead was
+# considered and rejected: a stride-4 convolution would then run four times the
+# rows it needs, on four of the busiest shapes in the network.
+#
+# The (K, N) pairs are the checkpoint's own channel counts padded up to tile_k
+# and to tile_n*cols, and they are listed here rather than derived from a formula
+# because they are not a formula: they are whatever YOLOv8n-pose's widths happen
+# to be. tools/pack/packers/pose.py holds the same list, and
+# tools/verify/verify_pose_streamset.py checks the two against each other rather
+# than trusting that they were written down the same twice.
+# ONE M FOR THE WHOLE SET, NOT ONE PER STRIDE. A stride-2 convolution has
+# M=102400 rows and a stride-16 one has M=400, and it is tempting to compile a
+# stream per (K, N, M) -- twenty-five of them. The runtime does not want that:
+# NpuConvBackend reads its row count ONCE, from the design's single top-level
+# `M` (runtime/src/pose/session.cpp), and conv() then walks any convolution's
+# own rows in chunks of that size (runtime/src/pose/net.cpp). So the design
+# carries ONE dispatch chunk and every convolution is cut into pieces of it.
+# Twenty-one streams it is, and the M that goes in all of them is
+# POSE_DISPATCH_M. Padding M up per stride instead was rejected: the runtime has
+# no place to keep twenty-five different row counts.
+#
+POSE_DISPATCH_M = 1024
+
+POSE_CONV_SHAPES: tuple[tuple[int, int], ...] = (
+    (64, 128), (128, 128), (192, 128), (256, 128), (256, 256),
+    (320, 128), (384, 128), (384, 256), (512, 128), (512, 256),
+    (576, 128), (1152, 128), (1152, 256), (2304, 128),
+)
+
+
+def pose_stream_order() -> list[str]:
+    """Stream names, in the order the slots are filled in.
+
+    `conv{K}x{N}` -- deliberately NOT carrying M, because the M is the design's
+    single dispatch chunk rather than a property of the convolution. These are
+    the names tools/pack/packers/pose.py writes into the container's
+    npu_streams, so the two have to be spelled the same.
+    """
+    return [f"conv{k}x{n}" for k, n in POSE_CONV_SHAPES]
+
+
+def pose_shapes_for(m: int = POSE_DISPATCH_M) -> dict[str, dict[str, int]]:
+    """M/K/N for every pose convolution, keyed by pose_stream_order()'s names."""
+    return {
+        f"conv{k}x{n}": {"M": m, "K": k, "N": n}
+        for k, n in POSE_CONV_SHAPES
+    }
+
 
 def mel_proj_shapes(M: int, n_bins: int, n_mels: int,
                     tile_k: int = 64, tile_n: int = 32,
@@ -267,6 +331,11 @@ def shapes_for_stream_set(
     if stream_set == "stt":
         order, shapes = list(STT_STREAM_ORDER), stt_shapes_for(
             batch, hidden, intermediate, seq)
+    elif stream_set == "pose":
+        # A pose set's M is the dispatch chunk, not b*seq, so `batch` and `seq`
+        # are read here ONLY to be ignored -- which is why they are not
+        # parameters of pose_shapes_for().
+        order, shapes = pose_stream_order(), pose_shapes_for()
     else:
         order, shapes = list(STREAM_ORDER), shapes_for(
             batch, hidden, intermediate, gated, qkv_n, seq)

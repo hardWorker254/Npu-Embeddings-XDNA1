@@ -69,6 +69,24 @@ struct TensorInfo {
   uint64_t offset = 0;   // relative to data_offset
   uint64_t nbytes = 0;
   std::string layout_hash;   // empty when the tensor is not tiled
+
+  // The panel's own geometry, parsed out of the entry's "layout" dict. Only
+  // the four numbers an int4 DECODE needs -- where a nibble in the flat
+  // payload sits in [K,N] -- are kept: the rest of the dict is covered by
+  // layout_hash, which is what the design is matched against above. Zero when
+  // the tensor is not tiled, or when it is tiled and never decoded.
+  //
+  // Why it cannot be derived instead: an int4 panel's K-groups are a factor
+  // that varies along K, so the group index of element (k,j) is k/group and
+  // each element needs its own k. see common/int4_panel.hpp.
+  int64_t tile_k = 0;
+  int64_t tile_n = 0;
+  int64_t mac_s = 0;
+  int64_t mac_t = 0;
+  // "block_panel" for a tiled operand, empty when there is no layout. The
+  // int4 decode refuses any other value rather than assuming the geometry
+  // above describes it -- see common/int4_panel.hpp.
+  std::string layout_kind;
 };
 
 // A view into the mapped file. Never owns, never copies.

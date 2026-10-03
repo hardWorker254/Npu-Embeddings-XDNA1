@@ -49,6 +49,13 @@
       "qkv_n": null,
       "datapath": "bf16"
     },
+    "bge-micro-v2": {
+      "hidden": 384,
+      "intermediate": 1536,
+      "gated_ffn": false,
+      "qkv_n": null,
+      "datapath": "bf16"
+    },
     "bge-base-en-v1.5": {
       "hidden": 768,
       "intermediate": 3072,
@@ -263,6 +270,10 @@
           4
         ]
       }
+    },
+    "yolov8n-pose": {
+      "kind": "pose",
+      "datapath": "bfp16"
     }
   },
   "kinds": {
@@ -296,6 +307,26 @@
         "ffn_up",
         "ffn_down"
       ]
+    },
+    "pose": {
+      "exporter": "export_gemm_rtp",
+      "streams": [
+        "conv64x128",
+        "conv128x128",
+        "conv192x128",
+        "conv256x128",
+        "conv256x256",
+        "conv320x128",
+        "conv384x128",
+        "conv384x256",
+        "conv512x128",
+        "conv512x256",
+        "conv576x128",
+        "conv1152x128",
+        "conv1152x256",
+        "conv2304x128"
+      ],
+      "note": "arch 6, yolov8_pose_c2f_silu_dfl.\n\nThe FIRST stream set in this file whose streams are not operation names. The fourteen `conv{K}x{N}` entries are the network's own padded convolution shapes, in the order gemm_rtp/geometry.py's POSE_CONV_SHAPES gives them, and this list is written out rather than derived because the targets schema requires `streams` to be a list -- which makes the two independent spellings of one list, and tools/verify/verify_pose_streamset.py is what holds them together: it checks this file against geometry.py, against the design set's design.json, and against the packed container's npu_streams, all four ways.\n\nM is ONE value for the whole set, not one per stride, and that is why no stream name carries an M. The runtime reads its row count once from the design's top-level M (runtime/src/pose/session.cpp) and cuts every convolution into chunks of it (runtime/src/pose/net.cpp), so a set with a stream per (K, N, M) would have twenty-one streams of which four are dispatched and the rest unreachable."
     }
   }
 }

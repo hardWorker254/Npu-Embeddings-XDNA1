@@ -18,7 +18,7 @@ import numpy as np
 
 import npu_ops
 from ..common.cache import find_cache, purge, xclbin_identical_mod_uuid
-from ..common.consts import AIE_ROWS, ARCH_DEVICES, MAC_BY_ARCH
+from ..common.consts import AIE_ROWS, ARCH_DEVICES, mac_for_arch
 from ..common.paths import cache_dir_for
 from ..common.validate import validate_tiers_and_seq
 from .geometry import datapath_from_args, markers_for, shapes_for_stream_set
@@ -26,7 +26,16 @@ from .geometry import datapath_from_args, markers_for, shapes_for_stream_set
 # --stream-set -> the directory name the runtime looks the set up by. The
 # encoder's set keeps the historical name so every shipping artifact path and
 # every documented command is unchanged.
-STREAM_SET_DIRS = {"gemm_rtp": "gemm_rtp", "stt": "gemm_rtp_dec"}
+STREAM_SET_DIRS = {
+    "gemm_rtp": "gemm_rtp",
+    "stt": "gemm_rtp_dec",
+    # A pose set writes to `gemm_rtp` too, and deliberately NOT to a directory
+    # of its own: runtime/src/pose/session.cpp looks for
+    # `<artifacts>/gemm_rtp/design.json`, and that is also the path the runtime's
+    # refusal message names, so a `gemm_rtp_pose` directory would make the two
+    # disagree about where the set lives.
+    "pose": "gemm_rtp",
+}
 from .validate import validate_geometry
 
 def extra_markers_for_arch(
@@ -284,12 +293,18 @@ def export_arch(args: argparse.Namespace, arch: str) -> int:
     c_bytes = dp.c_bytes_out
 
     b_dtype = "I8" if args.int8 else "BF16"
-    # The B panel order is the generation's, not a constant: design.json's
-    # b_layout_hash is what the runtime compares against the container's, and
-    # that comparison is the ONLY thing standing between a packed file and a
-    # silently misread one. Both sides have to be derived from the same device
-    # or the hash agrees on a layout the hardware does not use.
-    mac_s, mac_t = MAC_BY_ARCH[str(arch)]
+    # The B panel order is the generation's AND the operand's, not a constant:
+    # design.json's b_layout_hash is what the runtime compares against the
+    # container's, and that comparison is the ONLY thing standing between a
+    # packed file and a silently misread one. Both sides have to be derived from
+    # the same device and the same dtype or the hash agrees on a layout the
+    # hardware does not use -- which is precisely what happened when this line
+    # read MAC_BY_ARCH[arch] alone: on npu1 the int8 MMAC's N sub-tile is 8, not
+    # bf16's 4, and an int8 container tiled for 4 produced a design whose every
+    # product was wrong while the hash, the exporter, the packer and the runtime
+    # all agreed with each other. b_dtype is computed on the line above for
+    # exactly this reason.
+    mac_s, mac_t = mac_for_arch(str(arch), b_dtype)
     b_layout = gemm_b_layout(args.k, args.n, mac_s, mac_t, dtype=b_dtype)
 
     meta = {
@@ -326,12 +341,21 @@ def export_arch(args: argparse.Namespace, arch: str) -> int:
         "tiers": tiers,
         "seq": args.seq,
 
-        "hidden": args.hidden,
-        "intermediate": (
-            4 * args.hidden if args.intermediate is None else args.intermediate
-        ),
-        "gated_ffn": args.gated_ffn,
-        "qkv_n": biggest["qkv"]["N"] if "qkv" in biggest else None,
+        # A pose design records NO hidden width and no intermediate width, and
+        # the keys are left out rather than written as 0. Those are the two
+        # fields a reader would use to decide whether a design set belongs to an
+        # embedder, and a 0 in them says "an embedder of width zero" rather than
+        # "not an embedder's design". Every key below is still written, so the
+        # set stays self-describing about what it IS.
+        **({} if args.pose_tiers else {
+            "hidden": args.hidden,
+            "intermediate": (
+                4 * args.hidden if args.intermediate is None
+                else args.intermediate
+            ),
+            "gated_ffn": args.gated_ffn,
+            "qkv_n": biggest["qkv"]["N"] if "qkv" in biggest else None,
+        }),
 
         "tile": {
             "m": args.m,
@@ -378,6 +402,53 @@ def export_arch(args: argparse.Namespace, arch: str) -> int:
 
     extra = npu_ops.parse_exportable(getattr(args, "npu_extra_ops", ""),
                                      npu_ops.EXPORTER_FLAG)
+    # WHICH CODES THIS MODEL CANNOT HONOUR, refused here rather than building
+    # designs nothing opens. Both reasons are properties of the MODEL, not of the
+    # board: an earlier version of this keyed on `arch`, which is the exporter's
+    # DEVICE GENERATION (--arch 1 is npu1), so it refused every model on this
+    # board and only looked right because the two models tested by hand were the
+    # two that genuinely cannot take these codes.
+    #
+    # The runtime encoder's only eltwise(gelu_, ...) call is in the ungated
+    # branch's else. nomic (SwiGLU), gte (GeGLU) and gemma (GeGLU) compute the
+    # activation inside the gated path instead, so there is no host-or-array
+    # choice for a GELU to make. This is not merely inert on those models: the
+    # runtime took host_gelu straight off the flag, printed "gelu GELU on the
+    # ARRAY", and returned vectors that measured relfro 0.000e+00 against its own
+    # host path on both nomic and gte (bge-base, ungated, measured 6.1e-03 for
+    # the same flag). The runtime now refuses by name; this stops the export
+    # building the directory that refusal is about.
+    #
+    # layn and softm are unaffected by the gate -- they are genuine per-op choices
+    # for these models -- so they still export. gemma is the exception that needs
+    # the second reason: GemmaNpuEncoder reads no per-op flag AT ALL, so no code
+    # in this table is reachable for it, and gemma_mode.hpp refuses all three
+    # before any of this runs.
+    if extra:
+        dead, why = set(), []
+        if args.gated_ffn:
+            dead.add("gelu")
+            why.append("this target has a GATED FFN, whose activation is part "
+                       "of the gated path between ffn_up and ffn_down rather "
+                       "than a separate pass, so there is no host-or-array "
+                       "choice for a GELU to make")
+        if args.target == "embeddinggemma-300m":
+            dead |= {"layn", "softm"}
+        if dead & extra:
+            dead &= extra
+            if args.target == "embeddinggemma-300m":
+                why.append("gemma's encoder takes no per-op host/array flag at "
+                           "all, so neither of these is reachable")
+            keep = sorted(extra - dead)
+            raise SystemExit(
+                f"{npu_ops.EXPORTER_FLAG} {','.join(sorted(dead))}: "
+                + "; and ".join(why)
+                + ". The runtime refuses the same codes for the same reasons. "
+                  "Drop "
+                + ("them" if len(dead) > 1 else "it")
+                + (f"; {' and '.join(keep)} still "
+                   + ("export" if len(keep) > 1 else "exports")
+                   + " for this model." if keep else "."))
     # The elementwise designs are built by the ENCODER pass only. The decoder
     # pass runs second and writes to the same directories, with its own smaller
     # row counts (batch*seq is 4*64 there against 1*512 here), so letting it

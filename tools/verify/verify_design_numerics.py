@@ -22,6 +22,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
+from design_sets import design_sets                                # noqa: E402
 from npue import gemm_b_layout, layout_hash, tile_b  # noqa: E402
 
 BF16 = ml_dtypes.bfloat16
@@ -32,18 +33,28 @@ BF16_HALF_ULP = 2.0 ** -9
 
 DEFAULT_RTOL_COS = 2e-3  # the repo's 1-cos bound for a whole hidden state
 
-# What the MMAC sub-tile really is, per generation. MEASURED, not assumed:
-# aie.iron.kernels.mm(...).mac_dims returns (r, s, t) and it is not the same
-# on both boards --
-#     npu2 / aie2p : (8, 8, 8)   npu1 / aie2 : (4, 8, 4)
-# and the B operand's byte order inside a (tile_k, tile_n) panel is (s, t).
-# tools/npue.gemm_b_layout defaults to (8, 8), which is right for npu2 and
-# wrong for npu1; the packers hardcode it, so a container packed that way is
-# read by an npu1 design with its columns permuted. The permutation is inside
-# a tile, so the bytes are the right size, the shapes agree, the recorded
-# layout_hash matches on both sides, and every number that comes out is
-# plausible. Only feeding the design and comparing with numpy sees it.
-MAC_BY_DEVICE = {"npu1": (8, 4), "npu2": (8, 8)}
+# What the MMAC sub-tile really is, per generation AND per operand dtype.
+# MEASURED, not assumed: aie.iron.kernels.mm(...).mac_dims returns (r, s, t) --
+#     npu1 / aie2 : bf16 (4, 8, 4)    i8 (4, 8, 8)
+#     npu2 / aie2p: bf16 (4, 8, 8)    i8 (4, 8, 8)
+# -- and the B operand's byte order inside a (tile_k, tile_n) panel is (s, t).
+# A container packed with one pair and read by a core built for the other has its
+# columns permuted. The permutation is inside a tile, so the bytes are the right
+# size, the shapes agree, the recorded layout_hash matches on both sides, and
+# every number that comes out is plausible. Only feeding the design and
+# comparing with numpy sees it.
+#
+# The dtype key is load-bearing, and this table used to be device-only. That is
+# how a bge-small int8 design came to record npu1's bf16 pair: the export, the
+# pack, the runtime hash check and this gate all read the same wrong constant,
+# so all four agreed and the design was silently wrong on every product. This
+# table now mirrors npue.MAC_BY_DEVICE -- the single source of truth -- rather
+# than restating it, because a fourth copy is what made the mistake look like a
+# settled fact.
+MAC_BY_DEVICE = {
+    "npu1": {"bf16": (8, 4), "i8": (8, 8)},
+    "npu2": {"bf16": (8, 8), "i8": (8, 8)},
+}
 MAC_S_DEFAULT = (8, 8)  # what an artifact with no b_layout was packed with
 
 
@@ -55,6 +66,29 @@ def dtype_of(tag):
     if tag in ("f32", "fp32", "F32"):
         return np.float32, 4
     raise SystemExit(f"unsupported operand dtype {tag!r}")
+
+
+def draw(rng, shape, a_np):
+    """One operand in the design's own dtype, NON-DEGENERATE in it.
+
+    The naive `rng.uniform(-1.0, 1.0).astype(np.int8)` is ALL ZEROS:
+    truncation toward zero of a value already strictly inside (-1, 1) is 0, for
+    every element. An int8 stream drawn that way is `0 @ 0`, and `report()`
+    then compares the array's zero against a zero reference through two
+    `or 1.0` fallbacks and reports a FAIL of 1-cos 1.0 -- a gate that cannot
+    tell a correct design from a broken one, which is the failure that matters
+    most. bge-small `--int8` was the first int8 design exported and found this:
+    twelve FAILs, every one of them the harness's own operands.
+
+    So integers over the range `quantise_a_int8` actually produces: symmetric
+    +-127, which is also the range `pack_i4`/`pack_i8` clamp to, so the stream
+    is the one the array meets in service rather than the corners it never
+    visits. bf16 and f32 keep the [-1, 1) draw -- `.astype` ROUNDS those, it
+    does not truncate them to zero.
+    """
+    if a_np is np.int8:
+        return rng.integers(-127, 128, size=shape).astype(np.int8)
+    return rng.uniform(-1.0, 1.0, size=shape).astype(a_np)
 
 
 class Design:
@@ -132,10 +166,14 @@ class Design:
             return
         _, _, s, t = self.b_tiles()
         if (s, t) != hw:
-            print(f"  LAYOUT MISMATCH: b_layout records mac (s={s}, t={t}); "
-                  f"device {self.meta['device']} consumes (s={hw[0]}, t={hw[1]}). "
-                  f"A container packed as recorded is misread by this design. "
-                  f"Re-pack with --mac-t {hw[1]}.")
+            dt = self.meta.get("b_layout", {}).get("dtype", "BF16")
+            print(f"  LAYOUT MISMATCH: b_layout records mac (s={s}, t={t}) for "
+                  f"{dt}; device {self.meta['device']} consumes (s={hw[0]}, "
+                  f"t={hw[1]}) for that dtype. A container packed as recorded "
+                  f"is misread by this design, and the layout_hash check cannot "
+                  f"see it -- both sides derive the same hash from the same wrong "
+                  f"pair. Re-export the design so its recorded b_layout matches "
+                  f"the hardware, then re-pack against it.")
 
     def check_layout(self):
         """Refuse a B layout this driver does not implement, rather than
@@ -169,8 +207,22 @@ class Design:
         return (lay["tile_k"], lay["tile_n"], s, t)
 
     def hardware_mac(self):
-        """What this design's own generation consumes, or None if unknown."""
-        return MAC_BY_DEVICE.get(self.meta.get("device"))
+        """What this design's own generation consumes for THIS design's B dtype,
+        or None if unknown.
+
+        The dtype is the design's own recorded b_layout dtype: the int8 MMAC's
+        sub-tile is not bf16's on npu1, so asking "what does npu1 consume?"
+        without it is the question whose wrong answer hid a broken design.
+        """
+        by_dtype = MAC_BY_DEVICE.get(self.meta.get("device"))
+        if not by_dtype:
+            return None
+        tag = self.meta.get("b_layout", {}).get("dtype", "BF16")
+        try:
+            dt, _ = dtype_of(tag)
+        except SystemExit:
+            return None
+        return by_dtype.get("i8" if dt is np.int8 else "bf16")
 
     def in_meta(self):
         """Instruction slot 0 first (insts.bin), then the streams in slot order."""
@@ -227,10 +279,10 @@ def check_stream(design, stream, rng, rtol_cos, mac=None):
     a_np, a_bytes = dtype_of(design.meta.get("a_dtype", "bf16"))
     c_bytes = 2 if design.meta.get("c_dtype", "bf16") == "bf16" else 4
 
-    # Values in [-1, 1): a GEMM of real activations and weights, not a
-    # near-singular matrix that would hide an operand swap in a small norm.
-    a = rng.uniform(-1.0, 1.0, size=(M, K)).astype(a_np)
-    b = rng.uniform(-1.0, 1.0, size=(K, N)).astype(a_np)
+    # An operand the array can actually be judged on: `draw` rather than
+    # uniform, because for an int8 design the uniform draw IS zero (see draw).
+    a = draw(rng, (M, K), a_np)
+    b = draw(rng, (K, N), a_np)
 
     tiled = tile_b(b, tile_k, tile_n, s, t)
     design.clear_c()
@@ -248,6 +300,21 @@ def check_stream(design, stream, rng, rtol_cos, mac=None):
 
 
 def report(stream, got32, ref, rtol_cos, note=""):
+    # A ZERO REFERENCE IS NOT A COMPARISON, and it must not look like one.
+    # Both `or 1.0` fallbacks below exist so a zero vector cannot divide by
+    # zero -- but together they turn "nothing was measured" into a verdict:
+    # the denominator becomes 1.0, cos becomes 0, and the gate prints
+    # `1-cos 1.00e+00` for a design that may be perfectly correct. That is
+    # fail-open in the direction that matters most, so it is refused by name
+    # instead of reported as a fault in the array.
+    if not np.any(ref):
+        raise SystemExit(
+            f"{stream['op']} b{stream['batch']} "
+            f"M{stream['M']} K{stream['K']} N{stream['N']}: the float32 "
+            f"reference is ALL ZEROS, so nothing was measured and nothing "
+            f"can be judged. This is the HARNESS handing the array "
+            f"degenerate operands in their own dtype (see draw()), not a "
+            f"design that failed.")
     err = np.abs(got32 - ref)
     scale = float(np.abs(ref).max()) or 1.0
     cos = float((got32 * ref).sum() / (np.linalg.norm(got32) *
@@ -294,8 +361,7 @@ def check_container(design, stream, rng, rtol_cos, reader, tensor):
 
     a_np, _ = dtype_of(design.meta.get("a_dtype", "bf16"))
     c_bytes = 2 if design.meta.get("c_dtype", "bf16") == "bf16" else 4
-    a = rng.uniform(-1.0, 1.0,
-                    size=(stream["M"], stream["K"])).astype(a_np)
+    a = draw(rng, (stream["M"], stream["K"]), a_np)
 
     design.clear_c()
     design.stage(0, a)
@@ -353,9 +419,13 @@ def main() -> int:
 
     dirs = args.dirs
     if not dirs:
-        root = Path(__file__).resolve().parents[2]
-        dirs = sorted(p.parent for p in
-                      root.glob("runtime/*/artifacts_npu*/gemm_rtp*/design.json"))
+        # Via design_sets, which states the layout once. The glob this replaces
+        # (`runtime/*/artifacts_npu*/gemm_rtp*/design.json`) matched NOTHING once
+        # the per-model sets moved under runtime/artifacts/, so this gate would
+        # have silently verified zero designs and reported it as a pass -- the
+        # failure mode this whole layout change is trying to make impossible.
+        dirs = sorted({p.parent for p in design_sets()
+                       if p.parent.name.startswith("gemm_rtp")})
 
     failed = 0
     for d in dirs:

@@ -12,6 +12,7 @@
 #include <stdexcept>
 
 #include "common/host_kernels.hpp"
+#include "common/int4_panel.hpp"
 
 #if defined(__AVX2__)
 #include <immintrin.h>
@@ -68,7 +69,9 @@ size_t WhisperDecoder::stage_all() {
                      std::vector<const float *> &bias) {
     slots.push_back(g_.stage_operand(model_, name));
     bias.push_back(model_.raw(name + ".bias").as<float>());
-    bytes += model_.raw(name).bytes;
+    // The STAGED size, not the stored one: an I4 payload is half-width on
+    // disk (see common/int4_panel.hpp).
+    bytes += staged_bytes(model_, name);
   };
   auto norm = [&](const std::string &name, std::vector<const float *> &gamma,
                   std::vector<const float *> &beta) {

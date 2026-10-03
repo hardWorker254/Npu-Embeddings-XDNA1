@@ -150,7 +150,7 @@ class GteEncoder:
 
     def __init__(self, w, num_layers=12, hidden=768, num_heads=12,
                  head_dim=64, intermediate=3072, eps=1e-12,
-                 rope_theta=20000.0, rope_factor=8.0):
+                 rope_theta=20000.0, rope_factor=8.0, gemm=None):
         self.w = w
         self.L = num_layers
         self.hidden = hidden
@@ -161,6 +161,24 @@ class GteEncoder:
         self.theta = rope_theta
         self.factor = rope_factor
         self._taps = None
+        # The GEMM hook, for the same reason encoder.py and encoder_nomic.py
+        # have one: build-time calibration (pack_npue.calibrate_smoothing)
+        # substitutes a callback to watch every projection operand, and the
+        # architecture is invisible to it unless the oracle's projections go
+        # through an attribute. Calling fp32_gemm directly here -- which is what
+        # this did -- meant gte had no int8 path AT ALL, and the refusal in the
+        # packer named a missing oracle when the oracle was present and simply
+        # had no door in it.
+        #
+        # Only `linear` is routed, and that is the right seam: gte's QK^T and A.V
+        # are not self.gemm calls here (they are einsum-shaped slices inside
+        # attention), so the callback sees exactly the four projections that
+        # the array will run -- qkv, o_proj, up_gate_proj, down_proj -- and not
+        # a fifth host-side operation. nomic needs the same seam widened to its
+        # attention because its attention IS expressed as gemm calls; that is
+        # why the two oracle hooks take different numbers of visits, and why
+        # calibrate_smoothing counts sites per architecture rather than assuming.
+        self.gemm = gemm or fp32_gemm
         try:
             import scipy  # noqa: F401
             self.gelu = gelu_exact
@@ -168,7 +186,7 @@ class GteEncoder:
             self.gelu = gelu_exact_no_scipy
 
     def linear(self, x, weight, bias=None):
-        y = fp32_gemm(x, weight.T)
+        y = self.gemm(x, weight.T)
         if bias is not None:
             y = y + bias
         return y
@@ -261,3 +279,76 @@ class GteEncoder:
             "cls_raw": cls,
             "cls_normalized": cls / np.linalg.norm(cls),
         }
+
+
+def load_reference(model_dir, gemm=None):
+    """Build the reference from models/gte-multilingual-base/.
+
+    Present so calibrate_smoothing() can calibrate this architecture the way it
+    calibrates the other three, and named the same on purpose: the function is
+    the seam, and a fourth spelling of "build me the oracle for this model"
+    would be one more thing for the caller to get wrong.
+
+    `gemm` is the same hook GteEncoder takes. It is passed through rather than
+    assigned afterwards because `linear` resolves `self.gemm` at call time
+    either way, but passing it in means the caller cannot forget and silently
+    get an un-hooked oracle -- which is the failure this whole change exists to
+    prevent.
+
+    TWO PREFIXES ARE STRIPPED, not one, and the second is not paranoia about a
+    file that is not here. Two different exporters wrote this checkpoint's ONNX
+    and they disagree about initializers: the trust_remote_code NewModel export
+    prefixes every tensor with `new.`, while a torch.onnx.export through optimum
+    wraps the module and emits `0.auto_model.<...>`. The checkpoint in models/
+    is the first form, so the second strip changes nothing today -- but the
+    packer already handles both for the same file, and a calibration oracle that
+    accepted only one of them would turn an exporter swap into a KeyError deep
+    inside a forward pass instead of a clear failure.
+
+    F16 INITIALIZERS ARE UPCAST losslessly. The checkpoint stores them as F16
+    and every consumer downstream -- the bf16 pre-tiler, the F32 emitters, and
+    the activation statistics themselves -- wants f32.
+    """
+    import json
+    from pathlib import Path
+
+    from onnx_io import MODEL_ONNX, load
+
+    model_dir = Path(model_dir)
+    cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+    raw, _ = load(model_dir / MODEL_ONNX)
+    w = {}
+    for k, v in raw.items():
+        kk = k[4:] if k.startswith("new.") else k
+        if kk.startswith("0.auto_model."):
+            kk = kk[len("0.auto_model."):]
+        w[kk] = v.astype(np.float32) if v.dtype == np.float16 else v
+    rs = cfg.get("rope_scaling") or {}
+    # head_dim is DERIVED, not read: this checkpoint's config.json has no
+    # `head_dim` key, and gte is not alone among architectures that omit one --
+    # nomic carries it, BERT implies it, and this one simply does not have it.
+    # Reading a key that is not there would make the calibration path the only
+    # one that cannot load the model.
+    heads = cfg["num_attention_heads"]
+    hidden = cfg["hidden_size"]
+    head_dim = cfg.get("head_dim") or (hidden // heads)
+    if hidden != heads * head_dim:
+        raise ValueError(
+            f"{model_dir}: hidden_size={hidden} != num_attention_heads="
+            f"{heads} * head_dim={head_dim}")
+    if head_dim % 2:
+        raise ValueError(
+            f"{model_dir}: head_dim={head_dim} is odd -- RoPE cannot "
+            f"half-split it into rotation pairs")
+    return GteEncoder(
+        w,
+        num_layers=cfg["num_hidden_layers"],
+        hidden=hidden,
+        num_heads=heads,
+        head_dim=head_dim,
+        intermediate=cfg["intermediate_size"],
+        eps=cfg["layer_norm_eps"],
+        rope_theta=float(cfg["rope_theta"]),
+        rope_factor=float(rs.get("factor", 8.0)),
+        gemm=gemm,
+    )

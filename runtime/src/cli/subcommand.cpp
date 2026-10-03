@@ -90,7 +90,22 @@ bool flag_takes_value(const std::string &a) {
     static const char *const kWithValue[] = {
         "--threads", "--pipeline", "--prefix", "--artifacts", "--dev",
         "--bo-mode", "--npu-extra-ops", "--language", "--task", "--max-new",
-        "--chunk-seconds", "--stride-seconds", "--classify", "--image",
+        "--chunk-seconds", "--stride-seconds", "--classify", "--pose",
+        // --audio is the generic spelling of --transcribe, for the
+        // `npuembeddings <root> --model m.npue --audio a.wav` form rather than
+        // the `transcribe` subcommand, and stt_mode.hpp reads it with the same
+        // flag("--audio") either way. It was missing here, which is not a
+        // parse error: forward_common() simply forwarded neither the flag nor
+        // its value, and stt_mode.hpp then reported that neither --transcribe
+        // nor --serve was given. Found by tools/verify/verify_cli_flags.py's
+        // two-tables-agree check.
+        "--audio",
+        "--conf", "--iou", "--kpt", "--max-det", "--pose-dump",
+        // --pose-server is the pose endpoint's port, the way --serve is the
+        // embedding endpoint's. Listed for run_pose()'s positional scan as much
+        // as for forward_common(): without it, `pose-server m --port 8080` would
+        // not reach the mode at all.
+        "--pose-server",
         "--root", "--port", "--bind", "--token", "--max-len",
     };
     for (const char *f : kWithValue)
@@ -132,7 +147,12 @@ void forward_common(const char *const *argv, int argc,
             // arch=5's own no-argument flags. Same reason, and --top-k is the
             // one that would hurt most: dropping it would print one label and
             // leave the user with no way to see how close the runner-up was.
-            a == "--top-k")
+            a == "--top-k" ||
+            // arch=6's own no-argument flag. --text switches the pose mode from
+            // its default JSON to a human summary, so dropping it here would
+            // leave `pose ... --text` printing JSON and looking like the flag
+            // had done nothing.
+            a == "--text")
             store.push_back(a);
         else if (flag_takes_value(a) && i + 1 < argc) {
             store.push_back(a);
@@ -292,6 +312,99 @@ int run_classify(int argc, char **argv) {
     return launch(argv[0], root, store);
 }
 
+// `pose` for an arch=6 body-pose model. Same shape as run_classify and for the
+// same reasons: the images are written to the flag form as repeated --pose,
+// which Runtime::run dispatches by the container's arch, so
+// `npuembeddings pose <model> <a.png> <b.png>` and
+// `npuembeddings <root> --model ... --pose <a.png>` are one code path.
+//
+// It adds four value flags over run_classify -- --conf, --iou, --kpt, --max-det
+// -- which are also added to flag_takes_value() above, for the same reason
+// run_classify lists --classify there: a positional scan that did not know they
+// took a value would try to open "0.25" as a PNG.
+int run_pose(int argc, char **argv) {
+    std::string root = default_root(argv[0]);
+    std::string cli_token;
+    for (int i = 2; i < argc; ++i) {
+        if (std::string(argv[i]) == "--root") root = argv[i + 1];
+        if (std::string(argv[i]) == "--token") cli_token = argv[i + 1];
+    }
+    if (argc < 3 || argv[2][0] == '-')
+        throw std::runtime_error(
+            "`pose` needs a model name or a path to a .npue container");
+    const std::string model_name = argv[2];
+    if (argc < 4 || argv[3][0] == '-')
+        throw std::runtime_error(
+            "`pose` needs an image:\n"
+            "    npuembeddings pose <model> <image.png> [more.png ...]\n"
+            "  (PNG and JPEG; anything else is refused rather than guessed at)\n"
+            "  --conf 0.25 --iou 0.70 --kpt 0.50 --max-det 300\n"
+            "  --text                 a human summary instead of JSON\n"
+            "  --npu-extra-ops conv    run the convolutions on the array\n"
+            "                          (slower here -- measured, see\n"
+            "                          runtime/include/pose/net.hpp)");
+    if (!is_container_path(model_name)) warn_if_unpinned(model_name);
+    const std::string container = resolve_container(root, model_name, cli_token);
+    std::vector<std::string> store = {"--model", container};
+    bool swallow = false;
+    for (int i = 3; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (swallow) {
+            swallow = false;
+            continue;
+        }
+        if (!a.empty() && a[0] == '-') {
+            swallow = flag_takes_value(a);
+            continue;
+        }
+        store.push_back("--pose");
+        store.push_back(a);
+    }
+    forward_common(argv, argc, store);
+    return launch(argv[0], root, store);
+}
+
+// `pose-server` for an arch=6 body-pose model: the same model, the same
+// container, the same session -- answering POST /v1/pose instead of writing
+// JSON to stdout.
+//
+// It is a SEPARATE VERB rather than `pose --serve`, and the reason is written on
+// the endpoint's header: `serve` is the OpenAI-shaped embedding endpoint and a
+// pose model has no embedding, so reusing it would mean /v1/embeddings answered
+// with landmarks, a shape no client on either side expects. Two verbs keep the
+// URL space honest.
+//
+// It writes the port into --pose-server, which pose_mode.hpp reads -- the same
+// shape stt_mode.hpp reads --serve, and for the same reason: the subcommand and
+// the flag form are then one code path rather than two that can drift.
+int run_pose_server(int argc, char **argv) {
+    std::string root = default_root(argv[0]);
+    int port = 8080;
+    std::string bind = "127.0.0.1";
+    std::string cli_token;
+    for (int i = 2; i < argc; ++i) {
+        if (std::string(argv[i]) == "--root") root = argv[i + 1];
+        if (std::string(argv[i]) == "--port") port = std::atoi(argv[i + 1]);
+        if (std::string(argv[i]) == "--bind") bind = argv[i + 1];
+        if (std::string(argv[i]) == "--token") cli_token = argv[i + 1];
+    }
+    if (argc < 3 || argv[2][0] == '-')
+        throw std::runtime_error(
+            "`pose-server` needs a model name or a path to a .npue container:\n"
+            "    npuembeddings pose-server <model> [--port 8080] [--bind 127.0.0.1]\n"
+            "  POST /v1/pose  multipart: image (required), conf, iou, kpt, max_det");
+    if (!is_container_path(argv[2])) warn_if_unpinned(argv[2]);
+    const std::string container = resolve_container(root, argv[2], cli_token);
+    // No --threads/--pipeline defaults: `serve`'s "24 threads, 4 lanes" is a
+    // statement about the embedding pipeline's per-request GEMM batching, and
+    // this mode walks one image through one pool of its own.
+    std::vector<std::string> store = {"--model", container,
+                                      "--pose-server", std::to_string(port),
+                                      "--bind", bind};
+    forward_common(argv, argc, store);
+    return launch(argv[0], root, store);
+}
+
 int run_add(int argc, char **argv) {    std::string root = default_root(argv[0]);
     std::string cli_token;
     for (int i = 2; i < argc - 1; ++i) {
@@ -426,6 +539,8 @@ void register_default_subcommands(SubcommandDispatcher &dispatcher) {
     dispatcher.register_handler("tokenize", run_tokenize);
     dispatcher.register_handler("transcribe", run_transcribe);
     dispatcher.register_handler("classify", run_classify);
+    dispatcher.register_handler("pose", run_pose);
+    dispatcher.register_handler("pose-server", run_pose_server);
 }
 
 }  // namespace app

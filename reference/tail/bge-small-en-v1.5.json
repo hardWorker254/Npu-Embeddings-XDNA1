@@ -260,9 +260,10 @@
   "generated": "2026-08-27",
   "command": ".venv-ref\\Scripts\\python tools\\make_tail_reference.py",
   "baseline": {
-    "p99_measured": 1.161899611602736e-05,
+    "p99_measured": 1.4695006038637493e-05,
     "p99_ceiling": 0.002,
-    "measured_date": "2026-08-27",
-    "datapath": "bf16 MMAC, C as fp32"
+    "measured_date": "2026-10-03",
+    "datapath": "bf16 MMAC, C as bf16",
+    "ops_on_array": ""
   }
 }

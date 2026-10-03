@@ -86,6 +86,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
 
 from gemm_i8 import add_gemm_b_int8                              # noqa: E402
+from gemm_i4 import add_gemm_b_int4                              # noqa: E402
 from npue import (ARCH_VIT_PATCH16_PRELN, MAC_BY_DEVICE,        # noqa: E402
                   MAC_DEFAULT_DEVICE, Writer, gemm_b_layout, layout_hash,
                   mac_for_device, tile_b, to_bf16_bits)
@@ -96,7 +97,7 @@ from onnx_weights import MODEL_ONNX, OnnxWeights, model_digest  # noqa: E402
 # `mac` is resolved from --device and threaded into every operand rather than
 # fixed here, because a container packed for the other board is not refused by
 # anything -- it is merely wrong. `mac_for_device` refuses an unknown board.
-MAC_DEFAULT = MAC_BY_DEVICE["npu2"]
+MAC_DEFAULT = MAC_BY_DEVICE["npu2"]["bf16"]
 
 # BERT's tile sizes, which are also this family's. See the header: both are
 # forced by the geometry, and changing either means repacking every container.
@@ -161,11 +162,15 @@ class _Int8:
     that is wrong for the model is visible here and nowhere else.
     """
 
-    def __init__(self, amax, alpha, mac, layout_dtype):
+    def __init__(self, amax, alpha, mac, layout_dtype, int4_group=None):
         self.amax = amax
         self.alpha = alpha
         self.mac = mac
         self.layout_dtype = layout_dtype
+        # None for every int8 pack; an int number of rows per K-group for an
+        # int4 pack. It rides on the emitter rather than a module global for
+        # the same reason I8_DTYPE does not: one container, one scheme.
+        self.int4_group = int4_group
         self.errors: list[tuple[str, float]] = []
 
     def smoothing(self, key, mat):
@@ -185,8 +190,16 @@ class _Int8:
             add_gemm_b(w, name, mat, fold=fold, mac=self.mac)
             return
         s = self.smoothing(key, mat)
-        err = add_gemm_b_int8(w, name, mat, TILE_K, TILE_N, fold=fold,
-                              asmooth=s, mac=self.mac)
+        # The SAME smoothing either way: int4 is the int8 datapath with a
+        # narrower weight, so the activation side of the SmoothQuant identity
+        # does not change and the calibration is shared with int8 (gemm_i4.py).
+        if self.int4_group is None:
+            err = add_gemm_b_int8(w, name, mat, TILE_K, TILE_N, fold=fold,
+                                  asmooth=s, mac=self.mac)
+        else:
+            err = add_gemm_b_int4(w, name, mat, TILE_K, TILE_N, fold=fold,
+                                  asmooth=s, group=self.int4_group,
+                                  mac=self.mac)
         self.errors.append((name, err))
 
     def report(self) -> str:
@@ -194,7 +207,8 @@ class _Int8:
             return "  (no int8 operands)"
         es = [e for _, e in self.errors]
         worst = max(self.errors, key=lambda kv: kv[1])
-        return (f"  int8: {len(self.errors)} operands, quantisation error "
+        return (f"  {'int4' if self.int4_group is not None else 'int8'}: "
+                f"{len(self.errors)} operands, quantisation error "
                 f"median {float(np.median(es)):.2e} max {worst[1]:.2e} "
                 f"({worst[0]})")
 
@@ -323,10 +337,25 @@ def _ln(w, name, st, wkey, bkey, hidden):
 
 
 def pack_vit(model_dir, out, fold_scale=True, dry_run=False, device=None,
-             int8=False, int8_alpha=0.5, int8_images=8, int8_corpus=None):
+             int8=False, int4_group=None, int8_alpha=0.5, int8_images=8,
+             int8_corpus=None):
     global I8_DTYPE
+    if int4_group is not None and not int8:
+        # int4 is the int8 datapath with 4-bit weights (gemm_i4.py), so with
+        # int8=False there is no quantisation to attach a group size to.
+        # Refused rather than dropped: a bf16 container that ignored the flag
+        # would exit 0, and the caller would have no way to learn it did
+        # nothing -- the accepted-and-ignored shape this packer refuses by
+        # name (--max-seq on a ViT, pack_npue.py).
+        raise SystemExit(
+            f"--int4-group {int4_group} was passed to a pack that does not "
+            f"quantise (int8=False); int4 is the int8 datapath with 4-bit "
+            f"weights, so it has nothing to attach to. Refusing rather than "
+            f"emitting a bf16 container that ignores it.")
     model_dir = Path(model_dir)
-    mac = mac_for_device(device)
+    # int8's sub-tile is NOT bf16's on npu1 -- see npue.MAC_BY_DEVICE. The
+    # dtype is required by mac_for_device for that reason.
+    mac = mac_for_device(device, "I8" if int8 else "BF16")
     cfg = _read_json(model_dir / "config.json", "vit config")
     mt = cfg.get("model_type")
     if mt != "vit":
@@ -439,8 +468,9 @@ def pack_vit(model_dir, out, fold_scale=True, dry_run=False, device=None,
                                            pre["resample"])
         amax = vit_int8.calibrate(model_dir, layers, images, pixel_values,
                                   alpha=int8_alpha, verbose=False)
-        ictx = _Int8(amax, int8_alpha, mac, I8_DTYPE)
-        print(f"  int8: {label}, alpha={int8_alpha}, "
+        ictx = _Int8(amax, int8_alpha, mac, I8_DTYPE, int4_group)
+        print(f"  {'int4' if int4_group is not None else 'int8'}: {label}, "
+              f"alpha={int8_alpha}, "
               f"{len(amax)} GEMM sites ({layers} layers + patch_embed)")
 
     config = {
@@ -504,6 +534,10 @@ def pack_vit(model_dir, out, fold_scale=True, dry_run=False, device=None,
         # per-output-channel scale and a SmoothQuant factor, and the design set
         # must be exported with --int8 or the runtime refuses the pair by name.
         "a_dtype": I8_DTYPE,
+        # INT4 ONLY: the K-group size behind every .gscale in this container.
+        # Absent for bf16/int8 -- a config that carries it is an int4 config,
+        # and the reader cannot fold an int4 panel without it (npue.fold_i4).
+        **({"int4_group": int4_group} if int4_group is not None else {}),
         "head_npu": False,
         "pooling": "cls",
         "fusions": [

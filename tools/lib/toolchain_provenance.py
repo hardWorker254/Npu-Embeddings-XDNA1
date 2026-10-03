@@ -39,12 +39,31 @@ from pathlib import Path
 MLIR_AIE_ROOT = Path(r"C:\dev\mlir-aie")
 
 
-def _pkg_version(name: str) -> str:
+def _pkg_version(*names: str) -> str:
+    """The first of `names` that is installed, else "unavailable".
+
+    SEVERAL NAMES, because the distribution a toolchain ships under is not
+    stable: AMD's mlir-aie wheels are published as `mlir-aie-no-rtti`, so
+    `_pkg_version("mlir_aie")` -- the module name, not the distribution name --
+    found nothing and every newly exported design recorded
+    `mlir_aie_version: unavailable`. Provenance that degrades to a constant the
+    moment a wheel is renamed is not provenance; it is worse than absent,
+    because "unavailable" reads as "we looked and there was nothing".
+
+    The FIRST name is the modern one, so a rename lands on a name that resolves
+    rather than on a fallback. Nothing downstream interprets this string; it is
+    recorded so two design sets can be compared months later.
+    """
     try:
         import importlib.metadata as m
-        return m.version(name)
     except Exception:
         return "unavailable"
+    for name in names:
+        try:
+            return m.version(name)
+        except Exception:
+            continue
+    return "unavailable"
 
 
 def _git_head(root: Path) -> str:
@@ -69,8 +88,12 @@ def write_toolchain_json(out_dir: Path,
     provenance is not worth failing an export over.
     """
     info = {
-        "mlir_aie_version": _pkg_version("mlir_aie"),
-        "peano_version": _pkg_version("llvm-aie"),
+        # Distribution names, not module names. The no-rtti wheels are what AMD
+        # publishes, and the plain name is kept as a fallback for a toolchain
+        # built from source with the RTTI variant.
+        "mlir_aie_version": _pkg_version("mlir-aie-no-rtti", "mlir-aie",
+                                          "mlir_aie"),
+        "peano_version": _pkg_version("llvm-aie", "peano"),
         "mlir_aie_git_head": _git_head(mlir_aie_root),
     }
     out_dir = Path(out_dir)

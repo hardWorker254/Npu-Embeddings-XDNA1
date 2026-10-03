@@ -53,7 +53,8 @@ def main() -> int:
         help=(
             "artifacts root. Each generation is written to "
             "<out>/artifacts_npu<N>/gemm_rtp, or with --target to "
-            "<out>/<model>/artifacts_npu<N>/gemm_rtp. Default: runtime/"
+            "<out>/artifacts/<model>/artifacts_npu<N>/gemm_rtp. Default: "
+            "runtime/"
         ),
     )
 

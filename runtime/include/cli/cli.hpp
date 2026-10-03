@@ -119,7 +119,13 @@ inline std::string resolve_prefix(int argc, char **argv) {
 }
 
 inline void print_usage() {
-    std::printf(
+    // fputs, NOT printf, and this is not a style preference: the argument below
+    // IS the format string if this is a printf, so every `%` in 200 lines of help
+    // text is a conversion specification. "2.6%." in the pose block printed a
+    // literal `0` into the middle of a sentence -- the text read "2.6%.0 The
+    // status block prints both sides" -- which is exactly the kind of help output
+    // that teaches a reader to skim past the numbers.
+    std::fputs(
         "NpuEmbeddings -- BERT-family embeddings on the AMD NPU (XDNA1/npu1,\n"
         "XDNA2/npu2; --dev selects the generation)\n"
         "\n"
@@ -150,6 +156,42 @@ inline void print_usage() {
         "        reads it. --top-k prints the runners-up to stderr, --json\n"
         "        the objects to stdout. `embed` is not how this runs.\n"
         "\n"
+        "  npuembeddings pose <model> <image.png> [more.png ...]\n"
+        "        detect people and their 17 COCO keypoints with a YOLOv8-pose\n"
+        "        model. Same shape as classify and for the same reasons: one\n"
+        "        image per argument, the result on stdout and the status block\n"
+        "        on stderr. --json prints one object per image with every box,\n"
+        "        every joint, the 12-edge skeleton and the letterbox transform,\n"
+        "        --text a human summary. --conf/--iou/--kpt/--max-det move the\n"
+        "        thresholds the container was not given. --pose-dump FILE\n"
+        "        writes every graph node's fp32 output, for diffing against an\n"
+        "        independent interpreter.\n"
+        "        CPU BY DEFAULT, and that is a measurement rather than a\n"
+        "        preference. --npu-extra-ops conv moves the 72 convolutions to\n"
+        "        the array and nothing else, needs a container packed with --npu\n"
+        "        and a design set, and is SLOWER here: 258 ms of network on 16\n"
+        "        threads against 384 ms dispatched as GEMMs, because N must be a\n"
+        "        multiple of 128 (2.6x arithmetic padding waste before anything\n"
+        "        runs), the stem alone is 100 of the 436 dispatches, and a\n"
+        "        dispatch costs 660 us of which 140 us is the device's GEMM. Per\n"
+        "        layer 19 of the 72 are faster on the array and an oracle\n"
+        "        splitting each onto its faster side measured 146 ms -- 2.6%.\n"
+        "        The status block prints both sides, per image.\n"
+        "        MEASURED on the CPU path, 640x640 input, i8: 29 ms front end,\n"
+        "        258 ms network of which 88 ms is the GEMM, 57 ms im2col, 10 ms\n"
+        "        the weight transpose and 7 ms the output transpose, 1 ms decode.\n"
+        "\n"
+        "  npuembeddings pose-server <model> [--port N] [--bind ADDR]\n"
+        "        the same model over HTTP: POST /v1/pose, multipart with one\n"
+        "        `image` part (PNG or JPEG, by magic bytes) and optional conf,\n"
+        "        iou, kpt, max_det. The answer is byte for byte what `pose\n"
+        "        --json` prints -- both call npue::pose::result_json -- so the\n"
+        "        endpoint and the CLI cannot drift. Also GET /health and\n"
+        "        GET /v1/models. A separate verb rather than `pose --serve`\n"
+        "        because `serve` is the embedding endpoint and a pose model has\n"
+        "        no embedding: `pose --serve` refuses and says this instead.\n"
+        "        Per-request thresholds apply to that request only.\n"
+        "\n"
         "  npuembeddings add <org/model> [<sha256>]\n"
         "        teach this installation about a model that is not built in --\n"
         "        typically a finetune of one that is. Reads the repository's\n"
@@ -159,7 +201,7 @@ inline void print_usage() {
         "        WITHOUT a sha256 the weights are NOT verified. That is allowed,\n"
         "        and it is warned about on every single run.\n"
         "\n"
-        "  <model> in serve/embed/transcribe/classify/tokenize is either a\n"
+        "  <model> in serve/embed/transcribe/classify/pose/tokenize is either a\n"
         "        NAME -- looked up in models/, fetched and verified against the\n"
         "        catalogue's sha256 when the catalogue knows it -- or a PATH to\n"
         "        a .npue, used as given and never re-resolved by name:\n"
@@ -289,7 +331,7 @@ inline void print_usage() {
         "  The flag form is unchanged and still works:\n"
         "    npuembeddings <root> --model NAME --artifacts DIR --serve [port]\n"
         "  and carries the probes and benchmarks; see docs/CURRENT_STATUS.md.\n"
-        "\n");
+        "\n", stdout);
 }
 
 // A speech-to-text model needs BOTH design sets, and `pick_artifacts` only knows
@@ -370,7 +412,25 @@ inline void print_catalog(const std::string &root) {
                         m.error.c_str());
             continue;
         }
-        std::printf("  %-20s %-9s %6lld %6lld %8s %6.0f MB  %s\n", m.name.c_str(),
+        // A pose container's state says "pose" and nothing about design sets,
+        // because there is nothing to say: every convolution runs on the host,
+        // so the file is runnable as it stands. A "no design" here would tell
+        // the user to go and export something, which is both false and the only
+        // instruction in this table with no command behind it.
+        // The layers/hidden columns are DASHES, not zeros, for a detector: a
+        // `0 layers` row reads as a claim about a malformed container, and
+        // 0 here means the architecture does not have the concept. Same reason
+        // `pooling` says `n/a` rather than `none`.
+        const char *lay = is_pose_arch(m.arch) ? "-" : nullptr;
+        char layers[24], hidden[24];
+        if (lay) {
+            std::snprintf(layers, sizeof layers, "%s", lay);
+            std::snprintf(hidden, sizeof hidden, "%s", lay);
+        } else {
+            std::snprintf(layers, sizeof layers, "%lld", (long long)m.layers);
+            std::snprintf(hidden, sizeof hidden, "%lld", (long long)m.hidden);
+        }
+        std::printf("  %-20s %-9s %6s %6s %8s %6.0f MB  %s\n", m.name.c_str(),
                     !encoder_implemented(m.arch)              ? "no encoder"
                     : is_stt_arch(m.arch)                    ? "stt"
                     // A locally packed arch=5 container: `classify`, not
@@ -378,12 +438,25 @@ inline void print_catalog(const std::string &root) {
                     // "ready" here would otherwise be read as "ready to embed"
                     // and the first thing a user tries is the wrong one.
                     : is_vit_arch(m.arch)                    ? "cls"
+                    : is_pose_arch(m.arch)                   ? "pose"
                     : m.gemm_layout == "host"                 ? "cpu"
                     : pick_artifacts(root, m.hidden, m.ffn, m.gated_ffn,
                                      m.qkv_n, "", "bf16", m.name).empty()
                         ? "no design" : "ready",
-                    (long long)m.layers, (long long)m.hidden, m.pooling.c_str(),
-                    m.mb, m.repo.c_str());
+                    layers, hidden, m.pooling.c_str(),
+                    m.mb,
+                    // The last column is the command for these three and the
+                    // source repo for the rest, because for an embedder the repo
+                    // is the thing worth checking and for a locally packed
+                    // detector the repo is "n/a" -- the file came from a local
+                    // ONNX and there is nothing to name.
+                    is_pose_arch(m.arch) ? "npuembeddings pose <name> <image>; "
+                                            "CPU only unless packed with --npu"
+                        : is_vit_arch(m.arch) ? "npuembeddings classify <name> "
+                                               "<image>"
+                        : is_stt_arch(m.arch) ? "npuembeddings transcribe <name> "
+                                               "<audio.wav>"
+                                              : m.repo.c_str());
     }
 
     std::printf(
@@ -489,12 +562,23 @@ inline bool maybe_prepare_model(const CLIArgs &args, int argc, char **argv) {
             app::set_running_device(argv[i + 1]);
     const npue::MacGeom mac = npue::mac_for_device(app::running_device());
 
-    // The container is named after the checkpoint directory, not after
-    // MiniLM. This was a literal until a second model made it visible.
+    // The container is named after the checkpoint directory, not after MiniLM.
+// This was a literal until a second model made it visible.
+    //
+    // AND IT GOES ALONGSIDE THE MODEL DIRECTORY, not inside it. It used to be
+    // `models/<name>/<name>.npue`, which is a place no reader looks:
+    // `model_catalog` globs `models/*.npue` and `ensure_model` looks for
+    // `<root>/models/<name>.npue`, so the output of `--prepare-model` -- the
+    // documented one-command way to build a container -- was invisible to both.
+    // Running it produced a container, printed `wrote ...`, and left `embed
+    // <name>` still saying the model was not installed. The sibling location is
+    // where every other path that writes a container already puts it
+    // (pack_npue.py, and `embed`'s own auto-fetch), so this is the third
+    // spelling of the same answer being reduced to one.
     std::string out = args.prepare_model_out;
     if (out.empty())
-        out = dir + "/" + std::filesystem::path(dir).filename().string() +
-              ".npue";
+        out = std::filesystem::path(dir).parent_path().string() + "/" +
+              std::filesystem::path(dir).filename().string() + ".npue";
 
     auto read_all = [](const std::string &p) {
         std::ifstream f(p, std::ios::binary);

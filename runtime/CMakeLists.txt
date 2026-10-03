@@ -99,6 +99,17 @@ add_executable(npuembeddings
   src/vit/head.cpp
   src/vit/encoder.cpp
   src/vit/classify.cpp
+  # arch=6 (body pose). src/pose/net.cpp is compiled at -O3 on its own: its
+  # host GEMM is a nested axpy whose inner loop is what -O3 vectorises, and the
+  # file-wide default here is -O2, which does not. The rest of the pose module
+  # is I/O and graph walking and is happy at -O2.
+  src/pose/geometry.cpp
+  src/pose/image.cpp
+  src/pose/net.cpp
+  src/pose/decode.cpp
+  src/pose/session.cpp
+  src/pose/result_json.cpp
+  src/embed_models/pose_model.cpp
   # Subtask 7: STT extension (Whisper). The tokenizer stub lives with the
   # other tokenizers but is grouped here with the rest of the Whisper
   # placeholders.
@@ -143,6 +154,7 @@ add_executable(npuembeddings
   src/server/embed_backend.cpp
   src/server/embed_service.cpp
   src/server/stt_backend.cpp
+  src/server/pose_backend.cpp
   # Subtask 6: CLI system
   src/cli/cli.cpp
   src/cli/subcommand.cpp
@@ -186,4 +198,18 @@ if(MSVC)
 else()
   target_compile_options(npuembeddings PRIVATE -Wall -O2 -march=native)
   target_compile_definitions(npuembeddings PRIVATE _FILE_OFFSET_BITS=64)
+endif()
+
+# The pose host GEMM at -O3. One source, one reason: its inner loop is an axpy
+# over the channel axis and -O3's vectoriser is what turns it into loads and
+# FMAs, while -O2 (the file-wide default above) leaves it as a scalar loop. The
+# same arithmetic without vectorisation is not 3% slower, because the kernel is
+# memory-bound on B and on the accumulators -- it is a different kernel.
+#
+# This is stated as a property of THIS source and not as a global -O3, because
+# the rest of the runtime is I/O, dispatch bookkeeping and BF16 conversion loops,
+# where -O3 buys nothing measurable and costs compile time and binary size.
+if(NOT MSVC)
+  set_source_files_properties(src/pose/net.cpp PROPERTIES
+    COMPILE_OPTIONS "-O3")
 endif()

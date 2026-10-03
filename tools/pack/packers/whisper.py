@@ -47,6 +47,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
 
 from gemm_i8 import add_gemm_b_int8                              # noqa: E402
+from gemm_i4 import add_gemm_b_int4                              # noqa: E402
 from npue import (ARCH_WHISPER_ENC_DEC_GELU, MAC_BY_DEVICE,  # noqa: E402
                   MAC_DEFAULT_DEVICE, Writer, gemm_b_layout, layout_hash,
                   mac_for_device, tile_b, to_bf16_bits)
@@ -62,7 +63,7 @@ from whisper_bpe import VocabMerges, build_table                      # noqa: E4
 # rather than fixed here. The wrong pair is unreadable only by the hardware:
 # same byte count, same shapes, same layout_hash on both sides, plausible
 # products. `mac_for_device` refuses a device it does not know.
-MAC_DEFAULT = MAC_BY_DEVICE["npu2"]
+MAC_DEFAULT = MAC_BY_DEVICE["npu2"]["bf16"]
 
 TILE_K, TILE_N = 64, 32
 
@@ -142,11 +143,14 @@ class _Int8:
     nowhere else.
     """
 
-    def __init__(self, amax: dict, alpha: float, mac, layout_dtype: str):
+    def __init__(self, amax: dict, alpha: float, mac, layout_dtype: str,
+                 int4_group: int | None = None):
         self.amax = amax
         self.alpha = alpha
         self.mac = mac
         self.layout_dtype = layout_dtype
+        # None for an int8 pack; a row count for an int4 one -- see gemm_i4.py.
+        self.int4_group = int4_group
         self.errors: list[tuple[str, float]] = []
 
     def smoothing(self, key: str, mat: np.ndarray) -> np.ndarray:
@@ -167,8 +171,16 @@ class _Int8:
             add_gemm_b(w, name, mat, fold=fold, mac=self.mac)
             return
         s = self.smoothing(key, mat)
-        err = add_gemm_b_int8(w, name, mat, TILE_K, TILE_N, fold=fold,
-                              asmooth=s, mac=self.mac)
+        # The SAME smoothing either way: int4 is the int8 datapath with a
+        # narrower weight, so the activation half of the SmoothQuant identity
+        # and the audio calibration that feeds it are shared with int8.
+        if self.int4_group is None:
+            err = add_gemm_b_int8(w, name, mat, TILE_K, TILE_N, fold=fold,
+                                  asmooth=s, mac=self.mac)
+        else:
+            err = add_gemm_b_int4(w, name, mat, TILE_K, TILE_N, fold=fold,
+                                  asmooth=s, group=self.int4_group,
+                                  mac=self.mac)
         self.errors.append((name, err))
 
     def report(self) -> str:
@@ -176,7 +188,8 @@ class _Int8:
             return "  (no int8 operands)"
         es = [e for _, e in self.errors]
         worst = max(self.errors, key=lambda kv: kv[1])
-        return (f"  int8: {len(self.errors)} operands, quantisation error "
+        return (f"  {'int4' if self.int4_group is not None else 'int8'}: "
+                f"{len(self.errors)} operands, quantisation error "
                 f"median {float(np.median(es)):.2e} max {worst[1]:.2e} "
                 f"({worst[0]})")
 
@@ -315,15 +328,29 @@ def _ffn(w, st, ck_prefix, name_prefix, hidden, inter, mac=MAC_DEFAULT,
 
 def pack_whisper(model_dir, out, max_seq=None, max_target=None,
                  fold_scale=True, dry_run=False, device=None,
-                 int8=False, int8_alpha=0.5, int8_clips=8, int8_corpus=None):
+                 int8=False, int4_group=None, int8_alpha=0.5, int8_clips=8,
+                 int8_corpus=None):
     # The B operand's dtype for this whole container, and therefore the layout
     # hash: switched once, here, so the writer, `add_gemm_b` and the printed
     # report cannot disagree about which one they wrote. A disagreement would be
     # a container whose layout_hash describes the other datatype, which nothing
     # except the hardware would notice.
     global I8_DTYPE
+    if int4_group is not None and not int8:
+        # int4 is the int8 datapath with 4-bit weights (gemm_i4.py), so with
+        # int8=False there is no quantisation to attach a group size to. See
+        # pack_vit's identical guard for why this is refused rather than
+        # dropped: an accepted-and-ignored flag exits 0 and tells the caller
+        # nothing.
+        raise SystemExit(
+            f"--int4-group {int4_group} was passed to a pack that does not "
+            f"quantise (int8=False); int4 is the int8 datapath with 4-bit "
+            f"weights, so it has nothing to attach to. Refusing rather than "
+            f"emitting a bf16 container that ignores it.")
     model_dir = Path(model_dir)
-    mac = mac_for_device(device)
+    # int8's sub-tile is NOT bf16's on npu1 -- see npue.MAC_BY_DEVICE. The
+    # dtype is required by mac_for_device for that reason.
+    mac = mac_for_device(device, "I8" if int8 else "BF16")
     cfg = _read_json(model_dir / "config.json", "whisper config")
     if cfg.get("model_type") != "whisper":
         raise SystemExit(
@@ -434,8 +461,9 @@ def pack_whisper(model_dir, out, max_seq=None, max_target=None,
         amax = whisper_int8.calibrate(
             model_dir, enc_layers, dec_layers, clips, alpha=int8_alpha,
             verbose=False)
-        ictx = _Int8(amax, int8_alpha, mac, I8_DTYPE)
-        print(f"  int8: {corpus_label}, alpha={int8_alpha}, "
+        ictx = _Int8(amax, int8_alpha, mac, I8_DTYPE, int4_group)
+        print(f"  {'int4' if int4_group is not None else 'int8'}: "
+              f"{corpus_label}, alpha={int8_alpha}, "
               f"{len(amax)} GEMM sites, {len(clips) * 4 * 3000} mel frames "
               f"per encoder pass")
 
@@ -475,6 +503,7 @@ def pack_whisper(model_dir, out, max_seq=None, max_target=None,
         # SmoothQuant factor, and the design set must be exported with --int8 or
         # the runtime refuses the container by name when the two disagree.
         "a_dtype": I8_DTYPE,
+        **({"int4_group": int4_group} if int4_group is not None else {}),
         "fusions": [
             "qkv fused into one [d,3d] operand per attention; the K half of "
             "the fused bias is zero because Whisper's k_proj has no bias",

@@ -203,7 +203,15 @@ inline bool encoder_implemented(const std::string &arch) {
          // the same reason arch=4 is: a table that prints "no encoder" for a
          // container that classifies perfectly well is a lie of exactly the
          // shape this whitelist exists to prevent.
-         arch == "vit_patch16_prenorm_gelu";
+         arch == "vit_patch16_prenorm_gelu" ||
+         // arch=6, a YOLOv8-pose detector. The same answer as arch=4 and arch=5
+         // for the first reason: it is not an embedder, it takes pixels and
+         // returns people. The difference that matters is the last one -- the CPU
+         // path needs NO design set at all, because every convolution runs on
+         // the host and the array path is optional (`--npu-extra-ops conv`). So
+         // such a container is runnable the moment the file exists, where a
+         // whisper or a ViT is not runnable until it has been exported.
+         arch == "yolov8_pose_c2f_silu_dfl";
 }
 
 // True for a container this build runs through a mode of its own rather than
@@ -224,6 +232,19 @@ inline bool is_stt_arch(const std::string &arch) {
 // than a pipeline.
 inline bool is_vit_arch(const std::string &arch) {
   return arch == "vit_patch16_prenorm_gelu";
+}
+
+// True for a BODY-POSE detector's container: arch=6. The fourth architecture in
+// this tree that owns a mode rather than a pipeline, and the one whose state
+// column is not about design sets at all -- see print_catalog().
+//
+// Kept apart from is_vit_arch rather than merged, for the reason is_vit_arch is
+// kept apart from is_stt_arch: these are four different shapes of thing (a
+// decoder that generates text, a head that does not, a 17-keypoint detector, a
+// vector) and a predicate that merged them would have to branch again at the
+// first use that cares which is which.
+inline bool is_pose_arch(const std::string &arch) {
+  return arch == "yolov8_pose_c2f_silu_dfl";
 }
 
 inline bool config_flag(const npue::File &f, const char *key, bool fallback) {

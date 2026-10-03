@@ -13,6 +13,7 @@
 #include <stdexcept>
 
 #include "common/host_kernels.hpp"
+#include "common/int4_panel.hpp"
 #include "vit/head.hpp"
 
 namespace npue::vit {
@@ -50,11 +51,16 @@ size_t VitEncoder::stage_all() {
           "tools/pack/pack_npue.py.");
     if (a == "BF16") {
       int8_ = false;
-    } else if (a == "I8") {
+    } else if (a == "I8" || a == "I4") {
+      // I4 is the SAME datapath with a narrower weight: the payload is
+      // nibbles, but gemm_b_panel widens them to an int8 panel before stage(),
+      // so the MMAC sees an I8 operand and needs the same scales. Admitting it
+      // here rather than in a branch of its own is the whole point of the
+      // format -- there is no fourth dispatch schedule.
       int8_ = true;
     } else {
       throw std::runtime_error("vit encoder: GEMM operands are " + a +
-                               ", and this build dispatches BF16 or I8. "
+                               ", and this build dispatches BF16, I8 or I4. "
                                "Refusing rather than reinterpreting the bytes.");
     }
     const std::string cfg = model_.config_string("a_dtype");
@@ -83,7 +89,10 @@ size_t VitEncoder::stage_all() {
       out.wscale = model_.raw(name + ".wscale").as<float>();
       out.asmooth = model_.raw(name + ".asmooth").as<float>();
     }
-    bytes += model_.raw(name).bytes;
+    // The STAGED size, not the stored one: an I4 payload is half-width, so
+    // raw().bytes would under-count it by two and the total this function
+    // returns would no longer be what the slots hold.
+    bytes += staged_bytes(model_, name);
   };
   auto norm = [&](const std::string &name, std::vector<const float *> &gamma,
                   std::vector<const float *> &beta) {

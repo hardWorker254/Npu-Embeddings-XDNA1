@@ -18,7 +18,7 @@ itself builds in a couple of commands.
 | **MLIR-AIE / IRON** | Compiles the AIE kernels and the dataflow graph into `final.xclbin` + `insts.bin`. This is the dependency that makes the build heavy — everything NPU-side goes through it. |
 | **Peano (LLVM-AIE)** | The kernel compiler IRON drives. Ships with the IRON install. |
 | **MSVC** (VS 2022 or newer) + CMake + Ninja | For the C++ runtime. |
-| **Python 3.13** with numpy, torch (CPU), transformers, sentence-transformers | Build-time only: fetching the checkpoint, packing the model, generating tables, and verification. **No Python is used at runtime.** |
+| **Python 3.13** with numpy, torch (CPU), transformers, sentence-transformers | Build-time only: fetching the checkpoint, packing the model, generating tables, and verification. **No Python is used at runtime.** The one exception is the NPU backend itself, which links `PYTHONPATH=/opt/xilinx/xrt/python` so that `xrt._NPU_RUNTIME` resolves; with that variable unset the driver reports the runtime as `cpu` and every export fails at load rather than at build. |
 
 ### Installing MLIR-AIE
 
@@ -158,14 +158,25 @@ embeddings.
 
 **`--device` is not optional in practice.** The B panel's order inside a tile is
 the MMAC sub-tile, and the sub-tile is **not** the same on both boards: npu1
-(aie2) consumes `(s=8, t=4)`, npu2 (aie2p) consumes `(8, 8)`. So `--device`
-selects the pair, the exporter picks the matching one from `--arch`, and the
-two are compared by the layout hash that already existed. A container packed
-for the other generation is not rejected by that check — it was derived from
-the same wrong constant on both sides — it is merely wrong, everywhere, with
-plausible numbers. It now hashes differently and *is* rejected. Run the
-exporter and the packer for the same generation, and re-pack when you switch
-`--dev`.
+(aie2) consumes `(s=8, t=4)` for bf16, npu2 (aie2p) consumes `(8, 8)`. It is
+also **not** the same for both operand dtypes on the same board — npu1's int8
+MMAC consumes `(8, 8)`, where its bf16 one consumes `(8, 4)` — so the pair is
+selected by device *and* by dtype, and an int4 container uses the int8 pair
+because it widens to int8 before staging. So `--device` selects the pair, the
+exporter picks the matching one from `--arch` and the operand dtype, and the two
+are compared by the layout hash that already existed. A container packed for the
+other generation is not rejected by that check — it was derived from the same
+wrong constant on both sides — it is merely wrong, everywhere, with plausible
+numbers. It now hashes differently and *is* rejected. Run the exporter and the
+packer for the same generation, and re-pack when you switch `--dev`.
+
+Getting the dtype wrong does the same thing one level in, and is harder to
+notice because the container and the design still agree with each other: they
+agreed on bf16's `(8, 4)` while the int8 array consumed `(8, 8)`, so
+`bge-small` on the int8 datapath came back at `1 - cos` 8.6e-01 with nothing
+failing. `verify_i4_scheme.py` section 8 re-measures the sub-tile table against
+`aie.iron.kernels.mm` on every cheap-gate run, so it is a measurement and not a
+constant.
 
 ```sh
 # both generations, both implementations, byte for byte

@@ -14,6 +14,7 @@
 
 #include "common/app_state.hpp"   // gelu_erf_exact
 #include "common/host_kernels.hpp"  // bf16_fill, from_bf16, now_s
+#include "common/int4_panel.hpp"     // gemm_b_panel
 
 #if defined(__AVX2__)
 #include <immintrin.h>
@@ -42,8 +43,52 @@ size_t NpuGemm::stage_operand(const npue::File &model,
         name + ": layout mismatch -- design " + d_.info().name + " wants " +
         want.substr(0, 16) + "..., file has " + got.substr(0, 16) +
         "... The bytes would be the right size and the wrong order.");
-  const Span w = model.raw(name);
-  return d_.stage(1, w.data, w.bytes);
+  // bf16/I8 hand the mapping's own bytes to stage() with no copy; an I4
+  // payload is widened to the int8 panel the array consumes first
+  // (common/int4_panel.hpp). Whisper has no encoder- or decoder-local staging
+  // of its own -- vit and both whisper paths funnel through here -- so this one
+  // call site covers them.
+  const Panel panel = gemm_b_panel(model, name, d_.info().a_elem_bytes);
+  const size_t wslot = d_.stage(1, panel.bytes.data, panel.bytes.bytes);
+
+  // The scales ride with the slot, not with the design: they are per OPERAND,
+  // and one design carries up to seven of them (the decoder) or four (the
+  // encoder). Reading them only on an int8 design is deliberate -- a bf16
+  // container has no `.wscale` and `File::raw` throws on a missing tensor, so
+  // asking unconditionally would break every bf16 pack.
+  if (d_.info().a_elem_bytes == 1) {
+    OpScale sc;
+    sc.wscale = model.raw(name + ".wscale").as<float>();
+    // asmooth is OPTIONAL and its absence is meaningful: `add_gemm_b_int8`
+    // writes an all-ones vector when the calibration found nothing to smooth,
+    // but a container packed by a scheme that has no smoothing at all carries
+    // no such tensor. An empty inv_smooth is the same instruction either way --
+    // no smoothing -- so the two cases do not have to be told apart here.
+    if (model.has(name + ".asmooth")) {
+      const TensorInfo &ti = model.info(name);
+      const int64_t K = ti.logical_shape.empty() ? ti.padded_shape[0]
+                                                 : ti.logical_shape[0];
+      const float *as = model.raw(name + ".asmooth").as<float>();
+      sc.inv_smooth.resize(static_cast<size_t>(K));
+      for (int64_t j = 0; j < K; ++j)
+        sc.inv_smooth[static_cast<size_t>(j)] =
+            as[j] > 0.f ? 1.0f / as[j] : 1.0f;
+    }
+    scales_[wslot] = std::move(sc);
+  }
+  return wslot;
+}
+
+const NpuGemm::OpScale &NpuGemm::scale_for(size_t wslot,
+                                           const char *call) const {
+  const auto it = scales_.find(wslot);
+  if (it == scales_.end())
+    throw std::runtime_error(
+        std::string(d_.info().name) + ": " + call + " dispatched against B "
+        "slot " + std::to_string(wslot) + ", which stage_operand() did not "
+        "produce for this design. An int8 GEMM has no other source for that "
+        "operand's .wscale/.asmooth, so it cannot proceed without them.");
+  return it->second;
 }
 
 void NpuGemm::run(size_t instr, const float *a, int64_t n_real, int64_t rows,
@@ -67,10 +112,16 @@ void NpuGemm::run(size_t instr, const float *a, int64_t n_real, int64_t rows,
         "). Re-export it for this model.");
 
   const double t0 = app::now_s();
-  if (ab != 2)
-    throw std::runtime_error(d_.info().name + ": a_dtype is int8, which the "
-                             "Whisper packer does not produce -- the container "
-                             "and the design disagree about the operand type");
+  if (ab == 1) {
+    // The ONE branch on the datapath, here rather than at each of the eleven
+    // call sites. Everything after it -- the bounds check, the dispatch window,
+    // the row-scaled read-back -- is the int8 path's own, and it re-checks
+    // `a_elem_bytes` so a direct run_i8() on a bf16 design is still refused.
+    const OpScale &sc = scale_for(wslot, "run");
+    run_i8(instr, a, n_real, rows, k, wslot, bias, n, out, sc.wscale,
+           sc.inv_smooth.empty() ? nullptr : sc.inv_smooth.data());
+    return;
+  }
   auto *abuf = static_cast<uint16_t *>(d_.slot_ptr(0, slot_a));
   app::bf16_fill(abuf, a, static_cast<size_t>(n_real * k));
   // The padded tail, zeroed rather than left stale -- see the header.
@@ -150,15 +201,6 @@ void NpuGemm::run_i8(size_t instr, const float *a, int64_t n_real,
         "as int8 while the design says it is.");
 
   const double t0 = app::now_s();
-  // 1/s cached by POINTER, the same way the BERT path does it: a container's
-  // asmooth is a pointer into a mapping that outlives the session, so identity
-  // is "the same pointer" and the reciprocal is paid once per operand.
-  if (inv_smooth && inv_smooth != inv_smooth_src_) {
-    inv_smooth_.resize(static_cast<size_t>(k));
-    for (int64_t j = 0; j < k; ++j) inv_smooth_[static_cast<size_t>(j)] =
-        inv_smooth[j] > 0.f ? 1.0f / inv_smooth[j] : 1.0f;
-    inv_smooth_src_ = inv_smooth;
-  }
   a_scale_.assign(static_cast<size_t>(rows), 0.0f);
   auto *abuf = static_cast<int8_t *>(d_.slot_ptr(0, slot_a));
   // The helpers take a `par_rows(n, body)` callable and this class HAS one, so
@@ -166,8 +208,18 @@ void NpuGemm::run_i8(size_t instr, const float *a, int64_t n_real,
   // stand-in instead would be correct and would put the whole A quantisation on
   // one core, which is the cost this datapath is supposed to avoid.
   auto par = [this](int64_t n, auto &&body) { par_rows(n, body); };
-  app::quantise_a_int8(a, n_real, k, inv_smooth ? inv_smooth_.data() : nullptr,
-                  abuf, a_scale_.data(), par);
+  // `inv_smooth` arrives ALREADY reciprocalled, from stage_operand's OpScale,
+  // which holds it by value for the operand's whole life. There is no pointer
+  // comparison and no per-dispatch K divisions here: the caller pays the
+  // reciprocal once per operand, at stage time, and this reads it.
+  app::quantise_a_int8(a, n_real, k, inv_smooth, abuf, a_scale_.data(), par);
+  // The padded tail, zeroed exactly as the bf16 path above zeroes it. quantise_a
+  // only sees the `n_real` rows the host actually has, and the design computes
+  // every one of `rows`; leaving the rest holding the previous dispatch's
+  // activations would put another call's tokens into this one's output.
+  if (n_real < rows)
+    std::memset(abuf + n_real * k, 0,
+                static_cast<size_t>(rows - n_real) * k);
   t_convert += app::now_s() - t0;
 
   {
@@ -210,9 +262,14 @@ void NpuGemm::run_accum(size_t instr, const float *a, int64_t n_real,
         std::to_string(d_.info().seq) + ", M " + std::to_string(d_.info().M) +
         "). Re-export it for this model.");
   if (ab != 2)
-    throw std::runtime_error(d_.info().name + ": a_dtype is int8, which the "
-                             "Whisper packer does not produce -- the container "
-                             "and the design disagree about the operand type");
+    throw std::runtime_error(
+        d_.info().name + ": run_accum is the CONVOLUTION's accumulate form and "
+        "its B panel is built on the host from the container's F32 conv weights "
+        "through a bf16 tiler (NpuConv1d::stage), which cannot fill an int8 "
+        "design's I8 panel with its own MAC sub-tile. This design is int8, so "
+        "the front end must run on the host -- which is what stt_mode.hpp does "
+        "for an int8 design set. Reaching this means that decision was "
+        "bypassed.");
   // Checked BEFORE the dispatch, not after reading C: a design that emits fp32
   // would already have run by the time a wrong-width read refused.
   if (cb != 2)

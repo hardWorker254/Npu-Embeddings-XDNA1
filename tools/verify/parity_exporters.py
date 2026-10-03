@@ -20,6 +20,7 @@
 
 import argparse
 import difflib
+import re
 import subprocess
 import sys
 import tempfile
@@ -296,6 +297,36 @@ def main() -> int:
                 return t
             so_n, eo_n = norm(so, ref_tools), norm(eo, ref_tools)
             sn_n, en_n = norm(sn, new_tools), norm(en, new_tools)
+
+            # THE PER-MODEL OUTPUT LAYOUT, and the only difference here that is
+            # not attached to a case. Two parts, one change:
+            #
+            #   split:   <root>/artifacts/<model>[-i8]/artifacts_npu<N>
+            #   monolith <root>/<model>/artifacts_npu<N>
+            #
+            # The `artifacts/` level groups every per-model set under one
+            # parent, so `ls runtime/` tells build artifacts from source
+            # directories. The `-i8` suffix gives a model's two datapaths two
+            # directories, because they are indistinguishable by geometry and
+            # differ only in `b_layout_hash` -- so the runtime proposes both
+            # names and the writer has to produce both.
+            #
+            # Both are normalised HERE, once and globally, rather than as `accept`
+            # substitutions on the cases that happen to print an `--out`.
+            # Per-case would be seven chances to forget one, and a missed case
+            # would read as a regression rather than as the change it is.
+            #
+            # What is NOT done: the substitution touches nothing but this path
+            # shape, so a real difference elsewhere in the command line still
+            # fails, and so does a difference in which model or generation is
+            # named -- including `-i8` appearing where the split did not put it.
+            _OUT = re.compile(r"TREE/runtime(?:/artifacts)?/"
+                              r"([A-Za-z0-9_.-]+?)(?:-i8)?"
+                              r"(/artifacts_npu\d)")
+            so_n = _OUT.sub(r"TREE/runtime/artifacts/\1\2", so_n)
+            sn_n = _OUT.sub(r"TREE/runtime/artifacts/\1\2", sn_n)
+            eo_n = _OUT.sub(r"TREE/runtime/artifacts/\1\2", eo_n)
+            en_n = _OUT.sub(r"TREE/runtime/artifacts/\1\2", en_n)
             for old, new in accept:
                 so_n, sn_n = so_n.replace(old, new), sn_n.replace(old, new)
                 eo_n, en_n = eo_n.replace(old, new), en_n.replace(old, new)

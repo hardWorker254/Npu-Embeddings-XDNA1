@@ -12,6 +12,7 @@
 #include "runtime/gemma_mode.hpp"
 #include "runtime/stt_mode.hpp"
 #include "runtime/vit_mode.hpp"
+#include "runtime/pose_mode.hpp"
 #include "runtime/model.hpp"
 #include <cstdio>
 #include <cstdlib>
@@ -66,6 +67,18 @@ int Runtime::run(int argc, char **argv) {
     // other container. --artifacts is read above, so the same flag works.
     if (int cls_r = app::maybe_vit_mode(root_, argc, argv, model_path_); cls_r >= 0)
         return cls_r;
+
+    // arch=6 (a YOLOv8-pose) is the fourth architecture with a pipeline of its
+    // own: an image front end, 72 convolutions as an explicit op graph, a
+    // detection head, and none of the embedding machinery. Dispatched here,
+    // beside the other three, and returns -1 for every other container.
+    //
+    // It is also the only one whose DEFAULT path opens no device: the
+    // convolutions run on the host unless --npu-extra-ops conv moves them onto
+    // the array, and that default is a measured result rather than an omission
+    // (see runtime/include/runtime/pose_mode.hpp for the arithmetic).
+    if (int pose_r = app::maybe_pose_mode(root_, argc, argv, model_path_); pose_r >= 0)
+        return pose_r;
 
     RunContext ctx;
     ctx.argc = argc;
@@ -122,6 +135,67 @@ int Runtime::run(int argc, char **argv) {
                 "no design set found for --artifacts '" + art_ +
                 "'; looked for gemm_rtp/design.json or qkv/design.json under " +
                 looked);
+        }
+
+        // NAMING A SET IS NOT THE SAME AS IT FITTING. `has_design` above asks
+        // whether the directory holds a design, and the implicit path -- where
+        // the runtime chooses -- then asks design_fits whether it serves THIS
+        // container. Handing --artifacts used to stop at the first question, so
+        // `--artifacts <model>` on an int8 container named the bf16 set and the
+        // encode died at layer 0 on a layout hash, which is a crash with a
+        // cause three steps from where the mistake was.
+        //
+        // The container's own B layout is the one thing that distinguishes two
+        // sets of otherwise identical geometry, and both sides of it are
+        // recorded, so it is checked here rather than inferred. An empty answer
+        // on either side is not a mismatch: a design exported before the field
+        // existed cannot be excluded by it, and refusing those would break every
+        // older set in the tree.
+        //
+        // select_set_for_layout is the same filter the Whisper resolver uses.
+        // It was written there first and then reused here rather than the other
+        // way round, because Whisper's version has to look for two files and
+        // this one's error message is the richer of the two.
+        {
+            std::string want_layout;
+            try {
+                want_layout = ctx.model->info("layer.0.qkv").layout_hash;
+            } catch (const std::exception &) {}
+            const std::string by_layout = select_set_for_layout(
+                candidates, has_design, want_layout);
+            if (by_layout.empty() && !want_layout.empty()) {
+                // Nothing usable, or nothing with this container's layout. The
+                // first is "your --artifacts is not a design set"; the second
+                // is the one that looks like a working directory and is not.
+                bool saw_usable = false;
+                for (const auto &c : candidates)
+                    saw_usable = saw_usable || has_design(c);
+                if (saw_usable) {
+                    const std::string got = design_b_layout_hash(found);
+                    throw std::runtime_error(
+                        "--artifacts '" + art_ + "' resolved to " + found +
+                        ", whose B-operand layout is " + got.substr(0, 12) +
+                        "..., but this container's is " +
+                        want_layout.substr(0, 12) +
+                        "..., and no other candidate under " + root_ +
+                        " declares it. They are the same shapes in different "
+                        "element types, so nothing in that directory can "
+                        "execute it. Export one for this datapath, or run a "
+                        "container built for that one.");
+                }
+            }
+            if (!by_layout.empty()) {
+                if (by_layout != found && !want_layout.empty())
+                    std::fprintf(stderr,
+                                 "note: --artifacts %s resolves to %s, whose B "
+                                 "layout is %s; this container's is %s. Using %s "
+                                 "instead.\n",
+                                 art_.c_str(), found.c_str(),
+                                 design_b_layout_hash(found).substr(0, 12).c_str(),
+                                 want_layout.substr(0, 12).c_str(),
+                                 by_layout.c_str());
+                found = by_layout;
+            }
         }
         art_ = found;
     }

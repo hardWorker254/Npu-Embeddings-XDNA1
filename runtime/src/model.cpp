@@ -45,17 +45,83 @@ size_t skip_ws(const std::string &s, size_t i) {
   return i;
 }
 
+// The escapes a JSON string may carry. json.dumps -- the writer's -- emits
+// these and nothing else: `\"` for a quote inside a value, `\\` for a
+// backslash, `\/` optionally, the four short forms, and `\uXXXX` for anything
+// outside ASCII. So the whole set is listed rather than a prefix matched.
+//
+// A config value that CONTAINS JSON -- arch=6's "graph" and "npu_streams" are
+// JSON text held in a JSON string -- needs `\"`, and refusing it made the reader
+// unable to open a pose container at all. An unlisted escape is still refused by
+// name rather than passed through: a silent pass-through would turn `A` into
+// `AXu0041` and store a name nothing can match.
+void append_escape(const std::string &s, size_t &i, std::string &out) {
+  const char e = s[i++];
+  switch (e) {
+    case '"': out += '"'; return;
+    case '\\': out += '\\'; return;
+    case '/': out += '/'; return;
+    case 'b': out += '\b'; return;
+    case 'f': out += '\f'; return;
+    case 'n': out += '\n'; return;
+    case 'r': out += '\r'; return;
+    case 't': out += '\t'; return;
+    case 'u': {
+      if (i + 4 > s.size())
+        throw std::runtime_error(".npue: \\u escape is truncated in the directory");
+      unsigned cp = 0;
+      for (int k = 0; k < 4; ++k) {
+        const char h = s[i + static_cast<size_t>(k)];
+        unsigned d;
+        if (h >= '0' && h <= '9') d = static_cast<unsigned>(h - '0');
+        else if (h >= 'a' && h <= 'f') d = static_cast<unsigned>(h - 'a' + 10);
+        else if (h >= 'A' && h <= 'F') d = static_cast<unsigned>(h - 'A' + 10);
+        else
+          throw std::runtime_error(std::string(".npue: \\u escape has '") + h +
+                                   "' where a hex digit belongs");
+        cp = cp * 16 + d;
+      }
+      i += 4;
+      // Encoded as UTF-8, because the directory is UTF-8 and a code point above
+      // 0x7f written as a raw byte would be a different string than the writer
+      // meant. Surrogate halves are not paired here: json.dumps writes
+      // non-BMP characters as a surrogate PAIR of \u escapes, and a lone half
+      // is not a character.
+      if (cp < 0x80) {
+        out += static_cast<char>(cp);
+      } else if (cp < 0x800) {
+        out += static_cast<char>(0xC0 | (cp >> 6));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+      } else {
+        out += static_cast<char>(0xE0 | (cp >> 12));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+      }
+      return;
+    }
+    default:
+      throw std::runtime_error(
+          std::string(".npue: unsupported escape '\\") + e +
+          "' in the directory. The writer emits only \\\" \\\\ \\/ \\b \\f \\n "
+          "\\r \\t and \\uXXXX; anything else is a directory this reader does not "
+          "understand, and passing it through would store a different string "
+          "than the one that was written.");
+  }
+}
+
 std::string read_string(const std::string &s, size_t &i) {
   if (s[i] != '"') throw std::runtime_error(".npue: expected a JSON string");
-  size_t start = ++i;
-  while (i < s.size() && s[i] != '"') {
-    if (s[i] == '\\')
-      throw std::runtime_error(".npue: escapes are not supported in the "
-                               "directory; the writer never emits them");
-    ++i;
-  }
-  std::string out = s.substr(start, i - start);
   ++i;
+  std::string out;
+  while (i < s.size() && s[i] != '"') {
+    if (s[i] == '\\') {
+      ++i;
+      append_escape(s, i, out);
+      continue;
+    }
+    out += s[i++];
+  }
+  ++i;                       // the closing quote
   return out;
 }
 
@@ -96,6 +162,51 @@ std::vector<int64_t> read_int_array(const std::string &s, size_t &i) {
     if (s[i] == ',') ++i;
   }
   return out;
+}
+
+// One tensor's "layout" dict, narrowed to what an int4 decode needs:
+// TensorInfo::layout_kind plus tile_k/tile_n/mac_s/mac_t. Everything else in
+// the dict is deliberately skipped: `order`, `inner` and `dtype` are already
+// folded into layout_hash, and design matching compares that hash -- so
+// re-reading them here would be a second, weaker copy of a check that already
+// exists. (It also means this parser assumes the canonical `order`, exactly as
+// Python's Reader.panel() does when it calls untile_b with no order=; the hash
+// is what makes the assumption safe, and layout_kind is the cheap half of it
+// that can be checked by name.)
+//
+// Returns false when the dict does not describe a block_panel the decode can
+// walk, which the caller treats as "not decodable" rather than as a parse
+// error: BF16 and I8 operands never need these numbers, and a container that
+// does not use them must keep loading.
+bool read_layout(const std::string &s, size_t &i, TensorInfo &t) {
+  i = skip_ws(s, i);
+  if (s[i] != '{') throw std::runtime_error(".npue: layout is not an object");
+  ++i;
+  while (true) {
+    i = skip_ws(s, i);
+    if (s[i] == '}') { ++i; break; }
+    std::string k = read_string(s, i);
+    i = skip_ws(s, i);
+    if (s[i] != ':')
+      throw std::runtime_error(".npue: layout entry is not key: value");
+    ++i;
+    i = skip_ws(s, i);
+    if (k == "kind") t.layout_kind = read_scalar(s, i);
+    else if (k == "tile_k") t.tile_k = std::stoll(read_scalar(s, i));
+    else if (k == "tile_n") t.tile_n = std::stoll(read_scalar(s, i));
+    else if (k == "mac_s") t.mac_s = std::stoll(read_scalar(s, i));
+    else if (k == "mac_t") t.mac_t = std::stoll(read_scalar(s, i));
+    else skip_value(s, i);
+    i = skip_ws(s, i);
+    if (s[i] == ',') ++i;
+  }
+  const bool usable = t.layout_kind == "block_panel" && t.tile_k > 0 &&
+                      t.tile_n > 0 && t.mac_s > 0 && t.mac_t > 0;
+  if (!usable) {
+    t.tile_k = t.tile_n = t.mac_s = t.mac_t = 0;
+    if (t.layout_kind != "block_panel") t.layout_kind.clear();
+  }
+  return usable;
 }
 
 }  // namespace
@@ -212,6 +323,7 @@ File::File(const std::string &path) {
           else if (tk == "offset") t.offset = std::stoull(read_scalar(js, i));
           else if (tk == "nbytes") t.nbytes = std::stoull(read_scalar(js, i));
           else if (tk == "layout_hash") t.layout_hash = read_scalar(js, i);
+          else if (tk == "layout") read_layout(js, i, t);
           else skip_value(js, i);
           i = skip_ws(js, i);
           if (js[i] == ',') ++i;

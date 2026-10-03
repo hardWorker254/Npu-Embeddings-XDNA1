@@ -104,12 +104,38 @@ class Reference:
 
     def __init__(self, ckpt: Path, n_mels: int):
         import torch
-        from transformers import (WhisperFeatureExtractor,
-                                  WhisperForConditionalGeneration,
+        from transformers import (GenerationConfig,
+                                  WhisperFeatureExtractor,
                                   WhisperTokenizer)
+
+        import onnx_torch
+        from onnx_weights import (WHISPER_DECODER_ONNX,
+                                  WHISPER_ENCODER_ONNX)
+
         self.torch = torch
-        self.model = WhisperForConditionalGeneration.from_pretrained(
-            str(ckpt), torch_dtype=torch.float32).eval()
+        # Weights from the ONNX export rather than from_pretrained, for the
+        # reason whisper_int8 documents: this tree ships no pytorch_model.bin and
+        # no safetensors file, so from_pretrained raised an OSError listing five
+        # filenames that do not exist for a checkpoint whose weights were present
+        # one directory up. `proj_out.weight` is absent by construction -- the
+        # tied `embed_tokens` projection lives in the encoder graph.
+        #
+        # The tokenizer reads vocab.json/merges.txt, which this tree does ship,
+        # so it stays on from_pretrained: it needs no weights.
+        self.model = onnx_torch.build(
+            ckpt, "WhisperConfig", "WhisperForConditionalGeneration",
+            [(ckpt / WHISPER_ENCODER_ONNX, "model.encoder."),
+             (ckpt / WHISPER_DECODER_ONNX, "")],
+            allow_missing=("proj_out.weight",),
+            what=f"verify_whisper_cli {Path(ckpt).name}").eval()
+        # The generation config comes from the checkpoint directory, for the
+        # reason verify_whisper_model spells out at length: the ONNX-built tree
+        # has the class-default generation config, which carries no
+        # `lang_to_id`/`task_to_id`, and generate() then refuses a `language=`
+        # as an outdated config. models/whisper-tiny/generation_config.json has
+        # both maps, and from_pretrained used to attach it.
+        self.model.generation_config = GenerationConfig.from_pretrained(
+            str(ckpt))
         self.tok = WhisperTokenizer.from_pretrained(str(ckpt))
         self.fe = WhisperFeatureExtractor(feature_size=n_mels,
                                            sampling_rate=RATE)
@@ -193,8 +219,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="Hold the Whisper CLI and endpoint against transformers.")
     ap.add_argument("--npue", default=str(REPO / "models" / "whisper-tiny.npue"))
+    # runtime/artifacts/<model>/artifacts_npu<N>, where every model's sets live.
+    # The default used to be runtime/<model>/artifacts_npu<N>, which is the
+    # pre-relocation path: it still parses and still names a directory that is
+    # simply not there, so this gate failed on a missing design set and said
+    # nothing about the CLI it exists to check.
     ap.add_argument("--artifacts",
-                    default=str(REPO / "runtime" / "whisper-tiny" /
+                    default=str(REPO / "runtime" / "artifacts" / "whisper-tiny" /
                                 "artifacts_npu1"))
     ap.add_argument("--checkpoint", default=str(REPO / "models" / "whisper-tiny"))
     ap.add_argument("--exe",

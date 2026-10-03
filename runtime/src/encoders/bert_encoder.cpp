@@ -9,6 +9,7 @@
 #include "encoders/bert_encoder.hpp"
 
 #include "common/app_state.hpp"
+#include "common/int4_panel.hpp"
 #include "encoders/gemma_kernels.hpp"
 #include "runtime/model.hpp"
 #include "tokenizers/tokenizer_facade.hpp"
@@ -58,10 +59,15 @@ size_t BertEncoder::stage_all() {
           " wants " + want.substr(0, 16) + "..., file has " +
           got.substr(0, 16) + "... The bytes would be the right size and the "
           "wrong order.");
-    auto w = model_.raw(name);
-    slots.push_back(d.stage(1, w.data, w.bytes));
+    // One accessor for BOTH schemes (common/int4_panel.hpp): bf16 and I8 come
+    // straight out of the mapping with no copy, and an I4 payload is widened
+    // to the int8 panel the array consumes before stage() ever sees it. The
+    // bytes counted are the STAGED ones -- K*N for int8 and int4, K*N*2 for
+    // bf16 -- which is what the slot sizes this function returns add up to.
+    const Panel panel = gemm_b_panel(model_, name, d.info().a_elem_bytes);
+    slots.push_back(d.stage(1, panel.bytes.data, panel.bytes.bytes));
     bias.push_back(model_.raw(name + ".bias").as<float>());
-    bytes += w.bytes;
+    bytes += panel.bytes.bytes;
     if (i8 && wsc) {
       wsc->push_back(model_.raw(name + ".wscale").as<float>());
       asm_->push_back(model_.raw(name + ".asmooth").as<float>());
@@ -158,18 +164,106 @@ double BertEncoder::lap(double t0, double &bucket) {
   return t;
 }
 
+// HOW MUCH OF A TENSOR ONE DISPATCH OF AN ELTWISE DESIGN COMPUTES, as the
+// (offset, count) chunks that add up to the whole thing.
+//
+// These designs compute [rows, cols] tiles, and this file used to assume a
+// tensor always fits one of them: `eltwise` and `layer_norm` converted the WHOLE
+// tensor into the A buffer with no capacity check anywhere. For most models that
+// assumption holds, because the exporter sizes each design to hold exactly one
+// batch tier of its own tensor at seq 64 and nothing asks for a second.
+//
+// bge-large asks for a second, and it does so exactly where the sizing is
+// tightest. The softmax design is ONE program reused for every model -- a fixed
+// 12288 rows x 64 cols -- and 12288 rows is precisely batch 16 * seq 64 * 12
+// heads. bge-large has 16 heads, so at tier 16 it needs 16*16*64*64 = 1,048,576
+// elements against a 786,432-element buffer: a third over. `bf16_fill` then wrote
+// 262,144 bf16 past the end of a device buffer and the process died with SIGSEGV
+// (exit 139, no message at all) from a flag whose entire contract is "move this
+// op to the array". bge-base sits on the boundary at exactly 786,432, which is
+// why it passed and its 33%-larger sibling did not -- a test that only ever ran
+// the 12-head models would have kept passing.
+//
+// Every design states what it holds, in two fields: `cols` is the row width and
+// `row_capacity` the rows one dispatch computes. Sets exported before
+// `row_capacity` existed still record `cols`, and dividing the A buffer's
+// element capacity by it recovers exactly the number the newer ones state:
+// all-MiniLM's three sets work out at 1572864, 1024 and 12288 rows, the same
+// values bge-base records explicitly. The plan is therefore read from the design
+// in both cases, never assumed -- which is also why it is checked rather than
+// trusted: a design whose `cols` does not divide the tensor it is handed is a
+// design exported for a different shape, and that is a refusal, not a rewrite.
+static std::vector<std::pair<size_t, size_t>> elt_chunks(const npu::DesignInfo &in,
+                                                         size_t n) {
+  std::vector<std::pair<size_t, size_t>> out;
+  if (in.buffer_bytes.size() < 2)
+    throw std::runtime_error(in.name +
+                             ": fewer than two buffers, so there is no input "
+                             "buffer to stage into");
+  const size_t cap = in.buffer_bytes[0] / sizeof(uint16_t);
+  if (n == 0) return out;
+
+  // GELU. `kind` is "eltwise" and it declares `cols` as the WHOLE flat span with
+  // row_capacity 1, so for this op a row IS a dispatch and the walk advances in
+  // ELEMENTS. That is not a shortcut: an element-wise function is correct at
+  // every split point, whereas softmax and LayerNorm are only correct at row
+  // boundaries -- and a GELU call is routinely smaller than the design, so its
+  // length is not a multiple of anything and must not be asked to be.
+  if (in.kind == "eltwise") {
+    for (size_t off = 0; off < n; off += cap)
+      out.emplace_back(off, std::min(cap, n - off));
+    return out;
+  }
+
+  // LayerNorm and softmax are ROW-wise: softmax normalises one score row and
+  // LayerNorm one hidden row, so a chunk boundary inside a row would compute a
+  // row that does not exist in the tensor. `cols` is load-bearing here, not
+  // descriptive, which is why a missing one has to be refused rather than
+  // defaulted -- there is no safe unit to fall back to.
+  if (in.cols <= 0)
+    throw std::runtime_error(
+        in.name + "/design.json records no row width (`cols`), and this op is "
+        "row-wise, so a tensor larger than one dispatch cannot be split without "
+        "cutting a row in half. Re-export with tools/export/export_eltwise.py, "
+        "which writes `cols`.");
+  const size_t cols = static_cast<size_t>(in.cols);
+  if (n % cols != 0)
+    throw std::runtime_error(
+        in.name + ": " + std::to_string(n) + " elements is not a whole number of " +
+        std::to_string(cols) + "-wide rows, so this design cannot compute this "
+        "tensor without splitting a row. It was exported for a different shape "
+        "than the one it is being handed -- a softmax whose cols is the sequence "
+        "length, a LayerNorm whose cols is d_model. Re-export it for this model.");
+  const size_t rows_total = n / cols;
+  const size_t rows_per =
+      in.row_capacity > 0 ? static_cast<size_t>(in.row_capacity) : cap / cols;
+  if (rows_per == 0)
+    throw std::runtime_error(in.name + ": a " + std::to_string(cap) +
+                             "-element buffer holds no whole row of " +
+                             std::to_string(cols));
+  for (size_t r = 0; r < rows_total; r += rows_per)
+    out.emplace_back(r * cols,
+                     std::min(rows_per, rows_total - r) * cols);
+  return out;
+}
+
 void BertEncoder::eltwise(npu::Design &d, const EltSlots &slots, float *x,
                           size_t n) {
+  const size_t cap_elems = d.info().buffer_bytes[0] / sizeof(uint16_t);
+  // One chunk for every case that already fitted, so this changes no result that
+  // used to work -- it stops the cases that did not fit from writing off the end.
+  for (const auto &chunk : elt_chunks(d.info(), n)) {
+  const size_t off = chunk.first, cnt = chunk.second;
   double t0 = now_s();
+  float *xb = x + off;
   // The A buffer is this lane's own, so the conversion runs unlocked and in
   // parallel. It is the dispatch window below that has to be exclusive.
   auto *in_bf16 = static_cast<uint16_t *>(d.slot_ptr(0, slots.a));
-  par(n, [&](size_t lo, size_t hi) {
-    bf16_fill(in_bf16 + lo, x + lo, hi - lo);
+  par(cnt, [&](size_t lo, size_t hi) {
+    bf16_fill(in_bf16 + lo, xb + lo, hi - lo);
   });
-  const size_t cap_elems = d.info().buffer_bytes[0] / sizeof(uint16_t);
-  if (n < cap_elems)
-      std::memset(in_bf16 + n, 0, (cap_elems - n) * sizeof(uint16_t));
+  if (cnt < cap_elems)
+      std::memset(in_bf16 + cnt, 0, (cap_elems - cnt) * sizeof(uint16_t));
   t0 = lap(t0, t_conv);
   // ONE mutex, exactly as gemm() takes it, because the thing being protected is
   // the same thing gemm() protects: Design's `active` slot table is shared
@@ -193,29 +287,36 @@ void BertEncoder::eltwise(npu::Design &d, const EltSlots &slots, float *x,
   // the shared binding table nor the lock, and the C buffer is this lane's own.
   const auto *out_bf16 = static_cast<const uint16_t *>(
       d.slot_ptr(d.output_index(), slots.c));
-  par(n, [&](size_t lo, size_t hi) {
-    bf16_read(x + lo, out_bf16 + lo, hi - lo);
+  par(cnt, [&](size_t lo, size_t hi) {
+    bf16_read(xb + lo, out_bf16 + lo, hi - lo);
   });
   lap(t0, t_conv);
   ++n_dispatch;
+  }
 }
 
 void BertEncoder::layer_norm(std::vector<float> &x, size_t slot) {
   if (host_ln) { layer_norm_cpu(x, slot - 1); return; }
+  const size_t cap_elems = layernorm_.info().buffer_bytes[0] / sizeof(uint16_t);
+  // Same chunking and the same reason as eltwise(): this design is sized to one
+  // batch tier of B*seq*hidden, which is an exact fit for every model that has
+  // one -- and a buffer overrun for one that needs two.
+  for (const auto &chunk : elt_chunks(layernorm_.info(), x.size())) {
+  const size_t off = chunk.first, cnt = chunk.second;
   double t0 = now_s();
   auto *in_bf16 = static_cast<uint16_t *>(
       layernorm_.slot_ptr(0, slots_ln.a));
-  par(x.size(), [&](size_t lo, size_t hi) {
-    bf16_fill(in_bf16 + lo, x.data() + lo, hi - lo);
+  par(cnt, [&](size_t lo, size_t hi) {
+    bf16_fill(in_bf16 + lo, x.data() + off + lo, hi - lo);
   });
-  const size_t cap_elems = layernorm_.info().buffer_bytes[0] / sizeof(uint16_t);
-  if (x.size() < cap_elems)
-      std::memset(in_bf16 + x.size(), 0, (cap_elems - x.size()) * sizeof(uint16_t));
+  if (cnt < cap_elems)
+      std::memset(in_bf16 + cnt, 0, (cap_elems - cnt) * sizeof(uint16_t));
   t0 = lap(t0, t_conv);
   // Same window, same reason, same mutex as eltwise() and gemm(). `slot` is the
   // gamma|beta site, and lanes sit at DIFFERENT sites at the same instant -- so
   // an unlocked bind(1, slot) handed this dispatch another layer's parameters,
-  // which is the larger half of the corruption.
+  // which is the larger half of the corruption. It is the same site for every
+  // chunk of this call, because a chunk is a piece of one layer, not a layer.
   {
     std::unique_lock<std::mutex> lk;
     if (npu_mu) lk = std::unique_lock<std::mutex>(*npu_mu);
@@ -232,11 +333,12 @@ void BertEncoder::layer_norm(std::vector<float> &x, size_t slot) {
   }
   const auto *out_bf16 = static_cast<const uint16_t *>(
       layernorm_.slot_ptr(layernorm_.output_index(), slots_ln.c));
-  par(x.size(), [&](size_t lo, size_t hi) {
-    bf16_read(x.data() + lo, out_bf16 + lo, hi - lo);
+  par(cnt, [&](size_t lo, size_t hi) {
+    bf16_read(x.data() + off + lo, out_bf16 + lo, hi - lo);
   });
   lap(t0, t_conv);
   ++n_dispatch;
+  }
 }
 
 void BertEncoder::layer_norm_cpu(std::vector<float> &x, size_t site) {

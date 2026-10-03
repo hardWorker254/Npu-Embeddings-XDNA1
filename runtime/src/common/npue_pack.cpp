@@ -57,6 +57,17 @@ constexpr uint32_t kAlign = 4096;
 // board's pair is not refused by anything -- same byte count, same shapes, and
 // the same layout_hash on both sides, because both sides used the same wrong
 // constant. It is only ever wrong NUMBERS. See npue_pack.hpp.
+//
+// THESE ARE THE bf16 PAIRS, and that is not an oversight: the int8 MMAC's
+// sub-tile is not bf16's (on npu1 int8 is s8/t8, where bf16 is s8/t4), so a
+// table keyed by device alone is wrong for int8 -- and a table keyed by device
+// alone is exactly what shipped a bge-small int8 design that read 1-cos 8.6e-01
+// while every check agreed. This file is safe ONLY because it never packs int8:
+// `gemm_b_layout` below hardcodes "BF16" and pack_gemma writes a_dtype
+// "bf16", because int8 needs a numpy SmoothQuant pass and is a Python-only
+// path. If you add an int8 or int4 branch here, add the dtype dimension to
+// `mac_for_device` and to `gemm_b_layout` in the same commit -- mirroring
+// npue.MAC_BY_DEVICE, which is the table that is actually right.
 constexpr MacGeom kMacNpu2{8, 8};
 constexpr MacGeom kMacNpu1{8, 4};
 
@@ -428,6 +439,11 @@ Layout gemm_b_layout(int64_t tile_k, int64_t tile_n, int64_t mac_s,
   const std::string k = std::to_string(tile_k), n = std::to_string(tile_n);
   const std::string s = std::to_string(mac_s), tt = std::to_string(mac_t);
   Layout L;
+  // "BF16" is the only dtype this file writes, and it is the reason
+  // kMacNpu1 above can be a constant: see the note there. An int8 panel wants
+  // "I8" in BOTH strings -- the dict and the canonical form that is hashed --
+  // and npue.MAC_BY_DEVICE's int8 pair. Changing one string and not the other
+  // would make every layout_hash here disagree with Python's.
   // Insertion order, matching tools/lib/npue.py's dict literal.
   L.json = "{\"kind\":\"block_panel\",\"tile_k\":" + k + ",\"tile_n\":" + n +
            ",\"order\":\"k,n,kt,nt\",\"inner\":\"s,t\"" +

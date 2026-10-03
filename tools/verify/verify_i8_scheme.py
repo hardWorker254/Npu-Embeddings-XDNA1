@@ -42,11 +42,17 @@ sys.path.insert(0, str(REPO / "tools" / "lib"))
 
 from gemm_i8 import add_gemm_b_int8, check_i8_operand          # noqa: E402
 from npue import (ASMOOTH_SUFFIX, WSCALE_SUFFIX, Reader, Writer,             # noqa: E402
-                  dequant_int8, gemm_b_layout, layout_hash, tile_b, untile_b)
+                  dequant_int8, gemm_b_layout, layout_hash, mac_for_device,
+                  tile_b, untile_b)
 
-# npu1's sub-tile, not gemm_i8's (8, 8) MAC_DEFAULT: that is npu2's, and using
-# it here would test a byte order this project does not ship.
-MAC = (8, 4)
+# npu1's sub-tile FOR AN INT8 OPERAND, which is not the same as npu1's bf16
+# sub-tile: on npu1 the int8 MMAC's N sub-tile is 8 where bf16's is 4. This was
+# the literal (8, 4) -- the bf16 pair -- and the gate still passed, because
+# writer and reader agreed with each other; what it did not do is test the bytes
+# a real int8 container carries, which is exactly the pair the exporter bakes
+# into a design. Asked of the one table that is the source of truth, whose
+# values verify_i4_scheme.py section 8 re-measures against the compiler.
+MAC = mac_for_device("npu1", "I8")
 TILE_K, TILE_N = 64, 32
 SHAPE = (128, 96)          # K, N -- K a multiple of 64, N of 32, neither square
 PAD_COL = 64               # stands in for the fused qkv's N-axis zero padding

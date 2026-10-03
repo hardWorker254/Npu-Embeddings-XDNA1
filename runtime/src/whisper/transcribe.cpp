@@ -133,9 +133,11 @@ std::vector<int32_t> merge_windows(
 
 std::string resolve_stt_artifacts(const std::string &root,
                                   const std::string &artifacts,
-                                  const std::string &model_name) {
+                                  const std::string &model_name,
+                                  const std::string &want_layout) {
   // The same candidate list the embeddings path uses, so `--artifacts <model>`
-  // and the per-model runtime/<model>/artifacts_npu<arch> layout both work.
+  // and the per-model runtime/artifacts/<model>/artifacts_npu<arch> layout both
+  // work.
   std::vector<std::string> candidates;
   if (!artifacts.empty()) {
     if (std::filesystem::path(artifacts).is_absolute())
@@ -145,15 +147,61 @@ std::string resolve_stt_artifacts(const std::string &root,
   } else {
     candidates = app::artifacts_candidates(root, model_name);
   }
+
+  // USABLE MEANS BOTH HALVES, and the layout filter is applied to the ENCODER
+  // set because that is the half whose `gemm_rtp` records a hash the container
+  // also records: the container's `encoder.layers.0.qkv` layout_hash. The
+  // decoder's is not consulted, deliberately -- it is a separate design with its
+  // own hash, and the exporter builds both halves in one run from one set of
+  // flags, so a set whose encoder matches this container's dtypes was built for
+  // the same run. Checking the decoder too would be a second opinion about a
+  // file this function already decided exists.
+  //
+  // Before the filter, this took the first candidate holding both files, which
+  // is the bf16 set for every model that has both -- so every int8 Whisper
+  // container resolved to the bf16 design of the same name and died at
+  // `encoder.layers.0.qkv` on "layout mismatch -- design gemm_rtp wants
+  // 4d729172b0d8..., file has f0a4a89650...". The Whisper path had its own
+  // resolver and so had none of the checks the embedding path grew.
+  auto both_halves = [](const std::string &c) {
+    return std::ifstream(c + "/gemm_rtp/design.json").good() &&
+           std::ifstream(c + "/gemm_rtp_dec/design.json").good();
+  };
+  const std::string chosen =
+      app::select_set_for_layout(candidates, both_halves, want_layout);
+  if (!chosen.empty()) return chosen;
+
+  // Nothing usable, or nothing with this container's layout. The message has to
+  // say WHICH, because the two are different problems with different fixes --
+  // and the layout case is the one that looks like a working directory and is
+  // not.
   std::string looked;
+  bool saw_usable = false;
   for (const auto &c : candidates) {
     const bool enc = std::ifstream(c + "/gemm_rtp/design.json").good();
     const bool dec = std::ifstream(c + "/gemm_rtp_dec/design.json").good();
-    if (enc && dec) return c;
+    if (enc && dec) {
+      saw_usable = true;
+      looked += (looked.empty() ? "" : ", ") + c + " (both halves, but its " +
+                "gemm_rtp declares B layout " +
+                app::design_b_layout_hash(c).substr(0, 12) + "...)";
+      continue;
+    }
     if (looked.empty()) looked = c;
     else looked += ", " + c;
     if (enc) looked += " (gemm_rtp only, no gemm_rtp_dec)";
     if (dec) looked += " (gemm_rtp_dec only, no gemm_rtp)";
+  }
+  if (saw_usable && !want_layout.empty()) {
+    throw std::runtime_error(
+        "no Whisper design set matches this container's B-operand layout ("
+        + want_layout.substr(0, 12) +
+        "...). Every complete design set under " + root +
+        " was built for a different element type, so the bytes would be the "
+        "right size and the wrong order -- looked at " + looked +
+        ". Export one for this datapath with "
+        "tools/export/export_gemm_rtp.py --target " + model_name +
+        " --int8, or run a bf16 container.");
   }
   throw std::runtime_error(
       "no Whisper design set found; looked at " +
@@ -435,7 +483,22 @@ Session::Session(npue::File &model, const std::string &model_name,
         gemm_stream = &s;
         break;
       }
-    if (gemm_stream) {
+    // An int8 design has the [rows, d, d] stream -- attn_out is a GEMM of the
+    // right shape whatever the operand type -- and still cannot run the front
+    // end on it. NpuConv1d::stage() builds this operand's B panel from the
+    // container's F32 conv weights through a bf16 tiler, and there are no
+    // .wscale/.asmooth sidecars to quantise them against; an int8 panel is I8
+    // with its own MAC sub-tile, so that tiler would produce the right byte
+    // count of the wrong element type in the wrong order. Rather than let
+    // stage() refuse -- which it must, since nothing above it can catch a
+    // mis-tiled panel -- the stream is not offered here, and conv_available()
+    // answers false so a request that asked for the array is refused by name.
+    const bool int8_enc = enc_design_->info().a_elem_bytes != 2;
+    if (gemm_stream && int8_enc)
+      conv_note_ =
+          "an int8 design's conv panel cannot be tiled from fp32 conv weights; "
+          "the front end runs on the host";
+    if (gemm_stream && !int8_enc) {
       conv_gemm_ = std::make_unique<NpuGemm>(*enc_design_, *pool_);
       conv_gemm_->alloc_buffers();
       conv1_ = std::make_unique<NpuConv1d>(

@@ -39,6 +39,22 @@ void NpuConv1d::stage(const std::string &label, const float *w,
         std::to_string(n_) + " does not tile by the design's (" +
         std::to_string(d_.info().b_tile_k) + "," +
         std::to_string(d_.info().tile_n) + ") tile");
+  // REFUSED HERE, WHERE THE PANEL IS BUILT, because everything below this line
+  // would succeed on an int8 design and produce a wrong number. The tiler writes
+  // bf16 bits; an int8 design's panel is I8 with mac_t 8 where bf16's is 4, so
+  // the bytes come out the right SIZE and the wrong element type in the wrong
+  // order, and the convolution that follows returns plausible nonsense. There is
+  // no int8 conv panel in the tree: the container carries conv weights as F32
+  // (`kind: conv`, tools/pack/packers/whisper.py) with no .wscale/.asmooth
+  // sidecars, so an int8 design set cannot run this front end at all and
+  // stt_mode.hpp sends it to the host instead.
+  if (d_.info().a_elem_bytes != 2)
+    throw std::runtime_error(
+        label + ": this design's A operand is int8, and the convolution's B "
+        "panel is tiled here from fp32 conv weights with a bf16 tiler. Run "
+        "Whisper's front end on the host (drop --npu-extra-ops conv), or teach "
+        "NpuConv1d::stage the int8 panel and the packer the .wscale/.asmooth it "
+        "would need.");
   if (!b_slots_.empty())
     throw std::runtime_error(label + ": weights already staged");
 

@@ -159,7 +159,7 @@ inline void load_designs(RunContext &ctx) {
                 d_qkv.info().c_elem_bytes == 2 ? "bf16" : "fp32");
   else
     std::printf("  datapath   %s MMAC, C as %s\n",
-                d_qkv.info().emulate_bfp16 ? "bfp16-emulated" : "bf16",
+                d_qkv.info().datapath_name(),
                 d_qkv.info().c_elem_bytes == 2 ? "bf16" : "fp32");
 
   // WHICH GENERATION WAS ACTUALLY SELECTED (subtask 3), read off the loaded
@@ -338,6 +338,41 @@ inline void setup_flags_pools(RunContext &ctx) {
         "no front end to send it to the array. It belongs to `transcribe <a "
         "whisper model> <audio>`.");
   }
+  // A GATED FFN HAS NO PER-OP GELU, and the code is refused HERE, beside the
+  // speech-to-text codes above, because this is the same question: which codes
+  // can this container honour at all. It has to be asked before load_designs()
+  // (runtime.cpp calls setup_flags_pools first), or a gated model that was never
+  // given a gelu/ directory fails on the missing design instead -- telling the
+  // reader to run an export command that refuses for this very reason.
+  //
+  // nomic (SwiGLU), gte (GeGLU) and gemma (GeGLU) compute their activation
+  // INSIDE the gated path: between ffn_up and ffn_down, in swiglu_cpu or its
+  // equivalent. The encoder's only eltwise(gelu_, ...) call sits in the `else`
+  // of that branch -- the ungated up -> GELU -> down shape -- so for a gated
+  // model host_gelu is read by nothing at all.
+  //
+  // What this used to do is the thing the status block two hundred lines below
+  // says it never does: report the intention rather than the value. host_gelu
+  // came straight off the flag, the status printed "gelu GELU on the ARRAY
+  // (gelu, arch 1 npu1)" for a design the encoder never opens, and the
+  // embeddings came back BIT-IDENTICAL to the host run -- measured, not
+  // inferred: relfro 0.000e+00 on both nomic and gte, against 6.1e-03 for
+  // bge-base, which is ungated and really does move it. A status line naming a
+  // dispatch that does not happen is worse than none, because it is the one a
+  // reader trusts.
+  //
+  // gemma additionally cannot take layn or softm, for a different reason (its
+  // encoder takes no per-op flag at all) and in a different place: gemma_mode.hpp
+  // refuses those before any of this runs.
+  if (app::g_gated_ffn && ctx.on_array("gelu"))
+    throw std::runtime_error(
+        "--npu-extra-ops gelu: this container has a GATED FFN, whose activation "
+        "is part of the gated path between ffn_up and ffn_down rather than a "
+        "separate pass over the activations. There is no host-or-array choice to "
+        "make here, so asking for it moves nothing -- the run would print the op "
+        "as being on the array and hand back bit-identical vectors. The other "
+        "codes are unaffected: layn and softm are real per-op choices for this "
+        "model and work as they do on any encoder.");
   ctx.host_ln = !ctx.on_array("layn");
   ctx.host_sm = !ctx.on_array("softm");
   ctx.host_gelu = !ctx.on_array("gelu");

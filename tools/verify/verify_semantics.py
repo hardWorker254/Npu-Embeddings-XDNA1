@@ -33,7 +33,7 @@
 # Usage:
 #   python tools\verify_semantics.py                      # all built-in models
 #   python tools\verify_semantics.py --models bge-base-en-v1.5
-#   python tools\verify_semantics.py --exe dist\npuembeddings-0.4.0\npuembed.exe
+#   python tools\verify_semantics.py --exe dist/npuembeddings/npuembeddings
 
 from __future__ import annotations
 
@@ -53,6 +53,11 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "tools" / "lib"))
+
+# One default output location for every gate, rather than one directory
+# per task that asked for it. See tools/lib/gate_output.py for why.
+from gate_output import GATE_OUT                                 # noqa: E402
 
 # The six built-ins, in catalogue order. Extra containers in models/ are NOT
 # swept by default: `npuembeddings add` lets a user install finetunes, and a
@@ -527,8 +532,7 @@ def main() -> int:
               f"(weakest near {r['worst_near']['cos']:+.3f})")
 
     ok = all(r["pass"] for r in results)
-    out = Path(args.out) if args.out else (
-        REPO / "tasks" / "0121-semantic-gate" / "semantic_gate.json")
+    out = Path(args.out) if args.out else GATE_OUT / "semantic_gate.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({
         "kind": "behavioural gate, ordering only -- no tolerance",

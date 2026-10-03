@@ -49,6 +49,9 @@ from pathlib import Path
 
 import numpy as np
 
+from onnx_weights import (WHISPER_DECODER_ONNX,                        # noqa: E402
+                          WHISPER_ENCODER_ONNX)
+
 REPO = Path(__file__).resolve().parents[2]
 
 # The GEMM sites the packer asks about, and the torch module whose INPUT is that
@@ -175,13 +178,77 @@ def calibrate(model_dir: str | Path, enc_layers: int, dec_layers: int,
     caller gets the activation maxima only, which is what the printout needs.
     """
     import torch
-    from transformers import WhisperFeatureExtractor, WhisperForConditionalGeneration
+    from transformers import WhisperFeatureExtractor
+
+    import onnx_torch
 
     mp = Path(model_dir)
-    model = WhisperForConditionalGeneration.from_pretrained(
-        str(mp), torch_dtype=torch.float32).eval()
-    fe = WhisperFeatureExtractor()
-    tok = model.processor.tokenizer if hasattr(model, "processor") else None
+    # Weights from the ONNX export, for the reason vit_int8.calibrate gives:
+    # this repository has no safetensors and no pytorch_model.bin, so
+    # from_pretrained raised an OSError naming five files that do not exist.
+    #
+    # The TWO PREFIXES ARE NOT SYMMETRIC and that is measured, not tidied.
+    # `encoder_model.onnx` names a tensor `conv1.weight` where the module tree
+    # has `model.encoder.conv1.weight`, so it needs a prefix. `decoder_model.onnx`
+    # already carries `model.decoder.` in its own tensor names, so prefixing it
+    # too produces `model.decoder.model.decoder.embed_positions.weight` --
+    # which matches nothing, and before onnx_torch's unmapped-tensor refusal
+    # would have left every decoder parameter randomly initialised while the
+    # encoder calibrated happily.
+    #
+    # `proj_out` is the tied `embed_tokens` projection. The decoder-only export
+    # does not carry it -- it lives in the encoder graph -- so it is named as
+    # absent rather than left to look like an oversight.
+    model = onnx_torch.build(
+        mp, "WhisperConfig", "WhisperForConditionalGeneration",
+        [(mp / WHISPER_ENCODER_ONNX, "model.encoder."),
+         (mp / WHISPER_DECODER_ONNX, "")],
+        allow_missing=("proj_out.weight",),
+        what=f"whisper int8 {mp.name}")
+    # THE MEL BANK MUST COME FROM THE MODEL, NOT FROM THE DEFAULTS.
+    # `WhisperFeatureExtractor()` is constructed empty, and its default
+    # feature_size is 80 -- correct for tiny/base/small/medium and wrong for
+    # large-v3 and large-v3-turbo, whose conv1 is [1280, 128, 3]. The failure
+    # was not subtle: the encoder's first conv rejected an 80-channel input
+    # with "weight of size [1280, 128, 3], expected input[1, 80, 3000] to have
+    # 128 channels", which names the mismatch and lands on both large-v3
+    # models and on neither of the four that work.
+    #
+    # from_pretrained reads models/<name>/preprocessor_config.json, where
+    # feature_size is 80 or 128 as the checkpoint declares. A model directory
+    # with no such file still has to calibrate, so the default is kept as the
+    # fallback -- and stated when it is used, because "I assumed 80" and "the
+    # model says 80" are different claims and only one of them is a fact about
+    # the checkpoint.
+    import json as _json
+    mel_bins = None
+    pre = mp / "preprocessor_config.json"
+    if pre.is_file():
+        mel_bins = _json.loads(pre.read_text(encoding="utf-8")).get("feature_size")
+    if mel_bins is None:
+        mel_bins = 80
+        print(f"  {mp.name}: no preprocessor_config.json; assuming the default "
+              f"feature_size=80 mel bank, which is what WhisperFeatureExtractor "
+              f"would build. Confirm against the checkpoint if this model is "
+              f"not one of the four that use it.")
+    else:
+        print(f"  {mp.name}: mel bank from preprocessor_config.json, "
+              f"feature_size={mel_bins}")
+    fe = WhisperFeatureExtractor(feature_size=int(mel_bins))
+    # The forced prefix in `_forced_ids` wants REAL token ids, and used to get
+    # them from `model.processor.tokenizer`. A model built from config.json has
+    # no processor, so that attribute is gone; the tokenizer files themselves
+    # are in the model directory (they are what the runtime loads, and what the
+    # BERT calibration already asks transformers for), so read them directly.
+    # Absent tokenizer -> None -> the synthetic ids `_forced_ids` already has a
+    # branch for. That is a coarser corpus, not a wrong one, so it degrades
+    # rather than refuses.
+    tok = None
+    try:
+        from transformers import AutoTokenizer
+        tok = AutoTokenizer.from_pretrained(str(mp))
+    except Exception:
+        tok = None
 
     wanted = dict(site_keys(enc_layers, dec_layers))
     # (module path) -> container key. One path can feed one key here, because the

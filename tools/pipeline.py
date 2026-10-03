@@ -30,6 +30,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 TOOLS = REPO / "tools"
+sys.path.insert(0, str(TOOLS / "lib"))
+
+from design_sets import design_sets                                # noqa: E402
 
 # ---------------------------------------------------------------------------
 # The inventory. One row per entry point, and the row is the only place in the
@@ -82,6 +85,9 @@ TOOLSET = [
     ("verify_i8_kernels", "verify/verify_i8_kernels.py",
      "the runtime's int8 host kernels, AVX2 vs scalar, byte for byte",
      ("g++",)),
+    ("verify_i4_scheme", "verify/verify_i4_scheme.py",
+     "the int4 scheme, ten injected faults, and the C++ decode byte for byte",
+     ("numpy", "g++")),
     ("verify_design_numerics", "verify/verify_design_numerics.py",
      "does a design set COMPUTE what it claims to (needs the NPU)",
      ("numpy", "npu", "designs")),
@@ -121,6 +127,12 @@ TOOLSET = [
     ("verify_vit_model", "verify/verify_vit_model.py",
      "the host-only arch=5 half: geometry, the head's stride, the int8 kernels",
      ("numpy", "g++", "container")),
+    # No requirements at all: it reads the runtime's own sources and the CLI's
+    # own table, which is the point of putting it in this tier -- it is the one
+    # check that can say the refusal in cli.cpp is wrong before anything is built.
+    ("verify_cli_flags", "verify/verify_cli_flags.py",
+     "the CLI's flag table against the flags the runtime reads off argv",
+     ()),
     ("parity_exporters", "verify/parity_exporters.py",
      "the split exporters against the monoliths in git",
      ("git",)),
@@ -163,7 +175,7 @@ ARTEFACTS = [
      "the runtime fetches it on first use:  npuembeddings add <org/model>"),
     ("container", "a .npue under models/",
      "python tools/pipeline.py run pack_npue"),
-    ("designs", "a design.json under runtime/*/artifacts_npu*/",
+    ("designs", "a design.json under runtime/artifacts/*/artifacts_npu*/",
      "python tools/pipeline.py run export_gemm_rtp --target <model> --arch 1"),
     ("runtime", "the npuembeddings executable",
      "cmake -S runtime -B runtime/build && cmake --build runtime/build"),
@@ -187,6 +199,10 @@ MAP = [
      "pack_npue --int8, export_gemm_rtp --int8, then verify_i8_scheme, "
      "verify_i8_kernels, verify_npue",
      "tools/README.md § int8"),
+    ("I want int4 (W4A8) -- half the weight bytes, same int8 array",
+     "pack_npue --dtype i4 --int4-group 32, then verify_i4_scheme and "
+     "verify_npue; no re-export, run it against an int8 design set",
+     "tools/README.md § int4"),
     ("I changed the Whisper path",
      "verify_whisper_tokenizer, verify_whisper_features, verify_whisper_model",
      "BUILD.md §2.5"),
@@ -215,9 +231,21 @@ GATE_TIERS = {
     # C++ compiler, no checkpoint and no NPU. verify_vit_image and
     # verify_vit_model earn their place here because they are the only gates on
     # the image path that need neither -- they read a container, but not a
-    # design set and not a device.
-    "cheap": ("verify_i8_scheme", "verify_i8_kernels", "parity_exporters",
-              "verify_vit_image", "verify_vit_model"),
+    # design set and not a device. verify_i4_scheme compiles its own probe from
+    # runtime/src/model.cpp for the same reason verify_i8_kernels does: the
+    # arithmetic it has to hold apart lives in a header, and only a compile can
+    # show that header and npue.fold_i4() still agree.
+    "cheap": ("verify_i8_scheme", "verify_i8_kernels", "verify_i4_scheme",
+              "parity_exporters", "verify_vit_image", "verify_vit_model",
+              # Reads no container and needs no device: it compares the CLI's flag
+              # table against the flags the sources actually read, which is the
+              # one check that can run before anything is built. The
+              # unrecognised-option refusal in cli.cpp is written against that
+              # table, so a flag the runtime reads but the table has not heard of
+              # is a command that fails on a flag it spelled correctly -- which
+              # is how it broke 21 of them, including the one verify_pack_parity
+              # passes and the one tools/release_benchmark.ps1 passes.
+              "verify_cli_flags"),
     # "container" reads checkpoints and containers. verify_onnx_reader belongs
     # here rather than in "cheap" because both of its claims need one: the
     # per-model read needs an ONNX file, and the golden that proves the reader
@@ -287,7 +315,11 @@ def _have(kind):
             if (REPO / "models").is_dir() else []
         return bool(found), "python tools/pipeline.py run pack_npue"
     if kind == "designs":
-        found = list((REPO / "runtime").glob("*/artifacts_npu*/**/design.json"))
+        # Via design_sets, not a glob written here: the layout is stated once, in
+        # tools/lib/design_sets.py, beside the exporter that writes it and the
+        # note about what it replaced. A copy of the pattern in this file is a
+        # copy that can stop matching.
+        found = design_sets()
         return bool(found), "python tools/pipeline.py run export_gemm_rtp"
     if kind == "runtime":
         for name in ("npuembeddings", "npuembeddings.exe"):

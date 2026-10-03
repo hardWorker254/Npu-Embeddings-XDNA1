@@ -50,7 +50,7 @@ def main() -> int:
     npue_path = REPO / "models" / f"{args.model}.npue"
     if not npue_path.exists():
         print(f"FAIL -- {npue_path} not found; build it with "
-              f"`npuembed --prepare-model models/{args.model}`")
+              f"`npuembeddings --prepare-model models/{args.model}`")
         return 1
     with Reader(npue_path) as r0:
         want_sha = r0.config["source_sha256"]

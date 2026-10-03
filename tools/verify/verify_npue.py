@@ -62,11 +62,36 @@ BF16_BASELINE = {
 # instruction streams.
 INT8_WEIGHT_ONLY_LIMIT = 3e-03
 
+# int4's OWN limit, and it is not int8's. int4 is the same datapath with a
+# four-bit weight (tools/lib/gemm_i4.py), so everything said above about the
+# weight half being a lower bound applies here too -- and the number is two
+# orders larger because the OPERAND is. MEASURED with this check, off each
+# model's own goldens, --dtype i4 --device npu1 (the int8 row is the same
+# checkpoint's, for scale):
+#
+#     model        group    operand    end-to-end 1-cos
+#     MiniLM-L6       32     1.07e-1    3.676e-02    (i8: 4.383e-04)
+#     MiniLM-L6       16     9.15e-2    2.724e-02
+#     MiniLM-L6        0     1.73e-1    1.008e-01    <- per-channel
+#     bge-small       32     1.10e-1    2.505e-02
+#     bge-large       32     1.08e-1    1.905e-02
+#
+# 2e-01 is ~2x the worst of those, and the worst is the PER-CHANNEL group:
+# --int4-group 0 exists to express it, so a limit that did not cover every
+# group size the packer accepts would be a limit on the flags rather than on
+# the packing. The room beyond that is for a deeper checkpoint than these
+# three. What the limit still buys is what gates are for -- a scheme fault
+# (a group folded at the wrong size, an asmooth on the wrong axis, a payload
+# tiled the other way) lands at O(1) end to end, and check B fails EXACTLY on
+# the operand before this check ever runs.
+INT4_WEIGHT_ONLY_LIMIT = 2e-01
+
 from encoder import MiniLMReference                                # noqa: E402
 from precision_study import make_gemm                              # noqa: E402
 from gemm_i8 import check_i8_operand                                # noqa: E402
-from npue import (ALIGN, ASMOOTH_SUFFIX, HEADER_SIZE, MAGIC, VERSION,  # noqa: E402
+from npue import (ALIGN, ASMOOTH_SUFFIX, GSCALE_SUFFIX, HEADER_SIZE, MAGIC, VERSION,  # noqa: E402
                   Reader, WSCALE_SUFFIX, find_goldens, to_bf16_bits, untile_b)
+from gemm_i4 import check_i4_operand                               # noqa: E402
 from npz_io import load                                            # noqa: E402
 from onnx_io import MODEL_ONNX, load as load_ckpt                   # noqa: E402
 
@@ -149,15 +174,22 @@ def check_roundtrip(r, src, cfg, fold_scale):
                         f"own dtype: {sorted(schemes)} -- one emitter wrote them, "
                         f"so this is a container that cannot be run at all")
     scheme = schemes.pop() if len(schemes) == 1 else None
-    if scheme == "I8" and claimed != "i8":
+    if scheme in ("I8", "I4") and claimed != "i8":
+        # I4 lands here too, and must: an int4 container writes a_dtype "i8"
+        # because the ARRAY runs int8 (gemm_i4.py), so a file that claimed
+        # "i4" would be refused at load by design_selection's datapath match
+        # -- and one that claimed "bf16" would be handed int8-panel bytes.
         problems.append(f"config says a_dtype={claimed!r} but the operands are "
-                        f"I8 -- the container contradicts itself, and the "
+                        f"{scheme} -- the container contradicts itself, and the "
                         f"runtime would refuse it against the design")
     if scheme == "BF16" and claimed == "i8":
         problems.append(f"config claims a_dtype='i8' but the operands are BF16 "
                         f"-- an int8 design would be handed bf16 weights")
+    _scheme_name = {"I8": "int8 W8A8",
+                    "I4": "int4 W4A8, widened to int8 at load"}.get(scheme,
+                                                                    "bf16")
     print("\nB. round-trip (de-tile == the source, bit-exact), "
-          f"{'int8 W8A8' if scheme == 'I8' else 'bf16'}"
+          f"{_scheme_name}"
           f"{'' if scheme else ' -- SCHEME UNDETERMINED, see below'}")
 
     # The per-operand weight-quantisation error, recomputed here from the file
@@ -188,8 +220,13 @@ def check_roundtrip(r, src, cfg, fold_scale):
                                 f"pre-tiled NPU operand; check B cannot judge it")
                 continue
             K, N = e["padded_shape"]
-            got_bits = untile_b(r.raw(name), K, N, lay["tile_k"], lay["tile_n"],
-                                lay["mac_s"], lay["mac_t"])
+            # panel(), not raw(): for an I4 entry raw() REFUSES, because the
+            # bytes in the file are two nibbles per element. panel() hands
+            # back the int8 panel the ARRAY consumes -- nibbles unpacked,
+            # group scales folded -- which is what this check de-tiles and
+            # compares. For I8 and BF16 it is raw(), unchanged.
+            got_bits = untile_b(r.panel(name), K, N, lay["tile_k"],
+                                lay["tile_n"], lay["mac_s"], lay["mac_t"])
             kl, nl = e["logical_shape"]
             got_bits = got_bits[:kl, :nl]
 
@@ -207,13 +244,29 @@ def check_roundtrip(r, src, cfg, fold_scale):
                 total += got_bits.size
                 continue
 
+            if e["dtype"] == "I4":
+                # Same shape of check, five invariants of its own: the int4
+                # panel is a rounding too, and it is TWO roundings plus a
+                # widening factor, so the reconstruction has to reproduce all
+                # three in the emitter's own order to be an equality.
+                # tools/lib/gemm_i4.py check_i4_operand.
+                probs, rel = check_i4_operand(
+                    name, got_bits, r.tensor(name + WSCALE_SUFFIX),
+                    r.tensor(name + GSCALE_SUFFIX),
+                    r.tensor(name + ASMOOTH_SUFFIX), want_f32,
+                    cfg.get("int4_group", 0))
+                problems += probs
+                qerr.append((name, rel))
+                total += got_bits.size
+                continue
+
             want_bits = to_bf16_bits(want_f32)
             ndiff = int((got_bits != want_bits).sum())
             total += want_bits.size
             if ndiff:
                 problems.append(f"{name}: {ndiff} of {want_bits.size} differ")
 
-    unit = "int8" if scheme == "I8" else "bf16"
+    unit = "int8" if scheme in ("I8", "I4") else "bf16"
     ndiff, nother = _tally(problems)
     print(f"   {'ok  ' if not problems else 'FAIL'}  "
           f"{4*L} operands, {total:,} {unit} elements")
@@ -333,7 +386,13 @@ def check_goldens(r, cfg, goldens):
         return [f"checkpoint mismatch: goldens {meta['source_sha256'][:16]} vs "
                 f".npue {cfg['source_sha256'][:16]}"]
 
-    i8 = r.entries["layer.0.qkv"]["dtype"] == "I8"
+    # The scheme, read from the FILE rather than from config: I4 operands run
+    # the int8 datapath and therefore carry a_dtype "i8", so config alone
+    # cannot tell this check whether the weights in it are 8-bit or 4-bit.
+    _qdt = r.entries["layer.0.qkv"]["dtype"]
+    i8 = _qdt == "I8"
+    i4 = _qdt == "I4"
+    quantised = i8 or i4
 
     # Two runs, because they answer different questions and conflating them
     # would flatter the result:
@@ -365,7 +424,8 @@ def check_goldens(r, cfg, goldens):
                          taps=taps)
         runs[label] = (emb, taps)
 
-    head = "weights only" if not i8 else "int8 weights only"
+    head = ("int4 weights only" if i4
+            else "int8 weights only" if i8 else "weights only")
     print(f"   {'tensor':<20} {head:>19} {'+ bf16 activations':>20}")
     for nm in names:
         print(f"   {nm:<20} "
@@ -373,11 +433,12 @@ def check_goldens(r, cfg, goldens):
               f"{rel_fro(runs['bf16 activations'][1][nm], g['hf.' + nm]):>20.3e}")
 
     problems = []
-    if i8:
-        print("   NOTE  int8 container: these two runs differ only in the "
+    if quantised:
+        _s = "int4" if i4 else "int8"
+        print(f"   NOTE  {_s} container: these two runs differ only in the "
               "ACTIVATION\n         format. Neither quantises A per row, which "
               "the array does, so\n         both are the weight half of the "
-              "int8 cost -- a lower bound.")
+              f"{_s} cost -- a lower bound.")
     print()
     for label, (emb, _) in runs.items():
         cos = (emb.astype(np.float64) * g["hf.out.embedding"].astype(np.float64)).sum(1)
@@ -386,19 +447,23 @@ def check_goldens(r, cfg, goldens):
         print(f"   {label:<18} 1-cos {1 - cos.min():.3e}   "
               f"similarity shift {shift:.3e}")
         if label == "bf16 activations":
-            if i8:
+            if quantised:
                 # Its own limit, and NO ratio against the bf16 baseline: the
-                # two schemes are three orders apart, so the ratio would be ~90x
-                # and would report arithmetic rather than quality. See
-                # INT8_WEIGHT_ONLY_LIMIT for why this is the weight half only.
-                print(f"   {'':18} int8 weight half, limit "
-                      f"{INT8_WEIGHT_ONLY_LIMIT:.0e} "
-                      f"({'within' if 1 - cos.min() <= INT8_WEIGHT_ONLY_LIMIT else 'OVER'})"
+                # schemes are three orders apart for int8 and four for int4, so
+                # the ratio would report arithmetic rather than quality. See
+                # INT8_WEIGHT_ONLY_LIMIT / INT4_WEIGHT_ONLY_LIMIT for why this
+                # is the weight half only -- the array's per-row activation
+                # quantisation is not in either number.
+                lim = INT4_WEIGHT_ONLY_LIMIT if i4 else INT8_WEIGHT_ONLY_LIMIT
+                _s = "int4" if i4 else "int8"
+                print(f"   {'':18} {_s} weight half, limit "
+                      f"{lim:.0e} "
+                      f"({'within' if 1 - cos.min() <= lim else 'OVER'})"
                       f" -- the A-side row quantisation is NOT in this number")
-                if 1 - cos.min() > INT8_WEIGHT_ONLY_LIMIT:
+                if 1 - cos.min() > lim:
                     problems.append(
-                        f"int8 1-cos {1 - cos.min():.3e} exceeds the weight-only "
-                        f"limit {INT8_WEIGHT_ONLY_LIMIT:.0e} -- the operand "
+                        f"{_s} 1-cos {1 - cos.min():.3e} exceeds the weight-only "
+                        f"limit {lim:.0e} -- the operand "
                         f"round-trip in check B passed, so this is the "
                         f"quantisation itself, not a packing fault")
                 continue
@@ -439,18 +504,20 @@ def check_fold_cost(cfg, goldens, packed_path, model_dir, r=None):
     guessing at a question that takes one extra file to answer.
     """
     print("\nE. what the 1/sqrt(head_dim) fold costs, in isolation")
-    # SKIPPED FOR int8, and saying so is the whole point. The control below is
-    # packed WITHOUT --int8, so it would be a bf16 container; comparing an int8
-    # container against a bf16 one measures the quantisation, not the fold, and
-    # reports it as "the fold costs 90x -- NOT free". A gate that invents a
-    # finding is worse than a gate that skips, but only if it says which it is
-    # doing. Forwarding --int8 instead would need the calibration corpus and
-    # the numpy oracle this gate does not otherwise require.
-    if r is not None and r.entries["layer.0.qkv"]["dtype"] == "I8":
-        print("   SKIP  int8 container: the unfolded control would have to be "
-              "packed\n         --int8 too, which needs a calibration corpus "
-              "and the oracle. Comparing\n         across schemes would measure "
-              "the quantisation and call it the fold.")
+    # SKIPPED FOR int8 AND int4, and saying so is the whole point. The control
+    # below is packed WITHOUT --int8, so it would be a bf16 container; comparing
+    # an int8 container against a bf16 one measures the quantisation, not the
+    # fold, and reports it as "the fold costs 90x -- NOT free". A gate that
+    # invents a finding is worse than a gate that skips, but only if it says
+    # which it is doing. Forwarding the flag instead would need the calibration
+    # corpus and the numpy oracle this gate does not otherwise require.
+    if r is not None and r.entries["layer.0.qkv"]["dtype"] in ("I8", "I4"):
+        _s = ("int4" if r.entries["layer.0.qkv"]["dtype"] == "I4" else "int8")
+        _f = "--dtype i4" if _s == "int4" else "--int8"
+        print(f"   SKIP  {_s} container: the unfolded control would have to be "
+              f"packed\n         {_f} too, which needs a calibration corpus "
+              f"and the oracle. Comparing\n         across schemes would measure "
+              f"the quantisation and call it the fold.")
         return []
     unfolded = Path(packed_path).with_name("_verify_nofold.npue")
     import subprocess
@@ -523,7 +590,9 @@ def main():
     cfg = r.config
     print(f"{Path(args.npue).name}  "
           f"({Path(args.npue).stat().st_size/1e6:.2f} MB, {len(r.entries)} tensors)")
-    _dp = "int8 W8A8" if r.entries.get("layer.0.qkv", {}).get("dtype") == "I8" else "bf16"
+    _q = r.entries.get("layer.0.qkv", {}).get("dtype")
+    _dp = {"I8": "int8 W8A8",
+           "I4": "int4 W4A8, widened to int8"}.get(_q, "bf16")
     print(f"  tile ({cfg['tile_k']}, {cfg['tile_n']}), "
           f"mac (s={cfg['mac_s']}, t={cfg['mac_t']}), "
           f"datapath: {_dp}, "
@@ -557,8 +626,8 @@ def main():
     print("\nPASS -- spec conformant, round-trip bit-exact, layout guarded, "
           "goldens reproduced")
     if _dp != "bf16":
-        print("       (int8: the operand round-trip is the SCHEME's; the "
-              "golden number above\n        is the weight half only -- the A-side "
+        print("       (int8/int4: the operand round-trip is the SCHEME's; the "
+              "golden number\n        above is the weight half only -- the A-side "
               "row quantisation needs the array)")
     return 0
 
