@@ -736,6 +736,52 @@ design either way and i8 operands halve the bytes it has to move. The
 host/NPU split inside those numbers was **not** measured; the M=1024 explanation
 is the reason it is consistent, not a measurement of it.
 
+#### The int8 row above was measured on a container the runtime computed wrongly
+
+Worth stating plainly, because the table does not show it and the numbers are
+otherwise fine: those int8 timings were taken while `VitEncoder::gemm1()` was
+dividing each activation by `asmooth` where `NpuGemm::run_i8()` documents
+`1/asmooth`. The product came out as `X @ W * asmooth²`, the logits collapsed
+towards uniform, and the classifier answered **confidently and wrongly** —
+`bus.jpg` came back `water jug` at p=0.019 where fp32 says `minibus` at
+p=0.629. The speed was real; the arithmetic was not.
+
+What makes it worth writing down is that every gate was green. `verify_vit.py`'s
+sections 1-3 check the container's bytes, the patch layout, the panel invariants
+and the int8 scheme's own arithmetic in numpy — and all of that was, and still
+is, correct. The mistake lived in one line of C++ that no section executed.
+`gemm1()` was a ViT-only wrapper around `NpuGemm::run()` that branched on the
+container's dtype itself, and Whisper's encoder — which goes through `run()` and
+therefore picks the scales up from `stage_operand`'s `OpScale` — was never
+affected. The wrapper is deleted; all five ViT call sites say `run()` now, and
+the dtype is decided in the one place that already decided it.
+
+The gate now has a fourth section that runs the **C++ binary** and holds its
+answer against `transformers`, asserting the *confidence* and not only the
+top-1: on easy images a collapsed logit vector can still land on the right
+label. Reintroducing the bug fails it 4 images out of 4 with a worst p-ratio of
+102 against a gate of 2.0; fixed, the worst ratio is 1.52. `bus.jpg` through
+`serve` now reads `minibus` at p=0.636 against bf16's 0.629.
+
+Calibration is worth one line of its own, because it is a separate knob: the
+default corpus is `synth_images`, eight synthetic ramp-and-edge pictures. On the
+bus it is enough — top-1 still `minibus` — but quantisation error on
+`layer.11.ffn_down` is 1.95e-02 against 1.48e-02 for a 22-image corpus of real
+photographs. SmoothQuant is only as good as what it was shown, so a deployment
+should pass `--int8-corpus <dir>`.
+
+#### Reproducing the int8 container
+
+The ViT int8 path needs `transformers` 4.x: this tree's ViT code and its ONNX
+export both name tensors after the pre-5.x module tree
+(`vit.encoder.layer.0.attention.attention.query`), and transformers 5 renamed
+`encoder.layer` to `layers` and folded `attention.attention` into
+`attention.q_proj`. Under 5.x the calibration refuses by name rather than
+hooking the wrong modules, which is the right refusal — but it means
+`python tools/pack/pack_npue.py --model-dir models/vit-base-patch16-224 --dtype
+i8` needs `transformers==4.44.2` on a Python new enough to have its wheels.
+(Other families in this tree are on transformers 5; the ViT export is not.)
+
 ### What has NOT been measured
 
 Read this before quoting the table above as a result.
@@ -751,11 +797,39 @@ Read this before quoting the table above as a result.
   measurement in this repository exists above seq 64, and this container has 197
   positions.
 - **`npu2` is untested.** No second board was available.
-- **The classify endpoint has no load test and no concurrent clients.** Every
-  `/v1/classify` number here is a single sequential request. It serves one at a
-  time by design (one `Session`, one pool), so the untested thing is not
-  concurrency but throughput: no requests-per-second figure has been taken for
-  any of the four endpoints.
+- **Still no capacity or scaling curve.** The requests-per-second figures below
+  are `n` sequential requests from ONE client on one machine, which bounds an
+  endpoint from above and says nothing about where it saturates. No percentile
+  distribution, no keep-alive accounting, and no more than two clients at once.
+
+### Throughput, measured
+
+`n = 5` sequential requests, one client, warm, on this machine. The warm-up
+request is not counted. These are single-stream figures: every request pays the
+whole model, which is what "how fast is this endpoint" means.
+
+| endpoint | container | s/request | requests/second |
+|---|---|---|---|
+| `POST /v1/embeddings` | `all-MiniLM-L6-v2` (bf16) | 0.014 | **73.6** |
+| `POST /v1/classify` | `vit-base-patch16-224` (bf16) | 0.261 | **3.8** |
+| `POST /v1/pose` | `p_i8`, host convolutions | 0.314 | **3.2** |
+| `POST /v1/pose` | `p_i8`, `--npu-extra-ops conv` | 0.434 | **2.3** |
+| `POST /v1/audio/transcriptions` | `whisper-tiny`, `jfk.wav` (11 s) | 0.849 | **1.2** |
+
+The pose line is the array one **being slower**, which is the same result the
+per-layer measurement reaches from the other end: 436 dispatches at a ~660 us
+cost each against a 258 ms host network. The two figures bracket it from either
+end and they agree — the array path is ~1.38x slower end to end.
+
+Two clients at once, on all four: wall time is within a few percent of two
+sequential requests, and **each client gets the answer its own input gets when
+sent alone**. That second half is the claim worth having. "Both answered" is
+what a server with one shared output buffer also does whenever the two requests
+happen to agree; the check sends two different images (or two different texts)
+and compares each answer against that input's solo answer, so a swapped or
+interleaved result fails. They are served one at a time by design — one
+`Session`, one pool — so the concurrency figure is about the queue and about
+correctness, not about scaling.
 
 ---
 
@@ -1165,8 +1239,10 @@ measures, including i4 group 16.
   above carries the same 9.875 MiB of panels whatever its host weights are.
 - **No load test on the pose server.** The refusals, the per-request thresholds
   and the CLI/server agreement above were checked one request at a time. The
-  server is single-threaded by construction (one `Session`, one pool) and has not
-  been run under concurrency or measured for throughput.
+  server is single-threaded by construction (one `Session`, one pool). It has now
+  been run with two clients at once — each got the answer its own image gets
+  alone, on both backends — and timed at 3.2 req/s host / 2.3 req/s array, but
+  there is still no capacity curve and no scaling data past two clients.
 - **The Python facade has no test suite.** It has been exercised by hand against
   `bus.jpg` — both backends, all five input types, the refusals, and
   landmark-for-landmark agreement with the CLI — which is not the same as a gate

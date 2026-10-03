@@ -603,6 +603,97 @@ def main() -> int:
                f"{len(emb)} operands" if problems == 0
                else f"{problems} problems")
 
+    # -- the runtime's OWN answer, on the same images -------------------------
+    #
+    # Sections 1-3 are numpy. They check the container's bytes and the SCHEME's
+    # arithmetic, and they were all green while the shipped C++ answered
+    # 'water jug' at p=0.019 for a picture whose fp32 answer is 'minibus' at
+    # p=0.629 -- because VitEncoder::gemm1 divided each activation by asmooth
+    # where NpuGemm::run_i8 documents 1/asmooth. No amount of numpy re-derives
+    # that: the mistake was in a line no section above executed.
+    #
+    # So this section is the only one that can see it, and what it asserts is
+    # deliberately NOT "the top-1 agrees" -- on easy images a collapsed logit
+    # vector can still land on the right label. It asserts the confidence: the
+    # runtime's own probability for its own label has to be within a factor of
+    # transformers', which is 0.019 against 0.629 on the bus and 0.636 against
+    # 0.629 once fixed. Three orders of magnitude of headroom, not a coin flip.
+    print("\n4. the C++ runtime's own answer, against transformers")
+    exe = REPO / "runtime" / "build" / "npuembeddings"
+    if not exe.is_file():
+        report(False, "the C++ binary is built",
+               f"{exe} is absent -- `cmake --build runtime/build`. Without it "
+               f"this section is the only one that exercises the runtime, so "
+               f"it is not optional.")
+    else:
+        import json
+        import subprocess
+        import tempfile
+
+        # The design set is looked up by the container's stem, which a
+        # hand-named container like /tmp/vit_i8c.npue does not have. Ask the
+        # container where it came from and pick the set whose a_dtype agrees
+        # with the container's OWN operand dtype -- the same question
+        # classify.cpp asks, asked here so the gate measures the runtime rather
+        # than the naming.
+        stem = Path(cfg["source_repo"]).name
+        want_i8 = is_i8
+        arts = []
+        for d in (REPO / "runtime" / "artifacts").glob(stem + "*"):
+            for sub in sorted(d.glob("artifacts_npu*")):
+                dj = sub / "gemm_rtp" / "design.json"
+                if not dj.is_file():
+                    continue
+                a8 = json.loads(dj.read_text()).get("a_dtype", "").lower() == "i8"
+                if a8 == want_i8:
+                    arts.append(str(sub))
+        extra = ["--artifacts", arts[0]] if arts else []
+        if not arts:
+            print(f"   --    no design set for {stem} at a_dtype="
+                  f"{'i8' if want_i8 else 'bf16'}; the runtime will fall back to "
+                  f"its own lookup and may refuse to start")
+
+        with tempfile.TemporaryDirectory() as td:
+            paths = []
+            for i, im in enumerate(images):
+                p = Path(td) / f"img{i}.png"
+                im.save(p)
+                paths.append(p)
+            worst_top1, worst_ratio = 1.0, 0.0
+            for i, p in enumerate(paths):
+                out = subprocess.run([str(exe), "classify", args.container,
+                                      str(p), "--json", *extra],
+                                     capture_output=True, text=True)
+                try:
+                    # `classify --json` prints ONE OBJECT PER IMAGE, so the
+                    # document is an array even for a single path. That is the
+                    # CLI's shape and it is not the endpoint's: the endpoint
+                    # answers a bare object for its one `image` part, and
+                    # verify_serve_dispatch is what holds the two together.
+                    doc = json.loads(out.stdout)
+                    got = doc[0] if isinstance(doc, list) else doc
+                    assert "label" in got and "p" in got, list(got)[:8]
+                except Exception as e:
+                    report(False, "`classify --json` answers one object",
+                           f"-> {e}: {out.stdout[:200]!r} {out.stderr[-300:]!r}")
+                    break
+                want_lab = int(np.argmax(want[i]))
+                same = int(got["label"]) == want_lab
+                worst_top1 = min(worst_top1, float(same))
+                got_p, ref_p = float(got["p"]), float(np.exp(want[i] - want[i].max()).max())
+                worst_ratio = max(worst_ratio, ref_p / max(got_p, 1e-12))
+                print(f"   image {i}: runtime says {got['name']!r} at p={got_p:.3f}, "
+                      f"transformers says {labels[want_lab]!r} at "
+                      f"p={ref_p:.3f}  {'OK' if same else 'MISMATCH'}")
+            report(worst_top1 == 1.0,
+                   "the runtime's top-1 agrees with transformers",
+                   "" if worst_top1 == 1.0
+                   else f"{int((1 - worst_top1) * len(paths))} of "
+                        f"{len(paths)} disagreed")
+            report(worst_ratio <= 2.0,
+                   "and it is as CONFIDENT as transformers, not just as correct",
+                   f"worst p ratio {worst_ratio:.3f} against 2.0")
+
     r.close()
     print()
     if _failures:

@@ -144,9 +144,19 @@ def fixture() -> bytes | None:
 
 
 def audio_fixture() -> Path | None:
+    """A WAV to upload, or None.
+
+    jfk.wav -- 11 s of speech, 16 kHz mono 16-bit -- is what the reader accepts
+    unchanged, and it is SPEECH rather than a tone: this gate checks that the
+    endpoint accepts the upload and answers with a `text` field, and a 440 Hz
+    sine establishes neither that the audio path works nor that the model was
+    given something to transcribe. Looked for beside the repository first, then
+    in the home directory, so a machine that has it does not need a copy made.
+    """
     for cand in (
-        Path("/tmp/opencode/speech16k.wav"),
-        REPO / "tests" / "data" / "speech16k.wav",
+        Path.home() / "jfk.wav",
+        REPO / "tests" / "data" / "jfk.wav",
+        Path("/tmp/opencode/jfk.wav"),
     ):
         if cand.exists():
             return cand
@@ -462,7 +472,8 @@ def check_no_threshold_leak(srv: Server, path: str, jpeg: bytes) -> None:
            f"-> {again_thr} / {again_n} people, was {base_thr} / {base_n}")
 
 
-def check_cli_agreement(srv: Server, exe: Path, arch: str, jpeg: bytes) -> None:
+def check_cli_agreement(srv: Server, exe: Path, arch: str, jpeg: bytes,
+                        wav: Path | None = None) -> None:
     """The endpoint's answer and the CLI's, from the same emitter.
 
     The two are compared rather than trusted because they are two callers of one
@@ -476,8 +487,36 @@ def check_cli_agreement(srv: Server, exe: Path, arch: str, jpeg: bytes) -> None:
         note("skipped: verify_endpoint.py compares this endpoint against --embed")
         return
     if arch == "whisper":
-        note("skipped: this compares a JSON object and a transcript string, "
-             "which verify_whisper_cli.py covers on the CLI side")
+        # Not skipped. The transcript is a plain string rather than an object,
+        # but "the endpoint and the CLI say the same words" is exactly as
+        # checkable, and it is the check that catches a per-request field the
+        # endpoint applies and the CLI does not -- `language` is the one that
+        # bites, since transcribing a foreign language with the wrong one is a
+        # different sentence rather than a different number.
+        out = subprocess.run([str(exe), "transcribe", ARCHES[arch]["container"],
+                              str(wav or "/dev/null"), "--json"],
+                             capture_output=True, text=True)
+        try:
+            cli = json.loads(out.stdout)
+        except Exception as e:
+            report(False, "`transcribe --json` answers one object", f"-> {e}")
+            return
+        body, ctype = multipart([upload("file", "a.wav", (wav or Path("/dev/null")).read_bytes())])
+        status, raw = post(srv.base + path, body, ctype)
+        if not report(status == 200, "the endpoint answers 200",
+                      "" if status == 200 else f"-> {status}: {raw[:200]!r}"):
+            return
+        srv_d = json.loads(raw)
+        report(cli["text"] == srv_d.get("text"),
+               "the endpoint and the CLI transcribe to the same words",
+               "" if cli["text"] == srv_d.get("text") else
+               f"-> cli {cli['text'][:90]!r} vs endpoint {str(srv_d.get('text'))[:90]!r}")
+        report(cli["language"] == "en" and bool(cli["text"].strip()),
+               "and the transcript is not empty",
+               "" if cli["text"].strip() else "-> empty")
+        # Empty-but-200 is the failure worth naming: a WAV reader that accepted
+        # the header and then found no samples answers with an empty string and
+        # no error, which a shape check calls a pass.
         return
     if arch == "classify":
         out = subprocess.run([str(exe), "classify", ARCHES[arch]["container"],
@@ -598,7 +637,12 @@ def main() -> int:
             if spec["path"] in ("/v1/classify", "/v1/pose"):
                 check_image_refusals(srv, spec["path"], jpeg)
                 check_no_threshold_leak(srv, spec["path"], jpeg)
-                check_cli_agreement(srv, exe, name, jpeg)
+            # Every architecture that produces an answer, not just the image two:
+            # the whisper case used to be a note saying it was somebody else's
+            # gate's business, which is true of the WORDS and false of the
+            # agreement between two callers of the same session.
+            if spec["path"] != "/v1/embeddings":
+                check_cli_agreement(srv, exe, name, jpeg, wav)
         finally:
             srv.stop()
 

@@ -76,8 +76,6 @@ struct EncoderStreams {
 struct Operand {
   size_t slot = 0;
   const float *bias = nullptr;
-  const float *wscale = nullptr;   // int8 only: per OUTPUT channel
-  const float *asmooth = nullptr;  // int8 only: per INPUT channel
 };
 
 class VitEncoder {
@@ -120,13 +118,17 @@ private:
       f(r0, std::min<int64_t>(n, r0 + streams_.rows));
   }
 
-  // One GEMM, routed on the container's operand dtype. The two branches are the
-  // two functions in npue::whisper::NpuGemm and nothing else -- a third call
-  // site for "dispatch a GEMM" is a third place for the operand dtype to be
-  // decided, which is exactly what went wrong when the packer and the design
-  // disagreed about int8.
-  void gemm1(size_t instr, const float *a, int64_t n_real, int64_t k,
-             const Operand &w, int64_t n, float *out);
+  // There is deliberately NO gemm1() here. A ViT-specific wrapper around
+  // NpuGemm::run() existed once, branching on the container's operand dtype and
+  // calling run_i8() itself; it was the one call site outside NpuGemm::run()
+  // that had to know about int8, and it got the SmoothQuant direction wrong --
+  // it passed the container's asmooth where run_i8 documents 1/asmooth, so every
+  // ViT activation was divided by s instead of by 1/s, the product came out as
+  // X @ W * asmooth^2, and the classifier answered confidently and wrongly
+  // (bus.jpg: 'water jug' at p=0.019 where fp32 says 'minibus' at p=0.629).
+  // run() already routes on the datapath and already holds the per-operand
+  // scales against the B slot, so the five call sites below say run() and the
+  // dtype is decided in exactly one place.
 
   npue::File &model_;
   npue::whisper::NpuGemm g_;

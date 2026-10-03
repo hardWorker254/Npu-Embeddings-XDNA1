@@ -77,8 +77,10 @@ size_t VitEncoder::stage_all() {
     out.slot = g_.stage_operand(model_, name);
     out.bias = model_.raw(name + ".bias").as<float>();
     if (int8_) {
-      // The sidecars are NOT optional. An I8 panel with no per-channel scale is
-      // not a weight at a different precision; it is a number 1e-4 of the right
+      // The sidecars are NOT optional, and this check stays even though the
+      // scales themselves are no longer read here: stage_operand() takes them
+      // for its own OpScale, and an I8 panel with no per-channel scale is not a
+      // weight at a different precision -- it is a number 1e-4 of the right
       // size, and the failure is a plausible classifier rather than a crash.
       for (const char *suffix : {".wscale", ".asmooth"})
         if (!model_.has(name + suffix))
@@ -86,8 +88,6 @@ size_t VitEncoder::stage_all() {
               name + " is I8 but " + name + suffix +
               " is not in the container -- its bytes carry no scale, so they "
               "are not a weight. Repack with tools/pack/pack_npue.py --int8.");
-      out.wscale = model_.raw(name + ".wscale").as<float>();
-      out.asmooth = model_.raw(name + ".asmooth").as<float>();
     }
     // The STAGED size, not the stored one: an I4 payload is half-width, so
     // raw().bytes would under-count it by two and the total this function
@@ -164,16 +164,6 @@ void VitEncoder::reset_timers() {
   g_.t_convert = 0.0;
 }
 
-void VitEncoder::gemm1(size_t instr, const float *a, int64_t n_real, int64_t k,
-                       const Operand &w, int64_t n, float *out) {
-  if (!int8_) {
-    g_.run(instr, a, n_real, streams_.rows, k, w.slot, w.bias, n, out);
-    return;
-  }
-  g_.run_i8(instr, a, n_real, streams_.rows, k, w.slot, w.bias, n, out,
-            w.wscale, w.asmooth);
-}
-
 std::vector<float> VitEncoder::run(const std::vector<float> &patches) {
   const int64_t d = geom_.d_model, inter = geom_.intermediate;
   const int64_t rows = streams_.rows;
@@ -199,8 +189,8 @@ std::vector<float> VitEncoder::run(const std::vector<float> &patches) {
     int64_t done = 0;
     while (done < geom_.n_patches) {
       const int64_t n = std::min<int64_t>(rows, geom_.n_patches - done);
-      gemm1(streams_.attn_out, patches.data() + done * geom_.patch_dim, n,
-            geom_.patch_dim, patch_, d, patch_out.data());
+      g_.run(streams_.attn_out, patches.data() + done * geom_.patch_dim, n, rows,
+             geom_.patch_dim, patch_.slot, patch_.bias, d, patch_out.data());
       done += n;
     }
   }
@@ -256,7 +246,8 @@ std::vector<float> VitEncoder::run(const std::vector<float> &patches) {
       std::copy(x.begin() + r0 * d, x.begin() + r1 * d, norm.begin());
       npue::whisper::layernorm_rows(norm.data(), n, d, ln1_gamma[L], ln1_beta[L],
                                     geom_.ln_eps, pool_);
-      gemm1(streams_.qkv, norm.data(), n, d, qkv_[L], 3 * d, qkv_chunk.data());
+      g_.run(streams_.qkv, norm.data(), n, rows, d, qkv_[L].slot, qkv_[L].bias,
+           3 * d, qkv_chunk.data());
       std::copy(qkv_chunk.begin(), qkv_chunk.begin() + n * 3 * d,
                 qkv_all.begin() + r0 * 3 * d);
     });
@@ -271,8 +262,8 @@ std::vector<float> VitEncoder::run(const std::vector<float> &patches) {
                               pool_);
     chunks(geom_.n_pos, [&](int64_t r0, int64_t r1) {
       const int64_t n = r1 - r0;
-      gemm1(streams_.attn_out, ctx.data() + r0 * d, n, d, ao_[L], d,
-            proj.data());
+      g_.run(streams_.attn_out, ctx.data() + r0 * d, n, rows, d, ao_[L].slot,
+           ao_[L].bias, d, proj.data());
       for (int64_t i = 0; i < n * d; ++i)
         x[r0 * d + i] += proj[static_cast<size_t>(i)];
     });
@@ -283,10 +274,12 @@ std::vector<float> VitEncoder::run(const std::vector<float> &patches) {
       std::copy(x.begin() + r0 * d, x.begin() + r1 * d, norm.begin());
       npue::whisper::layernorm_rows(norm.data(), n, d, ln2_gamma[L], ln2_beta[L],
                                     geom_.ln_eps, pool_);
-      gemm1(streams_.ffn_up, norm.data(), n, d, fu_[L], inter, up.data());
+      g_.run(streams_.ffn_up, norm.data(), n, rows, d, fu_[L].slot, fu_[L].bias,
+           inter, up.data());
       npue::whisper::gelu_erf_inplace(up.data(), static_cast<size_t>(n * inter),
                                        pool_);
-      gemm1(streams_.ffn_down, up.data(), n, inter, fd_[L], d, down.data());
+      g_.run(streams_.ffn_down, up.data(), n, rows, inter, fd_[L].slot,
+           fd_[L].bias, d, down.data());
       for (int64_t i = 0; i < n * d; ++i)
         x[r0 * d + i] += down[static_cast<size_t>(i)];
     });
