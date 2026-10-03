@@ -115,6 +115,14 @@ TOOLSET = [
     ("verify_endpoint", "verify/verify_endpoint.py",
      "the endpoint driven by the official OpenAI client",
      ("numpy", "openai", "runtime")),
+    # No third-party requirements: stdlib urllib only, and it starts and stops the
+    # server itself. In the same tier as verify_endpoint because it answers a
+    # question ABOUT that endpoint -- which container answers on which path -- and
+    # that gate only ever looks at one of the four.
+    ("verify_serve_dispatch", "verify/verify_serve_dispatch.py",
+     "serve's four endpoints: each container answers for its own path and refuses "
+     "the rest, and the image endpoints refuse rather than fall back",
+     ("runtime",)),
     ("verify_npue_nomic", "verify/verify_npue_nomic.py",
      "the arch=2 gate for the nomic container",
      ("numpy", "container", "reference")),
@@ -255,7 +263,11 @@ GATE_TIERS = {
     "npu": ("verify_design_numerics", "verify_whisper_model"),
     "whisper": ("verify_whisper_tokenizer", "verify_whisper_features",
                 "verify_whisper_cli", "verify_whisper"),
-    "release": ("verify_semantics", "verify_tail", "verify_endpoint"),
+    # verify_serve_dispatch is here rather than under "release" because it needs no
+    # openai client and no human transcript: it starts and stops its own servers.
+    # What it does need is the built binary, so it is not in "cheap".
+    "release": ("verify_semantics", "verify_tail", "verify_endpoint",
+                "verify_serve_dispatch"),
 }
 # The order a gate list is printed and run in. Cheapest and most local first:
 # a container fault is cheaper to find here than as a wrong embedding later.

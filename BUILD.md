@@ -319,6 +319,12 @@ python tools/verify/verify_tail.py
 # the endpoint, driven by the official OpenAI client
 runtime\build\npuembeddings.exe . --artifacts artifacts_b128il --pipeline 2 --serve 8420
 & ".\.venv-ref\Scripts\python.exe" tools/verify/verify_endpoint.py --port 8420
+
+# the DISPATCH: `serve` is one verb and the arch picks the endpoint, so this
+# starts each of the four servers itself, requires each to answer for its own
+# path and refuse the other three, and compares the two image endpoints against
+# their CLI. Stdlib only, and it skips an architecture whose container is absent.
+python tools\verify\verify_serve_dispatch.py
 ```
 
 Expected: `1-cos` ≈ 1.086e-05 against the reference.

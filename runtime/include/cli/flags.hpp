@@ -8,7 +8,9 @@
 #ifndef NPU_CLI_FLAGS_HPP
 #define NPU_CLI_FLAGS_HPP
 
+#include <cctype>
 #include <cstddef>
+#include <cstdlib>
 #include <string>
 
 namespace app {
@@ -59,8 +61,7 @@ namespace app {
 // table, or if the table names a flag nothing reads. The grep that regenerates
 // this list by hand:
 //
-//   grep -rhoE '"--[a-z0-9-]+"' runtime/src runtime/include \
-//     | sort -u
+//   grep -rhoE '"--[a-z0-9-]+"' runtime/src runtime/include | sort -u
 //
 // The two flags with an arity above one are the probes that name two design
 // directories or a directory plus two numbers.
@@ -106,10 +107,6 @@ inline int flag_arity(const std::string &a) {
       // Diagnostic: dump every graph node's output for a node-by-node diff
       // against tools/verify/verify_pose.py. See pose_mode.hpp.
       {"--pose-dump", 1},
-      // The pose endpoint's port. A SEPARATE flag from --serve because that one
-      // is the embedding endpoint's: same arity, same reader, different mode,
-      // and a container's arch picks which of the two a given model reaches.
-      {"--pose-server", 1},
       {"--token", 1},
       // -- REFUSED BY NAME, not accepted. Listed so that CLI::parse() lets them
       // through to refuse_removed_op_flags / refuse_exporter_only_flags, whose
@@ -130,6 +127,44 @@ inline bool flag_is_known(const std::string &a) { return flag_arity(a) >= 0; }
 // one-off two-character special case reads more clearly here than it does as a
 // row whose every sibling starts with "--".
 inline bool flag_is_known_short(const std::string &a) { return a == "-h"; }
+
+// --serve, read ONCE, for every architecture that has an endpoint.
+//
+// ONE reader, three callers: the embedding endpoint (run_execute.hpp), the speech
+// endpoint (stt_mode.hpp) and the image endpoints (vit_mode.hpp, pose_mode.hpp).
+// Three hand-written scans of the same two flags is how `--serve` with no port
+// came to mean port 0 in the speech mode: std::atoi("") is 0, and 0 is a legal
+// request to bind(), so `npuembeddings <root> --model m.npue --serve` started,
+// printed its usual banner and listened on an ephemeral port it never named.
+// The default below is 8080, which is what `serve` has always documented.
+//
+// The grammar is deliberately the loose one `serve` has always accepted:
+// `--serve [PORT]`, where PORT is the next argument and only if it starts with a
+// digit. `--serve=8080` is not accepted, because nothing has ever documented it.
+//
+// `from` is the first argv index to read, because the callers do not all pass the
+// same slice: the arch modes read from 1 (argv[0] is the executable, argv[1] the
+// root) and the embedding path has always started at 2. Neither can be the index
+// of `--serve` in either form, so the argument is bookkeeping, not policy.
+//
+// It lives here rather than in cli.hpp because cli.hpp includes the catalogue, the
+// hub and the tokenizer facade, and a header read by three mode headers should not
+// drag all of that in behind it.
+inline bool read_serve(int argc, char *const *argv, int &port,
+                       std::string &bind_addr, int from = 1) {
+  port = 8080;
+  bind_addr = "127.0.0.1";
+  bool found = false;
+  for (int i = from; i < argc; ++i) {
+    if (std::string(argv[i]) != "--serve") continue;
+    found = true;
+    if (i + 1 < argc && std::isdigit(static_cast<unsigned char>(argv[i + 1][0])))
+      port = std::atoi(argv[++i]);
+  }
+  for (int i = from; i + 1 < argc; ++i)
+    if (std::string(argv[i]) == "--bind") bind_addr = argv[i + 1];
+  return found;
+}
 
 }  // namespace app
 

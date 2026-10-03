@@ -344,23 +344,36 @@ is research rather than wiring.
 | Command | What it does |
 |---|---|
 | `list` | every model this build can run, and which are installed |
-| `serve <model>` | OpenAI-shaped `POST /v1/embeddings`; downloads the model if needed |
+| `serve <model>` | the HTTP endpoint for whatever the container is; downloads the model if needed |
 | `embed <model> <in.txt> [out.f32]` | embed a text file, one text per line |
 | `transcribe <model> <audio.wav>` | transcribe 16 kHz audio with a Whisper model; the transcript alone on stdout |
 | `classify <model> <image>` | image classification (arch=5); `--top-k` prints the runners-up to stderr |
 | `pose <model> <image...>` | body pose (arch=6); MediaPipe-shaped JSON on stdout, `--text` for a human summary |
-| `pose-server <model>` | the same model as `POST /v1/pose`; see the pose section |
 | `add <org/model> [<sha256>]` | register a model this build does not know (a finetune) |
 | `tokenize` | tokenizer round-trip, for debugging |
 
-`serve` and `transcribe` are the same command for two different architectures:
-a Whisper container is served by the STT mode off the same flags, answers
-`POST /v1/audio/transcriptions` instead of `/v1/embeddings`, and refuses
-`--npu-extra-ops conv` rather than ignoring it. The mode is picked by the container's
-`arch`, never by a flag.
+### One verb, four endpoints
 
-`pose-server` is a **separate verb** rather than `pose --serve` for the same
-reason: `serve` is the embedding endpoint, and a pose model has no embedding.
+`serve` is the only verb that opens a socket, and the container's `arch` picks
+which endpoint answers:
+
+| arch | model | endpoint |
+|---|---|---|
+| 1, 2, 3 | BERT-family text | `POST /v1/embeddings` |
+| 4 | Whisper | `POST /v1/audio/transcriptions` |
+| 5 | ViT classifier | `POST /v1/classify` |
+| 6 | YOLOv8-pose | `POST /v1/pose` |
+
+The modes are dispatched on `arch` in `runtime/src/runtime.cpp` before `--serve`
+is ever read, so no two of them can meet and no flag chooses between them. A path
+that belongs to another architecture is a 404 that names the right one — never
+another endpoint's answer. `--npu-extra-ops conv` is refused by the modes that
+have no convolutions rather than ignored.
+
+This was not always one verb: pose arrived with a `pose-server` subcommand and
+the classifier refused `--serve` outright with "there is no endpoint for it". The
+refusal was honest and it was also an inconsistency — `serve` is the verb, so an
+architecture that refuses it is one a user discovers by typing.
 
 ### Options for `serve` / `embed`
 
@@ -648,6 +661,45 @@ rather than discarded.
 `--arch 1` is `npu1`. `--arch 2` targets a different board (8 AIE columns) and
 cannot be built or run on a one-NPU machine.
 
+### The classify endpoint
+
+`npuembeddings serve vit-base-patch16-224` answers `POST /v1/classify`, and the
+answer is **the same bytes** `classify --json` prints — both call
+`npue::vit::prediction_json`.
+
+```bash
+./runtime/build/npuembeddings serve models/vit-base-patch16-224.npue --port 8080
+
+curl -s -F image=@photo.jpg localhost:8080/v1/classify
+# {"image": "photo.jpg", "label": 654, "name": "minibus", "p": 0.629018188,
+#  "front_end_s": 0.020288158, "encoder_s": 0.252298374,
+#  "head_s": 0.000773930999, "dispatches": 49}
+
+curl -s -F image=@photo.jpg -F top_k=3 localhost:8080/v1/classify
+# ... "top_k": [{"label": 654, "p": 0.629018189},
+#               {"label": 874, "p": 0.177649605},
+#               {"label": 829, "p": 0.079892135}] ...
+
+curl -s localhost:8080/v1/labels     # the whole 1000-name vocabulary
+```
+
+`top_k` is the number of labels asked for, and it is the only per-request knob:
+there is no per-request model selection and no batch, because one image is one
+request. `top_k` above the vocabulary is **capped rather than refused** —
+`top_k=5000` on a 1000-label model is a request for everything, not a mistake —
+and `top_k` below 1 or not an integer is a 400, because answering "the top 0
+labels" with an empty array looks like a model that recognised nothing.
+
+`GET /v1/labels` returns all 1000 names and not a page of them: a partial list
+would make some ids silently unnameable. It exists so a client can turn a `label`
+into a `name` without shipping the container's `labels.table` itself.
+
+One field is named for what it is rather than for what a reader wants:
+`/health` reports `dispatches_so_far`, not `dispatches_per_image`. It is the
+encoder's running counter, so it reads 0 on a freshly started server and 49 after
+one request; calling it "per image" would report 0 for a model that in fact costs
+49 dispatches.
+
 ### What runs where
 
 | | on the NPU | on the host |
@@ -699,6 +751,11 @@ Read this before quoting the table above as a result.
   measurement in this repository exists above seq 64, and this container has 197
   positions.
 - **`npu2` is untested.** No second board was available.
+- **The classify endpoint has no load test and no concurrent clients.** Every
+  `/v1/classify` number here is a single sequential request. It serves one at a
+  time by design (one `Session`, one pool), so the untested thing is not
+  concurrency but throughput: no requests-per-second figure has been taken for
+  any of the four endpoints.
 
 ---
 
@@ -784,12 +841,12 @@ the per-layer numbers behind them.
 
 ### The pose endpoint
 
-`npuembeddings pose-server <model> --port 8080` serves the same model over HTTP,
-and the answer is **the same bytes** the CLI prints — both call
+`npuembeddings serve <model> --port 8080` serves the same model over HTTP at
+`POST /v1/pose`, and the answer is **the same bytes** the CLI prints — both call
 `npue::pose::result_json`, so the endpoint and `--json` cannot drift.
 
 ```bash
-./runtime/build/npuembeddings pose-server models/yolov8n-pose.npue --port 8080
+./runtime/build/npuembeddings serve models/yolov8n-pose.npue --port 8080
 
 curl -s localhost:8080/health
 # {"status":"ok","model":"yolov8n-pose",...,"kind":"pose","engine":"host",
@@ -804,11 +861,12 @@ curl -s -F image=@photo.jpg -F conf=0.4 -F iou=0.6 localhost:8080/v1/pose
 decided by magic bytes, not by the filename) and optional `conf`, `iou`, `kpt`,
 `max_det`. Also `GET /v1/models`.
 
-It is a **separate verb**, not `pose --serve`, because `serve` is the
-OpenAI-shaped *embedding* endpoint and a pose model has no embedding: reusing it
-would mean `/v1/embeddings` answering with landmarks, a shape no client on
-either side expects. Two verbs keep the URL space honest. `pose --serve` refuses
-and says so.
+The verb is `serve`, the same one every architecture uses — see
+[One verb, four endpoints](#one-verb-four-endpoints). What keeps the URL space
+honest is not a second verb but the second **path**: `/v1/embeddings` is
+embeddings and `/v1/pose` is pose, and neither answers for the other. A pose
+container asked for `/v1/embeddings` gets a 404 that names `/v1/pose` and lists
+all four endpoints, not landmarks under the wrong name.
 
 What it refuses, and why each refusal is there rather than a fallback:
 
@@ -842,7 +900,7 @@ hardware has.
 ### The Python facade
 
 `python/npue_pose.py` is a MediaPipe-shaped API over the same binary. It has no
-numerics of its own: it runs `npuembeddings pose` (or POSTs to `pose-server`)
+numerics of its own: it runs `npuembeddings pose` (or POSTs to `npuembeddings serve`)
 and parses that JSON, so there is exactly one place a keypoint is computed.
 
 ```python
@@ -858,7 +916,7 @@ with PoseLandmarker.create_from_options(PoseLandmarkerOptions(
 ```
 
 Two backends: `cli` (default — one process per `detect`, nothing needs to be
-running) and `http` (a `pose-server` child started on first use and stopped by
+running) and `http` (a `serve` child started on first use and stopped by
 `close()`; that is what a video loop wants, and it is why the second detect on
 `bus.jpg` costs 0.30 s rather than a second model load). Both return the same
 object — verified identical landmark-for-landmark.

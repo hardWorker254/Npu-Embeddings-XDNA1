@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -231,6 +232,70 @@ Prediction Session::classify(const npue::vit::Image &im) {
 
 Prediction Session::classify_file(const std::string &path) {
   return classify(decode_image(path));
+}
+
+std::string prediction_json(const Prediction &p, const std::string &label_name,
+                            const std::string &image_label, int64_t top_k) {
+  // A label name comes out of the container's own labels.table and is therefore
+  // NOT trusted to be JSON-safe: a fine-tuned classifier's classes are whatever
+  // the trainer typed, and a name with a quote in it would otherwise produce a
+  // document no parser accepts. Escaped here rather than at the call site, once.
+  auto esc = [](const std::string &s) {
+    std::string o;
+    for (char c : s) {
+      if (c == '"' || c == '\\') { o.push_back('\\'); o.push_back(c); continue; }
+      if (c == '\n') { o += "\\n"; continue; }
+      if (c == '\r') { o += "\\r"; continue; }
+      if (c == '\t') { o += "\\t"; continue; }
+      if (static_cast<unsigned char>(c) < 0x20) { o += ' '; continue; }
+      o.push_back(c);
+    }
+    return o;
+  };
+  // %.9g rather than std::to_string: the old emitter printed a float through
+  // std::to_string, which is six DECIMAL PLACES, so a top-1 of 0.9999997 was
+  // printed as "1.000000" and read as a certainty the model did not have. Nine
+  // significant digits is still far more than a softmax carries and is what the
+  // pose emitter uses.
+  char num[64];
+  auto pnum = [&](double v) {
+    std::snprintf(num, sizeof num, "%.9g", v);
+    return std::string(num);
+  };
+
+  std::string o = "{\"image\": \"" + esc(image_label) + "\", \"label\": " +
+                  std::to_string(p.label) + ", \"name\": \"" + esc(label_name) +
+                  "\", \"p\": " + pnum(p.top1);
+  if (top_k > 1 && !p.logits.empty()) {
+    // The RUNNERS-UP, by the same argmax the label came from, and out of the
+    // SAME softmax -- so their probabilities sum with `p` to 1 rather than being
+    // three independently normalised numbers.
+    const float mx = *std::max_element(p.logits.begin(), p.logits.end());
+    double sum = 0.0;
+    for (float v : p.logits) sum += std::exp(static_cast<double>(v) - mx);
+    std::vector<size_t> order(p.logits.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    const size_t want = std::min<size_t>(
+        static_cast<size_t>(top_k), order.size());
+    std::partial_sort(order.begin(), order.begin() + static_cast<long>(want),
+                      order.end(),
+                      [&](size_t a, size_t b) { return p.logits[a] > p.logits[b]; });
+    o += ", \"top_k\": [";
+    for (size_t i = 0; i < want; ++i) {
+      o += (i ? ", " : "");
+      o += "{\"label\": " + std::to_string(order[i]) + ", \"p\": " +
+           pnum(sum > 0.0 ? std::exp(static_cast<double>(
+                                     p.logits[order[i]]) - mx) / sum
+                          : 0.0) +
+           "}";
+    }
+    o += "]";
+  }
+  o += ", \"front_end_s\": " + pnum(p.front_end_s) +
+       ", \"encoder_s\": " + pnum(p.encoder_s) +
+       ", \"head_s\": " + pnum(p.head_s) +
+       ", \"dispatches\": " + std::to_string(p.n_dispatch) + "}";
+  return o;
 }
 
 }  // namespace npue::vit

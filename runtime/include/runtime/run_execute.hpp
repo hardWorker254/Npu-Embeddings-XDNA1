@@ -2,6 +2,7 @@
 #define NPUEMBEDDINGS_RUN_EXECUTE_HPP
 
 #include "runtime/run_setup.hpp"
+#include "cli/flags.hpp"          // read_serve
 #include "common/host_kernels.hpp"
 #include "server/embed_service.hpp"
 #include "server/embed_backend.hpp"
@@ -264,13 +265,13 @@ inline int maybe_serve(RunContext &ctx) {
   // parallelise inside a single request -- so concurrent request handling
   // would add contention and lock complexity to buy nothing. Throughput comes
   // from batching within a request, which is what an embeddings client does.
-  for (int i = 2; i < ctx.argc; ++i) if (std::string(ctx.argv[i]) == "--serve") {
-    int port = 8080;
-    if (i + 1 < ctx.argc && std::isdigit(static_cast<unsigned char>(ctx.argv[i + 1][0])))
-      port = std::atoi(ctx.argv[i + 1]);
-    std::string bind_addr = "127.0.0.1";
-    for (int k = 2; k < ctx.argc - 1; ++k)
-      if (std::string(ctx.argv[k]) == "--bind") bind_addr = ctx.argv[k + 1];
+  //
+  // read_serve() is the shared reader: the speech and pose endpoints read the
+  // same two flags through it, so the three cannot drift on what `--serve` with
+  // no port means.
+  int port = 8080;
+  std::string bind_addr = "127.0.0.1";
+  if (read_serve(ctx.argc, ctx.argv, port, bind_addr, 2)) {
 
     // --prefix is a PROCESS-WIDE setting and `serve` no longer has one
     // (tasks/0118). Refusing beats ignoring: a script that used to pin a

@@ -43,11 +43,13 @@
 #include <string>
 #include <vector>
 
+#include "cli/flags.hpp"          // read_serve
 #include "common/design_selection.hpp"
 #include "common/host_kernels.hpp"
 #include "common/hub.hpp"
 #include "common/npu_ops_flag.hpp"   // parse_npu_ops, refuse_removed_op_flags
 #include "runtime/device.hpp"        // npu::set_bo_mode, survey_contexts
+#include "server/vit_backend.hpp"    // serve_vit -- POST /v1/classify
 #include "vit/classify.hpp"
 
 namespace app {
@@ -68,10 +70,24 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
 
   refuse_removed_op_flags(argc, argv);
   refuse_exporter_only_flags(argc, argv);
+  // The LAST occurrence wins, not the first. `npuembeddings serve <model>` puts
+  // its own --threads 24 in the store BEFORE forward_common() appends whatever
+  // the user typed, so the reader that took the first match silently answered
+  // `serve <whisper> --threads 8` with 24 threads. Nothing on the command line
+  // said 24, so the run looked exactly like the one that was asked for and was
+  // half again as slow.
+  //
+  // Last-wins is the right rule for these modes specifically because they are the
+  // ones the `serve` verb injects defaults into; every other flag here is either
+  // absent or typed once, where first and last are the same entry. The REPEATED
+  // flags of this binary -- --classify and --pose -- do not come through this
+  // lambda at all: they are accumulated by the loops below, which is why they can
+  // legitimately repeat.
   auto flag = [&](const char *name) {
+    std::string v;
     for (int i = 1; i < argc - 1; ++i)
-      if (std::string(argv[i]) == name) return std::string(argv[i + 1]);
-    return std::string();
+      if (std::string(argv[i]) == name) v = argv[i + 1];
+    return v;
   };
   auto has = [&](const char *name) {
     for (int i = 1; i < argc; ++i)
@@ -137,24 +153,32 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
   const bool json = has("--json");
   const bool topk = has("--top-k");
 
+  // --serve PORT: the HTTP endpoint, read through the SHARED reader with the
+  // other three. It used to be refused outright -- "there is no endpoint for it"
+  // -- which was true and also an inconsistency: `serve` is the verb, the
+  // container's arch picks the endpoint, and an arch that refuses the verb is
+  // one a user discovers by typing. It answers POST /v1/classify, and the answer
+  // is the same object `classify --json` prints (npue::vit::prediction_json).
+  int serve_port = 8080;
+  std::string serve_bind = "127.0.0.1";
+  const bool serving = app::read_serve(argc, argv, serve_port, serve_bind);
+
   // -- the images, all of them given as --classify. run_classify() writes one
-  // --classify per path, so a multi-image request and a single-image one are
-  // the same command with a repeated flag -- and there is no positional
-  // archaeology here to disagree with it about which argv slot is the model.
+  // --classify per path, so a multi-image request and a single-image one are the
+  // same command with a repeated flag -- and there is no positional archaeology
+  // here to disagree with it about which argv slot is the model. The check is
+  // conditional only because a server has no image on the command line: it is a
+  // different way of NAMING the same model, not a different mode.
   std::vector<std::string> images;
   for (int i = 1; i < argc - 1; ++i)
     if (std::string(argv[i]) == "--classify") images.push_back(argv[i + 1]);
-  if (images.empty())
+  if (images.empty() && !serving)
     throw std::runtime_error(
         "this is an image classifier, so say what to classify:\n"
         "    npuembeddings classify <model> <image.png> [more.png ...]\n"
+        "    npuembeddings serve <model>          (POST /v1/classify)\n"
         "  (it reads PNG and JPEG; anything else is refused rather than "
         "guessed at)");
-  if (std::getenv("NPU_EMBEDDINGS_SERVE"))
-    throw std::runtime_error(
-        "--serve is an EMBEDDING endpoint and an image classifier has no "
-        "embedding to serve. This mode answers one image per request and there "
-        "is no endpoint for it; drop --serve.");
 
   const int threads = std::max(1, std::atoi(flag("--threads").empty()
                                                  ? "16"
@@ -332,26 +356,31 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
                "predicted.\n",
                static_cast<long long>(g.n_pos));
 
+  // -- the HTTP endpoint --------------------------------------------------
+  //
+  // Handed the session it built and its own default top-k, which is 1 unless
+  // --top-k was given: the CLI's default JSON prints the argmax alone and the
+  // runners-up go to stderr, and the endpoint keeps that split rather than
+  // putting three numbers where one was being read.
+  if (serving)
+    return app::serve_vit(session, model_name, serve_port, serve_bind,
+                          topk ? session.geometry().num_labels : 1);
+
   // -- classify -------------------------------------------------------------
   int exit = 0;
   if (json) {
     std::string out = "[\n";
     for (size_t i = 0; i < images.size(); ++i) {
       npue::vit::Prediction p = session.classify_file(images[i]);
-      std::string e = "  {\"image\": \"";
-      for (char c : images[i]) {
-        if (c == '"' || c == '\\') e.push_back('\\');
-        if (c == '\n') { e += "\\n"; continue; }
-        e.push_back(c);
-      }
-      e += "\", \"label\": " + std::to_string(p.label) + ", \"name\": \"" +
-           session.labels()[static_cast<size_t>(p.label)] + "\", \"p\": " +
-           std::to_string(static_cast<double>(p.top1)) +
-           ", \"front_end_s\": " + std::to_string(p.front_end_s) +
-           ", \"encoder_s\": " + std::to_string(p.encoder_s) +
-           ", \"head_s\": " + std::to_string(p.head_s) +
-           ", \"dispatches\": " + std::to_string(p.n_dispatch) + "}";
-      out += e + (i + 1 < images.size() ? ",\n" : "\n");
+      // top_k is 1 here even under --top-k: --top-k prints the ranking to STDERR
+      // and this branch prints the object, and a `--json` consumer that suddenly
+      // found a top_k array would be a shape change nobody asked for. The
+      // endpoint's default is 1 for the same reason; only a request that names
+      // top_k gets the array.
+      out += "  " + npue::vit::prediction_json(
+                       p, session.labels()[static_cast<size_t>(p.label)],
+                       images[i], 1) +
+             (i + 1 < images.size() ? ",\n" : "\n");
     }
     out += "]\n";
     std::fputs(out.c_str(), stdout);

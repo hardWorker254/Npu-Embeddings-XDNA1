@@ -92,4 +92,21 @@ private:
   size_t staged_ = 0;
 };
 
+// ONE JSON spelling of a classification result, for both callers.
+//
+// `npuembeddings classify ... --json` and POST /v1/classify answer the same
+// object, byte for byte, because they call the same function. Same reasoning as
+// pose/result_json.hpp: the CLI's output is what a reader compares by eye and the
+// endpoint's is what a program parses, and two emitters would surface as "the
+// server and the CLI disagree" -- a question nobody can answer without diffing two
+// documents by hand.
+//
+// `top_k` is the number of RUNNERS-UP to include, so 1 means the argmax alone. 0 is
+// refused by the caller rather than here, because "the top 0 labels" is a
+// malformed request and an empty array is a valid answer to it.
+//
+// `image_label` is a label, not a path: the server has no path for an upload.
+std::string prediction_json(const Prediction &p, const std::string &label_name,
+                            const std::string &image_label, int64_t top_k);
+
 }  // namespace npue::vit

@@ -2,6 +2,7 @@
 #include "runtime/model.hpp"
 
 #include <csignal>
+#include <cstdio>
 
 namespace npue {
 namespace http {
@@ -37,6 +38,13 @@ int serve_http(const EmbedBackend &be, const std::string &model_id, int port,
     std::printf("  REQUIRED per request: \"prompt_name\", one of [%s] "
                 "(or \"\" for no prefix at all). A request without it is "
                 "400.\n\n", join_names(be.prompt_names).c_str());
+  // Flushed, not left to the buffer. Every status line above this one goes to
+  // stderr and is unbuffered, so this banner is the LAST thing a redirected log
+  // receives; without the flush it sits in a block buffer until 4 KiB of output
+  // accumulates, which for a server that then prints nothing means the log never
+  // shows the port at all. An operator tailing that log would conclude the
+  // process had not started. All four endpoints do this.
+  std::fflush(stdout);
 
   const size_t kMaxTexts = 2048;
   npue::http::Server server(static_cast<uint16_t>(port), bind_addr);
@@ -51,6 +59,13 @@ int serve_http(const EmbedBackend &be, const std::string &model_id, int port,
     if (req.method == "GET" && (req.path == "/health" || req.path == "/")) {
       body = "{\"status\":\"ok\",\"model\":\"" + model_id +
              "\",\"backend\":\"amd-xdna2-npu\"";
+      // `kind`, which the other three endpoints already report and this one did
+      // not. It is the field a client reads to decide WHICH parser to hand the
+      // answer to, and it was absent from exactly the one endpoint that has an
+      // official client -- so the official client's answer was the only one a
+      // generic dispatcher could not identify without guessing from the URL.
+      // Added, not replaced: every other field here is unchanged.
+      body += ",\"kind\":\"embeddings\"";
       if (!be.prompt_names.empty()) {
         body += ",\"prompt_names\":[";
         for (size_t i = 0; i < be.prompt_names.size(); ++i)
@@ -67,7 +82,13 @@ int serve_http(const EmbedBackend &be, const std::string &model_id, int port,
       return;
     }
     if (req.path != "/v1/embeddings") {
-      fail(404, "not_found", "unknown path " + req.path);
+      fail(404, "not_found",
+           "unknown path " + req.path +
+               " -- this model serves /v1/embeddings. "
+               "`npuembeddings serve <model>` picks the endpoint from the "
+               "container's arch: text models answer /v1/embeddings, Whisper "
+               "/v1/audio/transcriptions, a ViT /v1/classify and YOLOv8-pose "
+               "/v1/pose.");
       return;
     }
     if (req.method != "POST") {

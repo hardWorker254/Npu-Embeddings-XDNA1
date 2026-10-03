@@ -26,7 +26,8 @@ rather than discovered later:
   drawing code, the counting code -- works unchanged.
 
 The numbers themselves are the C++ runtime's, not Python's: this module runs
-``npuembeddings pose`` (or POSTs to ``npuembeddings pose-server``) and parses
+``npuembeddings pose`` (or POSTs to ``npuembeddings serve``, which answers
+``/v1/pose`` for a pose container) and parses
 the JSON that ``npue::pose::result_json`` writes. There is no second
 implementation of the network, the front end or the decoder, so the Python and
 the CLI cannot disagree about a keypoint by a rounding step -- there is only one
@@ -35,7 +36,7 @@ place the number is computed.
 TWO BACKENDS, AND WHY
 ---------------------
 ``backend="cli"`` (the default) runs the binary once per ``detect`` and needs
-nothing running. ``backend="http"`` keeps a ``pose-server`` child process alive
+nothing running. ``backend="http"`` keeps a ``serve`` child process alive
 and POSTs to it, which is what a video loop wants: the model is loaded once
 instead of once per frame. Both return the same object, from the same emitter.
 
@@ -236,6 +237,22 @@ class PoseResult:
         """Iterate the people, so ``for person in result`` reads like MediaPipe."""
         return iter(self.pose_landmarks)
 
+    def __getitem__(self, i):
+        """``result[0]`` is the first person, as in MediaPipe.
+
+        Present because ``__len__`` and ``__iter__`` without it produce an object
+        that looks indexable and raises TypeError on the first attempt -- and
+        ``result[0]`` is the single most idiomatic thing to write against a
+        landmarker result.
+
+        Slices come back as a plain list of the same landmark lists, and any index
+        a list accepts works here, including negatives, because it IS a list index
+        and nothing about this class has a reason to differ. Out of range raises
+        IndexError from the underlying list, which is the exception a caller
+        writing ``result[0]`` is already handling for every other sequence.
+        """
+        return self.pose_landmarks[i]
+
     @property
     def num_poses(self) -> int:
         return len(self.pose_landmarks)
@@ -250,7 +267,7 @@ class PoseLandmarkerOptions:
 
     ``container`` is the .npue path, or a model name the runtime's catalogue
     knows. ``backend`` is ``"cli"`` (one process per detect) or ``"http"`` (a
-    ``pose-server`` child, started on first use and stopped by ``close()``).
+    ``serve`` child, started on first use and stopped by ``close()``).
     ``num_poses`` caps the returned list the way MediaPipe's does, by sending
     ``max_det``; it is not a separate filter applied afterwards, because a filter
     applied afterwards would return the runtime's N-th best person rather than
@@ -432,7 +449,7 @@ def _image_bytes(image: Any) -> tuple[bytes, str]:
 
 
 class _Server:
-    """A ``pose-server`` child process, started lazily and stopped on close().
+    """A ``npuembeddings serve`` child, started lazily and stopped on close().
 
     A thread is not used and requests are not overlapped: the C++ server serves
     one request at a time by design (one Session, one pool), so a client that
@@ -462,7 +479,7 @@ class _Server:
             port = int(s.getsockname()[1])
             s.close()
         binary = find_binary(self.opts.binary or None)
-        cmd = [binary, "pose-server", self.opts.container,
+        cmd = [binary, "serve", self.opts.container,
                "--port", str(port), "--bind", self.opts.bind]
         if self.opts.threads:
             cmd += ["--threads", str(self.opts.threads)]
@@ -487,7 +504,7 @@ class _Server:
                 with open(self.log.name, "r", errors="replace") as f:
                     tail = f.read()[-4000:]
                 raise RuntimeError(
-                    f"pose-server exited immediately ({self.proc.returncode}):\n"
+                    f"`npuembeddings serve` exited immediately ({self.proc.returncode}):\n"
                     + tail
                 )
             try:
@@ -498,7 +515,7 @@ class _Server:
                 last = str(exc)
             time.sleep(0.1)
         raise TimeoutError(
-            f"pose-server did not answer /health within {seconds:.0f}s "
+            f"`npuembeddings serve` did not answer /health within {seconds:.0f}s "
             f"(last error: {last}). Its output is in {self.log.name}."
         )
 
@@ -525,7 +542,7 @@ class PoseLandmarker:
         if options.backend not in ("cli", "http"):
             raise ValueError(
                 f"backend is 'cli' or 'http', not {options.backend!r}. 'cli' "
-                "runs the binary per detect; 'http' keeps a pose-server child "
+                "runs the binary per detect; 'http' keeps a `serve` child "
                 "alive, which is what a video loop wants."
             )
         if options.num_poses < 1:
@@ -675,8 +692,8 @@ class PoseLandmarker:
             # RuntimeError to retry a server fault must not also retry "conf was
             # not a number", which is what one exception type would tell it.
             if 400 <= exc.code < 500:
-                raise ValueError(f"pose-server rejected the request: {msg}")
-            raise RuntimeError(f"pose-server failed ({exc.code}): {msg}")
+                raise ValueError(f"/v1/pose rejected the request: {msg}")
+            raise RuntimeError(f"/v1/pose failed ({exc.code}): {msg}")
         return _to_result(doc, timestamp_ms)
 
     # -- lifecycle ------------------------------------------------------------

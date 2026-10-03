@@ -12,14 +12,27 @@
 // what a program parses, and "the server and the CLI disagree" is not a bug
 // anybody can act on without first diffing two JSON documents by hand.
 //
-// WHY THIS IS A SEPARATE SUBCOMMAND AND NOT `--serve`
-// ---------------------------------------------------
-// `npuembeddings <embedder> --serve` is an OPENAI-shaped endpoint: JSON in,
-// vectors out, one process per model. A pose model has no embedding to serve,
-// and reusing the path would mean answering /v1/embeddings with landmarks -- a
-// response shape that satisfies no client on either side. `pose-server` is its
-// own verb so that the URL space stays honest: `/v1/embeddings` is embeddings
-// and `/v1/pose` is pose, and neither endpoint answers for the other.
+// WHY `serve` AND NOT A VERB OF ITS OWN
+// -------------------------------------
+// It was a `pose-server` subcommand, and the reasoning was that `serve` is an
+// OpenAI-shaped endpoint: JSON in, vectors out. That reasoning was half right. It
+// is right that /v1/embeddings must not answer with landmarks -- no client on
+// either side would accept that. It was wrong about the fix, because a subcommand
+// per architecture solves a problem the URL space never had: the path already says
+// what the answer is, and the container's arch says which mode runs. Whisper has
+// answered /v1/audio/transcriptions off the same `--serve` for years without
+// confusing anything.
+//
+// So there is ONE verb and FOUR endpoints, and `serve` is the only one to learn:
+//
+//   /v1/embeddings           arch 1,2,3   a BERT-family text model
+//   /v1/audio/transcriptions arch 4       Whisper
+//   /v1/classify             arch 5       a ViT classifier
+//   /v1/pose                 arch 6       YOLOv8-pose, this one
+//
+// The modes are dispatched on the container's arch in runtime.cpp, before `--serve`
+// is ever read, so no two of them can meet and no flag chooses between them. What
+// /v1/embeddings must NOT answer with is enforced by the path, not by a verb.
 //
 // WHAT IT REFUSES, AND WHY EACH ONE MATTERS
 // ------------------------------------------

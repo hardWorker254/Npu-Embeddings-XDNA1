@@ -93,6 +93,13 @@ int serve_pose(npue::pose::Session &session, const std::string &model_id,
               static_cast<long long>(g.input_size),
               static_cast<long long>(defaults.max_det),
               session.array() ? "array" : "host");
+  // Flushed, not left to the buffer. Every status line above this one goes to
+  // stderr and is unbuffered, so this banner is the LAST thing a redirected log
+  // receives; without the flush it sits in a block buffer until 4 KiB of output
+  // accumulates, which for a server that then prints nothing means the log never
+  // shows the port at all. An operator tailing that log would conclude the
+  // process had not started. All four endpoints do this.
+  std::fflush(stdout);
 
   npue::http::Server server(static_cast<uint16_t>(port), bind_addr);
   server.run([&](const npue::http::Request &req, int &status, std::string &ctype,
@@ -124,7 +131,11 @@ int serve_pose(npue::pose::Session &session, const std::string &model_id,
     if (req.path != "/v1/pose") {
       fail(404, "not_found",
            "unknown path " + req.path +
-               " -- this model serves /v1/pose, not /v1/embeddings");
+               " -- this model serves /v1/pose, not /v1/embeddings. "
+               "`npuembeddings serve <model>` picks the endpoint from the "
+               "container's arch: text models answer /v1/embeddings, Whisper "
+               "/v1/audio/transcriptions, a ViT /v1/classify and YOLOv8-pose "
+               "/v1/pose.");
       return;
     }
     if (req.method != "POST") {

@@ -58,6 +58,7 @@
 #include <string>
 #include <vector>
 
+#include "cli/flags.hpp"          // read_serve
 #include "common/design_selection.hpp"
 #include "common/host_kernels.hpp"
 #include "common/hub.hpp"
@@ -85,10 +86,24 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
 
   refuse_removed_op_flags(argc, argv);
   refuse_exporter_only_flags(argc, argv);
+  // The LAST occurrence wins, not the first. `npuembeddings serve <model>` puts
+  // its own --threads 24 in the store BEFORE forward_common() appends whatever
+  // the user typed, so the reader that took the first match silently answered
+  // `serve <whisper> --threads 8` with 24 threads. Nothing on the command line
+  // said 24, so the run looked exactly like the one that was asked for and was
+  // half again as slow.
+  //
+  // Last-wins is the right rule for these modes specifically because they are the
+  // ones the `serve` verb injects defaults into; every other flag here is either
+  // absent or typed once, where first and last are the same entry. The REPEATED
+  // flags of this binary -- --classify and --pose -- do not come through this
+  // lambda at all: they are accumulated by the loops below, which is why they can
+  // legitimately repeat.
   auto flag = [&](const char *name) {
+    std::string v;
     for (int i = 1; i < argc - 1; ++i)
-      if (std::string(argv[i]) == name) return std::string(argv[i + 1]);
-    return std::string();
+      if (std::string(argv[i]) == name) v = argv[i + 1];
+    return v;
   };
   auto has = [&](const char *name) {
     for (int i = 1; i < argc; ++i)
@@ -155,13 +170,20 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
 
   const std::string model_name = fs::path(model_path).stem().string();
 
-  // --pose-server PORT: the HTTP endpoint. Parsed here, before the images are
-  // demanded, because a server has no image on the command line -- it is a
-  // different way of naming the same model, not a different mode. `--serve` is
-  // refused two paragraphs below because it is an embedding flag; this is the
-  // pose one.
-  const std::string serve_port = flag("--pose-server");
-  const bool serving = !serve_port.empty();
+  // --serve PORT: the HTTP endpoint. Read through the SHARED reader, before the
+  // images are demanded, because a server has no image on the command line -- it
+  // is a different way of NAMING the same model, not a different mode.
+  //
+  // `npuembeddings serve <model>` is the one verb, and the container's arch picks
+  // which endpoint answers: /v1/embeddings for a BERT-family model,
+  // /v1/audio/transcriptions for Whisper, /v1/classify for a ViT, /v1/pose for
+  // this one. That is already how the speech mode works off the same flag, and it
+  // is the reason there is no `pose-server` subcommand: a second verb would mean a
+  // second thing to learn for the same model, and the URL space is already
+  // unambiguous because each arch owns a different path.
+  int serve_port = 8080;
+  std::string serve_bind = "127.0.0.1";
+  const bool serving = app::read_serve(argc, argv, serve_port, serve_bind);
 
   // -- the images, given as --pose (run_pose() rewrites positionals into it).
   std::vector<std::string> images;
@@ -171,16 +193,11 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
     throw std::runtime_error(
         "this is a pose model, so say whose pose to find:\n"
         "    npuembeddings pose <model> <image.png> [more.png ...]\n"
-        "    npuembeddings pose-server <model> --port 8080   (POST /v1/pose)\n"
+        "    npuembeddings serve <model>        (POST /v1/pose)\n"
         "  (PNG and JPEG; anything else is refused rather than guessed at)\n"
         "  --conf 0.25  --iou 0.70  --kpt 0.50  --max-det 300\n"
         "  --npu-extra-ops conv   run the convolutions on the array instead "
         "(slower here; measured both ways)");
-  if (std::getenv("NPU_EMBEDDINGS_SERVE"))
-    throw std::runtime_error(
-        "--serve is an EMBEDDING endpoint and a pose model has no embedding to "
-        "serve. Use `npuembeddings pose-server <model>` for the pose endpoint "
-        "(see --help), or drop --serve.");
 
   // -- thresholds. Parsed and RANGED here rather than in DecodeParams, because a
   // NaN threshold that silently keeps nothing is a threshold nobody asked for.
@@ -410,14 +427,7 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
   // params: a request that names no threshold gets the defaults, a request that
   // names them gets its own for that request only.
   if (serving) {
-    const long p = std::strtol(serve_port.c_str(), nullptr, 10);
-    if (p <= 0 || p > 65535)
-      throw std::runtime_error("--port '" + serve_port +
-                               "': expected 1..65535");
-    return app::serve_pose(session, model_name, static_cast<int>(p),
-                           flag("--bind").empty() ? "127.0.0.1"
-                                                  : flag("--bind"),
-                           params);
+    return app::serve_pose(session, model_name, serve_port, serve_bind, params);
   }
 
   // -- run ---------------------------------------------------------------------

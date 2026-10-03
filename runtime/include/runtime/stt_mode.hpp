@@ -39,6 +39,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "cli/flags.hpp"          // read_serve
 #include "common/design_selection.hpp"
 #include "common/host_kernels.hpp"
 #include "common/npu_ops_flag.hpp"   // parse_npu_ops, the one --npu-extra-ops parser
@@ -66,10 +67,24 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
   // not be silently ignored just because this container never used it.
   refuse_removed_op_flags(argc, argv);
   refuse_exporter_only_flags(argc, argv);
+  // The LAST occurrence wins, not the first. `npuembeddings serve <model>` puts
+  // its own --threads 24 in the store BEFORE forward_common() appends whatever
+  // the user typed, so the reader that took the first match silently answered
+  // `serve <whisper> --threads 8` with 24 threads. Nothing on the command line
+  // said 24, so the run looked exactly like the one that was asked for and was
+  // half again as slow.
+  //
+  // Last-wins is the right rule for these modes specifically because they are the
+  // ones the `serve` verb injects defaults into; every other flag here is either
+  // absent or typed once, where first and last are the same entry. The REPEATED
+  // flags of this binary -- --classify and --pose -- do not come through this
+  // lambda at all: they are accumulated by the loops below, which is why they can
+  // legitimately repeat.
   auto flag = [&](const char *name) {
+    std::string v;
     for (int i = 1; i < argc - 1; ++i)
-      if (std::string(argv[i]) == name) return std::string(argv[i + 1]);
-    return std::string();
+      if (std::string(argv[i]) == name) v = argv[i + 1];
+    return v;
   };
   auto has = [&](const char *name) {
     for (int i = 1; i < argc; ++i)
@@ -137,7 +152,14 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
   const int threads = std::max(1, std::atoi(flag("--threads").empty()
                                                  ? "16"
                                                  : flag("--threads").c_str()));
-  const bool serve = has("--serve");
+  // --serve, read through the SHARED reader so this endpoint, the embedding one
+  // and the pose one cannot drift on what `--serve` with no port means. It used
+  // to be read as flag("--serve") and atoi'd, which is 0 when the value is
+  // absent -- and 0 is a legal request to bind(), so `npuembeddings <root>
+  // --model m.npue --serve` started and listened on a port it never printed.
+  int serve_port = 8080;
+  std::string serve_bind = "127.0.0.1";
+  const bool serve = app::read_serve(argc, argv, serve_port, serve_bind);
   const std::string audio = has("--transcribe") ? flag("--transcribe")
                                                 : flag("--audio");
   if (!serve && audio.empty())
@@ -379,10 +401,7 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
                  opts.chunk_seconds, opts.stride_seconds);
 
   if (serve) {
-    const int port = std::atoi(flag("--serve").c_str());
-    return app::serve_stt(session, model_name, port,
-                          flag("--bind").empty() ? "127.0.0.1" : flag("--bind"),
-                          opts);
+    return app::serve_stt(session, model_name, serve_port, serve_bind, opts);
   }
 
   const auto r = session.transcribe_file(audio, opts);

@@ -155,6 +155,7 @@ add_executable(npuembeddings
   src/server/embed_service.cpp
   src/server/stt_backend.cpp
   src/server/pose_backend.cpp
+  src/server/vit_backend.cpp
   # Subtask 6: CLI system
   src/cli/cli.cpp
   src/cli/subcommand.cpp

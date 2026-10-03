@@ -101,11 +101,11 @@ bool flag_takes_value(const std::string &a) {
         // two-tables-agree check.
         "--audio",
         "--conf", "--iou", "--kpt", "--max-det", "--pose-dump",
-        // --pose-server is the pose endpoint's port, the way --serve is the
-        // embedding endpoint's. Listed for run_pose()'s positional scan as much
-        // as for forward_common(): without it, `pose-server m --port 8080` would
-        // not reach the mode at all.
-        "--pose-server",
+        // --serve is deliberately NOT here: it is arity 0 in flags.hpp (the port
+        // is the next argv entry, and only if it starts with a digit), and it is
+        // injected by run_serve rather than forwarded from the user's line. A
+        // user who types `serve m --serve 9000` gets 9000 from run_serve's own
+        // parse of --port, which is the documented spelling.
         "--root", "--port", "--bind", "--token", "--max-len",
     };
     for (const char *f : kWithValue)
@@ -195,11 +195,24 @@ int run_serve(int argc, char **argv) {
         "--serve", std::to_string(port)};
     forward_common(argv, argc, store);
     return launch(argv[0], root, store);
-    // A Whisper container is served by the STT mode off the same flags: it
-    // reads --serve and --bind and ignores --threads/--pipeline in favour of
-    // its own pool, and it answers POST /v1/audio/transcriptions instead of
-    // /v1/embeddings. The two modes never meet: the mode is picked by the
-    // container's arch, not by a flag.
+    // ONE verb, four endpoints, and the container's arch picks which:
+    //
+    //   arch=1,2,3  BERT-family text   POST /v1/embeddings
+    //   arch=4      Whisper            POST /v1/audio/transcriptions
+    //   arch=5      ViT classifier     POST /v1/classify
+    //   arch=6      YOLOv8-pose        POST /v1/pose
+    //
+    // The modes never meet and none of them is chosen by a flag: runtime.cpp
+    // dispatches on arch before it ever looks at --serve. That is why there is no
+    // `pose-server` or `classify-server` verb -- a second verb per architecture
+    // would be a second thing to learn for the same model, and the URL space is
+    // already unambiguous because each arch owns a different path.
+    //
+    // --threads 24 / --pipeline 4 are the embedding pipeline's per-request GEMM
+    // batching, and the three other modes read --threads for their own pool and
+    // ignore --pipeline. So the image and speech endpoints inherit a pool of 24
+    // rather than their own default of 16; the pose section's measured timings
+    // are quoted at the 24 `serve` hands them, and the CLI numbers at 16.
 }
 
 int run_embed(int argc, char **argv) {
@@ -284,6 +297,7 @@ int run_classify(int argc, char **argv) {
         throw std::runtime_error(
             "`classify` needs an image:\n"
             "    npuembeddings classify <model> <image.png> [more.png ...]\n"
+            "    npuembeddings serve <model>            (POST /v1/classify)\n"
             "  (PNG and JPEG; anything else is refused rather than guessed at. "
             "--top-k prints the runners-up to stderr, --json to stdout)");
     if (!is_container_path(model_name)) warn_if_unpinned(model_name);
@@ -335,8 +349,9 @@ int run_pose(int argc, char **argv) {
     const std::string model_name = argv[2];
     if (argc < 4 || argv[3][0] == '-')
         throw std::runtime_error(
-            "`pose` needs an image:\n"
+            "`pose` needs an image, or you meant `serve`:\n"
             "    npuembeddings pose <model> <image.png> [more.png ...]\n"
+            "    npuembeddings serve <model>            (POST /v1/pose)\n"
             "  (PNG and JPEG; anything else is refused rather than guessed at)\n"
             "  --conf 0.25 --iou 0.70 --kpt 0.50 --max-det 300\n"
             "  --text                 a human summary instead of JSON\n"
@@ -360,47 +375,6 @@ int run_pose(int argc, char **argv) {
         store.push_back("--pose");
         store.push_back(a);
     }
-    forward_common(argv, argc, store);
-    return launch(argv[0], root, store);
-}
-
-// `pose-server` for an arch=6 body-pose model: the same model, the same
-// container, the same session -- answering POST /v1/pose instead of writing
-// JSON to stdout.
-//
-// It is a SEPARATE VERB rather than `pose --serve`, and the reason is written on
-// the endpoint's header: `serve` is the OpenAI-shaped embedding endpoint and a
-// pose model has no embedding, so reusing it would mean /v1/embeddings answered
-// with landmarks, a shape no client on either side expects. Two verbs keep the
-// URL space honest.
-//
-// It writes the port into --pose-server, which pose_mode.hpp reads -- the same
-// shape stt_mode.hpp reads --serve, and for the same reason: the subcommand and
-// the flag form are then one code path rather than two that can drift.
-int run_pose_server(int argc, char **argv) {
-    std::string root = default_root(argv[0]);
-    int port = 8080;
-    std::string bind = "127.0.0.1";
-    std::string cli_token;
-    for (int i = 2; i < argc; ++i) {
-        if (std::string(argv[i]) == "--root") root = argv[i + 1];
-        if (std::string(argv[i]) == "--port") port = std::atoi(argv[i + 1]);
-        if (std::string(argv[i]) == "--bind") bind = argv[i + 1];
-        if (std::string(argv[i]) == "--token") cli_token = argv[i + 1];
-    }
-    if (argc < 3 || argv[2][0] == '-')
-        throw std::runtime_error(
-            "`pose-server` needs a model name or a path to a .npue container:\n"
-            "    npuembeddings pose-server <model> [--port 8080] [--bind 127.0.0.1]\n"
-            "  POST /v1/pose  multipart: image (required), conf, iou, kpt, max_det");
-    if (!is_container_path(argv[2])) warn_if_unpinned(argv[2]);
-    const std::string container = resolve_container(root, argv[2], cli_token);
-    // No --threads/--pipeline defaults: `serve`'s "24 threads, 4 lanes" is a
-    // statement about the embedding pipeline's per-request GEMM batching, and
-    // this mode walks one image through one pool of its own.
-    std::vector<std::string> store = {"--model", container,
-                                      "--pose-server", std::to_string(port),
-                                      "--bind", bind};
     forward_common(argv, argc, store);
     return launch(argv[0], root, store);
 }
@@ -540,7 +514,6 @@ void register_default_subcommands(SubcommandDispatcher &dispatcher) {
     dispatcher.register_handler("transcribe", run_transcribe);
     dispatcher.register_handler("classify", run_classify);
     dispatcher.register_handler("pose", run_pose);
-    dispatcher.register_handler("pose-server", run_pose_server);
 }
 
 }  // namespace app

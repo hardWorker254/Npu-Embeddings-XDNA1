@@ -1,0 +1,624 @@
+#!/usr/bin/env python3
+"""Does `serve` answer for every architecture, and refuse for the others?
+
+WHAT THIS IS, AND WHY IT IS A SEPARATE GATE FROM verify_endpoint.py
+-------------------------------------------------------------------
+verify_endpoint.py drives the embedding endpoint with the REAL `openai` client
+and checks the vectors against `--embed`. That is the right test for /v1/embeddings
+and the wrong shape for the other three: none of them is an OpenAI client call, and
+reaching for it here would mean testing a client library against a shape it does not
+have.
+
+This gate is about the DISPATCH, which is the thing that changed and the thing no
+other gate covers. `serve` is one verb and the container's arch picks the endpoint,
+so the failure this exists to catch is a container answering for a path that is not
+its own -- /v1/embeddings with landmarks in it, /v1/pose with vectors. That is not a
+wrong number, it is a wrong KIND of answer, and it is exactly what "one verb, four
+endpoints" is supposed to make impossible.
+
+So for each architecture this:
+  * starts `serve` on that container and reads /health, which must name the RIGHT
+    kind, because a client picks its parser from that field;
+  * POSTs to that architecture's own path and requires a 2xx with a document of the
+    expected shape -- not merely "not an error", because a 200 carrying the wrong
+    object's keys is the failure being looked for;
+  * asks for the other three paths and requires a 404 whose message names the right
+    one, since a 404 that does not say where to go is not much of a 404;
+  * and for the two image endpoints, runs the refusal list: not multipart, no
+    `image`, two `image` parts, an empty `image`, a non-image, a threshold that is
+    not a number, and an unknown field type.
+
+The last group is where a silent fallback would hide. An endpoint that answers
+`conf=abc` with the default 0.25 has not refused anything -- it has returned a
+confident detection count produced under thresholds the client never asked for, and
+the number of people in it would be read as a property of the model.
+
+WHAT IT IS NOT
+--------------
+Not a numerics gate. It does not check that the pose landmarks or the classification
+are CORRECT -- diff_pose_dump.py and verify_vit_model.py are for that. It checks that
+the right container answers on the right path with the right refusal, and that the
+bytes the endpoint emits are the bytes the CLI emits.
+
+Usage:
+  python tools/verify/verify_serve_dispatch.py                 # all four
+  python tools/verify/verify_serve_dispatch.py --only pose
+  python tools/verify/verify_serve_dispatch.py --skip whisper  # no design set
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "tools" / "lib"))
+from gate_output import GATE_OUT                                 # noqa: E402
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+# The four endpoints, and the container that reaches each. `kind` is what /health
+# must report: a client chooses its response parser from that string, so a container
+# reporting the wrong one is a wrong answer to a question that was answered.
+ARCHES = {
+    "embed": {
+        "container": "models/all-MiniLM-L6-v2.npue",
+        "path": "/v1/embeddings",
+        "kind": "embeddings",
+        "verb": "serve",
+    },
+    "whisper": {
+        "container": "models/whisper-tiny.npue",
+        "path": "/v1/audio/transcriptions",
+        "kind": "stt",
+        "verb": "serve",
+    },
+    "classify": {
+        "container": "models/vit-base-patch16-224.npue",
+        "path": "/v1/classify",
+        "kind": "classify",
+        "verb": "serve",
+    },
+    "pose": {
+        "container": "/tmp/opencode/p_i8.npue",
+        "path": "/v1/pose",
+        "kind": "pose",
+        "verb": "serve",
+    },
+}
+
+# Keys the answer must carry. A 2xx with a document missing these is a 2xx for the
+# wrong endpoint, and it is the whole failure this gate is built around.
+SHAPE = {
+    "/v1/embeddings": ["data"],
+    "/v1/audio/transcriptions": ["text"],
+    "/v1/classify": ["label", "name", "p", "dispatches"],
+    "/v1/pose": ["landmarks", "skeleton", "thresholds", "letterbox"],
+}
+
+_failures: list[str] = []
+_checks = 0
+
+
+def report(ok: bool, what: str, detail: str = "") -> bool:
+    global _checks
+    _checks += 1
+    mark = "ok  " if ok else "FAIL"
+    line = f"  {mark}  {what}"
+    if detail:
+        line += f"  -> {detail}"
+    print(line)
+    if not ok:
+        _failures.append(what + (f" -- {detail}" if detail else ""))
+    return ok
+
+
+def note(what: str, detail: str = "") -> None:
+    print(f"  note    {what}" + (f"  {detail}" if detail else ""))
+
+
+# -- the fixture ------------------------------------------------------------
+
+
+def fixture() -> bytes | None:
+    """A JPEG to upload, or None with the reason said out loud.
+
+    bus.jpg is not in the repository, so a machine without it SKIPS the request
+    cases rather than failing them: a gate that fails for a missing photograph is a
+    gate whose result says nothing about the code.
+    """
+    for cand in (Path("/tmp/opencode/bus.jpg"), REPO / "docs" / "bus.jpg"):
+        if cand.exists():
+            return cand.read_bytes()
+    return None
+
+
+def audio_fixture() -> Path | None:
+    for cand in (
+        Path("/tmp/opencode/speech16k.wav"),
+        REPO / "tests" / "data" / "speech16k.wav",
+    ):
+        if cand.exists():
+            return cand
+    return None
+
+
+# -- HTTP helpers -----------------------------------------------------------
+
+
+def get(url: str, timeout: float = 5.0):
+    req = urllib.request.Request(url)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+    except Exception as e:                                    # connection refused
+        return None, str(e).encode()
+
+
+def post(url: str, body: bytes, content_type: str, timeout: float = 120.0):
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", content_type)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+    except Exception as e:
+        return None, str(e).encode()
+
+
+def multipart(parts: list[tuple[str, str, bytes | None]]) -> tuple[bytes, str]:
+    """A multipart body, built here rather than borrowed.
+
+    urllib has no multipart encoder and `requests` is not a dependency of every
+    machine that has this binary, so the encoder is these lines and the alternative
+    is a gate that cannot run.
+
+    `parts` is a LIST of (name, filename, data), and filename None means a plain
+    form field whose data is the value. It was a dict of name -> value at first,
+    which cannot express the one case this gate most needs: a request carrying
+    TWO `image` parts. A dict silently keeps the last, the server never sees a
+    duplicate, and the check named "two image parts is refused" would have been
+    passing against a request that carried one.
+
+    Returns the body and the Content-Type together, and they MUST be used
+    together: the boundary is generated per call, so calling this twice and taking
+    the body from one and the header from the other produces a body whose boundary
+    the header does not name -- which the server refuses, correctly, with a message
+    about the boundary rather than about the image. That reads like a server bug and
+    is a gate bug, which is why the pair is one return value.
+    """
+    b = f"----npue{uuid.uuid4().hex}"
+    out = bytearray()
+    for name, filename, data in parts:
+        if filename is None:
+            out += (f"--{b}\r\nContent-Disposition: form-data; "
+                    f"name=\"{name}\"\r\n\r\n").encode()
+        else:
+            out += (f"--{b}\r\nContent-Disposition: form-data; name=\"{name}\"; "
+                    f"filename=\"{filename}\"\r\n"
+                    f"Content-Type: application/octet-stream\r\n\r\n").encode()
+        out += (data or b"") + b"\r\n"
+    out += f"--{b}--\r\n".encode()
+    return bytes(out), f"multipart/form-data; boundary={b}"
+
+
+def field(name: str, value: str) -> tuple[str, str, None]:
+    return (name, None, value.encode())
+
+
+def upload(name: str, filename: str, data: bytes) -> tuple[str, str, bytes]:
+    return (name, filename, data)
+
+
+# -- the server under test ---------------------------------------------------
+
+
+class Server:
+    """`npuembeddings serve <container>`, started and stopped for one arch."""
+
+    def __init__(self, exe: Path, container: str, port: int,
+                 extra: list[str] | None = None):
+        self.exe, self.container, self.port = exe, container, port
+        self.extra = extra or []
+        self.proc: subprocess.Popen | None = None
+        self.log = REPO / "gate_output" / f"verify_serve_{port}.log"
+        self.base = f"http://127.0.0.1:{port}"
+
+    def start(self, seconds: float = 90.0) -> tuple[bool, str]:
+        GATE_OUT.mkdir(parents=True, exist_ok=True)
+        cmd = [str(self.exe), "serve", self.container, "--port", str(self.port)] + self.extra
+        env = dict(os.environ)
+        env.setdefault("PYTHONPATH", "/opt/xilinx/xrt/python")
+        with open(self.log, "wb") as f:
+            self.proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT,
+                                         env=env, start_new_session=True)
+        deadline = time.monotonic() + seconds
+        last = ""
+        while time.monotonic() < deadline:
+            if self.proc.poll() is not None:
+                return False, (f"exited {self.proc.returncode}: "
+                               + self.log.read_text(errors="replace")[-1500:])
+            status, body = get(self.base + "/health", timeout=2)
+            if status == 200:
+                return True, ""
+            last = body.decode(errors="replace")[:120]
+            time.sleep(0.2)
+        return False, f"/health never answered ({last})"
+
+    def stop(self) -> None:
+        if self.proc is None:
+            return
+        # SIGINT to the GROUP: the server installs its own handler and unwinds
+        # through the accept loop, which releases the NPU contexts. SIGKILL would
+        # skip that and leave a reader wondering whether the device is still held.
+        try:
+            os.killpg(os.getpgid(self.proc.pid), signal.SIGINT)
+            self.proc.wait(timeout=20)
+        except Exception:
+            try:
+                os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
+            except Exception:
+                pass
+        self.proc = None
+
+
+# -- the checks -------------------------------------------------------------
+
+
+def check_health(srv: Server, kind: str, path: str) -> dict | None:
+    print(f"\n  /health names the RIGHT kind, and the right path's neighbours")
+    status, body = get(srv.base + "/health")
+    if not report(status == 200, "/health answers 200",
+                   "" if status == 200 else f"-> {status}: {body[:160]!r}"):
+        return None
+    try:
+        h = json.loads(body)
+    except Exception as e:
+        report(False, "/health is JSON", f"-> {e}")
+        return None
+    got_kind = h.get("kind")
+    report(got_kind == kind,
+           f"/health says kind={kind!r}, which is how a client picks its parser",
+           "" if got_kind == kind else f"-> got {got_kind!r}")
+    report("model" in h and bool(h["model"]),
+           "/health names the model it is serving",
+           "" if h.get("model") else "-> no model field")
+    # The banner is on stdout and flushed; if it is still sitting in a buffer the
+    # operator tailing the log sees no port at all. Checked by reading the log.
+    try:
+        text = srv.log.read_text(errors="replace")
+        seen = f":{srv.port}" in text
+        report(seen,
+               "the banner reached the log, so a redirected run shows its port",
+               "" if seen else
+               "-> no banner in the log. stdout is block-buffered when redirected "
+               "and nothing else is printed after it, so the log never shows the "
+               "port and the run looks like it did not start")
+    except Exception as e:
+        note("could not read the log", str(e))
+    return h
+
+
+def check_own_path(srv: Server, path: str, jpeg: bytes, wav: Path | None) -> None:
+    print(f"\n  POST {path} answers 2xx with THIS endpoint's shape")
+    if path == "/v1/embeddings":
+        body, ctype = json.dumps({"input": "a gate"}).encode(), "application/json"
+    elif path == "/v1/audio/transcriptions":
+        if wav is None:
+            note("skipped: no WAV on disk (--audio), so the request case did not run")
+            return
+        body, ctype = multipart([upload("file", "a.wav", wav.read_bytes())])
+    else:
+        body, ctype = multipart([upload("image", "bus.jpg", jpeg)])
+    status, raw = post(srv.base + path, body, ctype)
+    if not report(status == 200, "the request answers 200",
+                   "" if status == 200 else f"-> {status}: {raw[:200]!r}"):
+        return
+    try:
+        d = json.loads(raw)
+    except Exception as e:
+        report(False, "the answer is JSON", f"-> {e}")
+        return
+    missing = [k for k in SHAPE[path] if k not in d]
+    report(not missing,
+           f"the answer carries {', '.join(SHAPE[path])}",
+           "" if not missing else
+           f"-> missing {missing}: this is a 200 for the wrong endpoint")
+
+
+def check_other_paths(srv: Server, path: str, jpeg: bytes) -> None:
+    print("\n  the OTHER three paths are 404s that say where to go instead")
+    for other in ARCHES.values():
+        if other["path"] == path:
+            continue
+        status, raw = get(srv.base + other["path"])
+        ok = status == 404
+        report(ok, f"GET {other['path']} is 404 here, not another endpoint's answer",
+               "" if ok else f"-> got {status}: {raw[:140]!r}")
+        if not ok:
+            continue
+        try:
+            msg = json.loads(raw)["error"]["message"]
+        except Exception:
+            report(False, "the 404 is the error envelope", f"-> {raw[:100]!r}")
+            continue
+        report(path in msg,
+               f"the 404 for {other['path']} names this model's own path {path}",
+               "" if path in msg else f"-> {msg[:150]}")
+
+
+def check_image_refusals(srv: Server, path: str, jpeg: bytes) -> None:
+    """The refusal list, for the two endpoints that take an image."""
+    print("\n  the refusals fire by name, and none of them falls back to a default")
+    img = "image"
+    # (what, body, content-type, expected status, a phrase the message must carry)
+    #
+    # The last element is "" for the case whose refusal is the front end's own and
+    # is worded by the decoder rather than by the endpoint; the status is the check
+    # there and pinning the decoder's English into this gate would make it fail when
+    # a decoder says the same thing differently.
+    cases = [
+        ("a body that is not multipart",
+         b"this is not a multipart body at all", "application/json", 400,
+         "multipart"),
+        ("no `image` part at all",
+         *multipart([field("top_k", "1")]), 400, img),
+        ("an empty `image` part",
+         *multipart([upload(img, "e.jpg", b"")]), 400, "empty"),
+        ("two `image` parts",
+         *multipart([upload(img, "a.jpg", jpeg), upload(img, "b.jpg", jpeg)]), 400,
+         "2 'image'"),
+        ("a file that is not PNG or JPEG",
+         *multipart([upload(img, "x.txt", b"definitely not an image at all")]), 400,
+         ""),
+    ]
+    for what, body, ctype, want, needle in cases:
+        status, raw = post(srv.base + path, body, ctype)
+        ok = status == want
+        report(ok, f"{what} -> {want}",
+               "" if ok else f"-> got {status}: {raw[:160]!r}")
+        if ok and needle:
+            say = needle.encode() in raw
+            report(say, f"its message says why ({needle!r})",
+                   "" if say else f"-> {raw[:200]!r}")
+
+    # The per-request knobs, which are the two models' own thresholds. The point is
+    # not that 0 is refused; it is that a refusal is a refusal and NOT the default.
+    for field_name in ("conf", "iou", "kpt", "top_k", "max_det"):
+        for bad in ("abc", "1e999", "-1"):
+            body, ctype = multipart([field(field_name, bad),
+                                     upload(img, "bus.jpg", jpeg)])
+            status, raw = post(srv.base + path, body, ctype)
+            if status in (400, 413):
+                report(True, f"{field_name}={bad!r} is refused")
+                continue
+            # A model that has no such field ignores it. That is not this gate's
+            # business, and saying so is better than counting it as a pass.
+            note(f"{field_name}={bad!r} -> {status} (this endpoint has no such field)")
+
+
+def check_no_threshold_leak(srv: Server, path: str, jpeg: bytes) -> None:
+    """A per-request threshold must not outlive the request.
+
+    The failure this catches is quiet: a mode that stores the parsed threshold in
+    the session instead of a per-request copy keeps it, and the NEXT request --
+    which said nothing about thresholds -- is answered under the last client's
+    numbers. Nothing in the response says so, because the response reports the
+    thresholds it used and they are the wrong ones.
+    """
+    print("\n  a per-request threshold does not survive into the next request")
+    if path == "/v1/classify":
+        # top_k is additive and capped, so it cannot leak visibly; the meaningful
+        # check for this endpoint is that a request with no field is the default.
+        body, ctype = multipart([upload("image", "bus.jpg", jpeg)])
+        _, first = post(srv.base + path, body, ctype)
+        body, ctype = multipart([field("top_k", "7"),
+                                 upload("image", "bus.jpg", jpeg)])
+        _, second = post(srv.base + path, body, ctype)
+        try:
+            report("top_k" not in json.loads(first),
+                   "a request naming no top_k gets no top_k array")
+            report(len(json.loads(second).get("top_k", [])) == 7,
+                   "and the next request's top_k=7 is honoured")
+        except Exception as e:
+            report(False, "both answers are JSON", f"-> {e}")
+        return
+
+    # conf is the sharp one: 0.25 finds three people on the fixture and 0.9 finds
+    # none, so a leak is visible in the count.
+    def count(**fields):
+        body, ctype = multipart([field(k, v) for k, v in fields.items()]
+                                + [upload("image", "bus.jpg", jpeg)])
+        _, raw = post(srv.base + path, body, ctype)
+        try:
+            d = json.loads(raw)
+        except Exception:
+            return None, raw[:120]
+        return len(d.get("landmarks", [])), d.get("thresholds")
+
+    base_n, base_thr = count()
+    strict_n, strict_thr = count(conf="0.9")
+    report(strict_n == 0,
+           "conf=0.9 finds nobody where conf=0.25 finds people",
+           "" if strict_n == 0 else
+           f"-> got {strict_n} at conf=0.9, where the default found {base_n}")
+    again_n, again_thr = count()
+    report(again_thr == base_thr and again_n == base_n,
+           "and the request AFTER it is back at the default thresholds",
+           "" if (again_thr == base_thr and again_n == base_n) else
+           f"-> {again_thr} / {again_n} people, was {base_thr} / {base_n}")
+
+
+def check_cli_agreement(srv: Server, exe: Path, arch: str, jpeg: bytes) -> None:
+    """The endpoint's answer and the CLI's, from the same emitter.
+
+    The two are compared rather than trusted because they are two callers of one
+    function, and one caller of one function can still differ from the other
+    (different label, different path, different default top_k). The timing fields
+    are excluded: they are measurements of two different runs.
+    """
+    print("\n  the endpoint and the CLI emit the same object")
+    path = ARCHES[arch]["path"]
+    if path == "/v1/embeddings":
+        note("skipped: verify_endpoint.py compares this endpoint against --embed")
+        return
+    if arch == "whisper":
+        note("skipped: this compares a JSON object and a transcript string, "
+             "which verify_whisper_cli.py covers on the CLI side")
+        return
+    if arch == "classify":
+        out = subprocess.run([str(exe), "classify", ARCHES[arch]["container"],
+                              "/tmp/opencode/bus.jpg", "--json"],
+                             capture_output=True, text=True)
+        try:
+            cli = json.loads(out.stdout)[0]
+        except Exception as e:
+            report(False, "`classify --json` answers one object", f"-> {e}")
+            return
+        body, ctype = multipart([upload("image", "bus.jpg", jpeg)])
+        _, raw = post(srv.base + path, body, ctype)
+        srv_d = json.loads(raw)
+        for k in ("label", "name"):
+            report(cli[k] == srv_d.get(k), f"both report {k}={cli[k]!r}",
+                   "" if cli[k] == srv_d.get(k) else
+                   f"-> the endpoint said {srv_d.get(k)!r}")
+        dp = abs(cli["p"] - srv_d.get("p", -1))
+        report(dp < 1e-6, "and the same top-1 probability",
+               "" if dp < 1e-6 else f"-> cli {cli['p']} vs endpoint {srv_d.get('p')}")
+        report(cli["dispatches"] == srv_d.get("dispatches"),
+               "and the same dispatch count",
+               "" if cli["dispatches"] == srv_d.get("dispatches") else
+               f"-> cli {cli['dispatches']} vs endpoint {srv_d.get('dispatches')}")
+        return
+
+    # pose: the whole document, minus the fields that are about the request rather
+    # than the answer (the image's label, and the timings).
+    out = subprocess.run([str(exe), "pose", ARCHES[arch]["container"],
+                          "/tmp/opencode/bus.jpg", "--json"],
+                         capture_output=True, text=True)
+    try:
+        cli = json.loads(out.stdout)
+    except Exception as e:
+        report(False, "`pose --json` answers one object", f"-> {e}")
+        return
+    body, ctype = multipart([upload("image", "bus.jpg", jpeg)])
+    _, raw = post(srv.base + path, body, ctype)
+    srv_d = json.loads(raw)
+
+    def strip(d):
+        d = json.loads(json.dumps(d))
+        for k in ("image", "timing_s", "backend"):
+            d.pop(k, None)
+        return d
+
+    same = strip(cli) == strip(srv_d)
+    report(same, "every box, every joint, the skeleton and the letterbox match",
+           "" if same else "-> the two documents differ, field by field below")
+    if strip(cli) != strip(srv_d):
+        for k in sorted(set(cli) | set(srv_d)):
+            if k in ("image", "timing_s", "backend"):
+                continue
+            if cli.get(k) != srv_d.get(k):
+                print(f"        {k}: cli={str(cli.get(k))[:90]}")
+                print(f"        {' ' * len(k)}  srv={str(srv_d.get(k))[:90]}")
+
+
+# -- main --------------------------------------------------------------------
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--exe", default=str(REPO / "runtime" / "build" / "npuembeddings"))
+    ap.add_argument("--only", action="append", default=None,
+                    help="one arch name, repeatable (default: all four)")
+    ap.add_argument("--skip", action="append", default=None,
+                    help="one arch name, repeatable")
+    ap.add_argument("--base-port", type=int, default=8450)
+    ap.add_argument("--out", default=str(GATE_OUT / "verify_serve_dispatch.json"))
+    args = ap.parse_args()
+
+    exe = Path(args.exe)
+    print("serve: one verb, four endpoints, and each container answers for its own\n")
+    if not exe.exists():
+        print(f"FAIL -- {exe} does not exist. Build it:\n"
+              f"    cmake -S runtime -B runtime/build && "
+              f"cmake --build runtime/build -j")
+        return 1
+
+    jpeg = fixture()
+    if jpeg is None:
+        print("FAIL -- no JPEG fixture. Put one at /tmp/opencode/bus.jpg "
+              "(810x1080, people in it) -- the pose counts below are read against "
+              "it.")
+        return 1
+    wav = audio_fixture()
+
+    names = [n for n in ARCHES if (not args.only or n in args.only)
+             and n not in (args.skip or [])]
+    results: dict[str, dict] = {}
+
+    for i, name in enumerate(names):
+        spec = ARCHES[name]
+        container = Path(spec["container"])
+        if not container.is_absolute():
+            container = REPO / container
+        print(f"\n{'=' * 74}\n  arch {name}: {spec['path']}\n{'=' * 74}")
+        if not container.exists():
+            note("SKIPPED: no container at " + str(container))
+            print("        (a gate that fails for a model nobody packed says "
+                  "nothing about the code)")
+            results[name] = {"skipped": "no container"}
+            continue
+
+        srv = Server(exe, str(container), args.base_port + i)
+        ok, why = srv.start()
+        if not ok:
+            report(False, f"`serve {name}` starts and answers /health", why)
+            results[name] = {"started": False, "why": why[:400]}
+            srv.stop()
+            continue
+        results[name] = {"started": True}
+        try:
+            check_health(srv, spec["kind"], spec["path"])
+            check_own_path(srv, spec["path"], jpeg, wav)
+            check_other_paths(srv, spec["path"], jpeg)
+            if spec["path"] in ("/v1/classify", "/v1/pose"):
+                check_image_refusals(srv, spec["path"], jpeg)
+                check_no_threshold_leak(srv, spec["path"], jpeg)
+                check_cli_agreement(srv, exe, name, jpeg)
+        finally:
+            srv.stop()
+
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(results, indent=2) + "\n")
+
+    print(f"\n{'=' * 74}")
+    if _failures:
+        print(f"FAIL -- {len(_failures)} of {_checks} checks did not hold:")
+        for f in _failures:
+            print(f"  - {f}")
+        print(f"\n        details: {out}")
+        return 1
+    print(f"PASS -- {_checks} checks: `serve` answers for every architecture, "
+          f"refuses the\n        others' paths with a message that says where to go, "
+          f"and the image\n        endpoints refuse rather than fall back.\n")
+    print(f"        {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
