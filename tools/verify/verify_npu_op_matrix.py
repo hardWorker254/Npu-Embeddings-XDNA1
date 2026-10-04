@@ -7,7 +7,9 @@
 #
 #   1. the registry's own shape -- 40 cells, five statuses, one tally, and the
 #      set of codes with no design directory equal to STREAM_ONLY;
-#   2. NPU_OPS.md, which is GENERATED from the registry, is not stale;
+#   2. NPU_OPS.md and NPU_OPS.ru.md, both GENERATED from the registry, are not
+#      stale -- and all 40 reasons are translated, so a Russian reader is never
+#      left with one English cell among forty Russian ones;
 #   3. the runtime's C++ table (runtime/include/common/npu_ops_flag.hpp) carries
 #      the same eight codes with the same design directory and the same long
 #      name, in the same order. This is the duplication the two files' headers
@@ -50,7 +52,10 @@ BIN = REPO / "runtime" / "build" / "npuembeddings"
 HPP = REPO / "runtime" / "include" / "common" / "npu_ops_flag.hpp"
 EXPORTER = REPO / "tools" / "export" / "export_gemm_rtp.py"
 PY = REPO / ".venv" / "bin" / "python"
-DOC = REPO / "NPU_OPS.md"
+# Both generated documents. Kept as a list rather than one name because there are
+# two languages now and the gate has to check both -- a single DOC constant would
+# have made the Russian one silently unchecked.
+DOCS = (REPO / "NPU_OPS.md", REPO / "NPU_OPS.ru.md")
 
 # The tally, pinned. These are not decorative: they are the counts a reader of
 # NPU_OPS.md is looking at, and they were measured one cell at a time (see each
@@ -209,17 +214,33 @@ def main() -> int:
         print("  FAIL  RUNTIME_FLAG and EXPORTER_FLAG differ")
         bad += 1
 
-    # --- 2. NPU_OPS.md is generated from the registry -----------------------
+    # --- 2. both documents are generated from the registry ------------------
+    # Two files, not one: the Russian one carries a translation of each reason,
+    # kept in the generator rather than in the registry (the registry is imported
+    # by the exporter and has no business carrying two languages). The
+    # completeness of that translation is asserted here, because a cell left in
+    # English reads to a Russian reader as an oversight rather than as a hole.
+    missing = [f"{lbl}/{c}" for lbl in arches for c in npu_ops.OPS
+               if (lbl, c) not in gen_npu_ops_doc.REASONS_RU]
+    if missing:
+        print(f"  FAIL  NPU_OPS.ru.md: {len(missing)} cell(s) with no Russian "
+              f"reason -- {missing[:4]}")
+        bad += 1
+    else:
+        print(f"  ok    all {len(npu_ops.OPS) * len(arches)} reasons "
+              f"translated into NPU_OPS.ru.md")
     rc = subprocess.run([sys.executable, str(REPO / "tools" /
                                              "gen_npu_ops_doc.py"), "--check"],
                         capture_output=True, text=True)
     if rc.returncode != 0:
-        print(f"  FAIL  {DOC.name} is stale -- run tools/gen_npu_ops_doc.py")
+        print("  FAIL  a generated document is stale -- run "
+              "tools/gen_npu_ops_doc.py")
         for line in rc.stdout.splitlines()[:40]:
             print("   " + line)
         bad += 1
     else:
-        print(f"  ok    {DOC.name} matches the registry")
+        for line in rc.stdout.splitlines():
+            print("  " + line)
 
     # --- 3. the runtime's C++ table says the same thing ---------------------
     cpp = cpp_table()
@@ -305,8 +326,8 @@ def main() -> int:
         print(f"FAIL -- {bad} disagreement(s) between the registry, the "
               f"generated document, the C++ table and what the runtime does")
         return 1
-    print("PASS -- the registry, NPU_OPS.md, the C++ table and the runtime all "
-          "say the same thing about every cell that could be run")
+    print("PASS -- the registry, both generated documents, the C++ table and the "
+          "runtime all say the same thing about every cell that could be run")
     return 0
 
 

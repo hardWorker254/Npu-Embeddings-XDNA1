@@ -1,21 +1,35 @@
 #!/usr/bin/env python3
 #===----------------------------------------------------------------------===//
-# Regenerate NPU_OPS.md from tools/lib/npu_ops.py.
+# Regenerate NPU_OPS.md and NPU_OPS.ru.md from tools/lib/npu_ops.py.
 #
 # The 40 cells (5 architectures x 8 codes) live in the registry as Python because
 # the exporter reads them to decide what to compile. A hand-written Markdown copy
 # of the same table would be a third copy of the truth and would drift the first
-# time somebody added a code, so NPU_OPS.md is GENERATED and
-# tools/verify/verify_npu_op_matrix.py asserts the checked-in file is exactly what
-# this script prints.
+# time somebody added a code, so both documents are GENERATED and
+# tools/verify/verify_npu_op_matrix.py asserts the checked-in files are exactly
+# what this script prints.
 #
-#   python tools/gen_npu_ops_doc.py            # rewrite NPU_OPS.md
-#   python tools/gen_npu_ops_doc.py --check    # exit 1 if it is stale, print the diff
+#   python tools/gen_npu_ops_doc.py            # rewrite both files
+#   python tools/gen_npu_ops_doc.py --check    # exit 1 if either is stale
 #
-# What this does NOT do is generate prose. The reasons come from the registry
-# verbatim, so the document cannot flatter a model; the framing sentences around
-# the tables are the only hand-written part and they live in this file, where a
-# reviewer sees them change.
+# WHAT IS GENERATED AND WHAT IS TRANSLATED
+# ----------------------------------------
+# The STATUS of every cell comes from the registry, so the document cannot
+# flatter a model: only the exporter's idea of what exists can change a tick, and
+# changing that is a behaviour change the matrix gate runs against the binary.
+#
+# The REASON for every cell is prose that lives in the registry, in English. The
+# Russian file carries a translation of each one, kept in REASONS_RU below rather
+# than in the registry, because the registry is imported by the exporter and has
+# no business carrying two languages: a cell's status is data and its
+# explanation is documentation, and they have different lifetimes.
+#
+# The consequence is that the two files can drift from EACH OTHER -- a reason
+# edited in the registry and not translated here leaves NPU_OPS.ru.md stale in a
+# way `--check` cannot see, because it only knows the generated text is stable.
+# So translation completeness IS checked instead: every one of the 40 cells must
+# have a Russian reason or the generator raises, and a stale translation is caught
+# by the same gate that catches a stale document.
 #===----------------------------------------------------------------------===//
 
 import argparse
@@ -27,24 +41,37 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "tools" / "lib"))
 import npu_ops  # noqa: E402  -- needs the path above
 
-DOC = REPO / "NPU_OPS.md"
+DOCS = {"en": REPO / "NPU_OPS.md", "ru": REPO / "NPU_OPS.ru.md"}
 
 # The order the architectures are printed in. Deliberately NOT the registry's
 # dict order: this is the order a reader meets them in -- the default first, then
 # the two that have audio, then the two that are not transformers at all.
+# (label, title en, title ru, blurb en, blurb ru)
 ARCHES = [
-    ("gemm_rtp", "Text embedders", "BERT and friends: bge, MiniLM, nomic, gte. "
-     "This is also the default for a text embedder with no `kind` of its own."),
-    ("stt", "Speech to text", "Whisper (all sizes) and anything else that "
-     "carries an audio front end."),
-    ("cls", "Image classification", "ViT. Its four GEMM streams are "
-     "`gemm_rtp`'s, which is why the classification head lives here."),
-    ("pose", "Pose", "YOLO pose. No transformer, no normalisation, no "
-     "attention -- most of this row is `absent`, and that is the answer."),
-    ("embeddinggemma-300m", "Gemma", "The one model whose ENCODER differs from "
-     "its kind, so it gets a row of its own rather than a fifth kind."),
+    ("gemm_rtp", "Text embedders", "Текстовые эмбеддеры",
+     "BERT and friends: bge, MiniLM, nomic, gte. This is also the default for a "
+     "text embedder with no `kind` of its own.",
+     "BERT и родственные: bge, MiniLM, nomic, gte. Это же значение по "
+     "умолчанию для текстового эмбеддера, у которого нет своего `kind`."),
+    ("stt", "Speech to text", "Распознавание речи",
+     "Whisper (all sizes) and anything else that carries an audio front end.",
+     "Whisper (все размеры) и всё, что несёт аудио-фронтенд."),
+    ("cls", "Image classification", "Классификация изображений",
+     "ViT. Its four GEMM streams are `gemm_rtp`'s, which is why the "
+     "classification head lives here.",
+     "ViT. Его четыре GEMM-потока — это потоки `gemm_rtp`, и поэтому "
+     "классификационная голова живёт здесь."),
+    ("pose", "Pose", "Поза",
+     "YOLO pose. No transformer, no normalisation, no attention -- most of this "
+     "row is `absent`, and that is the answer.",
+     "YOLO pose. Ни трансформера, ни нормализации, ни внимания — большая часть "
+     "этой строки `absent`, и это и есть ответ."),
+    ("embeddinggemma-300m", "Gemma", "Gemma",
+     "The one model whose ENCODER differs from its kind, so it gets a row of its "
+     "own rather than a fifth kind.",
+     "Единственная модель, чей КОДЕР отличается от своего `kind`, поэтому у неё "
+     "своя строка, а не пятый kind."),
 ]
-
 
 # Status -> the one word that goes in the matrix. Short because a table cell has
 # to stay a cell; the per-architecture sections carry the reasons.
@@ -54,6 +81,238 @@ MARK = {
     "unimplemented": "no code",
     "blocked": "blocked",
     "absent": "-",
+}
+
+MARK_RU = {
+    "honours": "**да**",
+    "on_array": "уже",
+    "unimplemented": "нет кода",
+    "blocked": "невозможно",
+    "absent": "—",
+}
+
+STATUS_MEANING_RU = {
+    "honours": "работает на массиве сегодня",
+    "on_array": "работа уже диспатчится; коду нечего выбирать, и он "
+                "отвергается с этим объяснением",
+    "unimplemented": "операция у модели есть, ветка не написана",
+    "blocked": "на этой плате перенести нельзя, по названной причине",
+    "absent": "такой операции у модели нет",
+}
+
+# The eight codes' long names. Transcribed rather than translated: these are the
+# names the runtime prints in its refusals (`--npu-ops softm (softmax)`), and a
+# Russian document that renamed them would be quoting the runtime in a language it
+# does not speak.
+LONG_RU = {
+    "gelu": "GELU",
+    "layn": "LayerNorm",
+    "softm": "softmax",
+    "conv": "conv1d (аудио-фронтенд Whisper)",
+    "attn": "внимание Whisper, как GEMMы",
+    "mproj": "банк mel-фильтров Whisper, как GEMM",
+    "fft": "трансформация 400 точек, как GEMM",
+    "logit": "проекция в словарь, как GEMM",
+}
+
+# Why each of the five stream-only codes has no directory of its own. Translated
+# from NO_DESIGN, same reason as the cell reasons below.
+NO_DESIGN_RU = {
+    "conv": "идёт на потоке, который `gemm_rtp` и так экспортирует, так что "
+            "компилировать нечего",
+    "attn": "его два потока добавляются в сами наборы `gemm_rtp` и "
+            "`gemm_rtp_dec`, а не в отдельный каталог",
+    "mproj": "его поток добавляется в сам набор `gemm_rtp`, а не в отдельный "
+             "каталог",
+    "fft": "его поток добавляется в сам набор `gemm_rtp`, а не в отдельный "
+           "каталог",
+    "logit": "его потоки добавляются в сам набор `gemm_rtp_dec`, а не в "
+             "отдельный каталог",
+}
+
+# (architecture, code) -> the Russian reason. Every one of the 40 cells must be
+# here; doc() raises on a missing one rather than falling back to English, because
+# a Russian reader who hits one English cell among forty has no way to tell that it
+# is a bug rather than an oversight in the translation.
+REASONS_RU = {
+("gemm_rtp", "gelu"):
+    "активация негейтед FFN — отдельный проход, поэтому его забирает дизайн "
+    "`gelu/`. У ГЕЙТЕД FFN (nomic, gte, gemma) активация считается внутри "
+    "гейтед-пути, и такого прохода нет — это и проверяет `buildable_codes()`. "
+    "Та же ОГОВОРКА, что и в строке `cls`: точный erf получается только при "
+    "`kind stt`, так что этот дизайн — фита `poly` 8-й степени, 2.49e-3 "
+    "относительно от точного erf хоста. Замерено сквозным прогоном на bge-base с "
+    "включённым кодом: relfro 6.1e-03 — поэтому рантайм принимает код, а не "
+    "отказывает.",
+("gemm_rtp", "layn"):
+    "pre-LN: два LayerNorm на слой плюс финальный. Дизайн `layernorm/` "
+    "строится под `d_model` и `layer_norm_eps` ЭТОЙ модели, и рантайм сверяет "
+    "оба с контейнером, который держит, так что набор, экспортированный для "
+    "другой модели, отвергается поимённо, а не нормализует молча неверными "
+    "числами.",
+("gemm_rtp", "softm"):
+    "softmax над матрицей оценок — отдельный проход между двумя GEMM "
+    "внимания, поэтому дизайн `softmax/` забирает его как есть.",
+("gemm_rtp", "conv"):
+    "называет conv1/conv2 Whisper — аудио-фронтенд, а этой архитектуры нет.",
+("gemm_rtp", "attn"):
+    "`qk()` и `av()` в `BertEncoder::run` считают QK^T и softmax·V на хосте, "
+    "без ветки на массиве. Softmax между ними уже `honours` — поэтому не "
+    "хватает только этих двух. Что для этого нужно: потоки `attn_qk`/`attn_av` "
+    "экспортёра, которые сегодня строит только `kind: stt`, и `n_kv` из 256 "
+    "позиций этой модели вместо `frames` — у эмбеддера ключа `frames` нет, так "
+    "что геометрия молча откатилась бы на Whisper-овские 1500.",
+("gemm_rtp", "mproj"):
+    "называет банк mel-фильтров Slaney — аудио-фронтенд, а этой архитектуры нет.",
+("gemm_rtp", "fft"):
+    "называет трансформацию 400 точек — аудио-фронтенд, а этой архитектуры нет.",
+("gemm_rtp", "logit"):
+    "называет СВЯЗАННЫЙ ЭМБЕДДИНГ Whisper, используемый как матрица логитов "
+    "(`decoder.cpp:196`: в чекпойнте нет `proj_out`). Эмбеддер заканчивается "
+    "головой пулинга и такого тензора не несёт: в `bert_encoder.cpp` ноль "
+    "вхождений `logit` или `vocab`.",
+("stt", "gelu"):
+    "чекпойнт Whisper объявляет `activation: gelu`, а упаковщик отвергает всё "
+    "остальное, так что это точное erf-ядро. `poly`-вариант на 2.49e-3 дальше от "
+    "него — это уже другая активация, а не более быстрая та же.",
+("stt", "layn"):
+    "pre-LN с собственным `layer_norm_eps` этого чекпойнта (1e-05, внутри "
+    "квадратного корня в `kernels/layernorm.cc`), строится под цель, а не по "
+    "умолчанию.",
+("stt", "softm"):
+    "softmax над матрицей оценок — отдельный проход; ширина строки дизайна "
+    "следует геометрии внимания, рядом с которым он построен.",
+("stt", "conv"):
+    "conv1/conv2 идут на СОБСТВЕННОМ потоке энкодерного набора `[rows, d, d]` — "
+    "shape строки `attn_out`, — поэтому код не стоит ни одного `hw_context` и ни "
+    "одного лишнего xclbin. Это единственная операция, выигрывающая по обеим "
+    "осям: стоимость на хосте растёт как d², на массиве — как число диспатчей, "
+    "а оно постоянно.",
+("stt", "attn"):
+    "два GEMM по краям softmax, как потоки `attn_qk` и `attn_av` в том же "
+    "наборе. ЗАМЕРЕНО 4.32 с против 0.94 с на хосте на окне в 3 с: работает, и "
+    "в 4.6 раза медленнее.",
+("stt", "mproj"):
+    "банк mel — ещё один поток в энкодерном наборе, при (201 бине, столько mel "
+    "у модели).",
+("stt", "fft"):
+    "трансформация 400 точек фронтенда — ещё один поток в энкодерном наборе, "
+    "при (400, 201).",
+("stt", "logit"):
+    "связанный эмбеддинг, транспонированный и нарезанный на восемь потоков-"
+    "чанков в ДЕКОДЕРНОМ наборе; 39 МБ подложенных панелей. Нарезан потому, "
+    "что 51865 колонок — это 1621 плитка по 32 против 12 у крупнейшего "
+    "корабльного дизайна.",
+("cls", "gelu"):
+    "pre-LN с негейтед FFN, так что активация ЯВЛЯЕТСЯ отдельным проходом, и его "
+    "забирает дизайн `gelu/`. ЗАМЕРЕНО на `vit-base-patch16-224`, bf16, "
+    "bus.jpg, лучший из 8: 0.343 с против 0.248 с у хоста — в 1.38 раза "
+    "МЕДЛЕННЕЕ. ОГОВОРКА, и она про точность, а не про код: `resolve.py` "
+    "форсирует точное erf-ядро только для `kind stt`, а ViT остаётся на "
+    "дефолте экспортёра `poly`, то есть это фита 8-й степени — 2.49e-3 "
+    "относительно от точного erf, которое считает хост. Замеренный дрейф на "
+    "наборе меток — меньше 0.011 по уверенности, поэтому это оговорка, а не "
+    "отказ. Цели, которой нужно точное ядро, приходится сказать об этом в "
+    "своих overrides; в дереве этого не делает никто.",
+("cls", "layn"):
+    "25 мест (два на слой плюс финальный), то же ядро. ЗАМЕРЕНО 0.377 с против "
+    "0.248 с — в 1.52 раза медленнее.",
+("cls", "softm"):
+    "здесь softmax ВНУТРИ внимания. Перенос его одного отправляет на массив и "
+    "обратно всю матрицу оценок 197×197 ради одного поэлементного прохода, а два "
+    "GEMM по краям — это `attn`, следующая ячейка.",
+("cls", "conv"):
+    "patch embedding — это свёртка `Conv2d(3, d, kernel=16, stride=16)`, и она "
+    "УЖЕ на массиве. im2col делает из неё `[n_patches, patch_dim] x "
+    "[patch_dim, d]`, то есть ровно shape строки `attn_out`, поэтому "
+    "диспатчится она в слот инструкции `attn_out` вообще без флага "
+    "(`runtime/src/vit/encoder.cpp:267`). Запрос `conv` не добавил бы ни одного "
+    "диспатча. Переписывание точное на одной только почве: stride равен kernel "
+    "при padding 0, так что 196 окон ни не перекрываются, ни пропускаются, и "
+    "im2col — это перестановка, а не сумма.",
+("cls", "attn"):
+    "12 голов на 197 позициях. Не хватает двух вещей, и ни одна из них не модель: "
+    "список потоков `kinds.cls` несёт qkv/attn_out/ffn_up/ffn_down, а не "
+    "attn_qk/attn_av, и в `npu_targets.json` нет ни одного замера внимания выше "
+    "seq 64, а у ViT их 197 — так что каталог уже помечает пропускную способность "
+    "собственной записи как НЕЗАМЕРЕННУЮ. У ViT нет своего внимания: "
+    "`vit/encoder.cpp:333` зовёт `npue::whisper::attention()`, то есть хостовый "
+    "путь уже общий с Whisper, и не хватает только ветки.",
+("cls", "mproj"):
+    "банк mel-фильтров — часть аудио-фронтенда, а этой архитектуры нет.",
+("cls", "fft"):
+    "трансформация 400 точек — часть аудио-фронтенда, а этой архитектуры нет.",
+("cls", "logit"):
+    "классификационная голова — настоящая проекция `[768, 1000]`, так что это не "
+    "отсутствующая операция, — но 1000 не кратно `tile_n*cols = 48*4 = 192`, "
+    "поэтому на этом массиве не существует ни одной законной панели B такой "
+    "ширины, и построить её нельзя. Это не «не хватает»: на этой плате её не "
+    "существует. (Впрочем, это 0.8% стоимости картинки в виде хостового "
+    "matvec, так что по скорости вопрос пустой.)",
+("pose", "conv"):
+    "72 диспатченные свёртки, на собственных потоках `convNNxMM` набора позы "
+    "(у шима 16 дескрипторов DMA-буферов — поэтому форм 14, а не одна). ЗАМЕРЕНО "
+    "290 мс против 150 мс у хоста на 640×640: здесь в 1.4 раза МЕДЛЕННЕЕ, и "
+    "сообщение рантайма об отказе для контейнера без набора дизайнов говорит "
+    "ровно это.",
+("pose", "gelu"):
+    "активация здесь SiLU, а не GELU, и она ВФЬЮЖЕНА в эпилог свёртки: "
+    "`Mul(x, Sigmoid(x))` — графовая операция, которую упаковщик узнаёт как "
+    "паттерн активации. Отдельного прохода, который можно перенести, нет.",
+("pose", "layn"):
+    "операции нормализации в этой сети нет вообще. `GRAPH_OPS` в "
+    "`packers/pose.py` — это `{Conv, Mul, Sigmoid, Add, Concat, Split, MaxPool, "
+    "Resize}`, и BatchNormalization там отсутствует, так что граф с BN был бы "
+    "ОТВЕРГНУТ ПОИМЕННО — ultralytics сворачивает BN в веса свёрток на экспорте, "
+    "вот почему `grep` не находит BatchNormalization нигде в `tools/`.",
+("pose", "softm"):
+    "нет внимания, значит нет softmax.",
+("pose", "attn"):
+    "нет внимания: `net.hpp` открывает conv/concat/slice/add/maxpool/upsample/"
+    "head и больше ничего взвешенного.",
+("pose", "mproj"):
+    "банк mel-фильтров — часть аудио-фронтенда, а этой архитектуры нет.",
+("pose", "fft"):
+    "трансформация 400 точек — часть аудио-фронтенда, а этой архитектуры нет.",
+("pose", "logit"):
+    "словаря нет: голова — это свёртка 1×1, дающая один class score и сетку DFL, а "
+    "не проекция в пространство токенов.",
+("embeddinggemma-300m", "gelu"):
+    "GeGLU считает активацию ВНУТРИ гейтед-пути, между `ffn_up` и `ffn_down`, "
+    "так что отдельного прохода, который мог бы забрать `hw_context`, нет, и "
+    "исполнение кода напечатало бы «на МАССИВЕ», не сдвинув ничего. Измерено, а "
+    "не заявлено: рантайм однажды взял `host_gelu` прямо из флага, напечатал "
+    "строку МАССИВА для дизайна, который так и не открыл, и вернул векторы с "
+    "relfro 0.000e+00 против собственного хостового пути (6.1e-03 у негейтед "
+    "bge-base, тот же флаг).",
+("embeddinggemma-300m", "layn"):
+    "gemma нормализует RMSNorm, а не LayerNorm: нет прохода по среднему, нет "
+    "beta, свой `rms_norm_eps`. `kernels/layernorm.cc` параметризован только "
+    "`-DLN_COLS/-DLN_EPS/-DLN_ROWS`, так что это другое тело ядра, новый вид "
+    "дизайна и ДЕВЯТЫЙ код. Намеренно не сделано: набор кодов стал бы больше и "
+    "менее однородным — три из четырёх трансформерных архитектур носили бы код "
+    "нормализации, а одна нет. Отвергнуто, а не сделано двумя разными "
+    "операциями под одним именем.",
+("embeddinggemma-300m", "softm"):
+    "`GemmaNpuEncoder` вообще не читает флаг операции, так что код до него не "
+    "доходит; а softmax внутри внимания — это следующая ячейка.",
+("embeddinggemma-300m", "attn"):
+    "`attention()` в `gemma_npu_encoder.cpp:166` — настоящий хостовый проход по "
+    "последовательности без ветки на массиве, то есть нереализованная работа, а "
+    "не неподдерживаемость. RoPE применяется к буферу qkv до её вызова, так что "
+    "операнд A на массиве — это активации уже после RoPE. Что для этого нужно — "
+    "список из строки `gemm_rtp` плюс это, и быстрее бы не стало: собственное "
+    "`attn` Whisper замерено в 4.6 раза медленнее хостового пути.",
+("embeddinggemma-300m", "conv"):
+    "называет conv1/conv2 Whisper — аудио-фронтенд, а этой архитектуры нет.",
+("embeddinggemma-300m", "mproj"):
+    "называет банк mel-фильтров Whisper — аудио-фронтенд, а этой архитектуры нет.",
+("embeddinggemma-300m", "fft"):
+    "называет трансформацию 400 точек Whisper — аудио-фронтенд, а этой "
+    "архитектуры нет.",
+("embeddinggemma-300m", "logit"):
+    "называет связанный эмбеддинг, используемый как матрица логитов; в "
+    "`gemma_npu_encoder.cpp` ноль вхождений `logit` или `vocab`.",
 }
 
 
@@ -77,7 +336,27 @@ def cell_rows(label):
             for code in npu_ops.OPS]
 
 
-def matrix_table():
+def ru_reason(label, code):
+    """The Russian reason, or a loud failure if the translation is missing.
+
+    Not a fallback to English. One English cell among forty Russian ones reads as
+    an oversight in the translation rather than as a hole, so the hole has to be
+    the loud kind: the generator refuses to produce the file, and the matrix gate
+    fails.
+    """
+    try:
+        return REASONS_RU[(label, code)]
+    except KeyError:
+        raise SystemExit(
+            f"NPU_OPS.ru.md: no Russian reason for {label}/{code}. The English "
+            f"registry has one (tools/lib/npu_ops.py, KIND_REGISTRY or "
+            f"MODEL_REGISTRY), so the translation is behind the source. Add it to "
+            f"REASONS_RU in {Path(__file__).name} -- do not leave the cell "
+            f"English."
+        ) from None
+
+
+def matrix_table(ru=False):
     """The whole 40-cell matrix, one row per architecture, one column per code.
 
     The cell is the status and nothing else. An earlier version put the op's long
@@ -87,13 +366,15 @@ def matrix_table():
     say both. The names are in the per-architecture section below, where the
     reason for each cell has room to explain what that cell's op actually is.
     """
-    head = "| architecture | " + " | ".join(
-        f"`{c}`" for c in npu_ops.OPS) + " |"
+    mark = MARK_RU if ru else MARK
+    head = "| " + ("архитектура" if ru else "architecture") + " | " + \
+        " | ".join(f"`{c}`" for c in npu_ops.OPS) + " |"
     rule = "| --- | " + " | ".join("---" for _ in npu_ops.OPS) + " |"
     lines = [head, rule]
-    for label, _title, _blurb in ARCHES:
+    for entry in ARCHES:
+        label = entry[0]
         reg = reg_of(label)
-        cells = [MARK[reg[c][0]] for c in npu_ops.OPS]
+        cells = [mark[reg[c][0]] for c in npu_ops.OPS]
         lines.append(f"| `{label}` | " + " | ".join(cells) + " |")
     return lines
 
@@ -113,23 +394,135 @@ def _do(n):
     return "does" if n == 1 else "do"
 
 
-def doc():
-    # One tally over every cell in the document, so the number at the top is the
-    # number of rows below it and the gate can assert both.
+def doc(ru=False):
     counts = {s: 0 for s in npu_ops.STATUSES}
-    for label, _t, _b in ARCHES:
-        reg = reg_of(label)
+    for entry in ARCHES:
+        reg = reg_of(entry[0])
         for code in npu_ops.OPS:
             counts[reg[code][0]] += 1
+    n_codes, n_arch = len(npu_ops.OPS), len(ARCHES)
 
     L = []
     a = L.append
+    if ru:
+        a("# Какая архитектура какой код `--npu-ops` исполняет")
+        a("")
+        a("<!-- СГЕНЕРИРОВАНО tools/gen_npu_ops_doc.py из tools/lib/npu_ops.py.")
+        a("     Не править руками: запустите скрипт, иначе упадёт")
+        a("     tools/verify/verify_npu_op_matrix.py. Реестр — источник истины,")
+        a("     этот файл — его проза. Английская версия: NPU_OPS.md -->")
+        a("")
+        a("У рантайма ОДИН флаг на это, `--npu-ops CODES`, и его значение по")
+        a("умолчанию — пустое множество: **всякая операция считается на CPU, а")
+        a("это измеренно более быстрый путь во всех случаях, где мерили.** Коды в")
+        a("списке — это способ попросить массив вместо этого, по одной операции.")
+        a("")
+        a("У экспортёра такого флага НЕТ вовсе. Одна команда собирает каждый")
+        a("дизайн, который цель способна использовать:")
+        a("")
+        a("```")
+        a("python tools/export/export_gemm_rtp.py --target <model> --arch 1")
+        a("```")
+        a("")
+        a("Она печатает выбранный список и причину для каждого пропущенного кода,")
+        a("и не принимает никакого флага операций: `--npu-ops`, `--npu-extra-ops`")
+        a("и `--npu-eltwise` там отвергаются поимённо, у каждого своё сообщение.")
+        a("Ниже — то, что он читает.")
+        a("")
+        # The tally is a LIST OF STATUSES rather than the English version's prose
+        # sentence, and that is not a stylistic choice: Russian agreement makes
+        # "14 работают / 1 работает" a thing the template cannot get right for
+        # every count, and a bullet carrying the status name is invariant under
+        # any number. The English keeps its sentence because English is invariant
+        # here and the sentence reads better than a list.
+        a(f"Кодов {n_codes}, архитектур {n_arch}, ячеек {n_codes * n_arch}. "
+          f"Из них:")
+        a("")
+        a(f"- **{counts['honours']}** `honours` — работает на массиве сегодня;")
+        a(f"- **{counts['on_array']}** `on_array` — работа уже диспатчена без кода;")
+        a(f"- **{counts['unimplemented']}** `unimplemented` — операция у модели "
+          f"есть, ветка на массив не написана;")
+        a(f"- **{counts['blocked']}** `blocked` — на эту плату перенести нельзя, "
+          f"причина названа ниже;")
+        a(f"- **{counts['absent']}** `absent` — такой операции у модели нет.")
+        a("")
+        a("## Восемь кодов")
+        a("")
+        a("Три — поэлементные дизайны собственной сборки, в соседнем каталоге")
+        a("рядом с набором GEMM:")
+        a("")
+        for code in ("gelu", "layn", "softm"):
+            a(f"- `{code}` — {LONG_RU[code]}, в `{npu_ops.OPS[code][0]}/`.")
+        a("")
+        a("Пять — НЕ дизайны собственной сборки. Это потоки, добавляемые в набор")
+        a("дизайнов, который экспорт GEMM и так производит, так что запрос кода не")
+        a("стоит лишнего xclbin — поэтому `build.py` для них ничего не")
+        a("компилирует, и знать о них должен только `resolve.py`:")
+        a("")
+        for code in sorted(npu_ops.STREAM_ONLY):
+            a(f"- `{code}` — {LONG_RU[code]}: {NO_DESIGN_RU[code]}.")
+        a("")
+        a("## Что значат пять статусов")
+        a("")
+        for s in npu_ops.STATUSES:
+            a(f"- **{s}** — {STATUS_MEANING_RU[s]}.")
+        a("")
+        a("`unimplemented` стоит отличать от `blocked` внимательнее всего: это")
+        a("**ветка кода, которую никто не написал**, а не свойство модели и не")
+        a("то, что экспортёр мог бы починить сам. `blocked` значит, что")
+        a("операция настоящая и здесь не переносится, и причина говорит какая из")
+        a("трёх: вфьюжена в другую операцию, требует другого ядра и нового кода,")
+        a("или не тайлится.")
+        a("")
+        a("## Матрица")
+        a("")
+        L.extend(matrix_table(ru=True))
+        a("")
+        a("`уже` — ячейка пуста потому, что работа уже сделана без кода, и это")
+        a("лучше галочки. `—` — у модели нет такой операции, и это навсегда и")
+        a("правильно. `нет кода` — честная середина: операция есть, и ничего до")
+        a("неё не доходит.")
+        a("")
+        for label, title_en, title_ru, blurb_en, blurb_ru in ARCHES:
+            a(f"## `{label}` — {title_ru}")
+            a("")
+            a(blurb_ru)
+            a("")
+            for code, long_name, status, _reason_en in cell_rows(label):
+                a(f"### `{code}` — {LONG_RU[code]}: **{status}**")
+                a("")
+                a(ru_reason(label, code))
+                a("")
+                design = npu_ops.OPS[code][0]
+                if not design and status == "honours":
+                    a(f"Каталог дизайна: нет — {NO_DESIGN_RU[code]}. См. "
+                      f"`STREAM_ONLY` в `tools/lib/npu_ops.py`.")
+                    a("")
+                elif status == "honours":
+                    a(f"Каталог дизайна: `{design}/`, собирается экспортёром "
+                      f"автоматически для любой цели этой архитектуры.")
+                    a("")
+        a("## Где это проверяется")
+        a("")
+        a("- `tools/lib/npu_ops.py` — реестр. Экспортёр читает его, решая что "
+          "строить.")
+        a("- `runtime/include/common/npu_ops_flag.hpp` — вторая копия восьми "
+          "кодов и их длинных имён у рантайма. Ни одна сторона не может включить "
+          "другую, поэтому каждая указывает на другую, а цена этого "
+          "дублирования — отказ поимённо с обеих сторон, а не неверное число.")
+        a("- `tools/verify/verify_npu_op_matrix.py` — проверяет, что этот файл "
+          "ровно то, что печатает `tools/gen_npu_ops_doc.py`, что ячеек ровно "
+          f"{n_codes * n_arch} и разложение по статусам верно, и что рантайм "
+          "принимает или отвергает коды так, как здесь написано.")
+        a("")
+        return "\n".join(L)
+
     a("# Which architecture honours which `--npu-ops` code")
     a("")
     a("<!-- GENERATED by tools/gen_npu_ops_doc.py from tools/lib/npu_ops.py.")
     a("     Do not edit: run the script, or tools/verify/verify_npu_op_matrix.py")
     a("     fails. The registry is the source of truth; this file is its prose.")
-    a("-->")
+    a("     Russian version: NPU_OPS.ru.md -->")
     a("")
     a("The runtime has ONE flag for this, `--npu-ops CODES`, and its default is")
     a("the empty set: **every op runs on the CPU, which is the measured-faster")
@@ -148,9 +541,8 @@ def doc():
     a("`--npu-eltwise` are refused by name there, each with its own message. The")
     a("table below is what it reads.")
     a("")
-    a(f"There are {len(npu_ops.OPS)} codes and "
-      f"{len(ARCHES)} architectures: {len(npu_ops.OPS) * len(ARCHES)} cells. "
-      f"Of those, "
+    a(f"There are {n_codes} codes and {n_arch} architectures: "
+      f"{n_codes * n_arch} cells. Of those, "
       f"{counts['honours']} run on the array today, "
       f"{counts['on_array']} {_are(counts['on_array'])} already there without a "
       f"code, {counts['unimplemented']} {_are(counts['unimplemented'])} "
@@ -197,14 +589,13 @@ def doc():
     a("which is permanent and correct. `no code` is the honest middle: the")
     a("operation is there, and nothing reaches it.")
     a("")
-    for label, title, blurb in ARCHES:
-        a(f"## `{label}` -- {title}")
+    for label, title_en, title_ru, blurb_en, blurb_ru in ARCHES:
+        a(f"## `{label}` -- {title_en}")
         a("")
-        a(blurb)
+        a(blurb_en)
         a("")
         for code, long_name, status, reason in cell_rows(label):
-            head = f"### `{code}` -- {long_name}: **{status}**"
-            a(head)
+            a(f"### `{code}` -- {long_name}: **{status}**")
             a("")
             a(reason)
             a("")
@@ -233,28 +624,36 @@ def doc():
     return "\n".join(L)
 
 
+# No leading indent here: the caller prints these lines with its own two-space
+# prefix, and a second one here prints the pair misaligned by two columns.
+def check_one(path, text) -> bool:
+    if not path.exists():
+        print(f"{path.name} does not exist; run tools/gen_npu_ops_doc.py")
+        return False
+    cur = path.read_text()
+    if cur == text:
+        print(f"ok    {path.name} matches tools/lib/npu_ops.py")
+        return True
+    print(f"{path.name} is stale; tools/gen_npu_ops_doc.py prints:")
+    for line in difflib.unified_diff(cur.splitlines(), text.splitlines(),
+                                     path.name, "generated", lineterm="", n=1):
+        print("  " + line)
+    return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", action="store_true",
-                    help="do not write; exit 1 and print the diff if stale")
+                    help="do not write; exit 1 and print the diff if either is "
+                         "stale")
     ns = ap.parse_args()
-    text = doc()
+    texts = {"en": doc(False), "ru": doc(True)}
     if ns.check:
-        if not DOC.exists():
-            print(f"{DOC.name} does not exist; run tools/gen_npu_ops_doc.py")
-            return 1
-        cur = DOC.read_text()
-        if cur != text:
-            print(f"{DOC.name} is stale; tools/gen_npu_ops_doc.py prints:")
-            for line in difflib.unified_diff(
-                    cur.splitlines(), text.splitlines(),
-                    DOC.name, "generated", lineterm="", n=1):
-                print("  " + line)
-            return 1
-        print(f"{DOC.name} matches tools/lib/npu_ops.py")
-        return 0
-    DOC.write_text(text)
-    print(f"wrote {DOC} ({len(text.splitlines())} lines)")
+        ok = all(check_one(DOCS[k], texts[k]) for k in ("en", "ru"))
+        return 0 if ok else 1
+    for k in ("en", "ru"):
+        DOCS[k].write_text(texts[k])
+        print(f"wrote {DOCS[k].name} ({len(texts[k].splitlines())} lines)")
     return 0
 
 
