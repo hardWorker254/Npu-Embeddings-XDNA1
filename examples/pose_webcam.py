@@ -212,9 +212,21 @@ def main(argv: list[str] | None = None) -> int:
                "-/+ line thickness. Requires opencv-python (see "
                "requirements.txt) and a built runtime binary.",
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--model", default="yolov8n-pose.npue",
-                    help="container path or a name the runtime's catalogue knows "
-                         "(default: %(default)s)")
+    # The default is a NAME with no ".npue" suffix, and that omission is the whole
+    # trick. runtime/include/common/model_catalog.hpp:200 treats any argument
+    # ending in ".npue" -- or containing a separator -- as a PATH and uses it
+    # exactly as given, resolved against the CURRENT directory. So the spelling
+    # "yolov8n-pose.npue" is a path meaning ./yolov8n-pose.npue, which exists in
+    # models/ and therefore nowhere you are likely to be standing: it failed from
+    # the repo root AND from examples/, with a "no such container" that reads as
+    # though the container were missing rather than as a spelling mistake. The
+    # bare name goes through the catalogue instead and resolves from any cwd.
+    ap.add_argument("--model", default="yolov8n-pose",
+                    help="a model NAME for the runtime's catalogue (no .npue "
+                         "suffix, no path separator -- it is looked up under "
+                         "models/), or a path to a .npue file, used exactly as "
+                         "given and so resolved against your current directory. "
+                         "Default: %(default)s")
     ap.add_argument("--camera", type=int, default=0,
                     help="camera index for cv2.VideoCapture (default: %(default)s)")
     ap.add_argument("--image", metavar="PATH",
