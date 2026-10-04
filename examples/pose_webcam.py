@@ -57,7 +57,9 @@ from pathlib import Path
 # The facade lives beside this file's parent, so the demo runs from a checkout
 # without being installed. A copy of this file elsewhere should import npue_pose
 # from wherever it is on sys.path instead -- it is one module and no packaging.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+sys.path.insert(0, str(REPO_ROOT / "python"))
 
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
@@ -257,7 +259,14 @@ def main(argv: list[str] | None = None) -> int:
                          "Honoured, and measured SLOWER for this network: 0.43 s "
                          "against 0.31 s per frame, so it is off by default.")
     ap.add_argument("--artifacts", default="",
-                    help="the design set's directory, if not the automatic one")
+                    help="the design set's directory. Left empty, --array looks "
+                         "for runtime/artifacts/<model>/artifacts_npu1/ and says "
+                         "which one it picked; if that is not there either, the "
+                         "runtime's refusal names the command that builds it.")
+    ap.add_argument("--arch", type=int, default=1,
+                    help="which array the design set under --artifacts is for; "
+                         "it is a directory name, artifacts_npu<N> (default: "
+                         "%(default)s)")
     ap.add_argument("--threads", type=int, default=16,
                     help="host threads (default: %(default)s)")
     ap.add_argument("--conf", type=float, default=0.25,
@@ -288,6 +297,33 @@ def main(argv: list[str] | None = None) -> int:
                     help="stop after this many frames, so --no-window terminates "
                          "(default: %(default)s)")
     args = ap.parse_args(argv)
+
+    # --array with no --artifacts could not work at all: the runtime refuses
+    # --npu-ops conv by name unless a design set is named, and its message says
+    # there is "nothing already on disk that could serve it" -- which is true of
+    # the runtime, which cannot infer a set, and false of this checkout, where
+    # runtime/artifacts/yolov8n-pose/artifacts_npu1/ holds all 14 designs this
+    # container needs. So the demo looks, and prints what it found, because a
+    # silently chosen design set is exactly the kind of thing that makes an
+    # --artifacts-flagged run comparable to itself for the wrong reason. If the
+    # directory is absent, --artifacts stays empty and the runtime's refusal --
+    # which names the command that builds one -- is the better message than
+    # anything invented here.
+    #
+    # Resolved against the REPO ROOT, not the current directory: this file is
+    # run from examples/ as often as from the root, and a relative guess would
+    # work in one and fail in the other, which is the same trap as the .npue
+    # default this same function already had to be taught about.
+    if args.array and not args.artifacts:
+        stem = Path(args.model).stem          # a name, or a path -> its stem
+        guess = (REPO_ROOT / "runtime" / "artifacts" / stem /
+                 f"artifacts_npu{args.arch}")
+        if guess.is_dir():
+            args.artifacts = str(guess)
+            print(f"design set: {guess}")
+        else:
+            print(f"note: no design set at {guess}; the runtime will refuse "
+                  f"--array and name the command that builds one", file=sys.stderr)
 
     opts = PoseLandmarkerOptions(
         container=args.model,
