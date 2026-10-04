@@ -47,7 +47,17 @@ CASES = [
     ("gemm", ["--target", "nomic-embed-text-v1.5", "--arch", "all", "--dry-run"]),
     ("gemm", ["--target", "embeddinggemma-300m", "--arch", "1", "--dry-run", "--batches", "4,8"]),
     ("gemm", ["--target", "gte-multilingual-base", "--arch", "1", "--seq", "128", "--dry-run"]),
-    ("gemm", ["--arch", "1", "--batch", "8", "--cols", "4", "--hidden", "384", "--dry-run"]),
+    # ACCEPTED DIFFERENCE: --identity-threshold's fallback moved 80 -> 128.
+    # Only THIS case shows it, because it is the only one with no --target: the
+    # threshold comes from the target's defaults when there is one, and from
+    # FALLBACK_IDENTITY_THRESHOLD (exporters/common/consts.py) when there is
+    # not. The change is deliberate and documented there -- 80 was one byte
+    # short of the 69-82 bytes two builds of the same shape actually differ by,
+    # so a set whose shapes were all fine refused to export -- while the
+    # monolith this gate diffs against still defaults to 80. The numbers and
+    # the exit code are otherwise unchanged.
+    ("gemm", ["--arch", "1", "--batch", "8", "--cols", "4", "--hidden", "384", "--dry-run"],
+     [("--identity-threshold 80", "--identity-threshold 128")]),
     ("gemm", ["--target", "no-such-model", "--arch", "1", "--dry-run"]),
     ("gemm", ["--target", "all-MiniLM-L6-v2", "--seq", "7", "--dry-run"]),
     ("gemm", ["--target", "all-MiniLM-L6-v2", "--seq", "64", "--batches", "4,6", "--dry-run"]),

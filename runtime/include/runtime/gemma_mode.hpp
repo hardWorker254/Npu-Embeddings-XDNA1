@@ -148,6 +148,35 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
       // gemm_rtp/build.py refuses the same codes for the same arch).
       std::string seen;
       for (const auto &c : codes) { if (!seen.empty()) seen += ", "; seen += c; }
+      // `attn` gets a different sentence, for the same reason run_setup.hpp
+      // splits it off BERT's: the sentence above is true of layn/softm/gelu
+      // (gemma runs RMSNorm, softmax and a GATED GeGLU, so there is no separate
+      // pass a design could take over), but attention IS a separate pass --
+      // `attention(qkvbuf, ctx)` in GemmaNpuEncoder -- and what is missing is
+      // the branch, not the capability. Telling a reader "exporting will not
+      // help" about a cell that is merely unwritten sends them to conclude the
+      // model cannot do it. Note the measured part still holds for attn: with
+      // no branch written, accepting it today returns bit-identical vectors.
+      if (codes.count("attn")) {
+        throw std::runtime_error(
+            "--npu-extra-ops " + listing + ": `attn` is unimplemented here, "
+            "not unsupported. GemmaNpuEncoder::attention() computes real "
+            "attention over this model's tokens on the host with no array "
+            "branch, so asking for attn today changes nothing and returns "
+            "identical vectors -- measured, max|d| 0.000e+00 -- because the "
+            "branch was never written, not because there is nothing to move. "
+            "Three things stand in the way, none of them the model: "
+            "export_gemm_rtp builds attn_qk/attn_av streams only under `kind "
+            "== \"stt\"` (resolve.py); kinds.cls's stream list does not carry "
+            "them; and n_kv is read from `frames`, which an embedder does not "
+            "have, so it would default to Whisper's 1500 instead of this "
+            "model's positions. And gemma applies RoPE to the qkv buffer "
+            "before attention() runs, so the array's A operand would be those "
+            "post-RoPE activations -- a per-model detail the shared host path "
+            "gets for free. Whisper's own `attn` measures 4.6x "
+            "SLOWER than its host path, so this cell is written down rather "
+            "than filled. Asked for: " + seen + ".");
+      }
       throw std::runtime_error(
           "--npu-extra-ops " + listing + ": this architecture runs RMSNorm, "
           "softmax and GeGLU on the host. GemmaNpuEncoder has no per-op "

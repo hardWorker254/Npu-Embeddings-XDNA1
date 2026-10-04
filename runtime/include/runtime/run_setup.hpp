@@ -328,15 +328,49 @@ inline void setup_flags_pools(RunContext &ctx) {
   // flag) -- so reaching here means an embedder was asked for a speech-to-text
   // op, and dropping it would be the "the flag was there and nothing happened"
   // failure the subcommand whitelist exists to prevent.
+  //
+  // `attn` does NOT get that message, and the difference is the whole point of
+  // splitting the code apart here. Attention has no front end: this model has
+  // real attention -- 12 heads over 256 tokens -- and `qk()` / `av()` in
+  // BertEncoder::run compute it on the host with no array branch to take. So
+  // the reason is what is MISSING, not what the model LACKS, and handing it
+  // conv's sentence would be a category error that reads as "this architecture
+  // cannot do attention" when the truth is "nobody has written the branch".
+  // That distinction is what a per-code refusal table is for; see README.md's
+  // "Which architecture honours which code".
   for (const auto &code : ctx.npu_ops) {
     if (code == "gelu" || code == "layn" || code == "softm") continue;
     const NpuOp *op = find_npu_op(code);
+    if (code == "attn") {
+      throw std::runtime_error(
+          std::string("--npu-extra-ops ") + code + " (" +
+          (op ? op->long_name : "unknown op") + "): this model HAS attention -- "
+          "BertEncoder::run's qk() and av() over the sequence -- and computes "
+          "it on the host with no array branch, so this is unimplemented work "
+          "rather than a missing operation. Three things are in the way, none "
+          "of them the model: export_gemm_rtp only builds attn_qk/attn_av "
+          "instruction streams under `kind == \"stt\"` (resolve.py); those "
+          "streams are absent from kinds.cls's stream list; and the n_kv "
+          "geometry is read from `frames`, which an embedder does not carry, so "
+          "it would default to Whisper's 1500 instead of this model's 256 "
+          "positions. No such design has been exported or run. Note also that "
+          "Whisper's own `attn` measures 4.6x SLOWER than its host path, so "
+          "filling this cell would not make anything faster. The codes this "
+          "container genuinely does not have are conv, mproj, fft and logit.");
+    }
     throw std::runtime_error(
         std::string("--npu-extra-ops ") + code + " (" +
         (op ? op->long_name : "unknown op") +
         ") is a speech-to-text op and this container is an embedder, which has "
         "no front end to send it to the array. It belongs to `transcribe <a "
-        "whisper model> <audio>`.");
+        "whisper model> <audio>`." +
+        (code == "logit"
+             ? std::string(
+                   " `logit` in particular names Whisper's TIED TOKEN EMBEDDING "
+                   "used as the logit matrix (decoder.cpp:196), not a generic "
+                   "vocabulary layer: an embedder stops at its pooling head and "
+                   "has no such tensor at all.")
+             : std::string()));
   }
   // A GATED FFN HAS NO PER-OP GELU, and the code is refused HERE, beside the
   // speech-to-text codes above, because this is the same question: which codes

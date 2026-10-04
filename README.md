@@ -213,47 +213,133 @@ honour is a property of the MODEL, not of the flag.** There are no
 architecture-specific NPU flags anywhere in the tree; the GEMMs are on the array
 everywhere and unconditionally, with no flag, because there is no GEMM code.
 
-This table was measured by running all eight codes against all five containers
-on this machine (`--npu-extra-ops CODE` on a real invocation of each mode), not
-read off the source:
+All 40 cells (5 architectures × 8 codes) were measured by running every code
+against every container on this machine with a real invocation of each mode, not
+read off the source. **But one flat table would hide the thing worth knowing:
+the empty cells are five different situations, and only one of them is permanent.**
 
-| code | embeddings (BERT) | gemma-300m | whisper | ViT | pose |
+| | BERT | gemma-300m | whisper | ViT | pose |
 |---|---|---|---|---|---|
-| `gelu` | yes | — | yes | **yes** | — |
-| `layn` | yes | — | yes | **yes** | — |
-| `softm` | yes | — | yes | — | — |
-| `conv` | — | — | yes | — | yes |
-| `attn` | — | — | yes | — | — |
-| `mproj` | — | — | yes | — | — |
-| `fft` | — | — | yes | — | — |
-| `logit` | — | — | yes | — | — |
+| `gelu` | ✓ | △ | ✓ | ✓ | — |
+| `layn` | ✓ | ◇ | ✓ | ✓ | — |
+| `softm` | ✓ | ▢ | ✓ | ▢ | — |
+| `conv` | — | — | ✓ | ⊕ | ✓ |
+| `attn` | ▢ | ▢ | ✓ | ▢ | — |
+| `mproj` | — | — | ✓ | — | — |
+| `fft` | — | — | ✓ | — | — |
+| `logit` | — | — | ✓ | ◇ | — |
+| **counts** | 3 ✓ | 1 ✓ | 8 ✓ | 3 ✓ | 1 ✓ |
 
-`—` means **refused by name**, with the reason in the message. The reasons are
-per architecture, and they are not one reason:
+* **✓ — runs on the array now** (14 cells).
+* **▢ — the model HAS the operation, the code does not reach the array** (5
+  cells: `attn` for BERT, gemma and ViT, and `softm` for gemma and ViT).
+  Unimplemented work, not a property of the model. See the caveat below.
+* **— — the model has no such operation** (17 cells). Permanent, and correct.
+* **△ ◇ ⊕ — four cells in three special situations** (4 cells; `◇` takes two of
+  them), explained per symbol below. 14 + 5 + 17 + 4 = 40.
 
-* **gemma** takes no per-op flag at all: `GemmaNpuEncoder` has no host/array
-  choice to read, and its FFN is gated, so the activation is inside the gated
-  path rather than a separate pass. Honouring a code would move nothing while
-  printing "on the ARRAY", so the exporter refuses to build the design too.
-* **ViT** now honours `layn` and `gelu` — the same two kernels Whisper runs, on
-  the same pre-LN and ungated exact-erf structure. It refuses `softm` because
-  softmax is *inside* attention: moving it alone ships the whole 197×197 score
-  matrix to the array and back for one elementwise pass, and the two GEMMs that
-  bracket it are `attn`, which `kinds.cls` does not carry and which
-  `npu_targets.json` records as unmeasured above seq 64.
-* **pose** has exactly one array-able op. Its SiLU is fused into the convolution
-  epilogue and it has no attention, no norm and no vocabulary, so there is
-  nothing else for a code to name.
-* **embeddings** refuse the five speech codes because they name Whisper's audio
-  front end, mel bank, transform and logit projection; a text encoder has none
-  of those, and it has its own vocabulary projection fused into the FFN.
+The 17 permanent cells, by reason:
 
-`layn` for gemma is the one cell that would need a **ninth** code: gemma uses
-RMSNorm, not LayerNorm, and RMSNorm is a different kernel (no mean pass, no
-beta) with a different epsilon (`rms_norm_eps`). Adding it would make the code
-set larger and *less* uniform — three of the four transformer architectures
-would have a norm code and one would not — so it is not done, and `layn` stays
-refused there rather than quietly meaning two different operations.
+| cells | why |
+|---|---|
+| `conv`, `mproj`, `fft` on BERT, gemma (6); `mproj`, `fft` on ViT (2) | these name Whisper's **audio front end**, its **mel filter bank** and its **400-point transform**. A text or image encoder has none of them. |
+| `logit` on BERT, gemma (2) | `logit` names Whisper's **tied token embedding used as the logit matrix** — `decoder.cpp:196`, "the checkpoint has no proj_out: the logit matrix is the tied token". An embedder stops at its pooling head and has no such tensor: `bert_encoder.cpp` and `gemma_npu_encoder.cpp` contain **zero** occurrences of `logit` or `vocab`. |
+| all 7 non-`conv` codes on pose (7) | `runtime/include/pose/net.hpp` exposes exactly one weighted op, `conv(..., bool silu, ...)`, plus `concat/slice/add/maxpool/upsample/head`. Its SiLU is fused into the convolution epilogue. There is **no normalization op at all**: `tools/pack/packers/pose.py:91` is `GRAPH_OPS = {Conv, Mul, Sigmoid, Add, Concat, Split, MaxPool, Resize}` and `BatchNormalization` is absent from it, so a graph carrying BN would be *refused by name* — and `grep BatchNormalization` over `tools/` and `docs/` returns nothing, because ultralytics folds BN into the conv weights at export. No attention, no vocabulary. Nothing for a code to name. |
+
+The four special cells:
+
+**⊕ `ViT conv` — the model HAS a convolution, and it is already on the array.**
+ViT's patch embedding is `Conv2d(3, 768, kernel=16, stride=16)`, im2col'd to
+`[197, 768] @ [768, 768]`. That K and N are exactly `attn_out`'s shape, so it is
+dispatched on `attn_out`'s instruction slot — unconditionally, with no flag, as
+one of the 49 GEMMs (`runtime/src/vit/encoder.cpp:267`,
+`g_.run(streams_.attn_out, ...)`). The cell is empty because **the work is
+already done**: `conv` names Whisper's `conv1`/`conv2` streams, which a ViT's
+design set does not carry, and honouring it would dispatch nothing new. This is
+the one empty cell that is better than a tick.
+
+**△ `gemma gelu` — the activation is fused, so there is no pass to move.**
+gemma's FFN is gated (GeGLU); the activation is computed *inside* the gated path
+while the two halves are being multiplied, rather than as a separate pass over a
+finished tensor. `gelu`'s whole design is one `hw_context` doing a standalone
+elementwise pass, so honouring it would print "on the ARRAY" while moving
+nothing. The exporter refuses for the same reason: gelu is dead for
+`gated_ffn` targets (nomic, gte, gemma).
+
+**◇ `gemma layn` — would need a NINTH code, and is deliberately not done.**
+gemma uses **RMSNorm**, not LayerNorm: no mean pass, no beta, its own
+`rms_norm_eps`. `kernels/layernorm.cc` is parameterised only by
+`-DLN_COLS/-DLN_EPS/-DLN_ROWS`, so RMSNorm is a different kernel body, a new
+design kind and a new code. That would make the code set *larger* and *less*
+uniform — three of the four transformer architectures would have a norm code and
+one would not — so `layn` stays refused there rather than quietly meaning two
+different operations.
+
+**◇ `ViT logit` — the model has it, the array cannot tile it.**
+The refusal message says it outright: the head is `[768, 1000]` and
+**1000 is not a multiple of `tile_n × cols = 48 × 4 = 192`**, so no legal B
+panel of that width exists on this array — it is not missing, it does not exist
+on this board. The same numbers are in `runtime/include/vit/encoder.hpp:37` and
+the header of `tools/pack/packers/vit.py`. (The head is also 0.8% of the image
+cost as a host matvec, so the point is moot for speed either way.)
+
+#### The 5 cells that are unimplemented work
+
+These are the honest gap. Each model computes the operation on the host with no
+host/array choice:
+
+```cpp
+// runtime/src/encoders/bert_encoder.cpp, BertEncoder::run
+qk(qkvbuf, scores);                          // host, no choice
+if (host_sm) softmax_cpu(scores);
+else eltwise(softmax_, slots_sm, ...);       // softm IS array-capable -- a ✓
+av(scores, qkvbuf, ctx);                     // host, no choice
+```
+
+That one `if` is exactly why `softm` works for BERT while `attn` does not:
+softmax is a standalone pass over a finished tensor and needed only the eltwise
+design, whereas the two GEMMs that bracket it have **no array branch at all**.
+`gemma_npu_encoder.cpp:166` is `attention(qkvbuf, ctx)` with no alternative
+either. And ViT does not even have its own attention: `vit/encoder.cpp:333`
+calls **`npue::whisper::attention(qkv_all.data(), ...)`** — the same shared
+function, the same signature. So the host path is already literally shared
+between two architectures; what is missing everywhere is only the branch inside
+it.
+
+The obstacle is a single gate in the exporter —
+`if model_spec.get("kind") == "stt":` before `ns.attn_streams = ...`
+(`tools/exporters/gemm_rtp/resolve.py:300`). Attention as two GEMMs is
+architecture-independent: `runtime/src/whisper/attention_npu.cpp` takes
+`(rows, head_dim, n_kv)` and a mask policy and does not otherwise depend on
+Whisper. Two per-model details it would have to be taught: BERT's and ViT's
+additive **padding** mask (Whisper's encoder has none), and gemma's **RoPE**,
+which is applied to the qkv buffer before `attention()` runs.
+
+**Two caveats before treating these as free cells:**
+
+1. **Lifting the gate alone would build the WRONG design.** The geometry is
+   `n_kv = ceil(frames / lcm(tile_n, tile_k)) * step`, read as
+   `int(model_spec.get("frames", 1500))` — and **only `kind == "stt"` models
+   carry `frames`** (1500). BERT and ViT have no such key, so they would inherit
+   the default 1500 → `n_kv = 1536`, a design three to seven times wider than
+   the 256 and 197 positions actually needed. The geometry has to be taught to
+   read the position count instead: BERT's sequence is 256
+   (`pack_npue.py` pre-slices `position_embeddings` to it) and a ViT's is fixed
+   at `(image_size/patch_size)^2 + 1 = 197`. On top of that, **`kinds.cls` does
+   not list `attn_qk`/`attn_av`** in its stream list, so the ViT/BERT design set
+   would need a new stream list too. None of this has been exported or run —
+   this table reports the refusal, not a successful export.
+
+   And separately: `tools/data/npu_targets.json` states that **this repo has no
+   attention measurement above seq 64**, while a ViT has 197 positions and BERT
+   256 — three to four times that. The catalogue already marks its own ViT
+   entry's throughput `UNMEASURED` for exactly this reason.
+2. **Whisper's `attn` is already measured at 4.32 s against 0.94 s on the host
+   — 4.6× SLOWER.** BERT's and ViT's `n_kv` is smaller (256 and 197 against
+   1504), so the array's per-dispatch fixed cost amortises *worse*, not better.
+   Implementing these five cells would fill the table and would not make any
+   run faster; that is the whole reason it is written down here rather than
+   done.
 
 **Which of them is worth asking for is a measurement, not a preference** — see
 [What to move to the NPU](#what-to-move-to-the-npu).
