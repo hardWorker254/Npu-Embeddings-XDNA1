@@ -115,6 +115,26 @@ BONE_COLOR = (60, 60, 60)     # the same grey as a low-confidence joint
 BOX_COLOR = (200, 200, 200)
 
 
+def frame_ms(result) -> float:
+    """The model's own time for one frame, in milliseconds.
+
+    NOT sum(timing_s.values()). The runtime's timing object carries `total`
+    ALONGSIDE the breakdown that adds up to it -- network, front_end, decode --
+    so summing the dict counts the frame twice. That reported 571 ms a frame
+    where the runtime had measured 280, which is how a demo that runs at 3.5 fps
+    came to be described as 1.7. `total` is the runtime's own arithmetic and is
+    preferred; the sum is the fallback for an answer that has a breakdown and no
+    total, and it drops `total` from the dict it walks so the fallback cannot
+    reintroduce the same double count.
+    """
+    t = result.timing_s or {}
+    if not t:
+        return 0.0
+    if "total" in t:
+        return 1000.0 * float(t["total"])
+    return 1000.0 * sum(v for k, v in t.items() if k != "total")
+
+
 def _put(img, text, org, scale=0.5, color=(255, 255, 255), thick=1, bar=False):
     """One line of text, legibly, on a background that is not cooperating.
 
@@ -194,8 +214,7 @@ def draw(img: np.ndarray, result, thickness: int = 2, show_boxes: bool = True) -
     # numbers a reader of a demo otherwise has to guess: how long the model took,
     # where the work ran, and how many people it thinks there are.
     t = result.timing_s or {}
-    ms = 1000.0 * sum(t.values()) if t else 0.0
-    _put(img, f"{result.num_poses} person(s)  {ms:.0f} ms  "
+    _put(img, f"{result.num_poses} person(s)  {frame_ms(result):.0f} ms  "
               f"{result.backend} backend  {result.dispatches} dispatches",
          (8, h - 10), 0.5, (255, 255, 255), 1, bar=True)
     return img
@@ -252,6 +271,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="requested capture width (default: %(default)s)")
     ap.add_argument("--height", type=int, default=720,
                     help="requested capture height (default: %(default)s)")
+    ap.add_argument("--jpeg-quality", type=int, default=95,
+                    help="quality of the JPEG the frame is encoded into before it "
+                         "is sent (default: %(default)s). PNG would be lossless "
+                         "and cost 277 ms a frame at 1280x720 against 2 ms for "
+                         "this; the runtime sniffs the format, so the name does "
+                         "not matter. Below about 85 the block artefacts start "
+                         "reaching the 640px letterbox and the joints move.")
     ap.add_argument("--out", default="out",
                     help="directory for frames saved with `s` (default: %(default)s)")
     ap.add_argument("--no-window", action="store_true",
@@ -329,14 +355,30 @@ def main(argv: list[str] | None = None) -> int:
                 if bgr is None:
                     break
 
-                # cv2 hands back BGR; the runtime's front end reads an image array
-                # as RGB (npue_pose._image_bytes). Handing it BGR would train the
-                # model on swapped channels -- the pose still mostly lands, which
-                # is what makes this worth a comment rather than leaving to chance.
+                # cv2 hands back BGR and the runtime's front end reads RGB, so the
+                # channels get swapped here rather than trained on wrong ones --
+                # the pose still mostly lands the wrong way round, which is what
+                # makes this worth a comment instead of leaving to chance.
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
+                # The frame is JPEG-encoded HERE and handed over as bytes, rather
+                # than as an array. Handed an array, npue_pose._image_bytes
+                # encodes PNG -- correctly, it is a library and lossless is the
+                # right default for one -- and PNG costs 277 ms a frame at
+                # 1280x720, measured against 2.1 ms for JPEG at q95. That is more
+                # than the whole network costs, so a demo that ships the array
+                # path spends half its frame budget turning RGB into bytes. The
+                # runtime sniffs the format by magic bytes, so the name "upload"
+                # does not matter; q95 keeps JPEG's own error far below the
+                # letterbox to 640px that follows it.
+                ok_jpg, enc = cv2.imencode(".jpg", rgb,
+                                          [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality])
+                if not ok_jpg:
+                    print("\nframe could not be JPEG-encoded", file=sys.stderr)
+                    break
+
                 t0 = time.monotonic()
-                result = lm.detect_for_video(rgb, int(t0 * 1000))
+                result = lm.detect_for_video(enc.tobytes(), int(t0 * 1000))
                 draw(bgr, result, thickness)
                 frames += 1
 
@@ -349,7 +391,7 @@ def main(argv: list[str] | None = None) -> int:
                           f"{result.dispatches} dispatches")
                     if not args.no_window:
                         print(f"first frame: {result.num_poses} person(s) in "
-                              f"{1000 * sum(result.timing_s.values()):.0f} ms")
+                              f"{frame_ms(result):.0f} ms")
 
                 if not args.no_window:
                     cv2.imshow("npue pose", bgr)
