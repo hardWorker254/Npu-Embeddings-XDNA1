@@ -198,6 +198,37 @@ private:
   // convolution.
   std::vector<float> a_pad_;
   std::vector<float> c_pad_;
+  // Every convolution's weights, already transposed from the container's [N, K]
+  // into the [K, N] the GEMM reads, built ONCE in the constructor. It was
+  // rebuilt per convolution per image, which is 3.28 M elements of strided write
+  // and a fresh allocation 72 times a frame to produce a constant -- and on the
+  // array path it was built and then never read, because the array takes the
+  // panel the packer already laid out.
+  //
+  // A member rather than a local in conv() because that is the whole point: conv()
+  // is per image and this is not. One flat buffer with per-convolution offsets,
+  // not a vector of vectors, so the whole table is a single allocation and the
+  // transposes happen in one pass in one order.
+  std::vector<float> wmat_;
+  std::vector<size_t> wmat_at_;
+  // Buffers of tensors whose LAST consumer has already run, kept for reuse.
+  // run() used to hold all 116 node outputs alive until the frame ended, which
+  // is 116 allocations of up to 26 MB per image; the large ones go through
+  // mmap, so free() gives the pages back and the next image re-faults every one
+  // of them. That is the "neither" row in the README's table.
+  std::vector<std::vector<float>> spare_;
+  // release_at_[i] lists the node indices whose buffer is dead once node i has
+  // been computed. Computed ONCE in the constructor from the graph's operand
+  // lists, because deriving it per run would be per-run work to save per-run
+  // allocations -- and a liveness bug here does not crash, it returns a buffer
+  // that is about to be written by something else.
+  std::vector<std::vector<size_t>> release_at_;
+  // A Tensor whose storage comes from spare_ when one is big enough. Every
+  // operator still ZEROES what it returns: reuse must not turn "allocated
+  // zeroed" into "allocated dirty", because an operator that ever fails to
+  // write all of its output would then read another tensor's leftovers -- a
+  // wrong number, not a crash.
+  Tensor take(int64_t c, int64_t h, int64_t w);
   Cost cost_;
 };
 

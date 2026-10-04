@@ -30,13 +30,21 @@ constexpr int64_t kParMinItems = 65536;
 // independent per item either way, and every caller below strides so that it is.
 //
 // `work` is separate from `n` because the callers below stride over DIFFERENT
-// things and only one of them is the right unit to measure. SiLU and the C2f
-// residual add stride over a flat element run, so work is 1. Concat, slice,
-// maxpool and upsample stride over CHANNELS -- so that each worker's memcpy is
-// one contiguous plane rather than a set of interleaved offsets -- and pass the
-// plane's element count as `work`. Thresholding on `n` there measured 32 to 512
-// channels against a 65536-element bar, so all four of them stayed serial and
-// the first cut of this helper parallelised only two of the six.
+// things and only one of them is the right unit to measure. The C2f residual add
+// strides over a flat element run, so work is 1. Concat, slice, maxpool and
+// upsample stride over CHANNELS -- so that each worker's memcpy is one contiguous
+// plane rather than a set of interleaved offsets -- and pass the plane's element
+// count as `work`. Thresholding on `n` there measured 32 to 512 channels against
+// a 65536-element bar, so all four of them stayed serial and the first cut of
+// this helper parallelised only two of the six.
+//
+// AND THE THRESHOLD IS NOT THE LEVER ANY MORE. Raising it to 2^20 so that only
+// the largest joins stay parallel measured 172 ms of network against this
+// value's 166, and lowering the ceiling entirely is not reachable either: with
+// one thread this span is 18 ms and with sixteen it is 20. It does not scale in
+// EITHER direction, which is what a bandwidth-bound span looks like and not what
+// a barrier-bound one looks like. Its traffic is about 14 M elements of copy with
+// one pool barrier in front of it, and that is the whole of what it costs.
 template <typename F>
 void par_items(app::Pool &pool, int64_t n, int64_t work, F &&f) {
   if (pool.size() == 1 || n * work < kParMinItems) {
@@ -48,25 +56,16 @@ void par_items(app::Pool &pool, int64_t n, int64_t work, F &&f) {
   });
 }
 
-// SiLU, x * sigmoid(x), in place. The activation is the MODEL's: YOLOv8's
-// C2f/SPPF/Detect blocks all use SiLU, and a container whose convs record a
-// different one is a different network. Fused into the conv's epilogue rather
-// than run as a separate pass because it is elementwise on the GEMM's output --
-// a second sweep over the tensor would double the memory traffic of the widest
-// layers for no arithmetic.
+// SiLU, x * sigmoid(x), has no function of its own here any more. The
+// activation is the MODEL's -- YOLOv8's C2f/SPPF/Detect blocks all use SiLU,
+// and a container whose convs record a different one is a different network --
+// but where it is APPLIED is not this file's choice to make twice.
 //
-// AND IT IS PARALLELISED, which it was not, and which is the whole reason it
-// belongs in this commit. It carries 15.5 M exp() calls over the network --
-// more elements than every other non-convolution put together -- and it ran on
-// one core while im2col, the GEMM and the transposes all ran on sixteen. That
-// single serial loop was the largest item in the time attributed to no
-// convolution at all.
-void silu_inplace(float *x, size_t n, app::Pool &pool) {
-  par_items(pool, static_cast<int64_t>(n), 1, [&](int64_t i) {
-    const float v = x[i];
-    x[i] = v / (1.0f + std::exp(-v));
-  });
-}
+// It was a separate pass over the finished NCHW tensor: read 15.5 M floats,
+// write 15.5 M, one pool barrier, for a function of each element and nothing
+// else, on top of a pass that had just written every one of those elements. It
+// is now applied inside transpose_mn_to_nchw, on the way to the tensor, which
+// is where it belongs -- see the `silu` branch there.
 
 // C[M,N] = A[M,K] @ B[K,N] + bias[N], with A's rows independent.
 //
@@ -177,7 +176,7 @@ void gemm_nt(const float *A, int64_t M, const float *B, int64_t K, int64_t N,
 // call and every whole-image transpose.
 void transpose_mn_to_nchw(const float *src, int64_t M, int64_t N, float *dst,
                           app::Pool &pool, int64_t src_cols = 0,
-                          int64_t dst_ch = 0) {
+                          int64_t dst_ch = 0, bool silu = false) {
   const int64_t sc = src_cols > 0 ? src_cols : N;
   const int64_t dc = dst_ch > 0 ? dst_ch : M;
   if (sc < N)
@@ -197,7 +196,23 @@ void transpose_mn_to_nchw(const float *src, int64_t M, int64_t N, float *dst,
       const int64_t m1 = std::min<int64_t>(m0 + kTile, M);
       for (int64_t n = 0; n < N; ++n) {
         float *const d = dst + n * dc + m0;
-        for (int64_t m = m0; m < m1; ++m) d[m - m0] = src[m * sc + n];
+        if (silu) {
+          // THE ACTIVATION IS FUSED HERE, into the pass that writes the tensor.
+          // It used to be a second sweep over the finished NCHW buffer: read
+          // 15.5 M floats, write 15.5 M, and a pool barrier to get there, for a
+          // function of each element and nothing else. The bias is already in
+          // `v` -- both backends apply it inside their GEMM -- so this is the
+          // same value the separate pass read, and the result is bit-identical.
+          // Bit-identical rather than merely close: `v` is stored and reloaded
+          // unchanged in between, so there is nothing for a fused form to round
+          // differently.
+          for (int64_t m = m0; m < m1; ++m) {
+            const float v = src[m * sc + n];
+            d[m - m0] = v / (1.0f + std::exp(-v));
+          }
+        } else {
+          for (int64_t m = m0; m < m1; ++m) d[m - m0] = src[m * sc + n];
+        }
       }
     }
   });
@@ -276,9 +291,77 @@ void im2col(const Tensor &in, int64_t kh, int64_t kw, int64_t ph, int64_t pw,
 
 }  // namespace
 
+// release_at_[i] lists the node indices whose buffer is dead once node i has run.
+//
+// Every node starts as "dead right after itself", and every consumer pushes
+// that out to the node that reads it last. The default matters: a node nothing
+// reads would otherwise never be listed and its buffer would be freed at the end
+// of the frame instead of reused within it.
+static std::vector<std::vector<size_t>> liveness(const std::vector<Layer> &graph) {
+  const size_t n = graph.size();
+  std::vector<size_t> last(n);
+  for (size_t i = 0; i < n; ++i) last[i] = i + 1;
+  for (size_t j = 0; j < n; ++j)
+    for (int id : graph[j].inputs) {
+      // -1 is the photograph, which run() borrows and does not own; an id past
+      // the end is geometry's business to refuse, not this function's to
+      // index with.
+      if (id < 0 || static_cast<size_t>(id) >= n) continue;
+      const size_t k = static_cast<size_t>(id);
+      if (j + 1 > last[k]) last[k] = j + 1;
+    }
+  std::vector<std::vector<size_t>> at(n);
+  for (size_t i = 0; i < n; ++i)
+    at[last[i] - 1].push_back(i);
+  return at;
+}
+
+Tensor Network::take(int64_t c, int64_t h, int64_t w) {
+  Tensor t;
+  t.c = c;
+  t.h = h;
+  t.w = w;
+  const size_t need = static_cast<size_t>(c * h * w);
+  for (size_t i = 0; i < spare_.size(); ++i) {
+    if (spare_[i].size() < need) continue;
+    t.d = std::move(spare_[i]);
+    spare_.erase(spare_.begin() + static_cast<std::ptrdiff_t>(i));
+    t.d.assign(need, 0.f);
+    return t;
+  }
+  t.d.assign(need, 0.f);
+  return t;
+}
+
 Network::Network(const Geometry &g, const Placement &place, app::Pool &pool,
                  NpuConvs *design)
-    : g_(g), place_(place), pool_(pool), npu_(design) {}
+    : g_(g), place_(place), pool_(pool), npu_(design) {
+  release_at_ = liveness(g.graph);
+  // The weight transposes happen HERE, once, and only on the host path -- which
+  // is the same condition conv() used to guard the per-image build with, so
+  // neither path can end up reading a table it did not fill.
+  if (place.conv_on_array && design != nullptr) return;
+  const size_t n = g.convs.size();
+  wmat_at_.resize(n);
+  size_t total = 0;
+  for (size_t i = 0; i < n; ++i) {
+    wmat_at_[i] = total;
+    total += static_cast<size_t>(g.convs[i].cout) *
+             static_cast<size_t>(g.convs[i].cin) *
+             static_cast<size_t>(g.convs[i].kh) *
+             static_cast<size_t>(g.convs[i].kw);
+  }
+  wmat_.resize(total);
+  for (size_t i = 0; i < n; ++i) {
+    const ConvW &cw = g.convs[i];
+    const int64_t K = cw.cin * cw.kh * cw.kw, N = cw.cout;
+    float *const dst = wmat_.data() + wmat_at_[i];
+    for (int64_t k = 0; k < K; ++k)
+      for (int64_t c = 0; c < N; ++c)
+        dst[static_cast<size_t>(k) * N + c] =
+            cw.w[static_cast<size_t>(c) * K + k];
+  }
+}
 
 Tensor Network::conv(const Tensor &in, const ConvW &w, bool silu,
                      int64_t stride, int64_t pad_h, int64_t pad_w,
@@ -306,7 +389,7 @@ Tensor Network::conv(const Tensor &in, const ConvW &w, bool silu,
   const int64_t OW = (in.w + 2 * pad_w - w.kw) / stride + 1;
   const int64_t M = OH * OW;
   const int64_t N = w.cout;
-  Tensor out(N, OH, OW);
+  Tensor out = take(N, OH, OW);
 
   // The GEMM's [M, N] result, held apart from the Tensor and transposed into it
   // afterwards -- see transpose_mn_to_nchw's header for why the two cannot be the
@@ -332,20 +415,23 @@ Tensor Network::conv(const Tensor &in, const ConvW &w, bool silu,
   // for part of the GEMM.
   //
   // AND IT IS NOT BUILT ON THE ARRAY PATH AT ALL, which it was. The array reads
-  // the panel the container already holds, tiled by the packer; wmat's only
-  // reader is the host GEMM below, which is after the array branch has already
-  // returned. So this was transposing 3.28 M elements per image into a buffer
-  // that was then dropped, on the one path that is the slowest.
+  // the panel the container already holds, tiled by the packer; the host GEMM's
+  // operand is after the array branch has already returned. So this was
+  // transposing 3.28 M elements per image into a buffer that was then dropped,
+  // on the one path that is the slowest.
   const bool on_array = place_.conv_on_array && npu_ != nullptr;
-  std::vector<float> wmat;
+  const float *wmat = nullptr;
   if (!on_array) {
-    const double tw = app::now_s();
-    wmat.resize(static_cast<size_t>(K) * static_cast<size_t>(N));
-    for (int64_t k = 0; k < K; ++k)
-      for (int64_t n = 0; n < N; ++n)
-        wmat[static_cast<size_t>(k) * N + n] =
-            w.w[static_cast<size_t>(n) * K + k];
-    cost_.t_wmat += app::now_s() - tw;
+    const size_t at = static_cast<size_t>(w.index);
+    if (w.index < 0 || at >= wmat_at_.size())
+      throw std::runtime_error(
+          "pose conv: the weight's own position " + std::to_string(w.index) +
+          " is outside the " + std::to_string(wmat_at_.size()) +
+          " convolutions the constructor transposed. Reading the table at an "
+          "index it does not have would multiply by whatever neighbour the "
+          "allocator left there, which is a network that detects plausible "
+          "nonsense");
+    wmat = wmat_.data() + wmat_at_[at];
   }
 
   const double ti = app::now_s();
@@ -416,7 +502,7 @@ Tensor Network::conv(const Tensor &in, const ConvW &w, bool silu,
       cost_.t_array_gemm += tg2 - tr1;
       transpose_mn_to_nchw(c_pad_.data(), chunk, N,
                            out.d.data() + static_cast<size_t>(done), pool_,
-                           pn, M);
+                           pn, M, silu);
       // AFTER the gemm, not before it. This span used to start at tr1, which is
       // before npu_->gemm, so it carried the device's own multiply and printed
       // 179 ms of "C transpose" for what is 157 ms of device time and about 20
@@ -432,27 +518,18 @@ Tensor Network::conv(const Tensor &in, const ConvW &w, bool silu,
     }
     cost_.convs_array++;
     cost_.t_array += app::now_s() - t0;
-    if (silu) {
-      const double ts = app::now_s();
-      silu_inplace(out.d.data(), out.d.size(), pool_);
-      cost_.t_elementwise += app::now_s() - ts;
-    }
     return out;
   }
 
   const double tg = app::now_s();
-  gemm_nt(a_buf.data(), M, wmat.data(), K, N, w.b, c_scratch_.data(), pool_);
+  gemm_nt(a_buf.data(), M, wmat, K, N, w.b, c_scratch_.data(), pool_);
   cost_.t_gemm += app::now_s() - tg;
   cost_.convs_host++;
   const double tt = app::now_s();
-  transpose_mn_to_nchw(c_scratch_.data(), M, N, out.d.data(), pool_);
+  transpose_mn_to_nchw(c_scratch_.data(), M, N, out.d.data(), pool_, 0, 0,
+                       silu);
   cost_.t_transpose += app::now_s() - tt;
   cost_.t_host += app::now_s() - t0;
-  if (silu) {
-    const double ts = app::now_s();
-    silu_inplace(out.d.data(), out.d.size(), pool_);
-    cost_.t_elementwise += app::now_s() - ts;
-  }
   return out;
 }
 
@@ -477,7 +554,7 @@ Tensor Network::concat(const std::vector<const Tensor *> &in) {
           "shapes holding half the channels of each.");
     c += t.c;
   }
-  Tensor out(c, in[0]->h, in[0]->w);
+  Tensor out = take(c, in[0]->h, in[0]->w);
   // Per CHANNEL, and that is not only for the threads. Copying one plane per
   // OPERAND -- plane() being h*w, one channel, while the operand is t->c of them
   // -- wrote 16 channels' worth of offsets but only a quarter of each one's data:
@@ -531,7 +608,7 @@ Tensor Network::slice(const Tensor &in, int64_t chan, int64_t nch) {
         "different op and is not approximated by clamping, because the two "
         "would put different values in different channels and every downstream "
         "channel count would still add up.");
-  Tensor out(nch, in.h, in.w);
+  Tensor out = take(nch, in.h, in.w);
   // Strided over the CHANNELS rather than the flat run: memcpy is fastest on one
   // contiguous call, so each worker is handed whole planes and none of the
   // channel boundaries are split.
@@ -546,7 +623,7 @@ Tensor Network::slice(const Tensor &in, int64_t chan, int64_t nch) {
 Tensor Network::add(const Tensor &a, const Tensor &b) {
   if (a.c != b.c || a.h != b.h || a.w != b.w)
     throw std::runtime_error("pose add: shapes differ");
-  Tensor out = a;
+  Tensor out = take(a.c, a.h, a.w);
   const size_t n = out.d.size();
   // Strided over elements, like SiLU and im2col before it: the two operands are
   // read-only and the output is disjoint, so there is nothing to reduce. This
@@ -558,7 +635,7 @@ Tensor Network::add(const Tensor &a, const Tensor &b) {
 
 Tensor Network::maxpool(const Tensor &in, int64_t k) {
   const int64_t pad = k / 2;
-  Tensor out(in.c, in.h, in.w);
+  Tensor out = take(in.c, in.h, in.w);
   // Strided over channels: a channel's maximum never reads another channel, so
   // the window loop is independent per c and there is no reduction to split.
   par_items(pool_, in.c, in.h * in.w, [&](int64_t ci) {
@@ -590,7 +667,7 @@ Tensor Network::maxpool(const Tensor &in, int64_t k) {
 }
 
 Tensor Network::upsample(const Tensor &in, int64_t scale) {
-  Tensor out(in.c, in.h * scale, in.w * scale);
+  Tensor out = take(in.c, in.h * scale, in.w * scale);
   // Strided over channels, for the same reason maxpool is: one channel's
   // nearest-neighbour expansion reads only that channel. Striding over CHANNELS
   // rather than over the output rows is what makes each worker's writes
@@ -935,6 +1012,14 @@ Tensor Network::run(const Tensor &input) {
     if (L.op != Op::Conv)
       cost_.t_elementwise += app::now_s() - tnode;
     if (on_node) on_node(i, vals[i]);
+    // Everything this node was the last reader of goes back to the pool. On
+    // the frame after the first this is the difference between 116
+    // allocations and none, and for the buffers above glibc's mmap threshold
+    // it is also the difference between faulting every page again and not.
+    for (size_t k : release_at_[i]) {
+      if (!vals[k].d.empty()) spare_.push_back(std::move(vals[k].d));
+      vals[k] = Tensor();
+    }
   }
   if (!have_head)
     throw std::runtime_error("pose net: the graph produced no head tensor");
