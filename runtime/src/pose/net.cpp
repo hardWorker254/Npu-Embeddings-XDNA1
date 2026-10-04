@@ -19,17 +19,53 @@ namespace npue::pose {
 
 namespace {
 
+constexpr int64_t kParMinItems = 65536;
+
+// Parallelise a strided loop over n items of `work` elements each -- but only
+// when it is worth the barrier. Pool::run is a generation counter with two
+// condition variables, so waking sixteen workers costs something; for a few
+// thousand elements that costs more than the loop. 65536 is the same threshold
+// the encoders use (BertEncoder::par, GemmaNpuEncoder::par), and it is a
+// THRESHOLD rather than a correctness argument: the loop body must be
+// independent per item either way, and every caller below strides so that it is.
+//
+// `work` is separate from `n` because the callers below stride over DIFFERENT
+// things and only one of them is the right unit to measure. SiLU and the C2f
+// residual add stride over a flat element run, so work is 1. Concat, slice,
+// maxpool and upsample stride over CHANNELS -- so that each worker's memcpy is
+// one contiguous plane rather than a set of interleaved offsets -- and pass the
+// plane's element count as `work`. Thresholding on `n` there measured 32 to 512
+// channels against a 65536-element bar, so all four of them stayed serial and
+// the first cut of this helper parallelised only two of the six.
+template <typename F>
+void par_items(app::Pool &pool, int64_t n, int64_t work, F &&f) {
+  if (pool.size() == 1 || n * work < kParMinItems) {
+    for (int64_t i = 0; i < n; ++i) f(i);
+    return;
+  }
+  pool.run([&](int w, int nw) {
+    for (int64_t i = w; i < n; i += nw) f(i);
+  });
+}
+
 // SiLU, x * sigmoid(x), in place. The activation is the MODEL's: YOLOv8's
 // C2f/SPPF/Detect blocks all use SiLU, and a container whose convs record a
 // different one is a different network. Fused into the conv's epilogue rather
 // than run as a separate pass because it is elementwise on the GEMM's output --
 // a second sweep over the tensor would double the memory traffic of the widest
 // layers for no arithmetic.
-inline void silu_inplace(float *x, size_t n) {
-  for (size_t i = 0; i < n; ++i) {
+//
+// AND IT IS PARALLELISED, which it was not, and which is the whole reason it
+// belongs in this commit. It carries 15.5 M exp() calls over the network --
+// more elements than every other non-convolution put together -- and it ran on
+// one core while im2col, the GEMM and the transposes all ran on sixteen. That
+// single serial loop was the largest item in the time attributed to no
+// convolution at all.
+void silu_inplace(float *x, size_t n, app::Pool &pool) {
+  par_items(pool, static_cast<int64_t>(n), 1, [&](int64_t i) {
     const float v = x[i];
     x[i] = v / (1.0f + std::exp(-v));
-  }
+  });
 }
 
 // C[M,N] = A[M,K] @ B[K,N] + bias[N], with A's rows independent.
@@ -191,8 +227,28 @@ void im2col(const Tensor &in, int64_t kh, int64_t kw, int64_t ph, int64_t pw,
   const int64_t OH = (H + 2 * ph - kh) / sh + 1;
   const int64_t OW = (W + 2 * pw - kw) / sw + 1;
   const int64_t M = OH * OW;
-  A.assign(static_cast<size_t>(M) * static_cast<size_t>(K), 0.f);
-  if (M <= 0 || K <= 0) return;
+  if (M <= 0 || K <= 0) {
+    A.clear();
+    return;
+  }
+  // The zero border is written ONCE per tensor -- A.assign(M*K, 0) -- rather
+  // than tested per element: the interior of the window is the common case and
+  // a bounds test inside the innermost loop is the difference between a
+  // memory-bound kernel and a branch-bound one, and there are 102400 rows at
+  // the stem.
+  //
+  // BUT ONLY WHERE THERE IS A BORDER TO WRITE. With no padding the gather can
+  // never fall outside the image -- y*sh + i is at most (OH-1)*sh + kh - 1,
+  // which is H - 1 -- so every one of the K columns of every row is written
+  // below and the fill is pure waste. That is 28 of the 73 convolutions: the 1x1
+  // ones, 19.1% of the network's arithmetic and 8.3% of its im2col rows, and
+  // they were zeroing a buffer they then wrote end to end. resize() is a no-op
+  // when the buffer is already big enough, and A is reused across
+  // convolutions precisely so that it usually is.
+  if (ph == 0 && pw == 0)
+    A.resize(static_cast<size_t>(M) * static_cast<size_t>(K));
+  else
+    A.assign(static_cast<size_t>(M) * static_cast<size_t>(K), 0.f);
   // Parallel over output image ROWS, not over the flat M: rows are independent
   // here too, and each worker owns a disjoint run of A, so there is no
   // reduction. The rows are handed out in strides rather than in blocks because
@@ -274,19 +330,29 @@ Tensor Network::conv(const Tensor &in, const ConvW &w, bool silu,
   // image. That is not the reason the network takes 250 ms -- the GEMM is -- but
   // it is real and it is measured separately now so that it cannot be mistaken
   // for part of the GEMM.
-  const double tw = app::now_s();
-  std::vector<float> wmat(static_cast<size_t>(K) * static_cast<size_t>(N));
-  for (int64_t k = 0; k < K; ++k)
-    for (int64_t n = 0; n < N; ++n)
-      wmat[static_cast<size_t>(k) * N + n] =
-          w.w[static_cast<size_t>(n) * K + k];
-  cost_.t_wmat += app::now_s() - tw;
+  //
+  // AND IT IS NOT BUILT ON THE ARRAY PATH AT ALL, which it was. The array reads
+  // the panel the container already holds, tiled by the packer; wmat's only
+  // reader is the host GEMM below, which is after the array branch has already
+  // returned. So this was transposing 3.28 M elements per image into a buffer
+  // that was then dropped, on the one path that is the slowest.
+  const bool on_array = place_.conv_on_array && npu_ != nullptr;
+  std::vector<float> wmat;
+  if (!on_array) {
+    const double tw = app::now_s();
+    wmat.resize(static_cast<size_t>(K) * static_cast<size_t>(N));
+    for (int64_t k = 0; k < K; ++k)
+      for (int64_t n = 0; n < N; ++n)
+        wmat[static_cast<size_t>(k) * N + n] =
+            w.w[static_cast<size_t>(n) * K + k];
+    cost_.t_wmat += app::now_s() - tw;
+  }
 
   const double ti = app::now_s();
   im2col(in, w.kh, w.kw, pad_h, pad_w, stride, stride, a_buf, pool_);
   cost_.t_im2col += app::now_s() - ti;
 
-  if (place_.conv_on_array && npu_ != nullptr) {
+  if (on_array) {
     // The array path takes the SAME im2col rows and the SAME weight panel, so
     // the two backends cannot differ in the part that is easy to get wrong (the
     // column order); they differ only in who multiplies. It also produces [M, N]
@@ -346,20 +412,31 @@ Tensor Network::conv(const Tensor &in, const ConvW &w, bool silu,
       });
       const double tr1 = app::now_s();
       npu_->gemm(w.index, a_pad_.data(), chunk, pk, pn, w.b, c_pad_.data());
+      const double tg2 = app::now_s();
+      cost_.t_array_gemm += tg2 - tr1;
       transpose_mn_to_nchw(c_pad_.data(), chunk, N,
                            out.d.data() + static_cast<size_t>(done), pool_,
                            pn, M);
+      // AFTER the gemm, not before it. This span used to start at tr1, which is
+      // before npu_->gemm, so it carried the device's own multiply and printed
+      // 179 ms of "C transpose" for what is 157 ms of device time and about 20
+      // ms of transposing -- which is the opposite of the conclusion the number
+      // invited, that the array is slow because the host shuffles its results.
+      cost_.t_array_transpose += app::now_s() - tg2;
       // The two host-side spans of the array path are timed separately, and
       // they are the reason a status line that printed only the device time
       // would lie: neither of them is the array's work.
       cost_.t_array_repack += tr1 - tr0;
-      cost_.t_array_transpose += app::now_s() - tr1;
       done += chunk;
       cost_.dispatches++;
     }
     cost_.convs_array++;
     cost_.t_array += app::now_s() - t0;
-    if (silu) silu_inplace(out.d.data(), out.d.size());
+    if (silu) {
+      const double ts = app::now_s();
+      silu_inplace(out.d.data(), out.d.size(), pool_);
+      cost_.t_elementwise += app::now_s() - ts;
+    }
     return out;
   }
 
@@ -371,7 +448,11 @@ Tensor Network::conv(const Tensor &in, const ConvW &w, bool silu,
   transpose_mn_to_nchw(c_scratch_.data(), M, N, out.d.data(), pool_);
   cost_.t_transpose += app::now_s() - tt;
   cost_.t_host += app::now_s() - t0;
-  if (silu) silu_inplace(out.d.data(), out.d.size());
+  if (silu) {
+    const double ts = app::now_s();
+    silu_inplace(out.d.data(), out.d.size(), pool_);
+    cost_.t_elementwise += app::now_s() - ts;
+  }
   return out;
 }
 
@@ -397,18 +478,37 @@ Tensor Network::concat(const std::vector<const Tensor *> &in) {
     c += t.c;
   }
   Tensor out(c, in[0]->h, in[0]->w);
-  int64_t at = 0;
-  for (const Tensor *t : in) {
-    // d.size(), NOT plane(). plane() is h*w, one channel; the operand is
-    // t->c of them. Copying a plane per operand wrote 16 channels' worth of
-    // offsets but only a quarter of each one's data, and the join that came out
-    // had the right shape and the right first row: the three surviving planes
-    // landed at channels 0, 16 and 32 -- the correct channels for the FIRST
-    // channel of each operand -- and every other channel of the join was zero.
-    // Every channel count downstream still added up.
-    std::memcpy(out.chw(at), t->d.data(), t->d.size() * sizeof(float));
-    at += t->c;
+  // Per CHANNEL, and that is not only for the threads. Copying one plane per
+  // OPERAND -- plane() being h*w, one channel, while the operand is t->c of them
+  // -- wrote 16 channels' worth of offsets but only a quarter of each one's data:
+  // the join came out with the right shape and the right first row, the three
+  // surviving planes landed at channels 0, 16 and 32 (the correct channels for
+  // the first channel of each operand), and every other channel was zero. Every
+  // channel count downstream still added up.
+  //
+  // AND IT IS STRIDED OVER THE OUTPUT'S CHANNELS. A join is the biggest of the
+  // non-convolution copies -- 8.9 M elements over the twenty joins here -- and it
+  // ran serially, while the convolutions above it ran on sixteen threads.
+  // `from` is the whole operand map flattened to one source pointer per output
+  // channel, built once on this thread because it is c entries and the copy it
+  // enables is a memcpy per plane. It is built rather than searched because a
+  // search would need a running offset, and a running offset is exactly what
+  // cannot be shared between workers.
+  const int64_t plane = in[0]->h * in[0]->w;
+  std::vector<const float *> from(static_cast<size_t>(c));
+  {
+    int64_t oc = 0;
+    for (const Tensor *t : in) {
+      const float *base = t->d.data();
+      for (int64_t k = 0; k < t->c; ++k)
+        from[static_cast<size_t>(oc++)] =
+            base + static_cast<size_t>(k) * static_cast<size_t>(plane);
+    }
   }
+  par_items(pool_, c, plane, [&](int64_t oc) {
+    std::memcpy(out.chw(oc), from[static_cast<size_t>(oc)],
+                static_cast<size_t>(plane) * sizeof(float));
+  });
   return out;
 }
 
@@ -432,7 +532,14 @@ Tensor Network::slice(const Tensor &in, int64_t chan, int64_t nch) {
         "would put different values in different channels and every downstream "
         "channel count would still add up.");
   Tensor out(nch, in.h, in.w);
-  std::memcpy(out.d.data(), in.chw(chan), out.d.size() * sizeof(float));
+  // Strided over the CHANNELS rather than the flat run: memcpy is fastest on one
+  // contiguous call, so each worker is handed whole planes and none of the
+  // channel boundaries are split.
+  const size_t plane = out.d.size() / static_cast<size_t>(nch);
+  par_items(pool_, nch, plane, [&](int64_t c) {
+    std::memcpy(out.d.data() + static_cast<size_t>(c) * plane,
+                in.chw(chan + c), plane * sizeof(float));
+  });
   return out;
 }
 
@@ -441,16 +548,22 @@ Tensor Network::add(const Tensor &a, const Tensor &b) {
     throw std::runtime_error("pose add: shapes differ");
   Tensor out = a;
   const size_t n = out.d.size();
-  for (size_t i = 0; i < n; ++i) out.d[i] = a.d[i] + b.d[i];
+  // Strided over elements, like SiLU and im2col before it: the two operands are
+  // read-only and the output is disjoint, so there is nothing to reduce. This
+  // loop carried 1.4 M elements -- the eight C2f residual adds -- on one core.
+  par_items(pool_, static_cast<int64_t>(n), 1,
+            [&](int64_t i) { out.d[i] = a.d[i] + b.d[i]; });
   return out;
 }
 
 Tensor Network::maxpool(const Tensor &in, int64_t k) {
   const int64_t pad = k / 2;
   Tensor out(in.c, in.h, in.w);
-  for (int64_t c = 0; c < in.c; ++c) {
-    const float *src = in.chw(c);
-    float *dst = out.chw(c);
+  // Strided over channels: a channel's maximum never reads another channel, so
+  // the window loop is independent per c and there is no reduction to split.
+  par_items(pool_, in.c, in.h * in.w, [&](int64_t ci) {
+    const float *src = in.chw(ci);
+    float *dst = out.chw(ci);
     for (int64_t y = 0; y < in.h; ++y) {
       for (int64_t x = 0; x < in.w; ++x) {
         float best = -std::numeric_limits<float>::infinity();
@@ -472,15 +585,20 @@ Tensor Network::maxpool(const Tensor &in, int64_t k) {
         dst[static_cast<size_t>(y) * in.w + x] = best;
       }
     }
-  }
+  });
   return out;
 }
 
 Tensor Network::upsample(const Tensor &in, int64_t scale) {
   Tensor out(in.c, in.h * scale, in.w * scale);
-  for (int64_t c = 0; c < in.c; ++c) {
-    const float *src = in.chw(c);
-    float *dst = out.chw(c);
+  // Strided over channels, for the same reason maxpool is: one channel's
+  // nearest-neighbour expansion reads only that channel. Striding over CHANNELS
+  // rather than over the output rows is what makes each worker's writes
+  // contiguous -- a row-strided split would have sixteen workers interleaving
+  // into the same 40 KB of output plane.
+  par_items(pool_, in.c, in.h * in.w, [&](int64_t ci) {
+    const float *src = in.chw(ci);
+    float *dst = out.chw(ci);
     for (int64_t y = 0; y < in.h; ++y)
       for (int64_t x = 0; x < in.w; ++x) {
         const float v = src[static_cast<size_t>(y) * in.w + x];
@@ -489,7 +607,7 @@ Tensor Network::upsample(const Tensor &in, int64_t scale) {
           for (int64_t dx = 0; dx < scale; ++dx) row[x * scale + dx] = v;
         }
       }
-  }
+  });
   return out;
 }
 
@@ -762,6 +880,11 @@ Tensor Network::run(const Tensor &input) {
   if (on_node) on_node(kGraphInput, input);
   for (size_t i = 0; i < g_.graph.size(); ++i) {
     const Layer &L = g_.graph[i];
+    // Timed here rather than inside each case: the point of the bucket is to
+    // separate the CONVOLUTIONS' arithmetic from everything else in the graph,
+    // and a per-case timer would make adding a new node type mean forgetting
+    // to time it. Conv times itself inside conv().
+    const double tnode = L.op == Op::Conv ? 0.0 : app::now_s();
     switch (L.op) {
       case Op::Conv:
         vals[i] = conv(operand(L.inputs.at(0)),
@@ -807,6 +930,10 @@ Tensor Network::run(const Tensor &input) {
         break;
       }
     }
+    // The join, the split, the residual add, max-pool, upsample -- whatever it
+    // was, it was not a convolution, and that is what this bucket claims.
+    if (L.op != Op::Conv)
+      cost_.t_elementwise += app::now_s() - tnode;
     if (on_node) on_node(i, vals[i]);
   }
   if (!have_head)

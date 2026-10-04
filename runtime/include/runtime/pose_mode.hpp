@@ -521,10 +521,12 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
     if (r.convs_host > 0)
       std::fprintf(stderr,
                    "             host conv split: %.1f ms gemm, %.1f ms im2col, "
-                   "%.1f ms [M,N] transpose, %.1f ms weight transpose "
+                   "%.1f ms [M,N] transpose, %.1f ms weight transpose, "
+                   "%.1f ms elementwise "
                    "(%.1fx torch's %.1f)\n",
                    r.t_gemm_s * 1e3, r.t_im2col_s * 1e3,
                    r.t_transpose_s * 1e3, r.t_wmat_s * 1e3,
+                   r.t_elementwise_s * 1e3,
                    r.network_s / 2.05e-2, 20.5);
 
     // The array path's counterpart to the host split above, and the same span:
@@ -539,15 +541,18 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
                    "(%.0f us each) -- %.1f ms GEMM on the device, %.1f ms the "
                    "host's own A repack, %.1f ms the C transpose. The other "
                    "%.1f ms of the %.1f ms network is im2col and the "
-                   "elementwise ops, on the host either way.\n",
+                   "elementwise ops, on the host either way, of which "
+                   "%.1f ms is the non-convolution span. im2col itself, which "
+                   "t_array also spans because t0 is taken before it, is "
+                   "%.1f ms.\n",
                    r.t_array_s * 1e3, static_cast<long long>(r.dispatches),
                    r.dispatches > 0
                        ? r.t_array_s * 1e6 / static_cast<double>(r.dispatches)
                        : 0.0,
-                   (r.t_array_s - r.t_array_repack_s - r.t_array_transpose_s) *
-                       1e3,
+                   r.t_array_gemm_s * 1e3,
                    r.t_array_repack_s * 1e3, r.t_array_transpose_s * 1e3,
-                   (r.network_s - r.t_array_s) * 1e3, r.network_s * 1e3);
+                   (r.network_s - r.t_array_s) * 1e3, r.network_s * 1e3,
+                   r.t_elementwise_s * 1e3, r.t_im2col_s * 1e3);
 
     if (text) {
       // A human summary. One line per person, then the skeleton by name, which

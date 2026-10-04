@@ -62,6 +62,8 @@ struct Result {
   // Zero on the array path, where there is one GEMM per dispatch and the host
   // does no arithmetic at all.
   double t_wmat_s = 0.0, t_im2col_s = 0.0, t_gemm_s = 0.0, t_transpose_s = 0.0;
+  // The non-convolution span, on BOTH backends: SiLU plus every non-conv node.
+  double t_elementwise_s = 0.0;
   // The array path's wall time in the convolution loop, which INCLUDES the
   // host-side per-chunk A repack and the transpose of C into NCHW. It is
   // deliberately the same span as t_host on the other side -- both are "the
@@ -69,7 +71,7 @@ struct Result {
   // comparable and neither can look better than it is by measuring a different
   // thing than its counterpart.
   double t_array_s = 0.0;
-  double t_array_repack_s = 0.0, t_array_transpose_s = 0.0;
+  double t_array_repack_s = 0.0, t_array_transpose_s = 0.0, t_array_gemm_s = 0.0;
   bool array = false;
 };
 

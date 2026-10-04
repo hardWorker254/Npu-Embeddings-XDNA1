@@ -105,6 +105,18 @@ struct Cost {
   double t_im2col = 0.0;     // the A matrix, including its zero-fill
   double t_gemm = 0.0;       // the blocked fp32 multiply
   double t_transpose = 0.0;  // [M, N] -> NCHW [N, H, W]
+  // Everything in run() that is NOT one of the four above: the SiLU epilogue,
+  // and the 43 nodes that are not convolutions (join, split, residual add,
+  // max-pool, upsample). It was the largest unattributed span in the network
+  // -- network_s minus the four buckets, which came to 101 ms of 253 -- and it
+  // was unattributed only because nothing timed it, not because it was small.
+  double t_elementwise = 0.0;
+  // The device call itself, MEASURED around npu_->gemm rather than recovered by
+  // subtracting the host spans from t_array. The subtraction is wrong: t_array
+  // starts at t0, which is before the weight transpose and before im2col, so a
+  // residual labelled "GEMM on the device" silently carries both of those and
+  // reported 63-66 ms where the call is a small fraction of that.
+  double t_array_gemm = 0.0;
   void reset() { *this = Cost{}; }
 };
 

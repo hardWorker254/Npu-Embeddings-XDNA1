@@ -1338,41 +1338,67 @@ the difference is the backend and nothing else.
 
 | stage | host (default) | array |
 |---|---|---|
-| front end (decode, letterbox, normalise) | 26 | 26 |
-| **network** | **258** | **384** |
-| — of which the GEMM | 88 | 63 *(on the device)* |
-| — of which im2col | 51 | 51 |
-| — of which the `[M,N]` → NCHW transpose | 8 | 179 |
+| front end (decode, letterbox, normalise) | 25 | 24 |
+| **network** | **223** | **347** |
+| — of which the multiply | 82 | 160 *(on the device)* |
+| — of which im2col | 47 | 47 |
+| — of which the `[M,N]` → NCHW transpose | 7 | 23 |
 | — of which the per-convolution weight transpose | 10 | — |
 | — of which widening A to the panel's K | — | 45 |
-| — not in any convolution | 101 | 96 |
+| — SiLU and the 43 non-convolution nodes | 50 | 53 |
+| — neither: allocation and per-node overhead | 27 | 19 |
 | decode (NMS, boxes, JSON) | 0.0 | 0.0 |
-| **total** | **0.29 s** | **0.42 s** |
+| **total** | **0.25 s** | **0.37 s** |
+
+Every row is a printed bucket, not a subtraction: the host split is timed
+directly, and the array's multiply is timed around `npu_->gemm` rather than
+recovered as "whatever `t_array` has left over". That distinction is not
+cosmetic — the leftover *was* wrong until it was measured, and it was wrong in
+both directions at different times. `t_array` starts before the weight transpose
+and before im2col, so subtracting only the two host spans reported 66 ms of
+"device GEMM" that was mostly those two; and `t_array_transpose` used to start
+before the `gemm` call, so its 175 ms was 157 ms of device multiply and about
+20 ms of transposing. A table built on either would have pointed the reader at
+the wrong bottleneck.
 
 Summed per convolution rather than per stage, the 72 convolutions that actually
-run take **150 ms on the host and 290 ms on the array**, in **436 dispatches at
-660 us each** — 72, not 73, because the head's `[1,16,1,1]` DFL convolution is
+run take **145 ms on the host and 277 ms on the array**, in **436 dispatches at
+630-660 us each** — 72, not 73, because the head's `[1,16,1,1]` DFL convolution is
 folded analytically into the decoder and is never dispatched as a GEMM. The
-array's own GEMM is 63 of those 660 us; the other 597 are the host widening A and
-transposing C back into NCHW.
+array's own GEMM is 370 us of those; the remaining 260 are im2col, the A repack
+and the transpose, all on the host.
+
+**The two paths are not interchangeable, and the reason is now measured rather
+than inferred.** The device multiply is 160 ms where the host's own blocked
+fp32 GEMM is 82 ms of the same 4.59 GMAC, so the array is *slower at the
+multiply*, not faster — 73 GMAC/s against 56, on work the design has already
+padded 2.6x, so per useful MAC it is about 4x worse. Whatever the array buys, it
+is not arithmetic throughput on this graph.
 
 torch, fp32, 16 threads, on the same graph: **20.5 ms**, so the host path is
-**12.6x slower than torch**, and its split says why: it is not the multiply. 4.59
-GMAC in 88 ms is 52 GMAC/s against torch's 214, and im2col writes 4.59 G floats
-— 18 GB of traffic per image — to feed it. Closing that gap means not
-materialising im2col, not narrowing the weights, and neither has been done.
+**10.9x slower than torch**, and its split says why: it is mostly not the
+multiply. The multiply is 82 of 223 ms and is 2x off oneDNN-class code; im2col
+is 47 and moves 18 GB per image; SiLU plus the non-convolution nodes is 50 and
+**does not scale with threads at all** — 65 ms on one thread against 49 on
+sixteen. That last number is why more threads will not fix it: the work is
+either bandwidth-bound or barrier-bound, and 116 pool barriers per frame is
+enough of the latter to matter. Closing the gap means fusing the epilogue and
+im2col into the multiply rather than narrowing the weights, and neither has been
+done.
 
-**The array is 1.4x slower than the host on this network, and three structural
-reasons account for it:**
+**The array is 1.6x slower than the host on this network.** Three structural
+reasons account for the difference, and the first is now the measured one:
 
+- **The device multiply is slower than the host's GEMM**, 160 ms against 82, for
+  the 2.6x of arithmetic padding below.
 - **2.6x arithmetic padding waste.** A design's `N` must be a multiple of
   `tile_n * AIE columns` = 128 on npu1, and most of this network's convolutions
   have `N <= 64`. 4.59 GMAC of useful work is dispatched as 11.95 GMAC.
 - **436 dispatches, 100 of them for the stem.** A dispatch is `M <= 1024` rows and
   the stem has `M = 102400`. The rest follow: 5 convolutions at M=25600 (25 each),
   20 at 6400 (7 each), 25 at 1600 (2 each), 21 at 400 (1 each).
-- **The per-dispatch host work dominates the per-dispatch device work**, which is
-  the one that would have to change to fix the others.
+- **The per-dispatch host work is 115 ms to the device's 160**, which is the one
+  that would have to change to fix the others.
 
 The measured per-layer picture says an oracle would not save it either: **19 of
 the 72 convolutions are faster on the array than on the host**, and an oracle that

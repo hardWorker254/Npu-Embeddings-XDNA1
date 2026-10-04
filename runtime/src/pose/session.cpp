@@ -363,8 +363,10 @@ Result Session::detect(const npue::vit::Image &im) {
   r.t_im2col_s = c.t_im2col;
   r.t_gemm_s = c.t_gemm;
   r.t_transpose_s = c.t_transpose;
+  r.t_elementwise_s = c.t_elementwise;
   r.t_array_s = c.t_array;
   r.t_array_repack_s = c.t_array_repack;
+  r.t_array_gemm_s = c.t_array_gemm;
   r.t_array_transpose_s = c.t_array_transpose;
   r.array = array_;
   r.total_s = app::now_s() - t_all;
