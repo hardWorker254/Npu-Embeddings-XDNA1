@@ -28,7 +28,7 @@
 // GEMM. Per layer, 19 of the 72 are faster on the array, and an oracle splitting
 // each layer onto its faster side measured 146 ms against the host's 150 -- 2.6%.
 //
-// So `--npu-extra-ops conv` is HONOURED here rather than refused, which is the
+// So `--npu-ops conv` is HONOURED here rather than refused, which is the
 // same relationship the flag has to Whisper's ops: an op is on the array when
 // it is listed. What it buys is a measured comparison, printed per run -- and
 // the status block prints both sides' numbers so the claim above is checkable
@@ -124,7 +124,7 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
           "--bo-mode " + m + ": expected host_only, host_only_1m, ext or ext_1m");
   }
 
-  // --npu-extra-ops conv is ACCEPTED and every other code is REFUSED.
+  // --npu-ops conv is ACCEPTED and every other code is REFUSED.
   //
   // This is the opposite of vit_mode.hpp, which refuses the flag outright, and
   // the difference is the measurement in the header: a ViT's design set carries
@@ -139,12 +139,12 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
   {
     std::string listing;
     for (int i = 1; i < argc - 1; ++i)
-      if (std::string(argv[i]) == "--npu-extra-ops") listing = argv[i + 1];
+      if (std::string(argv[i]) == "--npu-ops") listing = argv[i + 1];
     const std::set<std::string> codes = parse_npu_ops(listing);
     if (!codes.empty()) {
       if (codes.size() != 1 || !codes.count("conv"))
         throw std::runtime_error(
-            "--npu-extra-ops " + listing +
+            "--npu-ops " + listing +
             ": a pose model has exactly one array-able op, `conv`, which moves "
             "the 72 dispatched convolutions of the network onto the array as "
             "dispatched GEMMs (the 73rd weight, the head's [1,16,1,1] DFL, is "
@@ -163,7 +163,7 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
             "architecture has none of them: the activations here are SiLU, "
             "which is fused into the convolution's epilogue because it is "
             "elementwise on the GEMM's own output, and there is no LayerNorm, "
-            "no attention and no vocabulary. Re-run with `--npu-extra-ops conv`.");
+            "no attention and no vocabulary. Re-run with `--npu-ops conv`.");
       conv_on_array = true;
     }
   }
@@ -196,7 +196,7 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
         "    npuembeddings serve <model>        (POST /v1/pose)\n"
         "  (PNG and JPEG; anything else is refused rather than guessed at)\n"
         "  --conf 0.25  --iou 0.70  --kpt 0.50  --max-det 300\n"
-        "  --npu-extra-ops conv   run the convolutions on the array instead "
+        "  --npu-ops conv   run the convolutions on the array instead "
         "(slower here; measured both ways)");
 
   // -- thresholds. Parsed and RANGED here rather than in DecodeParams, because a
@@ -243,7 +243,7 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
 
   // -- the artifacts. EMPTY BY DEFAULT, and that is the whole point: the host
   // session needs no device, no design and no directory, so `pose` runs on a
-  // machine with no /dev/accel0. Only --npu-extra-ops conv (or an explicit
+  // machine with no /dev/accel0. Only --npu-ops conv (or an explicit
   // --artifacts) opens one.
   std::string art;
   if (conv_on_array || !flag("--artifacts").empty()) {
@@ -265,7 +265,7 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
       }
       if (streams.empty())
         throw std::runtime_error(
-            "--npu-extra-ops conv needs the array panels, and this container "
+            "--npu-ops conv needs the array panels, and this container "
             "does not carry any: it was packed without --npu. Repack with "
             "`--pose-onnx FILE --npu`, which stages the pre-tiled bf16 B panel "
             "for every convolution. (A design set is the SECOND requirement; "
@@ -276,7 +276,7 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
       for (size_t i = 0; i < streams.size(); ++i)
         if (streams[i] == '{') ++n;
       throw std::runtime_error(
-          "--npu-extra-ops conv needs a design set on disk: pass --artifacts "
+          "--npu-ops conv needs a design set on disk: pass --artifacts "
           "<dir> naming one, or build it with "
           "`python tools/export/export_gemm_rtp.py --target yolov8n-pose "
           "--arch 1 -n 32 --batch 1`. The flag has no default set to fall back "
@@ -354,7 +354,7 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
                backend_where.c_str());
   if (!session.array())
     std::fprintf(stderr,
-                 "             pass --npu-extra-ops conv to measure the array "
+                 "             pass --npu-ops conv to measure the array "
                  "instead; see runtime/include/pose/net.hpp for why the host "
                  "wins here (2.6x arithmetic padding waste on N <= 64, 100 of "
                  "the network's 436 dispatches for the stem alone, and 660 us "

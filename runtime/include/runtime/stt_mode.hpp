@@ -42,7 +42,7 @@
 #include "cli/flags.hpp"          // read_serve
 #include "common/design_selection.hpp"
 #include "common/host_kernels.hpp"
-#include "common/npu_ops_flag.hpp"   // parse_npu_ops, the one --npu-extra-ops parser
+#include "common/npu_ops_flag.hpp"   // parse_npu_ops, the one --npu-ops parser
 #include "runtime/model.hpp"
 #include "server/stt_backend.hpp"
 #include "whisper/transcribe.hpp"
@@ -181,14 +181,14 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
     opts.stride_seconds = std::atoi(flag("--stride-seconds").c_str());
   // conv1/conv2 on the array or on the host, from the one flag that already
   // answers "which ops go on the array". The host is the fp32 reference the
-  // features gate holds against, so it stays reachable with `--npu-extra-ops ""`.
+  // features gate holds against, so it stays reachable with `--npu-ops ""`.
   // The whole SET is parsed once, here, and handed to the session: the codes
   // that name a design directory decide which xclbins exist, and a design cannot
   // be opened after the stacks have been built.
   const std::set<std::string> npu_ops = [&] {
     std::string listing;
     for (int i = 1; i < argc - 1; ++i)
-      if (std::string(argv[i]) == "--npu-extra-ops") listing = argv[i + 1];
+      if (std::string(argv[i]) == "--npu-ops") listing = argv[i + 1];
     return app::parse_npu_ops(listing);
   }();
   opts.conv_npu = npu_ops.count("conv") > 0;
@@ -234,14 +234,14 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
   std::fprintf(stderr, "  designs    %s\n", art.c_str());
   std::fprintf(stderr, "  datapath   %s\n", session.datapath_note().c_str());
   // What ran, not what could: the design set's capability is one thing and this
-  // request's --npu-extra-ops is another, and a status line that reports the
+  // request's --npu-ops is another, and a status line that reports the
   // capability is a status line that says "npu" to a run that used the host.
   // Asking for the array on a set that cannot provide it is refused, because
   // answering from the host instead is the "the flag was there and nothing
   // happened" failure this project treats as worst.
   if (opts.conv_npu && !session.conv_available())
     throw std::runtime_error(
-        "--npu-extra-ops conv asked for conv1/conv2 on the array, but " + art +
+        "--npu-ops conv asked for conv1/conv2 on the array, but " + art +
         "/gemm_rtp cannot run them: " + session.conv_device() +
         ". For an int8 design set that is the operand type, not a missing "
         "stream -- attn_out is still there and still the right shape, but "
@@ -249,7 +249,7 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
         "tiler and an int8 panel is a different element type with a different "
         "MAC sub-tile. Re-export the encoder set with "
         "tools/export/export_gemm_rtp.py (no --int8), or drop conv from "
-        "--npu-extra-ops and run the host front end.");
+        "--npu-ops and run the host front end.");
 
   // WHERE EVERY OPERATION RUNS, and why. One row per op, the device it runs on,
   // and the thing that decides it -- the stream that exists, or the reason one
@@ -261,7 +261,7 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
   // and friends), so the table cannot describe an export other than the one
   // running. The host rows are this build's own schedule: there is no design
   // for them to be read from, and a design set that had one would say so in
-  // --npu-extra-ops, which is the same flag that moved conv.
+  // --npu-ops, which is the same flag that moved conv.
   {
     auto joined = [](const std::vector<std::string> &v) {
       std::string s;
@@ -306,7 +306,7 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
     } else {
       std::fprintf(stderr,
                    "             %-26s %-5s %s\n", "conv1, conv2", "host",
-                   "fp32, d^2 MACs; --npu-extra-ops conv sends it to the array");
+                   "fp32, d^2 MACs; --npu-ops conv sends it to the array");
     }
     // The operand type of every GEMM row below it, named once rather than
     // repeated on four lines: an int8 container on an int8 design set is the
@@ -345,7 +345,7 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
         for (const auto &n : session.elt_notes())
           if (n.rfind(dir, 0) == 0) why = n;
       } else {
-        why = std::string("fp32 on this process; --npu-extra-ops ") + code +
+        why = std::string("fp32 on this process; --npu-ops ") + code +
               " sends it to the array";
       }
       std::fprintf(stderr, "             %-26s %-5s %s\n", label,

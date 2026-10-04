@@ -71,7 +71,7 @@ def export_arch(out_dir: Path, arch: str, batch: int, hidden: int = 384,
     `ops` is the set of CODES from tools/lib/npu_ops.py (gelu, layn, softm); an
     empty or omitted set means all three, which is what this function has always
     done and what a caller with no opinion should get. An op that is not built
-    is a directory the runtime will refuse by name if --npu-extra-ops asks for it, so
+    is a directory the runtime will refuse by name if --npu-ops asks for it, so
     building a subset is a real saving (a compile and an xclbin each) and never a
     silent one.
     """
@@ -114,7 +114,10 @@ def export_arch(out_dir: Path, arch: str, batch: int, hidden: int = 384,
     if not want:
         raise SystemExit(
             "eltwise: no ops requested, so there is nothing to build. Pass "
-            f"{npu_ops.EXPORTER_FLAG} with at least one of [{npu_ops.CODES}]."
+            f"--extra-ops with at least one of [{npu_ops.CODES}] -- not "
+            f"{npu_ops.EXPORTER_FLAG}, which this tool refuses by name: that one "
+            "belongs to the runtime and only selects among designs that were "
+            "already built."
         )
 
     arr = _arrays()

@@ -46,7 +46,7 @@
 // the wrong kind of answer: it described the export, not the model. A ViT has
 // the same two pre-LN LayerNorms and the same ungated exact-erf FFN that
 // Whisper has, npue::whisper::NpuEltwise already implements both kernels, and
-// `--npu-extra-ops layn` / `gelu` now build the sibling design sets for
+// `--npu-ops layn` / `gelu` now build the sibling design sets for
 // kinds.cls exactly as they do for kinds.stt. So the two codes below are real
 // per-op host/array choices and the flag says so.
 //

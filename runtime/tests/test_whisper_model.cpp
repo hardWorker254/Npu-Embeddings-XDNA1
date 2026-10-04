@@ -364,7 +364,7 @@ int main(int argc, char **argv) {
         throw std::runtime_error(
             art + "/gemm_rtp has no attn_qk/attn_av streams at tier " +
             std::to_string(eb) +
-            "; re-export with --npu-extra-ops attn to run attention here");
+            "; re-export with --npu-ops attn to run attention here");
       bool want_softmax = std::ifstream(art + "/softmax/design.json").good();
       if (want_softmax) {
         sm_design = std::make_unique<npu::Design>(dev, art + "/softmax");

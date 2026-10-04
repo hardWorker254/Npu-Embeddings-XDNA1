@@ -114,7 +114,7 @@ public:
         throw std::runtime_error(
             name_ + ": graph node " + std::to_string(i) +
             " (conv " + std::to_string(L.conv) +
-            ") has no \"stream\" name, so --npu-extra-ops conv cannot run it. "
+            ") has no \"stream\" name, so --npu-ops conv cannot run it. "
             "This container was packed without array panels (pack with "
             "tools/pack/packers/pose.py --npu), and the flag is explicit about "
             "moving work to the array, so it refuses rather than running this "
@@ -265,7 +265,7 @@ private:
         "the design set has no stream named '" + name +
         "'. A pose design set carries one stream per distinct padded (K, N) "
         "the network needs, and the graph names the one each convolution uses; "
-        "re-export it for this model, or do not pass --npu-extra-ops conv.");
+        "re-export it for this model, or do not pass --npu-ops conv.");
   }
 
   const Panel &panel_at(int64_t conv) const {

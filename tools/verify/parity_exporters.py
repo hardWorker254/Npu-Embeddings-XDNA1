@@ -40,13 +40,59 @@ MONOLITHS = ("export_gemm_rtp.py", "export_eltwise.py")
 SHARED = ("gemm_pretiled.py", "npue.py", "toolchain_provenance.py",
           "onnx_weights.py", "whisper_bpe.py")
 
+def eltwise_args_dropped(ln_cols):
+    """The accepted difference: the child argv no longer omits the eltwise geometry.
+
+    One export command compiles every design the target can honour, so the child
+    of --arch all is told the geometry those designs need instead of being told
+    which ones to build. The monolith this gate diffs against was told which
+    ones, so its argv has nothing appended and the split one's argv has the
+    seven arguments below -- and the accepted difference has to DELETE them, not
+    add them, because both sides are substituted with the same pair (line 393)
+    and the side that already has them would otherwise get a second copy.
+
+    Deleting rather than rewriting one side to match the other is also the
+    narrower claim: it asserts "these seven arguments, and nothing else, is the
+    difference", whereas adding them to the monolith side would assert nothing
+    about what surrounds them.
+
+    Nothing about the GEMM design changes -- the pair is anchored on the full
+    argument list rather than on `--per-arch-cache`, which the informational
+    line "[export] --arch all: enabling --per-arch-cache ..." also contains.
+
+    --ln-eps 1e-12 is MiniLM's, the fallback for an export with no target. A
+    target with a different epsilon (Whisper's 1e-05) forwards its own, which is
+    the whole reason these numbers travel with the argv at all -- and why the
+    helper takes the column count rather than hard-coding a whole line.
+
+    gemma gets no accepted difference and needs none: it honours none of the
+    eltwise codes, so there is nothing to build, the geometry is not forwarded,
+    and its argv still matches the monolith byte for byte. That is the same fact
+    the registry states, showing up here as a case that has to keep passing
+    unedited -- if gemma ever starts building something, this file will say so.
+    """
+    added = (" --elt-cols 1 --gelu-tile 1024 --gelu-variant poly"
+             " --ln-variant il4 --sm-variant poly_il4"
+             f" --ln-cols {ln_cols} --ln-eps 1e-12")
+    return [(added, "")]
+
+
 CASES = [
     ("gemm", ["--list-targets"]),
-    ("gemm", ["--target", "all-MiniLM-L6-v2", "--arch", "1", "--dry-run"]),
-    ("gemm", ["--target", "bge-large-en-v1.5", "--arch", "2", "--dry-run"]),
-    ("gemm", ["--target", "nomic-embed-text-v1.5", "--arch", "all", "--dry-run"]),
+    # ACCEPTED DIFFERENCE (the five cases marked this way, plus the --arch 1 one
+    # below): the child argv carries the eltwise geometry now, because the
+    # exporter builds every design the target honours instead of being told
+    # which ones. eltwise_args_dropped() says what the string is and why the
+    # accepted difference deletes it from both sides.
+    ("gemm", ["--target", "all-MiniLM-L6-v2", "--arch", "1", "--dry-run"],
+     eltwise_args_dropped(384)),
+    ("gemm", ["--target", "bge-large-en-v1.5", "--arch", "2", "--dry-run"],
+     eltwise_args_dropped(1024)),
+    ("gemm", ["--target", "nomic-embed-text-v1.5", "--arch", "all", "--dry-run"],
+     eltwise_args_dropped(768)),
     ("gemm", ["--target", "embeddinggemma-300m", "--arch", "1", "--dry-run", "--batches", "4,8"]),
-    ("gemm", ["--target", "gte-multilingual-base", "--arch", "1", "--seq", "128", "--dry-run"]),
+    ("gemm", ["--target", "gte-multilingual-base", "--arch", "1", "--seq", "128", "--dry-run"],
+     eltwise_args_dropped(768)),
     # ACCEPTED DIFFERENCE: --identity-threshold's fallback moved 80 -> 128.
     # Only THIS case shows it, because it is the only one with no --target: the
     # threshold comes from the target's defaults when there is one, and from
@@ -57,11 +103,13 @@ CASES = [
     # monolith this gate diffs against still defaults to 80. The numbers and
     # the exit code are otherwise unchanged.
     ("gemm", ["--arch", "1", "--batch", "8", "--cols", "4", "--hidden", "384", "--dry-run"],
-     [("--identity-threshold 80", "--identity-threshold 128")]),
+     [("--identity-threshold 80", "--identity-threshold 128")] +
+     eltwise_args_dropped(384)),
     ("gemm", ["--target", "no-such-model", "--arch", "1", "--dry-run"]),
     ("gemm", ["--target", "all-MiniLM-L6-v2", "--seq", "7", "--dry-run"]),
     ("gemm", ["--target", "all-MiniLM-L6-v2", "--seq", "64", "--batches", "4,6", "--dry-run"]),
-    ("gemm", ["--target", "all-MiniLM-L6-v2", "--int8", "--emulate-bfp16", "--dry-run"]),
+    ("gemm", ["--target", "all-MiniLM-L6-v2", "--int8", "--emulate-bfp16", "--dry-run"],
+     eltwise_args_dropped(384)),
     # ACCEPTED DIFFERENCE: the M-not-tileable error's HINT now names -m and
     # --rows as well, because they are what can fix it. The numbers and the
     # refusal are unchanged.
@@ -91,12 +139,21 @@ CASES = [
 # and the block is not.
 #
 # What a RENAME costs, stated plainly: the monolith still has --npu-eltwise, so
-# no case here can notice a script that was never updated to --npu-extra-ops.
+# no case here can notice a script that was never updated to --npu-ops.
 # That is the price of an intentional CLI change, and the runtime's own refusal
 # of the old flag name is what covers it at the other end.
 REQUIRED_FLAGS = ("--cols", "--seq", "-m", "-k", "-n", "--batches", "--rows",
-                  "--stream-set", "--dec-seq", "--npu-extra-ops", "--int8",
+                  "--stream-set", "--dec-seq", "--int8",
                   "--emulate-bfp16", "--per-arch-cache", "--identity-threshold")
+# --npu-ops was on this list until this fork dropped the exporter's copy of it.
+# It is asserted against the NEW exporter's --help text, so leaving it would have
+# been satisfied by any prose mentioning the runtime's flag and asserted nothing
+# at all -- the whole point of the list is "a refactor that quietly dropped a
+# flag would pass a byte-comparison of nothing", and that only works while every
+# entry is a flag the exporter really parses. The exporter builds every design
+# the target can honour now (tools/lib/npu_ops.py KIND_REGISTRY), so there is no
+# op-selection flag left to require; the runtime's own list of eight codes is
+# checked by tools/verify/verify_cli_flags.py against the C++ table instead.
 
 REQUIRED_FLAGS_ELT = ("--arch", "--out", "--batch", "--seq", "--hidden",
                       "--elt-cols", "--gelu-tile", "--ln-variant",

@@ -89,7 +89,7 @@ std::string resolve_container(const std::string &root, const std::string &arg,
 bool flag_takes_value(const std::string &a) {
     static const char *const kWithValue[] = {
         "--threads", "--pipeline", "--prefix", "--artifacts", "--dev",
-        "--bo-mode", "--npu-extra-ops", "--language", "--task", "--max-new",
+        "--bo-mode", "--npu-ops", "--language", "--task", "--max-new",
         "--chunk-seconds", "--stride-seconds", "--classify", "--pose",
         // --audio is the generic spelling of --transcribe, for the
         // `npuembeddings <root> --model m.npue --audio a.wav` form rather than
@@ -355,7 +355,7 @@ int run_pose(int argc, char **argv) {
             "  (PNG and JPEG; anything else is refused rather than guessed at)\n"
             "  --conf 0.25 --iou 0.70 --kpt 0.50 --max-det 300\n"
             "  --text                 a human summary instead of JSON\n"
-            "  --npu-extra-ops conv    run the convolutions on the array\n"
+            "  --npu-ops conv    run the convolutions on the array\n"
             "                          (slower here -- measured, see\n"
             "                          runtime/include/pose/net.hpp)");
     if (!is_container_path(model_name)) warn_if_unpinned(model_name);

@@ -155,7 +155,7 @@ def embed(exe: Path, root: Path, model: str, texts: list[str], hidden: int,
         if prefix is not None:
             cmd += ["--prefix", prefix]
         if npu_ops:
-            cmd += ["--npu-extra-ops", npu_ops]
+            cmd += ["--npu-ops", npu_ops]
         r = subprocess.run(cmd, capture_output=True, text=True,
                            encoding="utf-8", errors="replace")
         if r.returncode != 0:
@@ -324,7 +324,7 @@ def main() -> int:
                          "picks, which exercises pick_artifacts() too")
     ap.add_argument("--threads", type=int, default=24)
     ap.add_argument("--npu-ops", default=None,
-                    help="op codes for the runtime's --npu-extra-ops, so this "
+                    help="op codes for the runtime's --npu-ops, so this "
                          "gate can measure a run with GELU/LayerNorm/softmax "
                          "ON THE ARRAY instead of on the host. The placement "
                          "is part of the baseline record: an op on the array "

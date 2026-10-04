@@ -4,25 +4,31 @@
 //
 // THE FLAG
 // --------
-//   --npu-extra-ops <codes>   a comma-separated subset of the codes below; the
+//   --npu-ops <codes>   a comma-separated subset of the codes below; the
 //                            default (and an empty list) is NONE of them, which
 //                            is the measured-faster host path
 //
-// ONE SPELLING, BOTH SIDES
-// -----------------------
-// The runtime's flag and the exporter's are the SAME STRING on purpose.
-// `tools/export/export_gemm_rtp.py --npu-extra-ops gelu` BUILDS the design that lets
-// `--npu-extra-ops gelu` RUN conv1/conv2, LayerNorm or GELU on the array, and
-// one name for one idea is the whole point: a user who has built the design
-// types the same word to use it. It used to be the other way round -- the
-// runtime said `--npu-ops`, the exporter `--npu-extra-ops` -- and the two differ
-// by one suffix while taking the same codes, so `serve ... --npu-extra-ops
+// ONE SPELLING, AND ONLY ONE SIDE HAS A FLAG ANY MORE
+// ----------------------------------------------------
+// This flag SELECTS; it does not build. One export command
+// (`export_gemm_rtp.py --target X`) compiles every design that X can actually
+// use -- the registry that decides is tools/lib/npu_ops.py, read by
+// exporters/gemm_rtp/build.py -- and this flag is the only thing that says
+// which of the built ones to RUN. So there is no second name to keep in step
+// with this one, and a user cannot hold two spellings of the same selection.
+//
+// The history is worth one paragraph because the bug it caused was silent. The
+// runtime used to say `--npu-ops` and the exporter `--npu-extra-ops`: two names
+// one suffix apart, taking the same codes, so `serve ... --npu-extra-ops
 // gelu,softm,layn,conv` selected nothing, was dropped by the subcommand
 // whitelist without a word, and printed a status block claiming the host. The
-// old spelling is now refused by name (see removed_op_flags).
+// runtime's spelling is now the surviving one, and the exporter's old name is
+// refused BY NAME (see removed_op_flags) rather than aliased -- a flag that
+// works under two names is two flags, and the undocumented one is the one
+// people keep typing.
 //
 // The codes are short because this is typed on a command line and the long
-// names run to nine characters: `layn`, `softm`, `gelu`. `--npu-extra-ops
+// names run to nine characters: `layn`, `softm`, `gelu`. `--npu-ops
 // layn,softm` is the old `--npu-eltwise --host-gelu`, and the flag with nothing
 // after it is the old `--npu-eltwise --host-ln --host-sm --host-gelu`. There is
 // no inverse flag: an op is on the host exactly when it is not in the list, and
@@ -67,7 +73,7 @@
 namespace app {
 
 struct NpuOp {
-  const char *code;      // what --npu-extra-ops takes
+  const char *code;      // what --npu-ops takes
   const char *design;    // the sibling design directory, and the kernel family
   const char *long_name; // for messages only
 };
@@ -110,8 +116,23 @@ inline const NpuOp *find_npu_op(const std::string &code) {
   return nullptr;
 }
 
+// Comma-joined codes, in TABLE order rather than the order the user typed them.
+// A message that lists what was asked for should read the same every time for
+// the same set, and "layn,softm" is easier to match against a help block than a
+// permutation of itself. The flag value itself is echoed unchanged elsewhere, so
+// what the user typed is never lost -- this is for repetition, not for evidence.
+inline std::string npu_op_list(const std::set<std::string> &codes) {
+  std::string s;
+  for (const auto &op : npu_op_table())
+    if (codes.count(op.code)) {
+      if (!s.empty()) s += ",";
+      s += op.code;
+    }
+  return s;
+}
+
 // "gelu, layn" and " gelu ,layn " both mean {gelu, layn}; an empty component is
-// skipped, so a trailing comma and `--npu-extra-ops ""` are the same thing.
+// skipped, so a trailing comma and `--npu-ops ""` are the same thing.
 inline std::set<std::string> parse_npu_ops(const std::string &list) {
   std::set<std::string> out;
   std::string item;
@@ -123,7 +144,7 @@ inline std::set<std::string> parse_npu_ops(const std::string &list) {
     if (code.empty()) return;
     if (!find_npu_op(code))
       throw std::runtime_error(
-          "--npu-extra-ops: '" + code +
+          "--npu-ops: '" + code +
           "' is not an op this build knows. Valid codes: [" + npu_op_codes() +
           "] (layn = LayerNorm, softm = softmax, gelu = GELU, conv = Whisper's "
           "conv1/conv2, attn = Whisper's attention as GEMMs, mproj = the mel "
@@ -151,15 +172,15 @@ inline std::set<std::string> parse_npu_ops(const std::string &list) {
 inline const std::vector<std::pair<const char *, const char *>> &
 removed_op_flags() {
   static const std::vector<std::pair<const char *, const char *>> v = {
-      {"--npu-eltwise", "--npu-extra-ops gelu,layn,softm"},
-      {"--host-gelu", "--npu-extra-ops without gelu"},
-      {"--host-ln", "--npu-extra-ops without layn"},
-      {"--host-sm", "--npu-extra-ops without softm"},
-      // The runtime's own former spelling. Refused rather than aliased: a flag
-      // that still works under two names is two flags, and the second one is
-      // the one nobody documents. The exporter's flag kept this name, so this
-      // is the rename, not a second name for it.
-      {"--npu-ops", "--npu-extra-ops"},
+      {"--npu-eltwise", "--npu-ops gelu,layn,softm"},
+      {"--host-gelu", "--npu-ops without gelu"},
+      {"--host-ln", "--npu-ops without layn"},
+      {"--host-sm", "--npu-ops without softm"},
+      // The name this flag used to carry while the exporter had a flag of its
+      // own. Refused rather than aliased: a flag that still works under two
+      // names is two flags, and the second one is the one nobody documents.
+      // Now the exporter needs none, so the shorter name is the one left.
+      {"--npu-extra-ops", "--npu-ops"},
   };
   return v;
 }
@@ -182,17 +203,18 @@ inline void refuse_removed_op_flags(const std::vector<std::string> &args) {
 
 // THE STT-ONLY ELTWISE FLAG, REFUSED AT RUN TIME
 // ----------------------------------------------
-// `--extra-ops` is tools/export/export_eltwise.py's own spelling, and it stays that
-// tool's: the gate that checks the exporters requires it (see
-// tools/verify/parity_exporters.py REQUIRED_FLAGS_ELT), and renaming a flag there would
-// make this tree's exporter disagree with every revision the gate compares
-// against. The runtime's flag is `--npu-extra-ops`, which is the same string the
-// GEMM exporter already took, so the one name a user has to know is the one that
-// both builds and selects.
+// `--extra-ops` is tools/export/export_eltwise.py's own spelling and stays that
+// tool's: it is the low-level per-kernel builder (its default builds all three
+// eltwise designs, and the flag only narrows that for a direct call), and the
+// gate that compares exporters against history requires the flag to exist (see
+// tools/verify/parity_exporters.py REQUIRED_FLAGS_ELT). The GEMM exporter has no
+// flag at all any more, so nobody reaches this one by accident from a top-level
+// export -- but a script that does reach for it, having learned it from a README
+// that predates the split, is told what to type instead.
 inline const std::vector<std::pair<const char *, const char *>> &
 exporter_only_flags() {
   static const std::vector<std::pair<const char *, const char *>> v = {
-      {"--extra-ops", "--npu-extra-ops"},
+      {"--extra-ops", "--npu-ops"},
   };
   return v;
 }

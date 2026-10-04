@@ -13,7 +13,7 @@
 //   softmax.V [rows, n_kv] @ [n_kv, head_dim]       a GEMM
 //
 // So the two GEMMs are the array's, one dispatch per head per query chunk, and
-// the softmax is whichever path --npu-extra-ops softm named. The dispatch count
+// the softmax is whichever path --npu-ops softm named. The dispatch count
 // is the price: heads x chunks x 2 x layers, which for large-v3 is 3840 per
 // window against 150 us of fixed cost each. That is why this exists anyway: the
 // arithmetic is 184 GFLOP per window on the host and the point of the exercise
@@ -74,7 +74,7 @@ public:
   void alloc_buffers();
 
   // Where the softmax runs. Null is the host pass, which is a real path and not
-  // a fallback: --npu-extra-ops softm has to name it.
+  // a fallback: --npu-ops softm has to name it.
   void set_softmax(NpuEltwise *s) { softm_ = s; }
   bool softmax_on_array() const { return softm_ != nullptr; }
 

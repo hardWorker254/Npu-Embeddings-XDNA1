@@ -192,11 +192,11 @@ Session::Session(npue::File &model, const std::string &model_name,
           ". The kernel's row width is compiled in, so this design normalises "
           "the wrong number of channels. Re-export it for this model: "
           "python tools/export/export_gemm_rtp.py --target " + name_ +
-          " --arch 1 --npu-extra-ops " + code);
+          " --arch 1 --npu-ops " + code);
     if (kind == EltwiseKind::LayerNorm) {
       // ViT's layer_norm_eps is 1e-12, an order of magnitude below the 1e-5 the
       // Whisper designs are built with, so this check is the one that fires
-      // when somebody points --npu-extra-ops layn at a design set that a
+      // when somebody points --npu-ops layn at a design set that a
       // previous export happened to leave next to this one.
       const double want = geom_.ln_eps;
       const double got = design->info().ln_eps;

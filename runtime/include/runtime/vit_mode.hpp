@@ -110,7 +110,7 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
           "ext_1m");
   }
 
-  // --npu-extra-ops is parsed below, BEFORE any Design exists, because the
+  // --npu-ops is parsed below, BEFORE any Design exists, because the
   // answer decides how many hw_contexts this run will open: gemm_rtp always,
   // plus one per honoured eltwise code. The budget check follows the parse for
   // that reason -- a machine already busy with another process gets a sentence
@@ -118,14 +118,14 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
   // "1" and then trips over the second load.
   std::set<std::string> npu_ops;
 
-  // --npu-extra-ops: TWO CODES ARE HONOURED AND SIX ARE REFUSED, each by name.
+  // --npu-ops: TWO CODES ARE HONOURED AND SIX ARE REFUSED, each by name.
   //
   // `layn` and `gelu` are genuine per-op host/array choices here, and were not
   // for a while: the refusal below once said this architecture's design set
   // carries no eltwise designs, which described the export rather than the
   // model. A ViT has the same two pre-LN LayerNorms and the same ungated
   // exact-erf FFN Whisper has, NpuEltwise already implements both kernels, and
-  // --npu-extra-ops layn,gelu now builds the sibling design sets for kinds.cls
+  // --npu-ops layn,gelu now builds the sibling design sets for kinds.cls
   // exactly as for kinds.stt. Each costs one extra xclbin and one extra
   // hw_context.
   //
@@ -156,7 +156,7 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
   {
     std::string listing;
     for (int i = 1; i < argc - 1; ++i)
-      if (std::string(argv[i]) == "--npu-extra-ops") listing = argv[i + 1];
+      if (std::string(argv[i]) == "--npu-ops") listing = argv[i + 1];
     const std::set<std::string> codes = parse_npu_ops(listing);
     const std::set<std::string> dead = {
         "softm", "attn", "conv", "mproj", "fft", "logit"};
@@ -170,7 +170,7 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
       for (const auto &c : {"layn", "gelu"})
         if (codes.count(c)) { keep += keep.empty() ? c : ", " + std::string(c); }
       throw std::runtime_error(
-          "--npu-extra-ops " + seen + ": this architecture has no such "
+          "--npu-ops " + seen + ": this architecture has no such "
           "host/array choice to make. softm is softmax inside attention, and "
           "moving it alone would ship the whole 197x197 score matrix to the "
           "array and back for one elementwise pass; attn is the two GEMMs that "
@@ -189,7 +189,7 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
           "cannot run on this array at all because 1000 is not a multiple of "
           "tile_n*cols = 192 and no legal B panel of that width exists." +
           (keep.empty() ? std::string(" Drop it.")
-                        : " Keep --npu-extra-ops " + keep +
+                        : " Keep --npu-ops " + keep +
                               ", which this architecture does honour."));
     }
     npu_ops = codes;
@@ -208,7 +208,7 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
       throw std::runtime_error(
           "NPU context budget: refusing to load " + std::to_string(want) +
           " concurrent hw_context(s) (gemm_rtp plus one per honoured "
-          "--npu-extra-ops code) -- see the report above (close the other "
+          "--npu-ops code) -- see the report above (close the other "
           "process, or pass --allow-contention)");
   }
 
@@ -342,19 +342,17 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
     throw std::runtime_error(
         art + " has no gemm_rtp/design.json. An image classifier needs "
         "gemm_rtp because its four streams ARE gemm_rtp's "
-        "(tools/data/npu_targets.json kinds.cls.streams), plus one sibling "
-        "directory per honoured --npu-extra-ops code (layernorm/, gelu/). "
-        "Export with tools/export/export_gemm_rtp.py --target " + model_name +
-        " --arch 1 --npu-extra-ops " +
-        (npu_ops.empty() ? std::string("(none)")
-                         : [&] {
-                             std::string s;
-                             for (const auto &c : npu_ops) {
-                               if (!s.empty()) s += ",";
-                               s += c;
-                             }
-                             return s;
-                           }()));
+        "(tools/data/npu_targets.json kinds.cls.streams). The exporter builds "
+        "the sibling directories too -- layernorm/ and gelu/ are what this "
+        "architecture honours, and one command builds them with no flag -- so a "
+        "set without gemm_rtp was exported for another model or before that "
+        "was true: run `python tools/export/export_gemm_rtp.py --target " +
+        model_name + " --arch 1` and re-pack" +
+        (npu_ops.empty()
+             ? std::string(". Nothing was asked for, so gemm_rtp alone is all "
+                           "the run needs.")
+             : "; --npu-ops " + npu_op_list(npu_ops) +
+                   " additionally needs the sibling directory it names."));
 
   const double t0 = app::now_s();
   npue::vit::Session session(probe, model_name, art, threads, npu_ops);
@@ -432,7 +430,7 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
           if (tag == name) {
             why = note.substr(note.find(':') + 1) +
                   "; bf16 in and out, fp32 accumulate -- the same two kernels "
-                  "Whisper's --npu-extra-ops layn,gelu runs";
+                  "Whisper's --npu-ops layn,gelu runs";
             break;
           }
         }
@@ -441,17 +439,17 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
     };
     elt_row("layernorm", session.layernorm_on_array(),
             ((std::string("fp32 with this container's layer_norm_eps ") + eps +
-              "; --npu-extra-ops layn moves it"))
+              "; --npu-ops layn moves it"))
                 .c_str());
     elt_row("gelu", session.gelu_on_array(),
-            "exact erf, fp32; --npu-extra-ops gelu moves it");
+            "exact erf, fp32; --npu-ops gelu moves it");
     std::fprintf(stderr, "             %-26s %-5s %s\n", "softmax", "host",
                  ("O(seq^2) attention on the host: " +
                   std::to_string(g.n_pos) + "x" + std::to_string(g.n_pos) +
                   " scores x " + std::to_string(g.heads) +
                   " heads; moving softmax alone would ship the whole score "
                   "matrix to the array and back for one elementwise pass, and "
-                  "the two GEMMs that bracket it (--npu-extra-ops attn) are "
+                  "the two GEMMs that bracket it (--npu-ops attn) are "
                   "unmeasured above seq 64 in this repository")
                      .c_str());
     std::fprintf(stderr, "             %-26s %-5s %s\n", "classifier head", "host",

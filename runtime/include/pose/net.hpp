@@ -11,7 +11,7 @@
 // copies would drift, and the drift would be a plausible pose.
 //
 //   host  (default)   im2col + a blocked fp32 GEMM, multi-threaded over rows
-//   array (--npu-extra-ops conv)   the same A rows into NpuGemm::run, chunked to
+//   array (--npu-ops conv)   the same A rows into NpuGemm::run, chunked to
 //                     the design's row count
 //
 // WHY CPU IS THE DEFAULT, WITH THE NUMBER ATTACHED
@@ -32,7 +32,7 @@
 //
 // Per layer, 19 of the 72 are faster on the array than on the host, and an
 // oracle that put each layer on its faster side measured 146 ms against the
-// host's 150 -- 2.6%, for choosing per layer. So `--npu-extra-ops conv` exists as
+// host's 150 -- 2.6%, for choosing per layer. So `--npu-ops conv` exists as
 // an explicit, measurable choice -- the same relationship the flag has to
 // Whisper's ops -- and the status block prints both numbers so the trade is
 // visible per run rather than argued in a comment.
@@ -193,7 +193,7 @@ private:
 //
 // Separate from Network so that the default path links and runs with no XRT
 // design at all: Network calls into it only when Placement says so, and the
-// Session builds one only when --npu-extra-ops named conv.
+// Session builds one only when --npu-ops named conv.
 class NpuConvs {
 public:
   virtual ~NpuConvs() = default;

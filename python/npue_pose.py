@@ -486,7 +486,7 @@ class _Server:
         if self.opts.artifacts:
             cmd += ["--artifacts", self.opts.artifacts]
         if self.opts.conv_on_array:
-            cmd += ["--npu-extra-ops", "conv"]
+            cmd += ["--npu-ops", "conv"]
         cmd += list(self.opts.extra_args)
         self.proc = subprocess.Popen(
             cmd, stdout=self.log, stderr=subprocess.STDOUT)
@@ -596,7 +596,7 @@ class PoseLandmarker:
         if o.artifacts:
             cmd += ["--artifacts", o.artifacts]
         if o.conv_on_array:
-            cmd += ["--npu-extra-ops", "conv"]
+            cmd += ["--npu-ops", "conv"]
         cmd += list(o.extra_args)
         return cmd
 

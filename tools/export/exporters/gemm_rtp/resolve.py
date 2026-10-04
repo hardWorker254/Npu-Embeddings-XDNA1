@@ -153,6 +153,13 @@ def resolve_args(args: argparse.Namespace) -> list[ResolvedArch]:
         ns.arch = arch
 
         if targets is None:
+            # No target, so no model to key the op registry on. The default row is
+            # the text encoder's, which is also what this path's geometry is: the
+            # historic fallbacks are MiniLM-shaped throughout, down to the 1e-12
+            # LayerNorm epsilon below. A spawned STT child lands here too (it has
+            # no --target) but reads its design set from NPUEMBEDDINGS_OPS instead,
+            # so this value is never the one that decides what it builds.
+            ns.kind = "gemm_rtp"
             ns.batch = FALLBACK_BATCH if args.batch is None else args.batch
             ns.cols = FALLBACK_COLS_BY_ARCH.get(arch, FALLBACK_COLS) if args.cols is None else args.cols
             ns.hidden = FALLBACK_HIDDEN if args.hidden is None else args.hidden
@@ -219,6 +226,14 @@ def resolve_args(args: argparse.Namespace) -> list[ResolvedArch]:
                 f"in {args.targets_file}"
             )
         overrides = model_spec.get("overrides") or {}
+
+        # The kind, carried through to build.py so nothing downstream has to load
+        # npu_targets.json a second time to learn WHICH MODEL this is -- the
+        # op registry (tools/lib/npu_ops.py) is keyed on the kind AND the target
+        # name, because gemma is a model whose row differs from its kind's:
+        # GemmaNpuEncoder reads no per-op flag at all. Read from model_spec, not
+        # from args.target, so the two cannot be taken from different places.
+        ns.kind = model_spec.get("kind", "gemm_rtp")
 
         ns.batch = _pick(
             args.batch, overrides.get("batch"), arch_spec.get("batch"),
@@ -306,38 +321,48 @@ def resolve_args(args: argparse.Namespace) -> list[ResolvedArch]:
             import math as _math
             step = _math.lcm(int(ns.n), int(ns.k))
             n_kv = -(-int(model_spec.get("frames", 1500)) // step) * step
-            if "attn" in npu_ops.parse_ops(args.npu_extra_ops or "",
-                                           npu_ops.EXPORTER_FLAG):
+
+            # EVERY code this model honours, built unconditionally. There is no
+            # longer a flag that could ask for one and not another, so this block
+            # asks the registry instead of the command line -- and the registry
+            # says all eight are `honours` for kind stt, which is why it reads as
+            # a straight line rather than four conditionals. Two of them carry a
+            # validation that used to be reachable only by asking for them:
+            # `logit` needs the model's vocab, and `softm` needs a row as wide as
+            # the score matrix. Those stay refusals, and they are the whole reason
+            # this cannot be "build whatever exists" -- a target without a vocab
+            # must fail the export rather than silently ship a decoder that cannot
+            # produce tokens.
+            reg = npu_ops.registry_for("stt", args.target)
+            honours = {c for c, (status, _) in reg.items() if status == npu_ops.HONOURS}
+
+            if "attn" in honours:
                 ns.attn_streams = npu_ops.GEMM_STREAMS["attn"]
                 ns.attn_geometry = (int(model_spec["head_dim"]), n_kv)
-            if "mproj" in npu_ops.parse_ops(args.npu_extra_ops or "",
-                                             npu_ops.EXPORTER_FLAG):
+            if "mproj" in honours:
                 # (n_bins, n_mels) of the slaney bank: 201 frequency bins, and
                 # the model's own mel count. Both belong to the front end, not
                 # to the encoder, which is why neither is an override.
                 ns.attn_streams = ns.attn_streams + npu_ops.GEMM_STREAMS["mproj"]
                 ns.mel_geometry = (201, int(model_spec["mel_bins"]))
-            if "fft" in npu_ops.parse_ops(args.npu_extra_ops or "",
-                                           npu_ops.EXPORTER_FLAG):
+            if "fft" in honours:
                 # (n_fft, n_bins) of the front end's transform: Whisper's own
                 # 400 and its own 201 half-spectrum bins. Neither is an encoder
                 # number, which is why they are read here and not from
                 # overrides.
                 ns.attn_streams = ns.attn_streams + npu_ops.GEMM_STREAMS["fft"]
                 ns.fft_geometry = (400, 201)
-            if "logit" in npu_ops.parse_ops(args.npu_extra_ops or "",
-                                             npu_ops.EXPORTER_FLAG):
+            if "logit" in honours:
                 if "vocab" not in model_spec:
                     raise SystemExit(
-                        f"--target {args.target}: --npu-extra-ops logit needs the "
-                        f"model's `vocab` (the tied embedding's columns), and "
-                        f"this target does not carry one. Add it from the "
-                        f"checkpoint's config.json.")
+                        f"--target {args.target}: the logit design is the tied "
+                        f"embedding, so it needs the model's `vocab` (its "
+                        f"columns), and this target does not carry one. Add it "
+                        f"from the checkpoint's config.json.")
                 ns.logit_geometry = (int(model_spec["hidden"]),
                                      int(model_spec["vocab"]),
                                      len(npu_ops.GEMM_STREAMS["logit"]))
-            if "softm" in npu_ops.parse_ops(args.npu_extra_ops or "",
-                                            npu_ops.EXPORTER_FLAG):
+            if "softm" in honours:
                 # A Whisper score row is n_kv wide, which kernels/softmax.cc
                 # cannot hold at 64 columns, so the width and the kernel travel
                 # together: asking for a wide row with the shipped variant is

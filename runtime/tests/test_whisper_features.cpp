@@ -160,7 +160,7 @@ int main(int argc, char **argv) {
       if (!df)
         throw std::runtime_error(
             art + "/gemm_rtp has no dft400 stream; re-export with "
-            "--npu-extra-ops fft");
+            "--npu-ops fft");
       fft = std::make_unique<NpuFft>(*design, pool, kNfft, kMelBins);
       fft->set_streams((size_t)df->slot, df->M);
       fft->alloc_buffers();
@@ -170,7 +170,7 @@ int main(int argc, char **argv) {
       if (!mp)
         throw std::runtime_error(
             art + "/gemm_rtp has no mel_proj stream; re-export with "
-            "--npu-extra-ops mproj");
+            "--npu-ops mproj");
       mproj = std::make_unique<NpuMelProj>(*design, pool, kMelBins, n_mels);
       mproj->set_streams((size_t)mp->slot, mp->M);
       mproj->alloc_buffers(mel_filter_bank(n_mels));

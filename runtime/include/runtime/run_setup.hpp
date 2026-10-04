@@ -41,7 +41,7 @@ inline void load_designs(RunContext &ctx) {
   // run skips this: the default path must not require a contention tool.
   int want_contexts = 0;
   if (unified) {
-    // One context for the unified GEMM design plus one per op --npu-extra-ops sends to
+    // One context for the unified GEMM design plus one per op --npu-ops sends to
     // the array. Counted from the request, not from what got loaded, so the
     // guard refuses BEFORE any Design is built (the point of the whole check).
     want_contexts = 1 + static_cast<int>(ctx.npu_ops.size());
@@ -91,7 +91,7 @@ inline void load_designs(RunContext &ctx) {
                   "one hw_context\n", ctx.streams.size(), tset.size());
     }
 
-    // --npu-extra-ops: the unified xclbin carries only the four GEMM streams, so each
+    // --npu-ops: the unified xclbin carries only the four GEMM streams, so each
     // op sent to the array comes from a sibling directory, one Design each.
     // Refuse by NAME when one is missing -- falling back to the host after the
     // flag asked for the array is the fail-open this project keeps meeting, and
@@ -108,19 +108,23 @@ inline void load_designs(RunContext &ctx) {
       const std::string dir = ctx.art + "/" + op->design;
       if (!std::ifstream(dir + "/design.json").good())
         throw std::runtime_error(
-            std::string("--npu-extra-ops ") + code + " (" + op->long_name +
+            std::string("--npu-ops ") + code + " (" + op->long_name +
             ") asks for it on the array, but " + dir +
-            "/design.json does not exist -- build it with "
-            "tools/export/export_gemm_rtp.py --npu-extra-ops " + code +
-            " (or tools/export/export_eltwise.py --extra-ops " + code +
-            "), or drop it from the list and run the host path, which is the "
+            "/design.json does not exist. The exporter builds every design the "
+            "target can honour -- one command, no flag, printing the list it "
+            "chose -- so a set missing this one was built before that, or built "
+            "for a different model: re-run `tools/export/export_gemm_rtp.py "
+            "--target <model>` against the container at " +
+            ctx.model_path +
+            " and re-pack. Or drop " + code +
+            " from the list and run the host path, which is the "
             "measured-faster one");
       *dst = std::make_unique<npu::Design>(*ctx.dev, dir);
       const auto &inf = (*dst)->info();
       if (inf.device_recorded && !inf.device.empty() &&
           !running_device().empty() && inf.device != running_device())
         throw std::runtime_error(
-            std::string("--npu-extra-ops ") + code + ": " + dir +
+            std::string("--npu-ops ") + code + ": " + dir +
             " was built for device " + inf.device + ", but this process runs on " +
             running_device() +
             " -- rebuild it for this generation or drop it from the list");
@@ -295,7 +299,7 @@ inline std::vector<float> pool_normalise(const RunContext &ctx,
 
 inline void setup_flags_pools(RunContext &ctx) {
   // A value flag in the LAST position used to be invisible: the loops below
-  // stopped at argc-1 because they read argv[i+1], so `--npu-extra-ops gelu` as the
+  // stopped at argc-1 because they read argv[i+1], so `--npu-ops gelu` as the
   // final two arguments parsed as nothing and the run quietly did the default.
   // That is the project's worst failure shape -- a flag the user typed that has
   // no effect and no error -- so the bound is argc and a flag with no value
@@ -316,12 +320,12 @@ inline void setup_flags_pools(RunContext &ctx) {
   // Which ops go on the array. The DEFAULT is the empty list -- all three on the
   // host, which is the measured-faster path -- and a repeated flag replaces the
   // previous one rather than adding to it, the same as --artifacts and --model:
-  // the last one on the line is the one that counts, and `--npu-extra-ops ""`
+  // the last one on the line is the one that counts, and `--npu-ops ""`
   // clears.
   ctx.npu_ops.clear();
   for (int i = 2; i < ctx.argc; ++i)
-    if (std::string(ctx.argv[i]) == "--npu-extra-ops")
-      ctx.npu_ops = parse_npu_ops(value_after(i, "--npu-extra-ops"));
+    if (std::string(ctx.argv[i]) == "--npu-ops")
+      ctx.npu_ops = parse_npu_ops(value_after(i, "--npu-ops"));
   // An op this pipeline has no place for is REFUSED by name here, where the
   // flag has just been parsed. `conv` is the one that matters today: Whisper's
   // conv1/conv2, which the STT mode already dispatched above with (it owns the
@@ -343,7 +347,7 @@ inline void setup_flags_pools(RunContext &ctx) {
     const NpuOp *op = find_npu_op(code);
     if (code == "attn") {
       throw std::runtime_error(
-          std::string("--npu-extra-ops ") + code + " (" +
+          std::string("--npu-ops ") + code + " (" +
           (op ? op->long_name : "unknown op") + "): this model HAS attention -- "
           "BertEncoder::run's qk() and av() over the sequence -- and computes "
           "it on the host with no array branch, so this is unimplemented work "
@@ -359,7 +363,7 @@ inline void setup_flags_pools(RunContext &ctx) {
           "container genuinely does not have are conv, mproj, fft and logit.");
     }
     throw std::runtime_error(
-        std::string("--npu-extra-ops ") + code + " (" +
+        std::string("--npu-ops ") + code + " (" +
         (op ? op->long_name : "unknown op") +
         ") is a speech-to-text op and this container is an embedder, which has "
         "no front end to send it to the array. It belongs to `transcribe <a "
@@ -400,7 +404,7 @@ inline void setup_flags_pools(RunContext &ctx) {
   // refuses those before any of this runs.
   if (app::g_gated_ffn && ctx.on_array("gelu"))
     throw std::runtime_error(
-        "--npu-extra-ops gelu: this container has a GATED FFN, whose activation "
+        "--npu-ops gelu: this container has a GATED FFN, whose activation "
         "is part of the gated path between ffn_up and ffn_down rather than a "
         "separate pass over the activations. There is no host-or-array choice to "
         "make here, so asking for it moves nothing -- the run would print the op "
@@ -521,7 +525,7 @@ inline int setup_encoder(RunContext &ctx) {
   // Where each op ACTUALLY runs, read off the design the encoder will call --
   // never off the flag that led here. A host-forced op prints the host line; an
   // array op names the resolved design and the generation it was built for.
-  // The op's CODE is printed, not its long name: the code is what --npu-extra-ops
+  // The op's CODE is printed, not its long name: the code is what --npu-ops
   // takes, and a status line that names something you cannot type is one more
   // thing to translate at the terminal.
   auto where = [](const char *code, bool host, const npu::Design &d,

@@ -8,6 +8,7 @@
 #include "cli/cli.hpp"
 
 #include "cli/flags.hpp"
+#include "common/npu_ops_flag.hpp"
 
 #include <stdexcept>
 
@@ -77,7 +78,7 @@ CLIArgs CLI::parse(int argc, char **argv) {
             args.tile_k = std::atoll(argv[++i]);
         else if (a == "--tile-n" && i + 1 < argc)
             args.tile_n = std::atoll(argv[++i]);
-        else if (a == "--npu-extra-ops" && i + 1 < argc)
+        else if (a == "--npu-ops" && i + 1 < argc)
             args.npu_ops = argv[++i];
         else if (a == "--root" && i + 1 < argc)
             args.root = argv[++i];
@@ -104,6 +105,23 @@ CLIArgs CLI::parse(int argc, char **argv) {
         // caller that passes --dev. The table in flags.hpp is the flag set, and
         // tools/verify/verify_cli_flags.py is what keeps it from going stale.
         else if (a.rfind("--", 0) == 0 && !flag_is_known(a)) {
+            // A flag this build RENAMED gets the rename's message, not the
+            // generic one. It matters more than it looks: `--npu-ops` and
+            // `--npu-extra-ops` take the same eight codes, so a user migrating
+            // from the old spelling is one typo away from the new one and a
+            // generic "unrecognised option" sends them to --help to find out
+            // which of the two they were already holding. run_setup.hpp and the
+            // subcommand whitelist call refuse_removed_op_flags() too; this is
+            // the first of the three to run, and it runs for every command
+            // including `serve`, so it is the one most people meet.
+            for (const auto &r : removed_op_flags())
+                if (a == r.first)
+                    throw std::runtime_error(
+                        std::string(r.first) + " is gone: use " + r.second +
+                        ". One flag now says which ops go on the array, and an "
+                        "op is on the host when it is NOT listed. (The old "
+                        "names are refused rather than ignored, so a stale "
+                        "command line cannot look like it worked.)");
             // `--` alone, and a flag the caller deliberately passed through,
             // are not ours to judge; anything else starting with -- that the
             // table does not name is.

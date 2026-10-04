@@ -52,7 +52,7 @@ void NpuConv1d::stage(const std::string &label, const float *w,
     throw std::runtime_error(
         label + ": this design's A operand is int8, and the convolution's B "
         "panel is tiled here from fp32 conv weights with a bf16 tiler. Run "
-        "Whisper's front end on the host (drop --npu-extra-ops conv), or teach "
+        "Whisper's front end on the host (drop --npu-ops conv), or teach "
         "NpuConv1d::stage the int8 panel and the packer the .wscale/.asmooth it "
         "would need.");
   if (!b_slots_.empty())

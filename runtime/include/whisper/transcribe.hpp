@@ -76,7 +76,7 @@ struct TranscribeOptions {
   int64_t max_new = 0;
   int chunk_seconds = 30;            // the model's own window; see the header
   int stride_seconds = 5;            // HF's default for a 30 s window
-  // conv1/conv2 on the NPU or on the host, from --npu-extra-ops conv. Off unless it
+  // conv1/conv2 on the NPU or on the host, from --npu-ops conv. Off unless it
   // is asked for, because an op is on the host exactly when the flag does not
   // name it; the host path is also the fp32 reference
   // tools/verify/verify_whisper_features.py holds the NPU path against.
@@ -122,7 +122,7 @@ public:
   // id; `artifacts` is the design-set root, already resolved by
   // resolve_stt_artifacts.
   //
-  // `npu_ops` is the set of op codes from --npu-extra-ops, and it is taken HERE
+  // `npu_ops` is the set of op codes from --npu-ops, and it is taken HERE
   // rather than per request because it decides which xclbins exist: each element
   // op is its own design directory and its own hw_context, and a design that is
   // not built cannot be opened later. Every code that names a directory is
@@ -250,7 +250,7 @@ private:
   std::unique_ptr<NpuAttention> enc_attn_, dec_attn_;
   // The mel filter bank as a GEMM, on the encoder set's mel_proj stream. Null
   // means the front end's projection is the host's, which is what the empty
-  // --npu-extra-ops list means.
+  // --npu-ops list means.
   std::unique_ptr<NpuMelProj> mel_proj_;
   std::string mel_note_;
   // The 400-point transform as a GEMM against the twiddle matrix. Null means the

@@ -248,7 +248,7 @@ python tools/verify/verify_whisper_tokenizer.py
 #
 # It also holds the ARRAY front end: the NPU conv output against torch at its
 # own max-abs tolerance (that path is bf16, not fp32) and the whole encoder run
-# a second time on it, which is the run that says `--npu-extra-ops conv` is a default
+# a second time on it, which is the run that says `--npu-ops conv` is a default
 # rather than a curiosity.
 python tools/verify/verify_whisper_model.py
 
@@ -265,7 +265,7 @@ python tools/verify/verify_whisper_cli.py
 # the corpus lives outside the tree:
 #   python tools/verify/verify_whisper.py --audio C:\clips\a.wav --ref "the words"
 #   python tools/verify/verify_whisper.py --corpus C:\speech-corpus --max-wer 0.20
-# --npu-ops conv passes conv through to the runtime's --npu-extra-ops, so the same
+# --npu-ops conv passes conv through to the runtime's --npu-ops, so the same
 # audio says whether the device moved the transcript
 #   python tools/verify/verify_whisper.py --corpus C:\speech-corpus --npu-ops conv
 

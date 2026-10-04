@@ -115,7 +115,7 @@ def run_ours(exe, name, audio, args) -> tuple[str, float, dict]:
         [str(exe), "transcribe", name, str(audio), "--language", LANG,
          "--artifacts", str(args.artifacts), "--json",
          "--threads", str(args.threads)]
-        + (["--npu-extra-ops", args.npu_ops] if args.npu_ops else []),
+        + (["--npu-ops", args.npu_ops] if args.npu_ops else []),
         capture_output=True, text=True, timeout=3600)
     dt = time.monotonic() - t0
     if p.returncode != 0:
@@ -176,7 +176,7 @@ def main() -> int:
                     help="a directory: every *.wav with a *.txt of the same stem")
     ap.add_argument("--threads", type=int, default=16)
     ap.add_argument("--npu-ops", default="",
-                    help="op codes for the runtime's --npu-extra-ops, so this "
+                    help="op codes for the runtime's --npu-ops, so this "
                          "gate can be run with the audio front end on the array "
                          "(conv) and check that the transcript does not move. "
                          "The gate's own flag is short because the runtime's is "

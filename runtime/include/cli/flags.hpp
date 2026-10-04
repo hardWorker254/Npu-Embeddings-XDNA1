@@ -76,7 +76,7 @@ inline int flag_arity(const std::string &a) {
       {"--prepare-model", 2},{"--list-models", 0}, {"--help", 0},
       {"--allow-truncation", 0}, {"--allow-contention", 0},
       {"--max-len", 1},      {"--source-repo", 1}, {"--gemma-host-only", 0},
-      {"--tile-k", 1},       {"--tile-n", 1},      {"--npu-extra-ops", 1},
+      {"--tile-k", 1},       {"--tile-n", 1},      {"--npu-ops", 1},
       {"--root", 1},
       // -- read straight off argv by Runtime::run and the setup headers.
 {"--dev", 1},          {"--bo-mode", 1},
@@ -112,8 +112,14 @@ inline int flag_arity(const std::string &a) {
       // through to refuse_removed_op_flags / refuse_exporter_only_flags, whose
       // messages name the replacement; run_setup.hpp calls both at line 314 and
       // stt/vit_mode.hpp at theirs, all of which are downstream of this parse.
+      //
+      // --npu-extra-ops is here for the same reason and used to be absent: it was
+      // this build's LIVE flag when that table was written, so nothing noticed it
+      // being refused rather than accepted. verify_cli_flags.py is what caught
+      // it, and it caught it because it checks for a second row with the same
+      // name rather than only checking that every accepted flag parses.
       {"--npu-eltwise", 0},  {"--host-gelu", 0}, {"--host-ln", 0},
-      {"--host-sm", 0},      {"--npu-ops", 0},   {"--extra-ops", 0},
+      {"--host-sm", 0},      {"--npu-extra-ops", 0}, {"--extra-ops", 0},
   };
   for (const Entry &e : kFlags)
     if (a == e.name) return e.arity;

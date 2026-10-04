@@ -27,7 +27,7 @@
 #include "encoders/gemma_npu_encoder.hpp"
 #include "common/host_kernels.hpp"
 #include "common/model_catalog.hpp"
-#include "common/npu_ops_flag.hpp"   // parse_npu_ops, the one --npu-extra-ops parser
+#include "common/npu_ops_flag.hpp"   // parse_npu_ops, the one --npu-ops parser
 #include "runtime/npu_contention.hpp"
 #include "common/hub.hpp"
 #include "runtime/design.hpp"
@@ -116,7 +116,7 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
         "request now. Send \"prompt_name\" in the POST body instead, and GET "
         "/health lists the names this model accepts.");
 
-  // --npu-extra-ops is REFUSED here, not honoured -- and not by default
+  // --npu-ops is REFUSED here, not honoured -- and not by default
   // either, which is the bug this block fixes. Every code it names is an
   // eltwise design directory (gelu / layernorm / softmax), and an arch=1
   // design set carries gemm_rtp and nothing else: GemmaNpuEncoder computes
@@ -131,7 +131,7 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
   {
     std::string listing;
     for (int i = 1; i < argc - 1; ++i)
-      if (std::string(argv[i]) == "--npu-extra-ops") listing = argv[i + 1];
+      if (std::string(argv[i]) == "--npu-ops") listing = argv[i + 1];
     const std::set<std::string> codes = parse_npu_ops(listing);
     if (!codes.empty()) {
       // The reason is the ENCODER, not the directories. An earlier version of
@@ -159,7 +159,7 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
       // no branch written, accepting it today returns bit-identical vectors.
       if (codes.count("attn")) {
         throw std::runtime_error(
-            "--npu-extra-ops " + listing + ": `attn` is unimplemented here, "
+            "--npu-ops " + listing + ": `attn` is unimplemented here, "
             "not unsupported. GemmaNpuEncoder::attention() computes real "
             "attention over this model's tokens on the host with no array "
             "branch, so asking for attn today changes nothing and returns "
@@ -178,14 +178,15 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
             "than filled. Asked for: " + seen + ".");
       }
       throw std::runtime_error(
-          "--npu-extra-ops " + listing + ": this architecture runs RMSNorm, "
+          "--npu-ops " + listing + ": this architecture runs RMSNorm, "
           "softmax and GeGLU on the host. GemmaNpuEncoder has no per-op "
           "host/array choice to read -- unlike the BERT encoder it takes no "
           "flag per op -- so these codes would move nothing: accepting them "
           "prints nothing, changes nothing and hands back identical vectors. "
           "Asked for: " + seen + ". This is not a missing design set and "
-          "exporting one will not help; the exporter refuses the same codes "
-          "for the same reason. Drop them.");
+          "exporting one will not help: the exporter reads the same registry "
+          "(NPU_OPS.md) and skips these codes for this model, printing the "
+          "reason as it goes. Drop them.");
     }
   }
 

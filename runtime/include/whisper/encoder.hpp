@@ -65,7 +65,7 @@ public:
   void set_streams(const EncoderStreams &s) { streams_ = s; }
   // Where LayerNorm and GELU run. Null is the host pass, which is what the
   // measured-faster path is at this width; a non-null design is one
-  // --npu-extra-ops code's worth of xclbin, and the numbers it computes are the
+  // --npu-ops code's worth of xclbin, and the numbers it computes are the
   // same operations in the same order, in bf16.
   void set_layernorm(NpuEltwise *ln) { ln_ = ln; }
   void set_gelu(NpuEltwise *gelu) { gelu_ = gelu; }

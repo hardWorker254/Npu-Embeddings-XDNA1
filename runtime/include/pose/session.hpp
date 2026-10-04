@@ -15,7 +15,7 @@
 // which is also what makes the parity gate in tools/verify/verify_pose.py
 // runnable anywhere.
 //
-// --npu-extra-ops conv flips it. The array backend is then REQUIRED rather than
+// --npu-ops conv flips it. The array backend is then REQUIRED rather than
 // optional, and if the design set lacks the streams this network needs, the
 // refusal is by name: a flag that says "put this on the array" must not quietly
 // leave it on the host, because the resulting run looks successful and its

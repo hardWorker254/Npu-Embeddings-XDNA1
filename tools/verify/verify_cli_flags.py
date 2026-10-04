@@ -64,8 +64,14 @@ TABLE_ROW = re.compile(r'\{"(--[a-z0-9][a-z0-9-]*)",\s*(\d+)\}')
 # (which names the replacement) is never reached -- main.cpp runs the parse
 # before the subcommand dispatcher, and run_setup.hpp/stt_mode.hpp/vit_mode.hpp
 # call both refusals downstream of it.
+# `--npu-ops` was on this list and is not any more: it was the RETIRED spelling
+# while the live one was `--npu-extra-ops`, and the rename put it back. What
+# replaced it here is `--npu-extra-ops`, which this gate caught in the opposite
+# direction -- it was still listed in flags.hpp as refused while cli.cpp had
+# already started accepting it, which is exactly the "invisible second row" this
+# file exists to complain about.
 REFUSED_BY_NAME = {"--npu-eltwise", "--host-gelu", "--host-ln", "--host-sm",
-                   "--npu-ops", "--extra-ops"}
+                   "--npu-extra-ops", "--extra-ops"}
 
 # cli/subcommand.cpp has a SECOND list, `flag_takes_value()`'s kWithValue, and
 # the two have to agree. This is claim 3 above, and it is not decoration:

@@ -339,7 +339,7 @@ def main() -> int:
         else:
             print("\n  array front end: this design set has no dft400/mel_proj "
                   "streams, so the case is skipped (re-export with "
-                  "--npu-extra-ops fft,mproj)")
+                  "--npu-ops fft,mproj)")
 
     # The filter bank on its own, so a spectrogram divergence can be attributed.
     from transformers.audio_utils import mel_filter_bank

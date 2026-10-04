@@ -8,7 +8,7 @@
 #   <out>/artifacts_npu<N>/layernorm
 #   <out>/artifacts_npu<N>/softmax
 #
-# The runtime only touches these when `--npu-extra-ops` names the op; with nothing
+# The runtime only touches these when `--npu-ops` names the op; with nothing
 # named the unified `gemm_rtp` set runs all three on the host, which is the
 # measured-faster path. Build only the ops you will ask for:
 # `--extra-ops layn,softm`. The exporter and the flag therefore agree on one layout:
@@ -27,7 +27,7 @@
 #   python tools/export/export_eltwise.py --arch 1   --batch 128 --extra-ops layn
 #
 # The eltwise designs are normally emitted alongside the GEMM set by
-# `tools/export/export_gemm_rtp.py --npu-extra-ops CODES`; this tool exists so they can
+# `tools/export/export_gemm_rtp.py --npu-ops CODES`; this tool exists so they can
 # be rebuilt on their own. The op codes are in tools/lib/npu_ops.py, next to the
 # runtime's copy of the same table.
 #
@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 # Re-exported on purpose: tools/export/exporters/gemm_rtp/build.py calls
-# export_eltwise.export_arch() when --npu-extra-ops is given, and that call
+# export_eltwise.export_arch() when --npu-ops is given, and that call
 # site predates the package split.
 from exporters.eltwise.main import export_arch, main  # noqa: E402,F401
 

@@ -200,7 +200,7 @@ std::vector<float> VitEncoder::run(const std::vector<float> &patches) {
 
   // The two elementwise passes, one call site each. Both are the same choice
   // Whisper's encoder makes with the same two classes, and both read a pointer
-  // that is null unless --npu-extra-ops asked for the design -- so a run that
+  // that is null unless --npu-ops asked for the design -- so a run that
   // asked for neither takes the host path without a second flag, and a run that
   // asked cannot reach the host one by forgetting something.
   //

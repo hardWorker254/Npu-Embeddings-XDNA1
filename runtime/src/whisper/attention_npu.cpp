@@ -50,7 +50,7 @@ void NpuAttention::alloc_buffers() {
         std::to_string(bk) + " and " + std::to_string(bv) +
         " bytes and the design's B buffer is " +
         std::to_string(in.buffer_bytes[1]) + ". This set was exported without "
-        "the attention streams (tools/export/export_gemm_rtp.py --npu-extra-ops attn).");
+        "the attention streams (tools/export/export_gemm_rtp.py --npu-ops attn).");
   bslot_qk_ = d_.stage_alloc(1, bk);
   bslot_av_ = d_.stage_alloc(1, bv);
   aq_.assign(static_cast<size_t>(rows_) * head_dim_, 0.f);

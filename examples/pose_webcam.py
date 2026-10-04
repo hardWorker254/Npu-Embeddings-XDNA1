@@ -222,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
                          "a machine with no webcam, and the way to check the "
                          "drawing without standing up")
     ap.add_argument("--array", action="store_true",
-                    help="run the convolutions on the NPU (--npu-extra-ops conv). "
+                    help="run the convolutions on the NPU (--npu-ops conv). "
                          "Honoured, and measured SLOWER for this network: 0.43 s "
                          "against 0.31 s per frame, so it is off by default.")
     ap.add_argument("--artifacts", default="",

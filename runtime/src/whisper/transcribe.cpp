@@ -255,7 +255,7 @@ Session::Session(npue::File &model, const std::string &model_name,
           ". The kernel's row width is compiled in, so this design normalises "
           "the wrong number of channels. Re-export it for this model: "
           "python tools/export/export_gemm_rtp.py --target " + name_ +
-          " --arch 1 --npu-extra-ops " + code);
+          " --arch 1 --npu-ops " + code);
     if (kind == EltwiseKind::LayerNorm) {
       const double want = geom_.ln_eps;
       const double got = design->info().ln_eps;
@@ -334,7 +334,7 @@ Session::Session(npue::File &model, const std::string &model_name,
   }
 
   // -- attention as two GEMMs, on the two sets' own attn_qk / attn_av streams.
-  // A set that does not carry them was exported without --npu-extra-ops attn,
+  // A set that does not carry them was exported without --npu-ops attn,
   // and asking for the array on it is refused by name rather than answered from
   // the host -- the flag was in the command and nothing happened.
   auto open_attn = [&](const std::string &code, const std::string &dir,
@@ -354,10 +354,10 @@ Session::Session(npue::File &model, const std::string &model_name,
       throw std::runtime_error(
           dir + " has no attn_qk/attn_av streams at batch tier " +
           std::to_string(batch) +
-          ", so --npu-extra-ops attn cannot run attention on the array here. "
+          ", so --npu-ops attn cannot run attention on the array here. "
           "Re-export this model with the code in the list: python "
           "tools/export/export_gemm_rtp.py --target " + name_ + " --arch 1 "
-          "--npu-extra-ops attn");
+          "--npu-ops attn");
     if (qk->M != rows_here)
       throw std::runtime_error(
           dir + ": the attn streams compute " + std::to_string(qk->M) +
@@ -410,10 +410,10 @@ Session::Session(npue::File &model, const std::string &model_name,
       throw std::runtime_error(
           artifacts + "/gemm_rtp has no mel_proj stream at batch tier " +
           std::to_string(etiers[0]) +
-          ", so --npu-extra-ops mproj cannot run the mel bank on the array "
+          ", so --npu-ops mproj cannot run the mel bank on the array "
           "here. Re-export this model with the code in the list: python "
           "tools/export/export_gemm_rtp.py --target " + name_ +
-          " --arch 1 --npu-extra-ops mproj");
+          " --arch 1 --npu-ops mproj");
     if (mp->K < kMelBins || mp->N < geom_.mel_bins)
       throw std::runtime_error(
           artifacts + "/gemm_rtp: mel_proj is " + std::to_string(mp->K) + "x" +
@@ -440,10 +440,10 @@ Session::Session(npue::File &model, const std::string &model_name,
       throw std::runtime_error(
           artifacts + "/gemm_rtp has no dft400 stream at batch tier " +
           std::to_string(etiers[0]) +
-          ", so --npu-extra-ops fft cannot run the transform on the array "
+          ", so --npu-ops fft cannot run the transform on the array "
           "here. Re-export this model with the code in the list: python "
           "tools/export/export_gemm_rtp.py --target " + name_ +
-          " --arch 1 --npu-extra-ops fft");
+          " --arch 1 --npu-ops fft");
     if (df->K < kNfft)
       throw std::runtime_error(
           artifacts + "/gemm_rtp: dft400's K is " + std::to_string(df->K) +
@@ -587,10 +587,10 @@ Session::Session(npue::File &model, const std::string &model_name,
       throw std::runtime_error(
           artifacts + "/gemm_rtp_dec has no logits_i streams at batch tier " +
           std::to_string(dtiers.front()) +
-          ", so --npu-extra-ops logit cannot run the projection on the array. "
+          ", so --npu-ops logit cannot run the projection on the array. "
           "Re-export this model with the code in the list: python "
           "tools/export/export_gemm_rtp.py --target " + name_ +
-          " --arch 1 --npu-extra-ops logit");
+          " --arch 1 --npu-ops logit");
     std::vector<size_t> lslots;
     int64_t chunk_n = 0;
     for (const auto &st : dec_streams) {

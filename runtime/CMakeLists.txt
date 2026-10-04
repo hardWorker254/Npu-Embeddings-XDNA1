@@ -133,7 +133,7 @@ add_executable(npuembeddings
   src/whisper/conv1d.cpp
   # The elementwise designs Whisper can be given instead of the host passes:
   # LayerNorm, softmax and GELU, each one xclbin the runtime opens only when
-  # --npu-extra-ops names it.
+  # --npu-ops names it.
   src/whisper/eltwise.cpp
   src/whisper/attention_npu.cpp
   src/whisper/mel_proj.cpp

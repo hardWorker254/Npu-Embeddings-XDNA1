@@ -256,7 +256,7 @@ def dequantise(mat, dtype, group=None):
     rather than two that agree today: the array's bf16 panels and the host's
     dequantised weights are the same convolution, and a container that shipped
     the fp32 checkpoint into the panels and the int8 checkpoint into the host
-    would run two different networks behind one `--npu-extra-ops conv` flag, with
+    would run two different networks behind one `--npu-ops conv` flag, with
     no file-level way to tell. Both backends taking the same numbers is the
     property that makes the flag worth having.
 

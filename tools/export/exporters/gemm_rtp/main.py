@@ -24,13 +24,52 @@ from ..common.consts import (
 from ..common.paths import set_out_dir
 from ..common.targets import load_targets, print_targets
 from ..common.validate import validate_tiers_and_seq
-from .build import build_child_argv, export_arch
+from .build import build_child_argv, child_env, export_arch
 from .geometry import STT_DECODE_SEQ
 from .resolve import resolve_args
 from .validate import validate_geometry
 
 
+def refuse_retired_flags(argv: list[str]) -> None:
+    """Refuse the flags this exporter used to take, each with its own reason.
+
+    The point of refusing rather than ignoring is the same one the runtime's
+    refuse_removed_op_flags() makes, in the same words: a stale command line has
+    asked for a specific thing, and dropping it on the floor is how "the flag was
+    there and nothing happened" happens.
+    """
+    for a in argv:
+        flag = a.split("=", 1)[0]
+        if flag not in npu_ops.RETIRED_EXPORTER_FLAGS:
+            continue
+        if flag == npu_ops.RUNTIME_FLAG:
+            raise SystemExit(
+                f"{flag} is the RUNTIME's flag and always was: it selects which "
+                "of the built designs to run. Passing it here asked this exporter "
+                "to build a subset, and it no longer takes one. One command now "
+                "compiles every design the target can actually use, and "
+                f"{flag} at RUN time only selects which of the built ones to "
+                "run -- so there is nothing to pass here."
+            )
+        raise SystemExit(
+            f"{flag} is gone: this exporter no longer takes a list of ops to "
+            "build. One command now compiles every design the target can "
+            f"actually use, and {npu_ops.RUNTIME_FLAG} at RUN time only selects "
+            "which of the built ones to run -- so there is nothing to pass here, "
+            "and nothing to keep in step with it. The export prints the list it "
+            "chose, and why, one line per code."
+        )
+
+
 def main() -> int:
+    # BEFORE the parser exists, and deliberately so. argparse rejects an unknown
+    # flag itself, and its message names the flag but neither why it is gone nor
+    # what to type now -- which for --npu-ops would be the worst possible answer,
+    # because that string is the runtime's flag and the user is holding a command
+    # that looks almost right. Checked here so each one is refused with its own
+    # reason, and so the refusal survives --dry-run.
+    refuse_retired_flags(sys.argv[1:])
+
     ap = argparse.ArgumentParser(
         description=(
             "Export GEMM RTP artifacts for one or more NPU architectures."
@@ -247,29 +286,21 @@ def main() -> int:
         ),
     )
 
-    ap.add_argument(
-        "--npu-extra-ops",
-        default="",
-        metavar="CODES",
-        help=(
-            "also build the elementwise design directories for the same "
-            f"generation, alongside gemm_rtp: any comma-separated subset of "
-            f"[{npu_ops.CODES}] (layn = LayerNorm, softm = softmax, gelu = "
-            "GELU). Each is a compile and an xclbin, and each costs one extra "
-            "hw_context at run time, so build only what the runtime's "
-            f"{npu_ops.RUNTIME_FLAG} will ask for. Default: none, and the "
-            "runtime's default -- all three ops on the host -- is the "
-            "measured-faster path. This replaces --npu-eltwise, which built all "
-            "three or none."
-        ),
-    )
+    # There is deliberately no --npu-ops here. It used to select which elementwise
+    # design directories to compile, and now it is the RUNTIME's flag alone: it
+    # says which of the built designs to RUN. One command builds everything the
+    # model can use, so a user cannot end up with an artifact set that is missing
+    # a design the runtime was about to ask for -- the failure this flag invited,
+    # since the two were separate invocations with no way to check they agreed.
+    # The set is derived from the registry (tools/lib/npu_ops.py); see
+    # buildable_codes() and the "BUILDS THE WHOLE SET" block in build.py.
 
     ap.add_argument(
         "--elt-cols",
         type=int,
         default=1,
         help=(
-            "AIE columns for the eltwise designs built by --npu-extra-ops. "
+            "AIE columns for the eltwise designs built beside gemm_rtp. "
             "LayerNorm and softmax refuse above 2 (see tools/export/export_eltwise.py)."
         ),
     )
@@ -279,7 +310,7 @@ def main() -> int:
         type=int,
         default=1024,
         choices=[1024, 4096],
-        help="elements per GELU DMA transaction for --npu-extra-ops gelu.",
+        help="elements per GELU DMA transaction for --npu-ops gelu.",
     )
 
     ap.add_argument(
@@ -287,7 +318,7 @@ def main() -> int:
         default="poly",
         choices=["poly", "erf"],
         help=(
-            "which GELU function --npu-extra-ops gelu builds. poly is the "
+            "which GELU function --npu-ops gelu builds. poly is the "
             "degree-8 fit of the even part (2.49e-3 relative against exact "
             "erf) that the BERT-family designs have always used; erf is "
             "kernels/gelu_erf.cc, the activation a Whisper container declares. "
@@ -302,7 +333,7 @@ def main() -> int:
         default="il4",
         choices=["base", "il4", "rne", "il4_rne", "il4_8", "il4_4"],
         help=(
-            "LayerNorm kernel variant for --npu-extra-ops layn. The il4_8 and "
+            "LayerNorm kernel variant for --npu-ops layn. The il4_8 and "
             "il4_4 entries are the same four-row body with fewer rows per call: "
             "L1 is 64 KB and a block of rows x columns is double-buffered on both "
             "sides, so a wide row (Whisper's 1280) fits four rows per call where "
@@ -316,7 +347,7 @@ def main() -> int:
         type=int,
         default=None,
         help=(
-            "row width of the LayerNorm design built by --npu-extra-ops layn. "
+            "row width of the LayerNorm design built by --npu-ops layn. "
             "Default: --hidden. A Whisper container's d_model is the number "
             "here, and the runtime refuses a design whose width is not the "
             "model's."
@@ -341,7 +372,7 @@ def main() -> int:
         choices=["lib", "poly", "poly_il4", "poly_rne", "poly_il4_rne",
                  "wide", "wide2"],
         help=(
-            "softmax kernel variant for --npu-extra-ops softm. `wide` and "
+            "softmax kernel variant for --npu-ops softm. `wide` and "
             "`wide2` are kernels/softmax_w.cc at one and two rows per call: a "
             "Whisper attention score row is n_kv (1500, padded) wide, which the "
             "64-column kernel cannot hold in registers or on a worker's stack. "
@@ -355,7 +386,7 @@ def main() -> int:
         type=int,
         default=None,
         help=(
-            "row capacity of the softmax design built by --npu-extra-ops softm. "
+            "row capacity of the softmax design built by --npu-ops softm. "
             "Default: batch*12*seq, which is an embedder's attention. A Whisper "
             "dispatch is one QUERY CHUNK, so a stt target passes batch*seq: every "
             "dispatch fills and drains the whole buffer, and a design 12x wider "
@@ -368,7 +399,7 @@ def main() -> int:
         type=int,
         default=None,
         help=(
-            "row width of the softmax design built by --npu-extra-ops softm. "
+            "row width of the softmax design built by --npu-ops softm. "
             "Default: 64. A Whisper target passes its padded n_kv, and the "
             "runtime refuses a design whose width is not the score row it is "
             "about to hand it."
@@ -450,14 +481,8 @@ def main() -> int:
             )
             args.per_arch_cache = True
 
-    # Validated here, not where it is used: a bad code must be refused before a
-    # single design is compiled, and the eltwise child would otherwise be the
-    # one to notice, after the GEMM set was already built. parse_exportable, not
-    # parse_ops, because `conv` is a runtime code with no directory to compile
-    # (tools/lib/npu_ops.py) -- and this is also the line --dry-run goes through, so
-    # a code that cannot be built is refused in a dry run too rather than
-    # printed into a command that would fail later.
-    npu_ops.parse_exportable(args.npu_extra_ops, npu_ops.EXPORTER_FLAG)
+    # A stale command line is REFUSED, not ignored -- see refuse_retired_flags(),
+    # which runs before the parser for the reason given there.
     resolved = resolve_args(args)
 
     # Validate each architecture against its own resolved values: the npu1
@@ -495,7 +520,9 @@ def main() -> int:
                     + " ".join(shlex.quote(str(x)) for x in cmd)
                 )
 
-                subprocess.run(cmd, check=True)
+                # The one thing the child cannot derive for itself: which designs
+                # THIS model honours. See npu_ops.ENV_OPS and build.child_env.
+                subprocess.run(cmd, check=True, env=child_env(ra.args))
 
         return 0
 

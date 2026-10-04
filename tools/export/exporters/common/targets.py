@@ -140,7 +140,7 @@ def load_targets(path: str | Path) -> dict:
         # describe, and requiring them here would mean writing a number that
         # nothing reads -- the pose export path builds no eltwise design and no
         # LayerNorm, so the only consumer of `hidden` (export_eltwise, reached
-        # only when --npu-extra-ops asks for an op) never runs for it. A required
+        # only when --npu-ops asks for an op) never runs for it. A required
         # field whose value is fiction is worse than an absent one, so this is
         # the one kind that does not carry them, and the check below is what
         # says so rather than letting a missing key read as 0.

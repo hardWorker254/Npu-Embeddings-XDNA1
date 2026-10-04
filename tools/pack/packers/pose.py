@@ -1376,7 +1376,7 @@ def npu_panels(t, conv_of, weights, device):
     tile_k and is nearly always already one, since a conv's K is Cin*kh*kw and
     this network's channel counts are multiples of 8.
 
-    The reason this is done anyway is that --npu-extra-ops conv exists so the
+    The reason this is done anyway is that --npu-ops conv exists so the
     ARRAY path can be MEASURED on this model rather than estimated in a comment,
     and a measured 105 ms against a measured 20.5 ms is worth having written
     down. tile_n is 32 rather than ViT's 48 because 48 divides none of these
@@ -1435,7 +1435,7 @@ def npu_panels(t, conv_of, weights, device):
         # (the padded shape tiles), the layout_hash matches (both sides derive it
         # from the same constants, and it does not describe the DATA), the C++
         # reader hands the bytes to the device unchanged, and the array multiplies
-        # a transposed weight -- so `--npu-extra-ops conv` returns a network that
+        # a transposed weight -- so `--npu-ops conv` returns a network that
         # finds 300 people in a photograph with three, with the stem convolution
         # already wrong and no error anywhere. `b[:K, :N] = w.reshape(N, K).T` is
         # the transpose; the flat order is what the reshape above preserved.
@@ -1505,7 +1505,7 @@ def pack_pose(onnx_path, out_path, device=None, npu=False, dry_run=False,
         # source. One flag, one network: on a --dtype i8 container the host
         # multiplies `q * s` and the array multiplies bf16(q * s), and those
         # agree to the bf16 rounding. Tiling the checkpoint's own weights instead
-        # would make `--npu-extra-ops conv` switch the MODEL as well as the
+        # would make `--npu-ops conv` switch the MODEL as well as the
         # backend -- an i8 container whose array path is quietly an fp32 one,
         # with nothing in the file that says so, and a detection that moves when
         # a performance flag is added.

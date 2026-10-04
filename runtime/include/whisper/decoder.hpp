@@ -71,7 +71,7 @@ public:
   void add_tier(const DecoderTier &t) { tiers_.push_back(t); }
   // Where LayerNorm and GELU run. Null is the host pass, which is the
   // measured-faster path at this width; a non-null design is one
-  // --npu-extra-ops code's worth of xclbin, shared with the encoder's.
+  // --npu-ops code's worth of xclbin, shared with the encoder's.
   void set_layernorm(NpuEltwise *ln) { ln_ = ln; }
   void set_gelu(NpuEltwise *gelu) { gelu_ = gelu; }
   // Where attention runs. Null is the host pass; non-null is the design set's

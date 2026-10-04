@@ -88,16 +88,21 @@ without it.
 python tools/export/export_gemm_rtp.py --target all-MiniLM-L6-v2 --arch 1 --out runtime
 ```
 
-This writes `runtime/artifacts/all-MiniLM-L6-v2/artifacts_npu1/gemm_rtp/`.
+This writes `runtime/artifacts/all-MiniLM-L6-v2/artifacts_npu1/gemm_rtp/` **and
+every other design the target can honour** — `gelu/`, `layernorm/`, `softmax/`
+for a BERT-family text embedder, one command, no flag. The exporter prints the
+list it chose and, for each code it did *not* build, the reason. There is no
+op-selection flag on the exporter at all: `--npu-ops`, `--npu-extra-ops` and
+`--npu-eltwise` are refused there by name, each with its own message. Which
+designs an architecture can honour is a table, not a flag:
+[**NPU_OPS.md**](NPU_OPS.md) — all 40 code × architecture cells with a status and
+a reason, generated from `tools/lib/npu_ops.py`, the same registry the exporter
+reads.
 
-Add `--npu-extra-ops CODES` to also build the elementwise designs beside it:
-`gelu`, `layn` (LayerNorm), `softm` (softmax), comma-separated, and only the
-ones you name. The exporter's flag is the **same string** the runtime takes:
-`--npu-extra-ops` BUILDS the design that `--npu-extra-ops` SELECTS at run time, so
-there is one name to learn. Build only what a run will ask for — each is
-a compile, an xclbin, and one more `hw_context`. See
-[Where each operation runs](#where-each-operation-runs) for why you probably do
-not want any of them.
+The build is deliberately not free: each sibling design is a compile, an xclbin
+and one more `hw_context` at run time, so the set is built once per target and
+shared. See [Where each operation runs](#where-each-operation-runs) for why you
+probably do not want to *ask* for any of them at run time.
 
 Preview what would be built, without invoking the toolchain:
 
@@ -168,12 +173,12 @@ texts
 embedding
 ```
 
-`*` = on the array instead when its op is named in `--npu-extra-ops`.
+`*` = on the array instead when its op is named in `--npu-ops`.
 
 The array does the four GEMMs per layer; attention and the elementwise ops run
 on the host by default because they were **measured faster on the host** — the
 elementwise designs pay a fixed per-dispatch cost that a 384-wide row-wise op
-does not amortise. `--npu-extra-ops` exists to make that an explicit, measurable
+does not amortise. `--npu-ops` exists to make that an explicit, measurable
 choice, not because it is the default.
 
 **`--pipeline N`** splits one request into right-sized chunks and runs `N` of
@@ -190,16 +195,16 @@ array work, not more array throughput.
 | Operation | Default | On the array when | Costs |
 |---|---|---|---|
 | QKV / attention-out / FFN-up / FFN-down / cross-Q / cross-K\|V GEMM | array | always | — |
-| conv1, conv2 (Whisper) | host | `--npu-extra-ops conv` | no context: the encoder set's own `[rows, d, d]` stream |
-| attention, as QK^T and softmax·V GEMMs | host | `--npu-extra-ops attn` | no context: two more streams in the same sets |
-| the mel filter bank, as a GEMM | host | `--npu-extra-ops mproj` | no context: one more stream in the encoder set |
-| the 400-point transform, as a GEMM | host | `--npu-extra-ops fft` | no context: one more stream in the encoder set |
-| the tied-embedding logit projection | host | `--npu-extra-ops logit` | no context: eight chunk streams in the decoder set; 39 MB of staged panels |
-| LayerNorm | host | `--npu-extra-ops layn` | one `hw_context` (`layernorm/`) |
-| softmax | host | `--npu-extra-ops softm` | one `hw_context` (`softmax/`) |
-| GELU (exact erf) | host | `--npu-extra-ops gelu` | one `hw_context` (`gelu/`) |
+| conv1, conv2 (Whisper) | host | `--npu-ops conv` | no context: the encoder set's own `[rows, d, d]` stream |
+| attention, as QK^T and softmax·V GEMMs | host | `--npu-ops attn` | no context: two more streams in the same sets |
+| the mel filter bank, as a GEMM | host | `--npu-ops mproj` | no context: one more stream in the encoder set |
+| the 400-point transform, as a GEMM | host | `--npu-ops fft` | no context: one more stream in the encoder set |
+| the tied-embedding logit projection | host | `--npu-ops logit` | no context: eight chunk streams in the decoder set; 39 MB of staged panels |
+| LayerNorm | host | `--npu-ops layn` | one `hw_context` (`layernorm/`) |
+| softmax | host | `--npu-ops softm` | one `hw_context` (`softmax/`) |
+| GELU | host | `--npu-ops gelu` | one `hw_context` (`gelu/`) — exact erf for Whisper, the degree-8 `poly` fit (2.49e-3 relative) for everything else; see the caveat below |
 
-The four GEMM-shaped codes (`conv`, `attn`, `mproj`, `fft`, `logit`) need no
+The five GEMM-shaped codes (`conv`, `attn`, `mproj`, `fft`, `logit`) need no
 sibling design set: each one is a stream inside a set that already exists, so
 they cost no `hw_context` and the runtime refuses a set that does not carry
 them **by name** rather than answering from the host. The three elementwise
@@ -215,8 +220,14 @@ everywhere and unconditionally, with no flag, because there is no GEMM code.
 
 All 40 cells (5 architectures × 8 codes) were measured by running every code
 against every container on this machine with a real invocation of each mode, not
-read off the source. **But one flat table would hide the thing worth knowing:
-the empty cells are five different situations, and only one of them is permanent.**
+read off the source. They now live in a registry — `tools/lib/npu_ops.py` — which
+the exporter reads to decide what to build, and
+[**NPU_OPS.md**](NPU_OPS.md) is generated from it with a reason per cell.
+`tools/verify/verify_npu_op_matrix.py` runs the 32 cells that have a container in
+this checkout against the binary and fails if the runtime and the table disagree;
+the eight pose cells are skipped there for want of a container, and the gate says
+so. **One flat table would hide the thing worth knowing: the empty cells are five
+different situations, and only one of them is permanent.**
 
 | | BERT | gemma-300m | whisper | ViT | pose |
 |---|---|---|---|---|---|
@@ -256,15 +267,30 @@ one of the 49 GEMMs (`runtime/src/vit/encoder.cpp:267`,
 `g_.run(streams_.attn_out, ...)`). The cell is empty because **the work is
 already done**: `conv` names Whisper's `conv1`/`conv2` streams, which a ViT's
 design set does not carry, and honouring it would dispatch nothing new. This is
-the one empty cell that is better than a tick.
+the one empty cell that is better than a tick — and asking for it is **refused**,
+with exactly that as the reason, because a code that selects nothing is the
+failure this project treats as worst.
+
+**⚠ Caveat on `gelu`, `ViT` and `gemm_rtp` rows — the activation is the `poly`
+fit, not the exact erf.** Only `kind: stt` gets the exact-erf kernel; a BERT or a
+ViT keeps the exporter's degree-8 `poly` default, which is **2.49e-3 relative
+from the erf the host computes**. Measured end to end on bge-base with `--npu-ops
+gelu`, relfro 6.1e-03, and on ViT under 0.011 in label confidence — small enough
+that the runtime accepts the code rather than refusing it, and recorded in both
+cells' reasons in NPU_OPS.md. It is not fixed here because it cannot be: fixing it
+means compiling a second kernel variant, which needs the toolchain this machine
+cannot run.
 
 **△ `gemma gelu` — the activation is fused, so there is no pass to move.**
 gemma's FFN is gated (GeGLU); the activation is computed *inside* the gated path
 while the two halves are being multiplied, rather than as a separate pass over a
 finished tensor. `gelu`'s whole design is one `hw_context` doing a standalone
 elementwise pass, so honouring it would print "on the ARRAY" while moving
-nothing. The exporter refuses for the same reason: gelu is dead for
-`gated_ffn` targets (nomic, gte, gemma).
+nothing. The exporter refuses for the same reason, and now by REGISTRY rather
+than by a special case: `gelu`'s cell for gemma says `blocked`, and a gated
+FFN's activation is part of the gated path between `ffn_up` and `ffn_down` rather
+than a separate pass (nomic and gte drop `gelu` for the same structural reason,
+and their rows say so).
 
 **◇ `gemma layn` — would need a NINTH code, and is deliberately not done.**
 gemma uses **RMSNorm**, not LayerNorm: no mean pass, no beta, its own
@@ -345,24 +371,32 @@ which is applied to the qkv buffer before `attention()` runs.
 [What to move to the NPU](#what-to-move-to-the-npu).
 
 One flag, and an op is on the host exactly when it is **not** listed — so
-`--npu-extra-ops layn,softm` is "LayerNorm and softmax on the array, GELU on the
+`--npu-ops layn,softm` is "LayerNorm and softmax on the array, GELU on the
 host", and there is no inverse flag to drift against it. This replaces
-`--npu-ops`, `--npu-eltwise` (all three or none) and
-`--host-ln/--host-sm/--host-gelu`; the old names are now **refused by name**, so a stale command line cannot look like
-it worked.
+`--npu-extra-ops` (the longer spelling of this same flag), `--npu-eltwise` (all
+three or none) and `--host-ln/--host-sm/--host-gelu`; the old names are now
+**refused by name**, so a stale command line cannot look like it worked.
 
-`--npu-extra-ops` needs one sibling design set per named op next to `gemm_rtp/`
-(`layernorm/`, `softmax/`, `gelu/`), built by
-`tools/export/export_gemm_rtp.py --npu-extra-ops CODES`. A missing one is **refused by
+`--npu-ops` only SELECTS among designs that were already built. Each named op
+needs its sibling design set next to `gemm_rtp/` (`layernorm/`, `softmax/`,
+`gelu/`), and the exporter builds all of them with no flag, so the command you
+already have for the GEMM set is the whole command. A missing one is **refused by
 name** — it never silently falls back to the host, because a flag whose whole
 point is "put this on the array" must not quietly not do that. Each op also
 costs one more `hw_context` out of six.
 
-`conv` is the one code with no sibling design set, and that is deliberate: it is
-a speech-to-text op (Whisper's two audio convolutions) which runs on the
-encoder set's own `[rows, d, d]` stream, so there is nothing to build and an
-exporter asked for it refuses the code by name. On an embedder it is refused
-too.
+Which codes a given architecture honours is a table with a reason per cell, not
+a flag to guess at: [**NPU_OPS.md**](NPU_OPS.md). Of the 40 cells, 14 run on the
+array today, 1 is already dispatched without a code (and the code is refused,
+because there is nothing for it to select), 5 are operations the model has and no
+array branch reaches, 3 cannot be moved on this board for a stated reason, and 17
+do not exist in that model at all.
+
+`conv` is one of the five codes with no sibling design set, and that is
+deliberate: it is a speech-to-text op (Whisper's two audio convolutions) which
+runs on the encoder set's own `[rows, d, d]` stream, so there is nothing to build
+and an exporter asked for it refuses the code by name. On an embedder it is
+refused too.
 
 It also costs four `hw_context`s instead of one. Before allocating any, the
 runtime asks `xrt-smi` how many contexts the device allows and refuses by name
@@ -380,7 +414,7 @@ threads, the same binary, ~0.35 s of which is setup. `CPU` is the summed user
 time of all threads, which is the number that matters when the CPU is the scarce
 resource; `wall` is what a caller waits.
 
-| `--npu-extra-ops` | wall, s | CPU, s | encoder, s | decoder, s | dispatches |
+| `--npu-ops` | wall, s | CPU, s | encoder, s | decoder, s | dispatches |
 |---|---:|---:|---:|---:|---:|
 | *(nothing — everything on the host)* | 0.94 | 5.54 | 0.28 | 0.07 | 192 |
 | `conv` | **0.66** | **3.81** | 0.30 | 0.07 | 207 |
@@ -406,7 +440,7 @@ Measured on `vit-base-patch16-224.npue` bf16, `bus.jpg` (810×1080), 16 host
 threads, best of 8 after a warm-up run. Wall is front end + encoder, which is
 the whole per-image cost minus the 0.9 ms head:
 
-| `--npu-extra-ops` | wall, s | vs host | label | p | elt dispatches |
+| `--npu-ops` | wall, s | vs host | label | p | elt dispatches |
 |---|---:|---:|---|---:|---:|
 | *(nothing)* | **0.248** | 1.00× | minibus | 0.629 | 0 |
 | `gelu` | 0.343 | 1.38× slower | minibus | 0.635 | 12 |
@@ -535,8 +569,10 @@ which endpoint answers:
 The modes are dispatched on `arch` in `runtime/src/runtime.cpp` before `--serve`
 is ever read, so no two of them can meet and no flag chooses between them. A path
 that belongs to another architecture is a 404 that names the right one — never
-another endpoint's answer. `--npu-extra-ops conv` is refused by the modes that
-have no convolutions rather than ignored.
+another endpoint's answer. A code the mode cannot honour -- `--npu-ops conv` on a
+classifier, `--npu-ops layn` on gemma -- is **refused by name**, never ignored and
+never quietly run on the host; the reason is in
+[NPU_OPS.md](NPU_OPS.md) and the refusal repeats it.
 
 This was not always one verb: pose arrived with a `pose-server` subcommand and
 the classifier refused `--serve` outright with "there is no endpoint for it". The
@@ -552,7 +588,7 @@ architecture that refuses it is one a user discovers by typing.
 | `--threads N` | host thread budget (`serve`/`embed` pass 24) |
 | `--pipeline N` | concurrent encode lanes (`serve`/`embed` pass 4) |
 | `--artifacts DIR` | override the design set |
-| `--npu-extra-ops CODES` | send the named ops to the array: `gelu`, `layn`, `softm`, and `conv` (Whisper's conv1/conv2, a `transcribe`-only code). The exporter's flag is the same string and builds them |
+| `--npu-ops CODES` | send the named ops to the array: `gelu`, `layn`, `softm`, and `conv` (Whisper's conv1/conv2, a `transcribe`-only code). The exporter's flag is the same string and builds them |
 | `--dev npu1\|npu2` | NPU generation; a design built for the other is refused |
 | `--root DIR` | override where models/ and designs live |
 | `--token VALUE` | HuggingFace token for a gated model (else `$HF_TOKEN`) |
@@ -640,15 +676,15 @@ refused at run time rather than quietly answering something else.
 
 | | on the NPU | on the host |
 |---|---|---|
-| the 3001 transforms of 400 points | `--npu-extra-ops fft` | yes (the default, fp64) |
-| the slaney mel bank | `--npu-extra-ops mproj` | yes (the default) |
-| conv1, conv2 | `--npu-extra-ops conv` | yes (the default) |
-| the GELU between them, and the permute into 1500 rows | `--npu-extra-ops gelu` (that one only) | yes (the default) |
+| the 3001 transforms of 400 points | `--npu-ops fft` | yes (the default, fp64) |
+| the slaney mel bank | `--npu-ops mproj` | yes (the default) |
+| conv1, conv2 | `--npu-ops conv` | yes (the default) |
+| the GELU between them, and the permute into 1500 rows | `--npu-ops gelu` (that one only) | yes (the default) |
 | every GEMM: qkv, attention-out, ffn-up, ffn-down, cross-q, cross-K\|V | **yes** | |
-| attention: QK^T, softmax, softmax·V | `--npu-extra-ops attn,softm` | yes (the default) |
-| LayerNorm (both stacks) | `--npu-extra-ops layn` | yes (the default) |
-| GELU in the FFN | `--npu-extra-ops gelu` | yes (the default) |
-| the tied-embedding logit projection | `--npu-extra-ops logit` | yes (the default) |
+| attention: QK^T, softmax, softmax·V | `--npu-ops attn,softm` | yes (the default) |
+| LayerNorm (both stacks) | `--npu-ops layn` | yes (the default) |
+| GELU in the FFN | `--npu-ops gelu` | yes (the default) |
+| the tied-embedding logit projection | `--npu-ops logit` | yes (the default) |
 | argmax and the two suppression lists | | yes, always |
 | token ids → text, and the long-form merge | | yes, always |
 
@@ -659,14 +695,14 @@ expresses them; that is not a scheduling choice left open.
 
 The two convolutions are host work by default and grow as d², which is what
 dominates the runtime on `whisper-large-v3` (2.8 s of a 19 s window on 16 host
-workers). `--npu-extra-ops conv` puts them on the array: a 3-tap convolution is a
+workers). `--npu-ops conv` puts them on the array: a 3-tap convolution is a
 GEMM over an im2col'ed `(input channel, tap)` K axis, so conv1 rides in one
 dispatch of the encoder set's own `[rows, d, d]` stream (attn_out's shape) and
 conv2 in three, accumulated in fp32 on the host. It needs **no new design set** —
 the same instruction stream the encoder's attention-out projection uses — and it
 costs no extra `hw_context`. Measured per 30 s window, 16 host workers:
 
-| model | host conv | `--npu-extra-ops conv` | dispatches added |
+| model | host conv | `--npu-ops conv` | dispatches added |
 |---|---|---|---|
 | whisper-tiny (d=384) | 0.11 s | 0.02 s | 15 |
 | whisper-large-v3-turbo (d=1280) | 1.37 s | 0.07 s | 15 |
@@ -981,7 +1017,7 @@ whole model, which is what "how fast is this endpoint" means.
 | `POST /v1/embeddings` | `all-MiniLM-L6-v2` (bf16) | 0.014 | **73.6** |
 | `POST /v1/classify` | `vit-base-patch16-224` (bf16) | 0.261 | **3.8** |
 | `POST /v1/pose` | `p_i8`, host convolutions | 0.314 | **3.2** |
-| `POST /v1/pose` | `p_i8`, `--npu-extra-ops conv` | 0.434 | **2.3** |
+| `POST /v1/pose` | `p_i8`, `--npu-ops conv` | 0.434 | **2.3** |
 | `POST /v1/audio/transcriptions` | `whisper-tiny`, `jfk.wav` (11 s) | 0.849 | **1.2** |
 
 The pose line is the array one **being slower**, which is the same result the
@@ -1015,7 +1051,7 @@ thresholding, and the inverse letterbox. The 17-point skeleton and its 12 edges
 live in the **runtime**, not the container, because they are a property of COCO
 rather than of this checkpoint.
 
-**CPU by default.** `--npu-extra-ops conv` moves the convolutions to the array
+**CPU by default.** `--npu-ops conv` moves the convolutions to the array
 and nothing else, exactly as it does for the other modes.
 
 ### Four commands
@@ -1030,7 +1066,7 @@ python tools/pack/pack_npue.py --pose-onnx yolov8n-pose.onnx \
 #    --dtype i8 takes the container from 22.8 MiB to 13.7, --dtype i4 to 12.8-13.9
 #    (or to 24.8 at --int4-group 1, which is wider than fp32; see below).
 #    --npu additionally stages the pre-tiled array panels; without it the
-#    container runs on the CPU and --npu-extra-ops conv refuses it by name.
+#    container runs on the CPU and --npu-ops conv refuses it by name.
 
 # 2. run it. One image per argument; the result on stdout, the status block on
 #    stderr.
@@ -1053,7 +1089,7 @@ python tools/verify/diff_pose_dump.py yolov8n-pose.onnx \
 
 The container must be packed with `--npu` to carry the pre-tiled panels, and the
 design set has to exist before the runtime will touch the array. Without both,
-`--npu-extra-ops conv` refuses *by name* rather than quietly running on the host —
+`--npu-ops conv` refuses *by name* rather than quietly running on the host —
 which is the whole point of a flag that moves work.
 
 ```bash
@@ -1072,7 +1108,7 @@ python tools/export/export_gemm_rtp.py --target yolov8n-pose --arch 1 \
 # 7. run it. --artifacts names that set; without it this run would silently be
 #    the host path again and any comparison against it would be trivially equal.
 ./runtime/build/npuembeddings pose models/yolov8n-pose.npue photo.jpg \
-    --npu-extra-ops conv --artifacts runtime/artifacts/yolov8n-pose/artifacts_npu1 \
+    --npu-ops conv --artifacts runtime/artifacts/yolov8n-pose/artifacts_npu1 \
     --text
 ```
 
@@ -1249,7 +1285,7 @@ runtime:
 - **116 of 116 graph nodes agree.** Worst relative difference 6.5e-06, on the
   first image. The canonical head tensor agrees to 7.4e-07 overall.
 - **The array path produces the same network.** With
-  `--npu-extra-ops conv --artifacts ...`, all 117 nodes of the `--pose-dump` agree
+  `--npu-ops conv --artifacts ...`, all 117 nodes of the `--pose-dump` agree
   with the host path's, on the same metric `diff_pose_dump.py` uses
   (`max|a-b| / max(1, max|b|)`): median 1.7e-02, worst 6.4e-02 at the c=51 40x40
   keypoint branch, 1.3e-02 at the head. That is bf16 — the array's datapath has no
@@ -1289,7 +1325,7 @@ stride and the wrong meaning produces a network that is confidently wrong.
 ### Measured, on both paths
 
 One image (`bus.jpg`, 810x1080), i8 container, 16 threads, this machine. Both
-columns are the same run with and without `--npu-extra-ops conv --artifacts`, so
+columns are the same run with and without `--npu-ops conv --artifacts`, so
 the difference is the backend and nothing else.
 
 | stage | host (default) | array |
@@ -1333,7 +1369,7 @@ reasons account for it:**
 The measured per-layer picture says an oracle would not save it either: **19 of
 the 72 convolutions are faster on the array than on the host**, and an oracle that
 put each one on its faster side measured **146.4 ms against the host's 150.2** —
-2.6% for choosing per layer. So `--npu-extra-ops conv` is honoured rather than
+2.6% for choosing per layer. So `--npu-ops conv` is honoured rather than
 refused: the choice belongs to the operator, the flag makes it measurable, and
 the status block prints both sides' numbers so the claim is checkable per run
 rather than argued in a comment.
@@ -1526,10 +1562,19 @@ Per-generation defaults:
 | `--arch 1\|2\|all` | NPU generation |
 | `--out DIR` | artifact root (usually `runtime`) |
 | `--batches a,b,c` | batch tiers to emit an instruction stream for |
-| `--npu-extra-ops CODES` | also build the named elementwise designs |
 | `--elt-cols N` | array columns for the eltwise designs (LayerNorm/softmax cap at 2) |
 | `--seq N` | sequence length to build for |
 | `--cache-root DIR` | IRON JIT cache (default `~/.npu/cache`) |
+
+**There is no op flag, and that is the point.** One command builds the GEMM set
+plus every sibling design the target can honour — `gelu/`, `layernorm/`,
+`softmax/` for a BERT-family text embedder — and prints the list it chose plus a
+reason for each code it skipped. `--npu-ops`, `--npu-extra-ops` and
+`--npu-eltwise` are refused there by name, each with its own message, because the
+set a model can use is a fact about the model and not something a command line
+should be able to get wrong. See [NPU_OPS.md](NPU_OPS.md) for what "can honour"
+means per architecture, and `tools/lib/npu_ops.py` for the registry the exporter
+reads.
 
 ### Two output layouts
 
@@ -1622,7 +1667,7 @@ goldens directly — see [Known defects](#known-defects).
 
 ### LayerNorm on the array used the previous layer's parameters — fixed
 
-**Symptom.** With the LayerNorm design loaded (`--npu-extra-ops layn`), the LayerNorm
+**Symptom.** With the LayerNorm design loaded (`--npu-ops layn`), the LayerNorm
 result was not reproducible and
 was not correct. Consecutive requests for the same input answered differently
 (cos ≈ 0.38 against ≈ 0.68), and mixing batch tiers inside one request made it
@@ -1759,11 +1804,11 @@ below are the ones that actually decide the number.
   `--allow-contention`.
 - **Per-dispatch cost is fixed and not small** (~150 µs measured). A design set
   is loaded once and kept precisely to avoid paying it per dispatch — which is
-  also why the elementwise ops default to the host, and why `--npu-extra-ops` can
+  also why the elementwise ops default to the host, and why `--npu-ops` can
   *lower* throughput rather than raise it.
 - **Batch tiers are right-sized, not padded.** A request is split into the
   largest tier that fits; the design set carries an instruction stream per tier.
-- **`--npu-extra-ops` costs one `hw_context` per named op** on top of the unified
+- **`--npu-ops` costs one `hw_context` per named op** on top of the unified
   one, so all three is four, against a
   measured budget of six on this driver. XRT exposes no usable-count query, so
   the budget is a labelled constant and the source of the number is printed
@@ -1800,9 +1845,9 @@ export PYTHONPATH=/opt/xilinx/xrt/python:$PYTHONPATH
 export NPU_RUNTIME=xrt
 ```
 
-**`--npu-extra-ops <code> asks for it on the array, but <dir>/design.json does not
+**`--npu-ops <code> asks for it on the array, but <dir>/design.json does not
 exist`** — that sibling design set was not built. Re-run the exporter with
-`--npu-extra-ops <code>`, or drop the code from the list.
+`--npu-ops <code>`, or drop the code from the list.
 
 **`--artifacts '<name>': no design set found`** — the path resolved to a
 directory with no `gemm_rtp/design.json` and no `qkv/design.json`. The error

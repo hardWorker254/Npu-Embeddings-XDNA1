@@ -400,55 +400,30 @@ def export_arch(args: argparse.Namespace, arch: str) -> int:
           f"({args.k}, {args.n}), hash {layout_hash(b_layout)[:16]}...")
 
 
-    extra = npu_ops.parse_exportable(getattr(args, "npu_extra_ops", ""),
-                                     npu_ops.EXPORTER_FLAG)
-    # WHICH CODES THIS MODEL CANNOT HONOUR, refused here rather than building
-    # designs nothing opens. Both reasons are properties of the MODEL, not of the
-    # board: an earlier version of this keyed on `arch`, which is the exporter's
-    # DEVICE GENERATION (--arch 1 is npu1), so it refused every model on this
-    # board and only looked right because the two models tested by hand were the
-    # two that genuinely cannot take these codes.
+    extra = eltwise_ops_for(args)
+    # WHICH DESIGNS GO IN THE BOX, AND WHY THE OTHERS DO NOT
+    # -----------------------------------------------------
+    # The set is DERIVED, never asked for: there is no exporter flag left, so a
+    # user cannot ask for a design that does not apply to their model and cannot
+    # forget one that does. The decision and the reasons live in one place --
+    # tools/lib/npu_ops.py, KIND_REGISTRY -- and this function is where the two
+    # programs meet it: the runtime refuses a code by name with the same reason,
+    # and NPU_OPS.md is the human copy.
     #
-    # The runtime encoder's only eltwise(gelu_, ...) call is in the ungated
-    # branch's else. nomic (SwiGLU), gte (GeGLU) and gemma (GeGLU) compute the
-    # activation inside the gated path instead, so there is no host-or-array
-    # choice for a GELU to make. This is not merely inert on those models: the
-    # runtime took host_gelu straight off the flag, printed "gelu GELU on the
-    # ARRAY", and returned vectors that measured relfro 0.000e+00 against its own
-    # host path on both nomic and gte (bge-base, ungated, measured 6.1e-03 for
-    # the same flag). The runtime now refuses by name; this stops the export
-    # building the directory that refusal is about.
+    # What used to happen here, and why it stopped: an earlier version REFUSED the
+    # export when a requested code was inapplicable, and the check keyed on the
+    # two things that decide it -- a gated FFN, and the target being gemma. That
+    # check could not fire under --arch all, the DEFAULT, because the spawned
+    # child does not receive --target: it got the geometry as explicit flags and
+    # nothing that names the model. So `export_gemm_rtp.py --target
+    # embeddinggemma-300m --arch all --npu-extra-ops layn,softm` built two
+    # LayerNorm and softmax designs for the one model in the tree whose encoder
+    # cannot open them. The set is now computed where the model is still known and
+    # handed down, so there is nothing left to miss.
     #
-    # layn and softm are unaffected by the gate -- they are genuine per-op choices
-    # for these models -- so they still export. gemma is the exception that needs
-    # the second reason: GemmaNpuEncoder reads no per-op flag AT ALL, so no code
-    # in this table is reachable for it, and gemma_mode.hpp refuses all three
-    # before any of this runs.
-    if extra:
-        dead, why = set(), []
-        if args.gated_ffn:
-            dead.add("gelu")
-            why.append("this target has a GATED FFN, whose activation is part "
-                       "of the gated path between ffn_up and ffn_down rather "
-                       "than a separate pass, so there is no host-or-array "
-                       "choice for a GELU to make")
-        if args.target == "embeddinggemma-300m":
-            dead |= {"layn", "softm"}
-        if dead & extra:
-            dead &= extra
-            if args.target == "embeddinggemma-300m":
-                why.append("gemma's encoder takes no per-op host/array flag at "
-                           "all, so neither of these is reachable")
-            keep = sorted(extra - dead)
-            raise SystemExit(
-                f"{npu_ops.EXPORTER_FLAG} {','.join(sorted(dead))}: "
-                + "; and ".join(why)
-                + ". The runtime refuses the same codes for the same reasons. "
-                  "Drop "
-                + ("them" if len(dead) > 1 else "it")
-                + (f"; {' and '.join(keep)} still "
-                   + ("export" if len(keep) > 1 else "exports")
-                   + " for this model." if keep else "."))
+    # The refusal did its real job anyway, in the runtime: gemma_mode.hpp still
+    # refuses all three by name, and that is what a user hits.
+    #
     # The elementwise designs are built by the ENCODER pass only. The decoder
     # pass runs second and writes to the same directories, with its own smaller
     # row counts (batch*seq is 4*64 there against 1*512 here), so letting it
@@ -456,27 +431,99 @@ def export_arch(args: argparse.Namespace, arch: str) -> int:
     # enough for the decoder, one chunk short for the encoder on some models.
     # The encoder's capacity is the larger of the two, and NpuEltwise walks a
     # tensor in chunks of whatever the design holds.
-    if extra and stream_set != "stt":
-        # Same generation root, alongside gemm_rtp: the runtime's --npu-extra-ops
-        # resolves these directories by the op's code, which IS the directory
-        # name (see tools/lib/npu_ops.py). Built in the same invocation so the two
-        # sets never drift apart by a rebuild, and only for the ops that were
-        # asked for -- each one is a compile and an xclbin.
-        import export_eltwise  # noqa: E402  (tools/export/ is on sys.path)
-        export_eltwise.export_arch(
-            Path(args.out), arch, args.batch, args.hidden, args.seq,
-            args.elt_cols, args.gelu_tile, args.ln_variant, args.sm_variant,
-            args.cache_root, args.per_arch_cache,
-            gelu_variant=args.gelu_variant,
-            # The LayerNorm design is built for THIS model: its row width is
-            # d_model and its epsilon is the checkpoint's layer_norm_eps, both
-            # of which the runtime then checks against the container it is
-            # holding. A design exported with the wrong pair is refused by name
-            # rather than silently normalising with the other model's numbers.
-            ln_cols=args.ln_cols, ln_eps=args.ln_eps, sm_cols=args.sm_cols,
-            ops=extra)
+    if stream_set != "stt":
+        report_eltwise_plan(extra, args)
+        if extra:
+            # Same generation root, alongside gemm_rtp: the runtime's --npu-ops
+            # resolves these directories by the op's code, which IS the directory
+            # name (see tools/lib/npu_ops.py). Built in the same invocation so the
+            # two sets can never drift apart by a rebuild. Each one is a compile
+            # and an xclbin; the runtime pays one extra hw_context only for the
+            # codes it is actually asked to run.
+            import export_eltwise  # noqa: E402  (tools/export/ is on sys.path)
+            export_eltwise.export_arch(
+                Path(args.out), arch, args.batch, args.hidden, args.seq,
+                args.elt_cols, args.gelu_tile, args.ln_variant, args.sm_variant,
+                args.cache_root, args.per_arch_cache,
+                gelu_variant=args.gelu_variant,
+                # The LayerNorm design is built for THIS model: its row width is
+                # d_model and its epsilon is the checkpoint's layer_norm_eps, both
+                # of which the runtime then checks against the container it is
+                # holding. A design exported with the wrong pair is refused by name
+                # rather than silently normalising with the other model's numbers.
+                ln_cols=args.ln_cols, ln_eps=args.ln_eps, sm_cols=args.sm_cols,
+                ops=extra)
 
     return 0
+
+
+# The set of sibling design directories to compile, and where it came from.
+#
+# Three cases, and they have to be told apart because two of them are the same
+# code with different data:
+#
+#   spawned child  NPUEMBEDDINGS_OPS is set by build_child_argv, and is the
+#                  parent's answer. The child cannot work this out itself: it
+#                  receives the geometry as explicit flags and --target is not
+#                  among them, precisely so that the child's resolve cannot
+#                  disagree with the parent's. So the DECISION is handed down
+#                  and the child cannot reach a different one.
+#   --arch 1       no handoff, and the target is still visible here, so it is
+#                  derived from the registry directly.
+#   no --target    a manual invocation naming only geometry. The registry's
+#                  default row is the text encoder's, which honours all three --
+#                  which is what the old --npu-eltwise built when it was given.
+def eltwise_ops_for(args: argparse.Namespace) -> set[str]:
+    raw = os.environ.get(npu_ops.ENV_OPS)
+    if raw is not None:
+        # An empty value is a real answer -- gemma, which can use none of them --
+        # so the handoff is "present" and not "non-empty" that decides this.
+        return npu_ops.parse_ops(raw, npu_ops.EXPORTER_FLAG)
+    return npu_ops.buildable_codes(
+        getattr(args, "kind", None) or "gemm_rtp",
+        getattr(args, "target", None),
+        bool(getattr(args, "gated_ffn", False)),
+    )
+
+
+def report_eltwise_plan(built: set[str], args: argparse.Namespace) -> None:
+    """Say what is being compiled and what is not, with the reason for each.
+
+    Printed by the exporter and not merely kept in a table, because the failure
+    this project treats as worst is a design that was not built and not
+    mentioned: a user who then runs --npu-ops layn gets "no design set" from the
+    runtime and has to go read the source to find out why. The runtime refuses
+    the same codes with the same reasons, so the two messages agree.
+    """
+    kind = getattr(args, "kind", None) or "gemm_rtp"
+    target = getattr(args, "target", None)
+    what = target or f"a targetless export (kind {kind})"
+    if built:
+        print(f"  eltwise designs: building {', '.join(sorted(built))} for {what}")
+    else:
+        print(f"  eltwise designs: none for {what} -- nothing this model can "
+              "honour has a directory of its own")
+    for code, _status, why in npu_ops.skipped_codes(
+        kind, target, bool(getattr(args, "gated_ffn", False))
+    ):
+        print(f"    {code:<6} not built: {why}")
+
+
+def child_env(args: argparse.Namespace) -> dict[str, str]:
+    """The environment for a spawned per-architecture child.
+
+    Only NPUEMBEDDINGS_OPS is added, and it is the one thing a child cannot
+    derive: see eltwise_ops_for(). Inheriting the rest unchanged is what makes
+    the child the same program the documented command is.
+    """
+    env = dict(os.environ)
+    ops = npu_ops.buildable_codes(
+        getattr(args, "kind", None) or "gemm_rtp",
+        getattr(args, "target", None),
+        bool(getattr(args, "gated_ffn", False)),
+    )
+    env[npu_ops.ENV_OPS] = ",".join(sorted(ops))
+    return env
 
 def build_child_argv(
     args: argparse.Namespace,
@@ -540,11 +587,22 @@ def build_child_argv(
     if args.per_arch_cache:
         cmd.append("--per-arch-cache")
 
-    if getattr(args, "npu_extra_ops", ""):
-        # The child re-parses the list with the same parser, so the set that is
-        # built cannot differ from the set that was asked for.
+    if child_env(args).get(npu_ops.ENV_OPS):
+        # The elementwise geometry is forwarded whenever there is anything to
+        # build with it -- that is, whenever this model's set is non-empty. The
+        # child cannot derive any of it: it receives no --target, so its
+        # ln_cols/ln_eps would fall back to the text encoder's defaults, and
+        # Whisper's LayerNorm would be compiled with the wrong epsilon inside a
+        # square root (1e-12 against the checkpoint's 1e-05). Forwarding the
+        # parent's resolved values is what keeps the two in step.
+        #
+        # Which designs to build is NOT here -- it is NPUEMBEDDINGS_OPS in the
+        # environment, because it is the one thing the child cannot work out and
+        # the one thing a user should never have to pass. It used to be an argv
+        # flag, and the two disagreed silently: the flag's value was parsed
+        # again in the child, while the applicability checks beside it read a
+        # --target the child did not have.
         cmd += [
-            npu_ops.EXPORTER_FLAG, args.npu_extra_ops,
             "--elt-cols", str(args.elt_cols),
             "--gelu-tile", str(args.gelu_tile),
             "--gelu-variant", args.gelu_variant,

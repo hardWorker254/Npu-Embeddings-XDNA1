@@ -7,7 +7,7 @@
 #   conv     the front end's output, against torch with the checkpoint's own
 #            conv weights, so a divergence in the encoder below it can be
 #            attributed
-#   convnpu  the same tensor from the NPU path (--npu-extra-ops conv), which runs
+#   convnpu  the same tensor from the NPU path (--npu-ops conv), which runs
 #            two convolutions as GEMMs on the encoder set's own [rows, d, d]
 #            stream. Checked at the same cosine tolerance and its own max-abs
 #            one, because its precision is the design's bf16 C rather than the
@@ -17,7 +17,7 @@
 #            4-layer stack, the position table, all sixteen GEMMs and the host
 #            attention, in one number. Run twice: once on the host conv and once
 #            on the NPU one, which is the property that decides whether
-#            --npu-extra-ops conv is a default or a curiosity
+#            --npu-ops conv is a default or a curiosity
 #   step     one teacher-forced decoder step: the state after the final
 #            LayerNorm and the tied-embedding logits, both against transformers
 #   greedy   the argmax chain from the standard control-token prompt, id by id
@@ -755,7 +755,7 @@ def main() -> int:
 
     # -- the whole stack fed from the NPU front end --------------------------
     # Everything above runs the encoder on the fp32 host conv. This runs it on
-    # the array's, which is the property that decides whether --npu-extra-ops conv is
+    # the array's, which is the property that decides whether --npu-ops conv is
     # a default or a curiosity: the bf16 front end is 15 dispatches, and what
     # matters is whether the encoder output still matches transformers when its
     # input carries that design's output precision.

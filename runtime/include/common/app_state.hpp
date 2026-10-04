@@ -208,7 +208,7 @@ inline bool encoder_implemented(const std::string &arch) {
          // for the first reason: it is not an embedder, it takes pixels and
          // returns people. The difference that matters is the last one -- the CPU
          // path needs NO design set at all, because every convolution runs on
-         // the host and the array path is optional (`--npu-extra-ops conv`). So
+         // the host and the array path is optional (`--npu-ops conv`). So
          // such a container is runnable the moment the file exists, where a
          // whisper or a ViT is not runnable until it has been exported.
          arch == "yolov8_pose_c2f_silu_dfl";

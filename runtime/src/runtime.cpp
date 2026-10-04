@@ -74,7 +74,7 @@ int Runtime::run(int argc, char **argv) {
     // beside the other three, and returns -1 for every other container.
     //
     // It is also the only one whose DEFAULT path opens no device: the
-    // convolutions run on the host unless --npu-extra-ops conv moves them onto
+    // convolutions run on the host unless --npu-ops conv moves them onto
     // the array, and that default is a measured result rather than an omission
     // (see runtime/include/runtime/pose_mode.hpp for the arithmetic).
     if (int pose_r = app::maybe_pose_mode(root_, argc, argv, model_path_); pose_r >= 0)

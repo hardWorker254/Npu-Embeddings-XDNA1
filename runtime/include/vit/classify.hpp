@@ -48,7 +48,7 @@ struct Prediction {
   int64_t n_dispatch = 0;        // the GEMMs
   // The elementwise designs, on top of those. 0 when LayerNorm and GELU are on
   // the host, which is the default -- so this is the field that says whether
-  // --npu-extra-ops actually reached the array, and it is measured rather than
+  // --npu-ops actually reached the array, and it is measured rather than
   // derived from the model so a design with a smaller row capacity than
   // expected shows up instead of hiding behind a wrong constant.
   int64_t n_elt_dispatch = 0;
@@ -56,7 +56,7 @@ struct Prediction {
 
 class Session {
 public:
-  // `npu_ops` is the --npu-extra-ops set, passed in rather than read off argv
+  // `npu_ops` is the --npu-ops set, passed in rather than read off argv
   // here: this file opens devices and the mode that owns argv is the thing that
   // parses flags, and a Session that read them itself would be a second parser.
   //
