@@ -1338,7 +1338,7 @@ the difference is the backend and nothing else.
 
 | stage | host (default) | array |
 |---|---|---|
-| front end (decode, letterbox, normalise) | 23 | 24 |
+| front end (decode, letterbox, normalise) | 23 → **5.5** | 24 → **6.1** |
 | **network** | **166** | **311** |
 | — of which the multiply | 76 | 162 *(on the device)* |
 | — of which im2col | 46 | 51 |
@@ -1349,6 +1349,20 @@ the difference is the backend and nothing else.
 | — neither: allocation and per-node overhead | 9 | 4 |
 | decode (NMS, boxes, JSON) | 0.0 | 0.0 |
 | **total** | **0.19 s** | **0.34 s** |
+
+The front-end row is the only one that moved, and it moved because of a measured
+fix rather than a re-baseline: see the letterbox paragraph below for the before
+and after, the method, and the gate.
+
+The network rows are **left at the numbers that session measured** rather than
+replaced by today's. This machine's network time moves about 20% between
+sessions and by ±20% inside one: re-measured today the same CLI gives a median
+network of 178 ms across ten runs (145-188), and twelve consecutive requests to
+one long-lived server give 146 ms (135-193). The 166 in the table sits inside both
+of those ranges, so swapping in any of them would be picking a point in the noise
+and calling it a result. The front end, by contrast, moved from 23-24 ms to under
+7 — a change several times this machine's own run-to-run spread, which is why that
+row is the one that changed.
 
 Medians of six consecutive frames of the same image in one process, because a
 single frame on this machine is worth 10 ms of noise and the changes below moved
@@ -1364,6 +1378,66 @@ and before im2col, so subtracting only the two host spans reported 66 ms of
 before the `gemm` call, so its 175 ms was 157 ms of device multiply and about
 20 ms of transposing. A table built on either would have pointed the reader at
 the wrong bottleneck.
+
+#### The letterbox was 21 ms of serial scalar code
+
+The front end is `decode`, then a PIL-equivalent bilinear **letterbox** to
+640px, then `(x/255 - mean)/std`. The letterbox was the whole cost, and the way
+that was established was by removing it rather than by reading it: the same
+810x1080 frame, fed in already at 640x640, where `resize_to` returns itself
+unchanged and every other step runs identically.
+
+| input | front end |
+|---|---|
+| 810x1080, resize present | **24.8 ms** |
+| 640x640, resize the identity | **3.7 ms** |
+
+So ~21 of the 23 ms was one bilinear resize. `runtime/src/vit/image.cpp`
+referenced the thread pool **zero** times, and its resampler had two separate
+problems:
+
+- **The weights were recomputed per line.** They are a function of the output
+  index and the axis geometry alone — they never read a pixel — so the 1080-line
+  horizontal pass evaluated the same 640 weight vectors 1080 times over, about
+  1.1 M evaluations of the index arithmetic and the kernel body that could not
+  have differed between lines. They are now built once per pass into an
+  `AxisPlan`.
+- **The passes were serial.** With the taps hoisted, a line is a short dot
+  product and lines are independent, so both passes go to the pool. The vertical
+  pass is split over **output rows, not source columns**: consecutive columns are
+  3 bytes apart inside one output row, so ~21 columns share a 64-byte line and
+  any 21 of them are likely to be on 21 different workers.
+
+The normalise loop went the same way (one task per channel-row), and the front
+end now writes the network's input tensor directly instead of returning a vector
+that the caller `std::copy`'d — and that tensor is kept between frames, which is
+worth another ~2 ms, since a fresh one costs 1.1 ms of value-initialising 4.9 MB
+that is immediately overwritten plus ~0.9 ms of first-touch page faults.
+
+| | before | after |
+|---|---|---|
+| CLI, 10 runs, median | 23-24 ms | **5.5 ms** |
+| 12 consecutive requests to one server | — | **3.5 ms** |
+| resize alone, isolated | ~21 ms | **2.1-3.1 ms** |
+
+The server figure is lower than the CLI's because the CLI is a fresh process per
+frame and pays the one-time allocation every time.
+
+**None of this may change a pixel**, and that is gated rather than asserted.
+`tools/verify/verify_vit_image.py` section 2 now runs every corpus case through
+all four implemented filters twice — once serial, once on an 8-thread pool — and
+requires the two rasters to be **byte-identical** before comparing either to PIL.
+`AxisPlan` is what makes that true: the taps are computed by the same expressions
+from the same inputs, and every output element still sums the same taps in the
+same order and divides by the same `ww` (a division, not a multiply by a
+precomputed reciprocal — those differ in the last bit, and this function's
+contract with PIL is measured to one LSB). All four filters and every corpus case
+pass; the PIL comparison itself is unchanged and still within one LSB.
+
+`Pool::run` also grew a guard: a thread already inside a generation runs the work
+serially and returns. `resize_to` taking a pool makes nested use reachable from
+inside `par_items`, and the failure mode of getting that wrong is a hang in a
+webcam demo rather than a wrong number.
 
 Summed per convolution rather than per stage, the 72 convolutions that actually
 run take **137 ms on the host and 289 ms on the array**, in **436 dispatches at

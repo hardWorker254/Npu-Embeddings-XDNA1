@@ -127,6 +127,22 @@ private:
   std::unique_ptr<app::Pool> pool_;
   std::unique_ptr<class NpuConvBackend> backend_;
   std::unique_ptr<Network> net_;
+  // The network's input tensor, kept between calls so that the front end writes
+  // into memory that is already faulted in.
+  //
+  // Measured reason, not tidiness: allocating it per frame costs 1.1 ms of
+  // value-initialising 4.9 MB that the front end immediately overwrites, plus
+  // roughly 0.9 ms of first-touch page faults on the ~1200 pages of it -- about
+  // 2 ms of a ~180 ms frame, every frame, for a buffer whose contents never
+  // survive the frame.
+  //
+  // Which is why this makes detect() non-reentrant, and why that is not a new
+  // restriction: detect() already writes params() and the network's cost_
+  // accumulators, so two overlapping calls were already a race before this
+  // member existed. The HTTP server is one accept() at a time -- server.hpp's
+  // run() handles, replies and closes before the next accept -- so there is one
+  // caller.
+  Tensor input_;
   std::vector<std::string> ops_;
   int64_t rows_ = 0;
   bool array_ = false;

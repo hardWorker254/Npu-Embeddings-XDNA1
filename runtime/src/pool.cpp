@@ -8,6 +8,23 @@
 
 namespace app {
 
+namespace {
+
+// Whether THIS thread is inside some pool's run(). Nested is not supported -- the
+// inner run() would wait for a completion count that includes the very worker
+// waiting for it -- and the failure mode is a hang, not an error.
+//
+// It exists because a pool-taking function has become reachable from inside
+// par regions. vit::resize_to takes an app::Pool* and the pose front end passes
+// one, so anything that resizes from a worker would deadlock the process rather
+// than misbehave visibly. Rather than rely on every future caller knowing that,
+// the pool answers the question itself: a thread already inside a generation runs
+// the work serially and returns. That costs a thread_local read per run() and
+// turns a class of hang into a class of slowdown.
+thread_local bool t_in_pool = false;
+
+}  // namespace
+
 Pool::Pool(int n) : n_(n < 1 ? 1 : n) {
   for (int i = 1; i < n_; ++i)
     workers_.emplace_back([this, i] {
@@ -67,6 +84,13 @@ void Pool::run(const std::function<void(int, int)> &f) {
     f(0, 1);
     return;
   }
+  // Already inside a generation on THIS thread: do the work here and return. See
+  // t_in_pool for why. The flag brackets the caller's own share as well, so a
+  // third level of nesting is caught the same way.
+  if (t_in_pool) {
+    f(0, n_);
+    return;
+  }
   long target = 0;
   {
     std::lock_guard<std::mutex> lk(m_);
@@ -78,7 +102,9 @@ void Pool::run(const std::function<void(int, int)> &f) {
     target = static_cast<long>(n_ - 1) * gen_;
   }
   cv_work_.notify_all();
+  t_in_pool = true;
   f(0, n_);
+  t_in_pool = false;
   std::unique_lock<std::mutex> lk(m_);
   cv_done_.wait(lk, [&] { return completed_ >= target; });
 }

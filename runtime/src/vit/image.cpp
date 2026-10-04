@@ -16,6 +16,8 @@
 #include <fstream>
 #include <stdexcept>
 
+#include "runtime/pool.hpp"
+
 extern "C" {
 #include <jpeglib.h>
 #include <png.h>
@@ -102,25 +104,65 @@ Kernel kernel_for(Resample r, int64_t *support_scale) {
   { *support_scale = 1; return {1.0, bilinear_eval}; }
 }
 
-// One separable pass, resampling `in_len` -> `out_len` along one axis of an
-// interleaved RGB buffer. This is PIL's ImagingResampleHorizontal/Vertical
-// without the fixed-point: float accumulation, and the same index arithmetic.
+// The filter taps for every output position along ONE axis, built once.
 //
-// The index arithmetic IS the load-bearing part and is transcribed exactly:
+// This is resample_axis's per-output-index prologue, hoisted out of its per-line
+// loop, and that hoist is the whole reason the pass can be parallel at all. The
+// weights are a function of (in_len, out_len, the kernel, filterscale) and the
+// output index ALONE -- they never read the image -- so the old shape evaluated
+// the same 640 weight vectors once per source line: about 1.1 M evaluations of
+// the index arithmetic and the kernel body on a 810x1080 -> 640x640 letterbox,
+// none of which could have differed between lines, because none of them could
+// read a pixel. What was left per line is a short dot product, and lines are
+// independent, so lines go to the pool.
 //
-//   scale    = in_len / out_len
-//   filterscale = max(1, scale)          <- the antialias widening
-//   support  = kernel.support * filterscale
-//   centre   = (i + 0.5) * scale
-//   xmin     = int(centre - support + 0.5), clamped to [0, in_len)
-//   xmax     = int(centre + support + 0.5), clamped to [0, in_len)
-//   weight   = kernel.eval((x - centre + 0.5) / filterscale)
-//
-// and the output is sum(w*v)/sum(w), not a plain mean, so a pixel that straddles
-// an edge keeps its level.
-void resample_axis(const uint8_t *in, int64_t in_len, uint8_t *out,
-                   int64_t out_len, int64_t stride_in, int64_t stride_out,
-                   int64_t nchan, const Kernel &kern, double filterscale) {
+// Bit-identical on purpose. The plan is built by the same expressions from the
+// same inputs, and apply_* below consume it in the order resample_axis built it,
+// summing the same taps in the same order and dividing by the same `ww` -- the
+// division, not a multiply by a precomputed reciprocal, because those differ in
+// the last bit and this function's contract with PIL is measured to one LSB.
+struct AxisPlan {
+  std::vector<int64_t> xmin;  // first source index, per output index
+  std::vector<int64_t> off;   // where this output index's taps start in w
+  std::vector<int64_t> n;     // tap count; <= 0 is the zero-row case below
+  std::vector<double> w;      // every output index's taps, concatenated
+  std::vector<double> ww;     // sum of that index's taps
+};
+
+// Below this many output elements a pass stays serial: the pool's barrier costs
+// about as much as the work it would hand out, and a resize nobody measured on a
+// hot loop should not get slower for having been parallelised.
+constexpr int64_t kResampleMinElems = 1 << 16;
+
+// Split `n` lines over the pool, or run them here if there is no pool or the
+// pass is too small to be worth one.
+template <typename F>
+void par_lines(app::Pool *pool, int64_t n, int64_t per_line, F &&f) {
+  if (pool == nullptr || pool->size() == 1 || n * per_line < kResampleMinElems) {
+    for (int64_t i = 0; i < n; ++i) f(i);
+    return;
+  }
+  pool->run([&](int w, int nw) {
+    for (int64_t i = w; i < n; i += nw) f(i);
+  });
+}
+
+AxisPlan make_axis_plan(int64_t in_len, int64_t out_len, const Kernel &kern,
+                        double filterscale) {
+  // This is PIL's ImagingResampleHorizontal/Vertical without the fixed-point:
+  // float accumulation, and the same index arithmetic. The arithmetic IS the
+  // load-bearing part and is transcribed exactly:
+  //
+  //   scale    = in_len / out_len
+  //   filterscale = max(1, scale)          <- the antialias widening
+  //   support  = kernel.support * filterscale
+  //   centre   = (i + 0.5) * scale
+  //   xmin     = int(centre - support + 0.5), clamped to [0, in_len)
+  //   xmax     = int(centre + support + 0.5), clamped to [0, in_len)
+  //   weight   = kernel.eval((x - centre + 0.5) / filterscale)
+  //
+  // and the output is sum(w*v)/sum(w), not a plain mean, so a pixel that
+  // straddles an edge keeps its level.
   const double scale = static_cast<double>(in_len) / static_cast<double>(out_len);
   const double support = kern.support * filterscale;
   const double inv_filter = 1.0 / filterscale;
@@ -132,7 +174,13 @@ void resample_axis(const uint8_t *in, int64_t in_len, uint8_t *out,
   // different filter.
   const int64_t kmax =
       std::min<int64_t>(in_len, static_cast<int64_t>(std::ceil(support * 2.0)) + 2);
-  std::vector<double> w(static_cast<size_t>(kmax));
+  AxisPlan p;
+  const size_t olen = static_cast<size_t>(out_len);
+  p.xmin.resize(olen);
+  p.off.resize(olen);
+  p.n.resize(olen);
+  p.ww.resize(olen);
+  p.w.reserve(olen * static_cast<size_t>(kmax));
   for (int64_t i = 0; i < out_len; ++i) {
     const double centre = (static_cast<double>(i) + 0.5) * scale;
     int64_t xmin = static_cast<int64_t>(centre - support + 0.5);
@@ -140,11 +188,13 @@ void resample_axis(const uint8_t *in, int64_t in_len, uint8_t *out,
     int64_t xmax = static_cast<int64_t>(centre + support + 0.5);
     if (xmax > in_len) xmax = in_len;
     const int64_t n = xmax - xmin;
+    p.xmin[static_cast<size_t>(i)] = xmin;
+    p.off[static_cast<size_t>(i)] = static_cast<int64_t>(p.w.size());
     if (n <= 0) {   // cannot happen for support >= 0.5 and scale > 0, but a
                     // zero-weight row would divide by zero below, and a NaN
                     // pixel is the worst thing this function can produce
-      for (int64_t c = 0; c < nchan; ++c)
-        out[i * stride_out + c] = 0;
+      p.n[static_cast<size_t>(i)] = 0;
+      p.ww[static_cast<size_t>(i)] = 1.0;
       continue;
     }
     if (n > kmax)
@@ -158,25 +208,92 @@ void resample_axis(const uint8_t *in, int64_t in_len, uint8_t *out,
     for (int64_t x = 0; x < n; ++x) {
       const double v = kern.eval((static_cast<double>(x + xmin) - centre + 0.5) *
                                  inv_filter);
-      w[static_cast<size_t>(x)] = v;
+      p.w.push_back(v);
       ww += v;
     }
-    if (ww == 0.0) ww = 1.0;   // a filter that sums to zero is a bug, not a
-                              // division to perform
+    p.n[static_cast<size_t>(i)] = n;
+    p.ww[static_cast<size_t>(i)] =
+        ww;   // a filter that sums to zero is a bug, not a division to perform
+    if (p.ww[static_cast<size_t>(i)] == 0.0) p.ww[static_cast<size_t>(i)] = 1.0;
+  }
+  return p;
+}
+
+// The 8-bit write, shared by both passes so the rounding is stated once. Round
+// half away from zero, then clamp. PIL's 8-bit path does the same clamp with its
+// fixed-point rounding; where the two differ it is in the last bit of the
+// fixed-point sum, which is what the test measures.
+inline uint8_t resample_round(double acc, double ww) {
+  const double v = acc / ww;
+  const double r = v < 0.0 ? v - 0.5 : (v > 0.0 ? v + 0.5 : v);
+  const long long q = static_cast<long long>(r);
+  return static_cast<uint8_t>(std::min<long long>(255, std::max<long long>(0, q)));
+}
+
+// ONE SOURCE LINE, all output positions along the axis. This is the horizontal
+// pass exactly as it was: `in` walks the line, `out` walks the output line, and
+// consecutive output pixels are 3 bytes apart in both.
+void apply_axis_line(const uint8_t *in, uint8_t *out, int64_t stride_in,
+                     int64_t stride_out, int64_t nchan, const AxisPlan &p,
+                     int64_t out_len) {
+  for (int64_t i = 0; i < out_len; ++i) {
+    const size_t oi = static_cast<size_t>(i);
+    const int64_t n = p.n[oi];
+    const int64_t xmin = p.xmin[oi];
+    if (n <= 0) {
+      for (int64_t c = 0; c < nchan; ++c) out[i * stride_out + c] = 0;
+      continue;
+    }
+    const double *w = p.w.data() + p.off[oi];
+    const double ww = p.ww[oi];
     for (int64_t c = 0; c < nchan; ++c) {
       double acc = 0.0;
       const uint8_t *base = in + c;
       for (int64_t x = 0; x < n; ++x)
-        acc += w[static_cast<size_t>(x)] *
-               static_cast<double>(base[(xmin + x) * stride_in]);
-      double v = acc / ww;
-      // Round half away from zero, then clamp. PIL's 8-bit path does the same
-      // clamp with its fixed-point rounding; where the two differ it is in the
-      // last bit of the fixed-point sum, which is what the test measures.
-      const double r = v < 0.0 ? v - 0.5 : (v > 0.0 ? v + 0.5 : v);
-      const long long q = static_cast<long long>(r);
-      out[i * stride_out + c] =
-          static_cast<uint8_t>(std::min<long long>(255, std::max<long long>(0, q)));
+        acc += w[x] * static_cast<double>(base[(xmin + x) * stride_in]);
+      out[i * stride_out + c] = resample_round(acc, ww);
+    }
+  }
+}
+
+// ONE OUTPUT POSITION, across every source line -- the vertical pass.
+//
+// Parallelising the vertical pass over source COLUMNS is the obvious reading and
+// it is a false-sharing trap: consecutive columns are 3 bytes apart inside one
+// output row of out_w*3 bytes, so about 21 columns share a 64-byte line and any
+// 21 of them are likely to be on 21 different workers, ping-ponging the line
+// once per tap. Here a worker owns whole output positions and writes each one
+// contiguously, and reads each tap's source run contiguously too. The arithmetic
+// per element is untouched -- same taps, same order, same ww -- so this is a
+// change of iteration order, not of results.
+//
+// The output index is spelled (i * nlines + l) * nchan + c and NOT with the tap
+// stride, and the difference is the difference between the vertical pass and the
+// TRANSPOSE of its answer: correctly shaped, entirely wrong, invisible on a flat
+// raster. The tap stride (out_w*3) and the pixel stride (3) are equal only when
+// out_w happens to be 1, so the one spelling that uses `stride` for both is
+// right for no size at all.
+void apply_axis_across(const uint8_t *in, uint8_t *out, int64_t tap_stride,
+                       int64_t nchan, int64_t nlines, const AxisPlan &p,
+                       int64_t i) {
+  const size_t oi = static_cast<size_t>(i);
+  const int64_t n = p.n[oi];
+  const int64_t xmin = p.xmin[oi];
+  if (n <= 0) {
+    for (int64_t l = 0; l < nlines; ++l)
+      for (int64_t c = 0; c < nchan; ++c)
+        out[(i * nlines + l) * nchan + c] = 0;
+    return;
+  }
+  const double *w = p.w.data() + p.off[oi];
+  const double ww = p.ww[oi];
+  for (int64_t l = 0; l < nlines; ++l) {
+    for (int64_t c = 0; c < nchan; ++c) {
+      double acc = 0.0;
+      const uint8_t *base = in + l * nchan + c;
+      for (int64_t x = 0; x < n; ++x)
+        acc += w[x] * static_cast<double>(base[(xmin + x) * tap_stride]);
+      out[(i * nlines + l) * nchan + c] = resample_round(acc, ww);
     }
   }
 }
@@ -465,7 +582,8 @@ Image decode_image(const std::string &path) {
   return decode_image_bytes(slurp(path), path);
 }
 
-Image resize_to(const Image &src, int64_t out_w, int64_t out_h, Resample how) {
+Image resize_to(const Image &src, int64_t out_w, int64_t out_h, Resample how,
+                app::Pool *pool) {
   if (out_w <= 0 || out_h <= 0)
     throw std::runtime_error("resize to " + std::to_string(out_w) + "x" +
                              std::to_string(out_h) + " pixels");
@@ -538,31 +656,30 @@ Image resize_to(const Image &src, int64_t out_w, int64_t out_h, Resample how) {
   // Horizontal first, into a h x out_w buffer, then vertical. The same order
   // PIL uses, and the same reason: the horizontal pass is the wider of the two
   // and doing it first keeps the intermediate at h*out_w rather than out_w*out_h.
+  //
+  // Each pass builds its tap table ONCE for the whole image and then consumes it
+  // from every thread. See AxisPlan for why the table does not depend on the line
+  // and why that is what makes the split safe as well as faster.
   std::vector<uint8_t> tmp(static_cast<size_t>(h) * out_w * 3);
   const double fscale_x =
       std::max(1.0, static_cast<double>(w) / static_cast<double>(out_w));
-  for (int64_t y = 0; y < h; ++y) {
-    resample_axis(src.rgb.data() + static_cast<size_t>(y) * w * 3, w,
-                  tmp.data() + static_cast<size_t>(y) * out_w * 3, out_w, 3, 3, 3,
-                  kern, fscale_x);
-  }
+  const AxisPlan px = make_axis_plan(w, out_w, kern, fscale_x);
+  par_lines(pool, h, out_w * 3, [&](int64_t y) {
+    apply_axis_line(src.rgb.data() + static_cast<size_t>(y) * w * 3,
+                    tmp.data() + static_cast<size_t>(y) * out_w * 3, 3, 3, 3, px,
+                    out_w);
+  });
+
   Image out;
   out.width = out_w;
   out.height = out_h;
   out.rgb.resize(static_cast<size_t>(out_w) * out_h * 3);
   const double fscale_y =
       std::max(1.0, static_cast<double>(h) / static_cast<double>(out_h));
-  for (int64_t x = 0; x < out_w; ++x)
-    // BOTH strides are out_w*3 and the output base is the COLUMN, because both
-    // buffers are row-major and consecutive OUTPUT indices are consecutive ROWS
-    // here, not consecutive pixels. Writing stride_out = 3 -- the value the
-    // horizontal pass above uses, and the one the two calls look
-    // interchangeable enough to invite -- makes the vertical pass emit the
-    // TRANSPOSE of the right answer: correctly shaped, entirely wrong, and
-    // invisible on a flat raster. Both strides being equal is not a typo to be
-    // tidied up later; it is the fact that makes the vertical pass vertical.
-    resample_axis(tmp.data() + x * 3, h, out.rgb.data() + x * 3, out_h,
-                  out_w * 3, out_w * 3, 3, kern, fscale_y);
+  const AxisPlan py = make_axis_plan(h, out_h, kern, fscale_y);
+  par_lines(pool, out_h, out_w * 3, [&](int64_t i) {
+    apply_axis_across(tmp.data(), out.rgb.data(), out_w * 3, 3, out_w, py, i);
+  });
   return out;
 }
 

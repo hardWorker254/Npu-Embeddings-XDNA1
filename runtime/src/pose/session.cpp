@@ -336,7 +336,20 @@ Result Session::detect(const npue::vit::Image &im) {
 
   const double t0 = app::now_s();
   Letterbox lb;
-  std::vector<float> px = letterbox_normalise(im, geom_, lb);
+  // The front end writes the network's input tensor directly. It used to return
+  // a vector that this line then std::copy'd into a fresh `in`, which is 4.9 MB
+  // read plus 4.9 MB write per frame to move bytes the front end had just
+  // written and the network was about to read once.
+  //
+  // SIZED ONCE, not per frame -- see input_'s comment. The first call pays the
+  // allocation and value-init; every call after it writes into pages that are
+  // already mapped, and that difference (about 2 ms) is the whole reason the
+  // tensor is a member.
+  const size_t want =
+      3 * static_cast<size_t>(geom_.input_size) * static_cast<size_t>(geom_.input_size);
+  if (input_.d.size() != want)
+    input_ = Tensor(3, geom_.input_size, geom_.input_size);
+  letterbox_normalise_into(input_.d.data(), im, geom_, lb, pool_.get());
   r.width = lb.src_w;
   r.height = lb.src_h;
   r.scale = lb.scale;
@@ -344,11 +357,8 @@ Result Session::detect(const npue::vit::Image &im) {
   r.pad_y = lb.pad_y;
   r.front_end_s = app::now_s() - t0;
 
-  Tensor in(3, geom_.input_size, geom_.input_size);
-  std::copy(px.begin(), px.end(), in.d.begin());
-
   const double t1 = app::now_s();
-  Tensor head = net_->run(in);
+  Tensor head = net_->run(input_);
   r.network_s = app::now_s() - t1;
 
   const double t2 = app::now_s();

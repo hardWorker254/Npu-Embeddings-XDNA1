@@ -96,13 +96,24 @@ FIXTURES = {
                                 artifacts="runtime/artifacts/"
                                           "embeddinggemma-300m",
                                 argv=["embed"], input="txt"),
+    # Pose reads the SAME two command-line words as every other row -- `pose` then
+    # the container then the image -- so there is nothing pose-shaped about the
+    # invocation. What was missing was this entry, and with it the whole row was
+    # skipped while its container, its design set and its image fixture all sat on
+    # this machine. The skip message it printed ("models/ has none") was false.
+    "pose": dict(kind="pose", target=None,
+                 container="models/yolov8n-pose.npue",
+                 artifacts="runtime/artifacts/yolov8n-pose",
+                 argv=["pose"], input="image"),
 }
-# Reported as skipped, not silently absent.
-UNRUNNABLE = {
-    "pose": "no pose container in this checkout (models/ has none); "
-            "tools/verify/verify_pose.py needs a checkpoint this machine "
-            "does not have either",
-}
+# Reported as skipped, not silently absent. EMPTY, and that is the point: every
+# architecture row in the registry now has a fixture, so a row that skips from
+# here on skips because something is genuinely absent from the machine and says
+# which thing. It used to hold `pose` with the reason "no pose container in this
+# checkout (models/ has none)" -- a claim that stopped being true the moment the
+# container was packed, and which nothing checked, because the gate only ever
+# prints these strings.
+UNRUNNABLE: dict[str, str] = {}
 
 # The cells the runtime must let RUN. Only `honours`: `on_array` is the case
 # this file's author got wrong first and the reason is worth keeping --

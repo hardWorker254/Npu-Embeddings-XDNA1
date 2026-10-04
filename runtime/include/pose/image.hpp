@@ -31,6 +31,10 @@
 #include "pose/geometry.hpp"
 #include "vit/image.hpp"   // npue::vit::Image, decode_image
 
+namespace app {
+class Pool;
+}
+
 namespace npue::pose {
 
 // The uniform scale and padding that letterbox applied, so decode can invert it.
@@ -70,6 +74,24 @@ inline constexpr float kPadValue = 114.f;
 // follows.
 std::vector<float> letterbox_normalise(const npue::vit::Image &src,
                                        const Geometry &g, Letterbox &lb);
+
+// The same thing, into a buffer the CALLER owns -- `dst` must have room for
+// 3*input_size*input_size floats, and every one of them is written: the padded
+// region gets the normalised pad value, the rest the normalised pixels. There is
+// no "only the interesting part" contract, because the pad is part of the model.
+//
+// This is not a convenience overload. Session::detect used to take the returned
+// vector and `std::copy` it into the network's input tensor, which is 4.9 MB of
+// read plus 4.9 MB of write per frame to move bytes that the writer had just
+// written and the reader was about to read once. Nothing in between looks at them.
+//
+// `pool`, borrowed and nullable, splits the resize and the normalise over
+// threads. A null pool runs both serially and the result is bit-for-bit the
+// same: every output element here is independent, so which thread computes it
+// cannot change what it computes.
+void letterbox_normalise_into(float *dst, const npue::vit::Image &src,
+                              const Geometry &g, Letterbox &lb,
+                              class app::Pool *pool);
 
 // decode -> letterbox -> normalise, for one file. Refuses a format
 // vit::decode_image refuses, by the same rules and for the same reason.

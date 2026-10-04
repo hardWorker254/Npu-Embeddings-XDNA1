@@ -111,6 +111,13 @@ MAX_LSB = 1
 # A filter error would be tens of percent.
 MAX_FRACTION = 0.10
 
+# Thread count for the byte-identity check in section 2. Deliberately NOT 1: a
+# one-thread pool takes the serial branch in resize_to's own code and would make
+# the check vacuous. Not the machine's core count either -- the point is that
+# several workers write the same raster concurrently, and eight is enough to make
+# every worker in a generation busy at once on the corpus's sizes.
+POOL_THREADS = 8
+
 _failures = []
 
 
@@ -128,7 +135,15 @@ def build_exe(path):
         str(REPO / "runtime" / "src" / "vit" / "image.cpp"),
         str(REPO / "runtime" / "src" / "common" / "json_min.cpp"),
         str(REPO / "runtime" / "src" / "model.cpp"),
-        "-lpng", "-ljpeg", "-o", str(path),
+        # image.cpp's resize takes an app::Pool* and calls run()/size() when it is
+        # given one. This probe never passes a pool -- every path through it runs
+        # the null-pool serial branch, which is the branch whose PIL equivalence
+        # this gate exists to measure -- but the symbols are still referenced, so
+        # pool.cpp has to be on the link line. -pthread because Pool's worker
+        # threads need it and it was not linked before Pool existed in this TU's
+        # dependency set.
+        str(REPO / "runtime" / "src" / "pool.cpp"),
+        "-lpng", "-ljpeg", "-lpthread", "-o", str(path),
     ]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
@@ -137,10 +152,12 @@ def build_exe(path):
     return path
 
 
-def run_probe(exe, npue, image, resample=None):
+def run_probe(exe, npue, image, resample=None, pool=None):
     cmd = [str(exe), str(npue), str(image)]
     if resample is not None:
         cmd += ["--resample", str(resample)]
+    if pool is not None:
+        cmd += ["--pool", str(pool)]
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
         raise RuntimeError(f"{exe} died with rc={p.returncode}:\n{p.stderr[-2000:]}")
@@ -149,6 +166,9 @@ def run_probe(exe, npue, image, resample=None):
         kind, _, rest = line.partition(" ")
         if kind == "refused":
             out["refused"] = rest
+        elif kind == "poolmatch":
+            verdict, _, n_bad = rest.partition(" ")
+            out["poolmatch"] = (verdict, int(n_bad))
         elif kind == "decoded":
             w, h, hexed = rest.split()
             out["decoded"] = np.frombuffer(bytes.fromhex(hexed),
@@ -357,11 +377,25 @@ def check_resize(exe, npue, corpus, image_size, code, name):
             # 16-bit refusal. Comparing the resize against a reference built from
             # a different raster would measure that policy twice.
             continue
-        got = run_probe(exe, npue, path, resample=code)
+        got = run_probe(exe, npue, path, resample=code, pool=POOL_THREADS)
         if got["refused"]:
             report(False, f"{case}: resized",
                    f"-> refused: {got['refused'][:120]}")
             continue
+        # The threaded raster must be the serial raster, byte for byte, before
+        # anything is compared to PIL. Section 2's claim is about the filter; this
+        # is about the SCHEDULING, and it is the property the pose front end
+        # depends on, because resize_to's only caller with a pool is the letterbox
+        # and every pose frame goes through it. A "differs" here means the plan is
+        # not line-independent -- a shared weight table, a hoisted accumulator, a
+        # stride spelled for the wrong axis -- and every pixel comparison below
+        # would still pass while the production path returned a different image
+        # from the one this gate just held to PIL.
+        verdict, n_bad = got.get("poolmatch", ("missing", -1))
+        report(verdict == "same",
+               f"{case}: {POOL_THREADS}-threaded resize is BYTE-IDENTICAL to serial",
+               "" if verdict == "same"
+               else f"-> {verdict}, {n_bad} bytes differ")
         pil_src = Image.open(path)
         if pil_src.size == (image_size, image_size):
             # PIL skips the filter entirely at equal sizes, and image.cpp says so

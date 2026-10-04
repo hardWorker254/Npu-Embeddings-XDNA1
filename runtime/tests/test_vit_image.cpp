@@ -17,6 +17,16 @@
 //                            The im2col still uses the container's patch, so
 //                            --side only makes sense at a whole number of
 //                            patches; the gate uses multiples of 16.
+//   --pool N                 run the resize a SECOND time on an N-thread pool and
+//                            report whether the two rasters are byte-identical.
+//                            Prints one extra line:
+//                              poolmatch <same|differs> <n_bytes_differing>
+//                            This is not a second claim about PIL. The serial
+//                            result is the one PIL is compared against; this
+//                            says that the threads do not change it, which is a
+//                            different property and the one the pose front end
+//                            actually depends on, since it is the only caller
+//                            that passes a pool.
 //   --keep-resized <path>    also write the resized uint8 raster here
 //
 // Output, all on stdout, one line per stage:
@@ -41,7 +51,8 @@
 // Build:
 //   g++ -std=c++17 -O2 -I runtime/include runtime/tests/test_vit_image.cpp \
 //       runtime/src/vit/image.cpp runtime/src/common/json_min.cpp \
-//       runtime/src/model.cpp -lpng -ljpeg -o /tmp/test_vit_image
+//       runtime/src/model.cpp runtime/src/pool.cpp \
+//       -lpng -ljpeg -lpthread -o /tmp/test_vit_image
 //
 // SPDX-License-Identifier: Apache-2.0
 //===----------------------------------------------------------------------===//
@@ -53,6 +64,7 @@
 #include <string>
 #include <vector>
 
+#include "runtime/pool.hpp"
 #include "vit/geometry.hpp"
 #include "vit/image.hpp"
 
@@ -80,11 +92,12 @@ int main(int argc, char **argv) {
   if (argc < 3) {
     std::fprintf(stderr,
                  "usage: %s <model.npue> <image> [--resample N] [--side N] "
-                 "[--keep-resized <path>]\n", argv[0]);
+                 "[--pool N] [--keep-resized <path>]\n", argv[0]);
     return 2;
   }
 
   npue::vit::Geometry g;
+  int pool_threads = 0;
   try {
     g = npue::vit::read_geometry(npue::File(argv[1]), argv[1]);
   } catch (const std::exception &e) {
@@ -115,6 +128,12 @@ int main(int argc, char **argv) {
       }
       const int64_t n = g.image_size / g.patch_size;
       g.n_patches = n * n;
+    } else if (a == "--pool") {
+      pool_threads = std::atoi(argv[i + 1]);
+      if (pool_threads < 1) {
+        std::fprintf(stderr, "--pool %d is not a thread count\n", pool_threads);
+        return 2;
+      }
     }
   }
 
@@ -140,6 +159,24 @@ int main(int argc, char **argv) {
   }
   std::printf("resize %lld %lld %s\n", (long long)sq.width, (long long)sq.height,
               to_hex(sq.rgb.data(), sq.rgb.size()).c_str());
+
+  if (pool_threads > 0) {
+    // resize_square does not take a pool -- only resize_to does, because only the
+    // pose letterbox has one to give -- so the comparison calls resize_to with
+    // the same target twice. Same arguments, so the serial arm here is the very
+    // raster compared against PIL above, not a lookalike.
+    app::Pool pool(pool_threads);
+    const npue::vit::Image par =
+        npue::vit::resize_to(img, g.image_size, g.image_size, g.resample, &pool);
+    size_t bad = 0;
+    if (par.rgb.size() != sq.rgb.size()) {
+      bad = sq.rgb.size() > par.rgb.size() ? sq.rgb.size() : par.rgb.size();
+    } else {
+      for (size_t i = 0; i < sq.rgb.size(); ++i)
+        if (sq.rgb[i] != par.rgb[i]) ++bad;
+    }
+    std::printf("poolmatch %s %zu\n", bad == 0 ? "same" : "differs", bad);
+  }
 
   for (int i = 1; i < argc; ++i)
     if (std::string(argv[i]) == "--keep-resized" && i + 1 < argc) {

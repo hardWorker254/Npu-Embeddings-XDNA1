@@ -37,6 +37,14 @@
 
 #include "vit/geometry.hpp"
 
+// Only so that resize_to can take a pool by pointer. The decoder and the
+// resampler do not USE the pool -- JPEG and PNG decoding are still serial -- but
+// a forward declaration here is cheaper than including runtime/pool.hpp into
+// every translation unit that wants an Image.
+namespace app {
+class Pool;
+}
+
 namespace npue::vit {
 
 // An 8-bit interleaved RGB raster. `rgb` is width*height*3, row-major.
@@ -137,7 +145,14 @@ Image resize_square(const Image &src, int64_t side, Resample how);
 // intermediate is not square -- see pose/image.hpp. The refusals for NEAREST and
 // HAMMING are resize_to's, identically, and the header's reasons for them
 // apply here unchanged.
-Image resize_to(const Image &src, int64_t out_w, int64_t out_h, Resample how);
+//
+// `pool`, when given, is used for the two resampling passes. It is a BORROWED
+// pointer and may be null, which is what every caller outside the pose front end
+// passes: a null pool runs both passes serially, which is bit-for-bit the same
+// result, because the passes split by line and every output element's arithmetic
+// is unchanged by which thread writes it.
+Image resize_to(const Image &src, int64_t out_w, int64_t out_h, Resample how,
+                app::Pool *pool = nullptr);
 
 // [0,255] RGB -> [3, S, S] fp32, (x/255 - mean[c]) / std[c].
 //
