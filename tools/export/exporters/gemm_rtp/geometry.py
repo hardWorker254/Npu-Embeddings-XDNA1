@@ -101,7 +101,8 @@ def stt_shapes_for(
 
 
 def attn_shapes(M: int, head_dim: int, n_kv: int,
-                n_aie_cols: int = 4, tile_n: int = 32) -> dict[str, dict[str, int]]:
+                n_aie_cols: int = 4, tile_n: int = 32,
+                tile_k: int = 64) -> dict[str, dict[str, int]]:
     """The two streams that turn attention into GEMMs.
 
         attn_qk   [M, head_dim] @ [head_dim, n_kv]  -> one head's scores
@@ -129,12 +130,25 @@ def attn_shapes(M: int, head_dim: int, n_kv: int,
     head_dim is 64 on every shipped Whisper, and a K of 64 is one k-tile: a thin
     GEMM, which is why this is worth having for the arithmetic and not for the
     dispatch count.
+
+    attn_qk's K is head_dim padded UP to tile_k, and that padding is not a
+    detail -- it is what makes a 32-wide head buildable at all. gemm_pretiled
+    asserts K % tile_k == 0, and three of the eight embedders here have
+    head_dim 32 against a tile_k of 64, so the unpadded shape dies in the
+    builder with a bare AssertionError. Padding is exact rather than an
+    approximation, and it is the same mechanism the N padding above already
+    uses: the B panel's extra K rows are zero and the runtime writes zero into
+    the matching rows of the gathered Q block, so the MACs over them contribute
+    0*0 to every score. Widening head_dim to 64 to make it legal is NOT the
+    alternative -- that would change the model's arithmetic, and the extra
+    columns would not be zero.
     """
-    step_k = _lcm(tile_n, 64)
+    step_k = _lcm(tile_n, tile_k)
     kv = -(-n_kv // step_k) * step_k
     ctx = -(-head_dim // (tile_n * n_aie_cols)) * (tile_n * n_aie_cols)
+    kq = -(-head_dim // tile_k) * tile_k
     return {
-        "attn_qk": {"M": M, "K": head_dim, "N": kv},
+        "attn_qk": {"M": M, "K": kq, "N": kv},
         "attn_av": {"M": M, "K": kv, "N": ctx},
     }
 
@@ -309,6 +323,8 @@ def shapes_for_stream_set(
     fft: tuple[int, int] | None = None,
     logit: tuple[int, int, int] | None = None,
     drop_streams: tuple[str, ...] = (),
+    tile_n: int = 32,
+    attn_m: int | None = None,
 ) -> tuple[list[str], dict[str, dict[str, int]]]:
     """(stream order, shapes) for a named stream set. One dispatch point.
 
@@ -327,6 +343,27 @@ def shapes_for_stream_set(
     vocabulary projection: a decode step is one row, so its chunks are only ever
     dispatched at the SMALLEST tier, and building eight streams at the other two
     is eight compiles per tier of an xclbin nothing binds.
+
+    `attn_m` is the row count of the attn streams, and it is NOT the set's M for
+    the architectures that call attention per sequence. attn_qk's B operand is
+    ONE K panel of [head_dim, n_kv] shared by every query row of the dispatch,
+    which is why a batched call is impossible: sixteen sequences would all
+    attend to whichever sequence's keys the panel holds. The runtime therefore
+    loops, handing each dispatch one sequence's `seq` rows -- so a design built
+    at M = batch*seq would compute the whole batch's rows for one sequence's
+    worth of real rows, and throw away the other fifteen. At batch 16 that is a
+    sixteen-fold waste of every attention dispatch, measured at 215 ms of
+    attention against a 20 ms whole-pass host run.
+
+    It cannot simply be `seq` either. A design's M has to tile into
+    m * n_aie_rows rows -- 256 on npu1 with the default tiles -- so a 64-position
+    sequence cannot be given a 64-row design. The CALLER rounds `seq` up to that
+    granularity, because that is where the tiles are named; this function takes
+    the row count it is handed.
+
+    None means "the set's M", which is what Whisper wants and what every set
+    before this parameter had: its encoder walks one sequence of 1500 positions
+    in chunks of exactly M, so the tier's M IS its query chunk.
     """
     if stream_set == "stt":
         order, shapes = list(STT_STREAM_ORDER), stt_shapes_for(
@@ -351,18 +388,20 @@ def shapes_for_stream_set(
         more: dict[str, dict[str, int]] = {}
         if attn is not None:
             head_dim, n_kv = attn
-            more.update(attn_shapes(M, head_dim, n_kv, n_aie_cols))
+            more.update(attn_shapes(M if attn_m is None else attn_m, head_dim,
+                                    n_kv, n_aie_cols, tile_n, tile_k))
         if mel is not None:
             n_bins, n_mels = mel
-            more.update(mel_proj_shapes(M, n_bins, n_mels, tile_k,
-                                        32, n_aie_cols))
+            more.update(mel_proj_shapes(M, n_bins, n_mels, tile_k, tile_n,
+                                        n_aie_cols))
         if fft is not None:
             n_fft, n_bins = fft
-            more.update(dft_shapes(M, n_fft, n_bins, tile_k, 32, n_aie_cols))
+            more.update(dft_shapes(M, n_fft, n_bins, tile_k, tile_n,
+                                   n_aie_cols))
         if logit is not None:
             hidden, vocab, n_chunks = logit
-            more.update(logit_shapes(M, hidden, vocab, n_chunks, tile_k, 32,
-                                     n_aie_cols))
+            more.update(logit_shapes(M, hidden, vocab, n_chunks, tile_k,
+                                     tile_n, n_aie_cols))
         for name in extra_streams:
             if name in drop_streams:
                 continue

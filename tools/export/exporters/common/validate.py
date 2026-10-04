@@ -130,9 +130,10 @@ def validate_tiers_and_seq(args: argparse.Namespace) -> list[int]:
             f"M = batch*seq, so tiers {tiers} give M {[b * args.seq for b in tiers]}."
         )
         print(
-            "             Host attention is O(seq^2) and this repo has no "
-            "measurement above seq 64. Treat this design's throughput as "
-            "unknown until it is traced."
+            "             Host attention is O(seq^2). The array branch of it "
+            "is measured at 197 positions (0.349 s of encoder against 0.244 s "
+            "of host -- the array slower); a seq longer than that is still "
+            "unknown rather than assumed."
         )
 
     return tiers

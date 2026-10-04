@@ -285,6 +285,12 @@ int64_t GemmaNpuEncoder::use_tier(int64_t want) {
   is_ao = tier_slots[pick][1];
   is_fu = tier_slots[pick][2];
   is_fd = tier_slots[pick][3];
+  // The attention with them, and by the same rule: null when this run did not
+  // ask for `attn`, which is the host path and a real one. It is picked here
+  // rather than in attention() because the SLOT it uses is the tier's, and a
+  // tier switch that moved the GEMM slots but not the attention's would
+  // dispatch one tier's keys on another tier's stream.
+  attn_ = pick < attns.size() ? attns[pick].get() : nullptr;
   return batch;
 }
 
@@ -292,6 +298,7 @@ void GemmaNpuEncoder::reset_timers() {
   t_conv = t_in = t_disp = t_out = t_bias = 0;
   t_norm = t_attn = t_rope = t_geglu = t_tok = 0;
   n_dispatch = 0;
+  n_elt_dispatch = 0;
 }
 
 template <typename F>
@@ -674,6 +681,159 @@ void GemmaNpuEncoder::attention(const std::vector<float> &qkv,
                                    std::vector<float> &out) {
   const double t0 = now_s();
   const int64_t pairs = batch * heads;
+
+  // On the array: QK^T and softmax.V as two GEMMs, per sequence.
+  //
+  // Per sequence rather than over the batch, because attn_qk's B operand is ONE
+  // K panel shared by every query row of a dispatch, and sixteen sequences in
+  // one dispatch would all attend to whichever sequence's keys that panel holds.
+  // It also happens to be the only way the per-sequence additive mask arrives
+  // intact: `mk` below is exactly this sequence's row, and set_additive_mask is
+  // called once per call with it.
+  //
+  // RoPE has ALREADY been applied to `qkv` by the time this runs, so the array
+  // reads post-RoPE activations -- the same bytes the host loop below reads.
+  // Nothing is applied a second time; the reference is the loop, not the model.
+  if (attn_) {
+    // Captured BEFORE the loop, not beside the drain at its end: the softmax
+    // dispatches happen inside these run() calls, so a baseline read after them
+    // is the value they produced and the delta is always zero. Measured that
+    // way, `attn,softm` printed no softmax dispatches while 18.4 s of its
+    // attention time was spent in them.
+    const int64_t sm_before = softm_ ? softm_->n_dispatch : 0;
+    for (int64_t b = 0; b < batch; ++b) {
+      const float *base = qkv.data() + b * seq_ * qkv_n;
+      // K begins at k_off (which the constructor sets to hidden_) and V at
+      // hidden_ + kv_w, so the pointer base + k_off puts K at 0 and V at kv_w --
+      // and set_kv_geometry() already told the class kv_w is the half-width and
+      // that there is one key/value head for however many query heads. Without
+      // those two numbers the class would take hidden_ as the K|V width and
+      // step 768 floats past a 256-wide block.
+      attn_->set_additive_mask(add_mask.data() + b * seq_);
+      attn_->run(base, qkv_n, base + k_off, qkv_n, seq_, seq_, hidden_,
+                 static_cast<float>(attn_scale),
+                 out.data() + b * seq_ * hidden_);
+    }
+    // Drain into this encoder's dispatch count rather than merely discarding:
+    // NpuAttention accumulates across layers and this branch runs once per
+    // layer, so reading the current value would sum 1+2+...+N calls' worth --
+    // the same error that printed 293 ms of QK^T for 87 ms of attention on the
+    // BERT path. gemma's status prints one `[N dispatches]`, and a run that
+    // dispatched attention 3*2*24 more times than it reports is a number no
+    // reader can reconcile with the time beside it.
+    //
+    // The softmax's dispatches are drained the same way and into their OWN
+    // counter: with `attn,softm` NpuAttention normalises between its two GEMMs
+    // on the separate softmax xclbin, so those are a different hw_context's
+    // dispatches and gemma's status printed 672 either way while the attention
+    // line moved from 358 ms to 18798. Drained by delta, not read, for the same
+    // reason as tu.dispatch above.
+    const auto tu = attn_->take_timers();
+    n_dispatch += static_cast<int64_t>(tu.dispatch);
+    if (softm_) n_elt_dispatch += softm_->n_dispatch - sm_before;
+    t_attn += now_s() - t0;
+    return;
+  }
+
+  // -- `softm` alone: the softmax, on its own design, with QK^T and
+  // -- softmax.V staying on the host ------------------------------------
+  //
+  // A separate xclbin, which is the whole point: this model's softmax is
+  // inside attention(), so it is the attention that has to step aside between
+  // its two halves for the flag to mean anything. Two phases are dispatched
+  // and one is not -- moving the GEMMs as well is the `attn` code, and a
+  // `softm` that quietly shipped them would move something the command did not
+  // name.
+  //
+  // The score rows are PADDED to the design's width and the columns past
+  // seq_ are -1e30, for the reason that decides correctness rather than
+  // tidiness: the kernel normalizes over every column it is given, so a
+  // padded column left at zero would add exp(0 - max) to the denominator and
+  // shrink every weight in the row. exp(-1e30 - max) is zero, so the real
+  // weights are untouched -- the same value NpuAttention writes into its own
+  // padded tail, proven on the BERT path where the host and array attention
+  // agree to a relative 5.4e-3.
+  if (softm_) {
+    const int64_t st = softm_->cols();
+    if (st < seq_)
+      throw std::runtime_error(
+          "softmax design built for rows " + std::to_string(st) +
+          " wide and this model attends over " + std::to_string(seq_) +
+          " keys, so the array would normalize fewer columns than the host "
+          "does. Re-export the softmax design at this model's own window.");
+    const int64_t nrows = batch * heads * seq_;
+    if (static_cast<int64_t>(sm_scratch_.size()) < nrows * st)
+      sm_scratch_.assign(static_cast<size_t>(nrows) * st, 0.f);
+    float *sc = sm_scratch_.data();
+
+    // Phase 1: QK^T plus this sequence's additive mask, parallel -- the same
+    // terms and the same order as the host loop below, so the two differ only
+    // in what the softmax that follows them does.
+    par_rows(pairs, [&](int64_t p0, int64_t p1) {
+      for (int64_t pi = p0; pi < p1; ++pi) {
+        const int64_t b = pi / heads, hh = pi % heads;
+        const float *base = qkv.data() + b * seq_ * qkv_n;
+        const float *mk = add_mask.data() + b * seq_;
+        for (int64_t i = 0; i < seq_; ++i) {
+          float *srow = sc + ((b * heads + hh) * seq_ + i) * st;
+          const float *qi = base + i * qkv_n + q_off + hh * head_dim;
+          for (int64_t j = 0; j < seq_; ++j) {
+            const float *kj = base + j * qkv_n + k_off;
+            int64_t dd = 0;
+            float acc;
+#if defined(__AVX2__)
+            __m256 a = _mm256_setzero_ps();
+            for (; dd + 8 <= head_dim; dd += 8)
+              a = _mm256_fmadd_ps(_mm256_loadu_ps(qi + dd),
+                                  _mm256_loadu_ps(kj + dd), a);
+            acc = hsum256(a);
+#else
+            acc = 0.f;
+#endif
+            for (; dd < head_dim; ++dd) acc += qi[dd] * kj[dd];
+            srow[j] = acc * static_cast<float>(attn_scale) + mk[j];
+          }
+          for (int64_t j = seq_; j < st; ++j) srow[j] = -1.0e30f;
+        }
+      }
+    });
+    // Phase 2: the softmax itself. Serial by necessity -- the design has ONE
+    // input and ONE output buffer, so two workers dispatching into it would
+    // hand each other's rows back. NpuEltwise::softmax walks the range in
+    // chunks of the design's own row capacity, so this is as many dispatches
+    // as nrows divided by that capacity, not nrows.
+    const int64_t before = softm_->n_dispatch;
+    softm_->softmax(sc, nrows);
+    n_elt_dispatch += softm_->n_dispatch - before;
+    // Phase 3: softmax.V, parallel again, reading the first seq_ columns of
+    // each row. The padded tail was never a key and is not read.
+    par_rows(pairs, [&](int64_t p0, int64_t p1) {
+      for (int64_t pi = p0; pi < p1; ++pi) {
+        const int64_t b = pi / heads, hh = pi % heads;
+        const float *base = qkv.data() + b * seq_ * qkv_n;
+        for (int64_t i = 0; i < seq_; ++i) {
+          const float *srow = sc + ((b * heads + hh) * seq_ + i) * st;
+          float *o = out.data() + (b * seq_ + i) * hidden_ + hh * head_dim;
+          std::memset(o, 0, sizeof(float) * static_cast<size_t>(head_dim));
+          for (int64_t j = 0; j < seq_; ++j) {
+            const float w = srow[j];
+            const float *vj = base + j * qkv_n + v_off;
+            int64_t dd = 0;
+#if defined(__AVX2__)
+            const __m256 wv = _mm256_set1_ps(w);
+            for (; dd + 8 <= head_dim; dd += 8)
+              _mm256_storeu_ps(o + dd, _mm256_fmadd_ps(wv, _mm256_loadu_ps(vj + dd),
+                                                       _mm256_loadu_ps(o + dd)));
+#endif
+            for (; dd < head_dim; ++dd) o[dd] += w * vj[dd];
+          }
+        }
+      }
+    });
+    t_attn += now_s() - t0;
+    return;
+  }
+
   par_rows(pairs, [&](int64_t p0, int64_t p1) {
     std::vector<float> row(static_cast<size_t>(seq_));
     for (int64_t pi = p0; pi < p1; ++pi) {

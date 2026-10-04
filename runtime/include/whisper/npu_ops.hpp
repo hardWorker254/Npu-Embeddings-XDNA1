@@ -35,6 +35,13 @@
 
 namespace npue::whisper {
 
+// One elementwise design (see whisper/eltwise.hpp for the class). Declared here
+// only so `attention` can take a pointer to one without this header pulling in
+// the whole eltwise design -- the two are separate designs with separate
+// buffers, and a header that included both would make every translation unit
+// that wants attention also want the eltwise buffer layout.
+class NpuEltwise;
+
 // One NPU GEMM, plus the two buffers that belong to it.
 //
 // A Design owns one A buffer and one C buffer. The weights are the DESIGN's
@@ -196,10 +203,34 @@ void gelu_erf_inplace(float *x, size_t n, app::Pool &pool);
 // 6 x 1500 x 1500 floats for whisper-tiny and 20 x 1500 x 1500 for large-v3,
 // which is why it is passed in rather than allocated per call. `out` is
 // [n_q, d_model].
+//
+// `softm` is NULL on every call that exists today, and that is the point of
+// putting it at the end with a default: the arithmetic below is one parallel
+// pass in which QK^T, the softmax and softmax.V happen per row, in that order,
+// and a caller passing nothing gets exactly that pass and exactly those
+// numbers -- Whisper's three call sites are untouched by this parameter and
+// nothing about their measured time can move because of it.
+//
+// When it is NOT null, the pass splits into three: QK^T over the rows, then the
+// softmax on the array's own design, then softmax.V over the rows again. That
+// is the only shape in which `softm` can mean anything for a model whose
+// softmax has no pass of its own to take: it is inside the attention, so the
+// attention has to be willing to step aside between its two GEMMs. What does
+// NOT move is the two GEMMs -- those stay on the host, because `softm` named
+// one op and shipping QK^T and softmax.V is the `attn` code.
+//
+// `score_stride` is the distance between consecutive score rows. It defaults
+// to `n_kv`, which is every existing caller, and a caller routing the softmax
+// through the array passes the DESIGN's width instead: the kernel reduces over
+// its whole row, so the row has to be its whole width. Columns past `n_kv` are
+// then filled with -1e30 by this function, which is exact -- exp of that minus
+// the row's max is zero -- and a stride narrower than `n_kv` is refused rather
+// than walked past.
 void attention(const float *q, int64_t q_stride, const float *kv,
                int64_t kv_stride, int64_t n_q, int64_t n_kv, int64_t d_model,
                int64_t heads, int64_t head_dim, float scale, float *out,
-               float *scores, app::Pool &pool);
+               float *scores, app::Pool &pool,
+               NpuEltwise *softm = nullptr, int64_t score_stride = 0);
 
 // The pre-tiled B panel, built on the host from an [K, N] fp32 matrix.
 //

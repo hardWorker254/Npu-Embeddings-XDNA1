@@ -150,6 +150,27 @@ def export_arch(args: argparse.Namespace, arch: str) -> int:
             getattr(args, "fft_geometry", None),
             logit_b,
             drop,
+            # NOT positional above, and the reason is that this one used to be
+            # a literal 32 inside attn_shapes' default. Whisper exports at
+            # tile_n 32 so the literal was invisible there; an embedder exports
+            # at 48, and the default then computed attn_av's N as 128 against a
+            # real tile_n*cols of 192 -- which dies in gemm_pretiled as "B must
+            # tile into (k, n*n_aie_cols) blocks", naming the wrong stream.
+            tile_n=args.n,
+            # One SEQUENCE's rows, not the tier's. The runtime calls attention
+            # per sequence because attn_qk's single K panel cannot serve a batch
+            # (geometry.py explains), so a design at batch*seq would compute
+            # sixteen times the rows it is handed at batch 16. The stt set does
+            # not pass this: Whisper's encoder walks one long sequence in chunks
+            # of exactly the tier M, which is the default.
+            #
+            # Rounded UP to m*rows, the granularity every other stream's M is
+            # held to (validate.py) and the one gemm_pretiled asserts on with
+            # "A must tile into (m*n_aie_rows, k) blocks". seq=64 in a 256-row
+            # granularity is 256 -- four wasted rows per dispatch, which is the
+            # smallest waste the core allows, against the 240 it used to be.
+            attn_m=None if stream_set == "stt" else (
+                -(-args.seq // (args.m * args.rows)) * (args.m * args.rows)),
         )
         shapes_by_batch[b] = shapes_b
         order_by_batch[b] = list(stream_order)

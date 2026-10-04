@@ -77,6 +77,35 @@ def eltwise_args_dropped(ln_cols):
     return [(added, "")]
 
 
+def seq_note_rewritten():
+    """The accepted difference: the `--seq != default` advisory sentence.
+
+    The monolith says this repo has no attention measurement above seq 64.
+    That was true when it was written and is not true now: the array branch
+    of the same pass has been measured on vit-base-patch16-224 at its 197
+    positions -- 0.349 s of encoder against 0.244 s on the host, i.e. the
+    array SLOWER -- so exporters/common/validate.py states the measurement
+    instead of the hole, and still says that a seq beyond the one measured is
+    unknown rather than assumed.
+
+    Both sentences map to the SAME placeholder, and the substitution runs
+    over both sides in order: the first entry retires the monolith's
+    sentence, the second retires the split's. Whatever is left is what the
+    two outputs actually agree on -- the `seq` line above it and the dry-run
+    line below it are untouched, so a difference in the numbers, the tiers or
+    the command line still fails.
+    """
+    old = ("             Host attention is O(seq^2) and this repo has no "
+           "measurement above seq 64. Treat this design's throughput as "
+           "unknown until it is traced.")
+    new = ("             Host attention is O(seq^2). The array branch of it "
+           "is measured at 197 positions (0.349 s of encoder against 0.244 s "
+           "of host -- the array slower); a seq longer than that is still "
+           "unknown rather than assumed.")
+    placeholder = "             [seq advisory: rewritten, accepted difference]"
+    return [(old, placeholder), (new, placeholder)]
+
+
 CASES = [
     ("gemm", ["--list-targets"]),
     # ACCEPTED DIFFERENCE (the five cases marked this way, plus the --arch 1 one
@@ -91,8 +120,10 @@ CASES = [
     ("gemm", ["--target", "nomic-embed-text-v1.5", "--arch", "all", "--dry-run"],
      eltwise_args_dropped(768)),
     ("gemm", ["--target", "embeddinggemma-300m", "--arch", "1", "--dry-run", "--batches", "4,8"]),
+    # This case also carries the rewritten --seq advisory: see
+    # seq_note_rewritten() below.
     ("gemm", ["--target", "gte-multilingual-base", "--arch", "1", "--seq", "128", "--dry-run"],
-     eltwise_args_dropped(768)),
+     eltwise_args_dropped(768) + seq_note_rewritten()),
     # ACCEPTED DIFFERENCE: --identity-threshold's fallback moved 80 -> 128.
     # Only THIS case shows it, because it is the only one with no --target: the
     # threshold comes from the target's defaults when there is one, and from

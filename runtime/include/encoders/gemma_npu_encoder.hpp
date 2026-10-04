@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -25,6 +26,7 @@
 #include "runtime/model.hpp"
 #include "encoders/gemma_kernels.hpp"
 #include "common/host_kernels.hpp"
+#include "whisper/attention_npu.hpp"  // NpuAttention -- attn as two GEMMs
 #include "tokenizers/gemma.hpp"
 
 namespace npue {
@@ -64,8 +66,27 @@ public:
          attn_scale = 1.0;
 
   int64_t seq_ = 0, batch = 0, rows = 0;
+  npue::whisper::NpuAttention *attn_ = nullptr;   // null = host attention
+  npue::whisper::NpuEltwise *softm_ = nullptr;
+  // The score rows for `softm` alone, [batch][heads][seq_][softm_->cols()] and
+  // MEMBER-owned rather than built per layer: this function runs once per layer
+  // and a 7 MB allocation per layer is 7 MB the status block's time line ends
+  // up describing. Sized once, at the first layer, and reused.
+  std::vector<float> sm_scratch_;
   std::vector<int64_t> tiers;
-  std::vector<std::array<size_t, 4>> tier_slots;
+  // SIX slots per tier, not four: [4] and [5] are attn_qk and attn_av. They are
+  // tier's own because the instruction streams are, and reading them out of the
+  // tier table rather than looking them up again at dispatch time is what lets
+  // use_tier() pick the attention with everything else it picks. A tier
+  // exported without the two attention streams carries zeros here, and
+  // attention() then has nothing to run -- which is a REFUSAL at the point the
+  // flag was asked for, not a silent fallback to the host.
+  std::vector<std::array<size_t, 6>> tier_slots;
+  // One NpuAttention per tier, matching tier_slots' order. Separate instances
+  // rather than one with the streams swapped: each allocates its own A and C
+  // buffers on the shared design, and an instance shared between them (or
+  // between lanes) hands back whichever finished last.
+  std::vector<std::unique_ptr<npue::whisper::NpuAttention>> attns;
   size_t is_qkv = 0, is_ao = 0, is_fu = 0, is_fd = 0;
   size_t slot_a = 0, slot_c = 0;
   std::mutex *npu_mu = nullptr;
@@ -96,6 +117,12 @@ public:
   double t_conv = 0, t_in = 0, t_disp = 0, t_out = 0, t_bias = 0,
          t_norm = 0, t_attn = 0, t_rope = 0, t_geglu = 0, t_tok = 0;
   int n_dispatch = 0;
+  // Dispatches made by the SEPARATE softmax xclbin, which has its own
+  // hw_context and therefore its own counter in every other encoder. Counted
+  // apart because `n_dispatch` is folded across pipeline lanes and the softmax
+  // runs serially in the lane that owns the buffer (see gemma_mode.hpp's
+  // status block, where this number is printed).
+  int64_t n_elt_dispatch = 0;
 
   // Inline helpers.
   template <typename F> void par(size_t n, F &&f) const;
@@ -129,6 +156,29 @@ public:
   void apply_rope(std::vector<float> &qkv, const float *cs_t, const float *sn_t);
   void geglu(const std::vector<float> &fused, std::vector<float> &out);
   void attention(const std::vector<float> &qkv, std::vector<float> &out);
+
+  // Attention as two GEMMs on the set's own attn_qk/attn_av slots. Null is the
+  // host pass above -- a real path and not a fallback, and the default.
+  //
+  // This model is MULTI-QUERY: `kv_heads` keys and values for `heads` query
+  // heads, so its K|V block is kv_w = kv_heads*head_dim wide while an output
+  // row is hidden_ wide. NpuAttention needs both numbers spelled out and says
+  // so; handing it d_model as the K|V half-width would walk off a one-head block
+  // on the second query head and produce a plausible-looking wrong answer. The
+  // caller is also the only place that knows k_off is `hidden_`, so it is the
+  // caller that points the K|V block rather than the class guessing.
+  void set_attention(npue::whisper::NpuAttention *a) { attn_ = a; }
+  bool attention_on_array() const { return attn_ != nullptr; }
+
+  // The softmax design, for `softm` WITHOUT `attn`.
+  //
+  // This model's softmax has no pass of its own -- it is inside attention() --
+  // so the choice the flag offers is "the exp/normalize in that loop, on the
+  // array or on the host", and it is read in exactly that one place. When
+  // attention itself is on the array, NpuAttention does the softmax as well and
+  // this pointer goes unused: an operator dispatched by two paths would be an
+  // operator whose dispatch count nobody can predict from the flag.
+  void set_softmax(npue::whisper::NpuEltwise *s) { softm_ = s; }
   void gemm_host(const float *a, int64_t M, int64_t K, const float *b,
                   int64_t N, float *c) const;
   void ensure_tables();

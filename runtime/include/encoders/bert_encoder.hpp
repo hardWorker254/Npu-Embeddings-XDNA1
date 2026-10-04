@@ -23,6 +23,7 @@
 #include "runtime/design.hpp"
 #include "runtime/device.hpp"
 #include "runtime/pool.hpp"
+#include "whisper/attention_npu.hpp"
 #include "runtime/types.hpp"
 #include "runtime/model.hpp"
 #include "common/host_kernels.hpp"
@@ -82,7 +83,17 @@ public:
   bool unified = false;
   size_t is_qkv = 0, is_ao = 0, is_fu = 0, is_fd = 0;
   std::vector<int64_t> tiers;
-  std::vector<std::array<size_t, 4>> tier_slots;
+  // qkv, attn_out, ffn_up, ffn_down -- and, when the set carries them and
+  // --npu-ops attn named them, attn_qk and attn_av in slots 4 and 5. They ride
+  // in the SAME per-tier table rather than in a second one because a stream
+  // slot is only meaningful together with the M its tier was built at: a tier
+  // whose attn slot came from a different tier would gather query rows at one
+  // row count and hand them to a GEMM that computes another.
+  std::vector<std::array<size_t, 6>> tier_slots;
+  // One NpuAttention per tier, owned by RunContext and handed over as raw
+  // pointers -- use_tier() picks among them the same way it picks among the
+  // slots, so a request that changes tier changes its attention with it.
+  std::vector<npue::whisper::NpuAttention *> attns;
 
   // The additive attention mask in the form softmax consumes, [batch, seq].
   // Public because setup_encoder(), --encode-file and the embedding service
@@ -96,6 +107,14 @@ public:
   bool host_gelu = false;
   bool sim_c_bf16 = false;
   bool fuse_ffn_epilogue = true;
+
+  // Attention as two GEMMs on the set's own attn_qk/attn_av streams. The host
+  // path is a real path and not a fallback; which one runs is decided by
+  // use_tier(), because the stream slots and the row count a dispatch computes
+  // are both properties of the tier. setup_encoder() fills `attns` and the
+  // slots in `tier_slots` and refuses by name a set that was exported without
+  // the code.
+  bool attention_on_array() const { return attn_ != nullptr; }
 
   // Pipeline lane fields.
   size_t lane_id = 0;
@@ -122,6 +141,7 @@ public:
   // other than the runtime.
   npue::File &model_;
   npu::Design &qkv_, &attn_out_, &ffn_up_, &ffn_down_, &gelu_, &layernorm_, &softmax_;
+  npue::whisper::NpuAttention *attn_ = nullptr;
   app::Pool &pool_;
 
   // Staged weight slots and bias pointers.
@@ -135,6 +155,12 @@ public:
   // Device-resident weights, one slot per layer per design.
   std::vector<float> residual;
   std::vector<float> qkvbuf, ctx, proj, up, down, scores;
+  // The row stride of `scores`, which is g_seq when the host takes the softmax
+  // and the softmax design's own `cols` when the array takes it -- see run().
+  // It is a separate number from g_seq because the two consumers of a score row
+  // were written against different widths: the host's own qk/av against the
+  // real key count and the kernel against the padded one NpuAttention hands it.
+  int64_t sc_cols = 0;
   std::vector<float> gated;
   std::vector<float> rope_cos, rope_sin;
   bool rope_ready = false;
@@ -210,6 +236,10 @@ public:
   void qk(const std::vector<float> &qkv, std::vector<float> &scores);
   void av(const std::vector<float> &scores, const std::vector<float> &qkv,
           std::vector<float> &ctx);
+  // All three of qk, the softmax and av as ONE array pass, when a design set
+  // carries the attn_qk/attn_av streams. Null -- the default, and what every
+  // model gets unless --npu-ops attn names it -- is the host path above.
+  void attention_npu(const std::vector<float> &qkv, std::vector<float> &ctx);
 
   // Layer-norm fusion helpers.
   void add_into(std::vector<float> &x, const std::vector<float> &y);

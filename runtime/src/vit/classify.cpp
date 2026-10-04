@@ -220,8 +220,88 @@ Session::Session(npue::File &model, const std::string &model_name,
   };
   open_elt("layn", "layernorm", EltwiseKind::LayerNorm, ln_design_, ln_);
   open_elt("gelu", "gelu", EltwiseKind::Gelu, gelu_design_, gelu_);
+  // The softmax, which has a sibling design of its own like the other two.
+  //
+  // It is a SEPARATE xclbin from gemm_rtp -- its own directory, its own
+  // hw_context, which is why the budget check in vit_mode.hpp counts it -- and
+  // it needs no GEMM to be on the array to be dispatched. That is what makes
+  // `softm` a real per-op choice here instead of a code that only means
+  // something as a side effect of `attn`: this architecture's softmax is inside
+  // its attention, so `attention()` takes the operator and steps aside between
+  // its two GEMMs -- QK^T on the host, the score row to the array, softmax.V
+  // back on the host. What does not move is the pair of GEMMs; moving them is
+  // the `attn` code, and a `softm` alone must not quietly ship them.
+  //
+  // The two flags compose: with `attn` too, NpuAttention runs all of it and
+  // takes this same operator through set_softmax() below.
+  open_elt("softm", "softmax", EltwiseKind::Softmax, sm_design_, sm_);
+  if (sm_)
+    ops_.push_back("softm at row width " + std::to_string(sm_->cols()) + ", " +
+                   std::to_string(sm_->rows()) + " rows per dispatch (one "
+                   "hw_context of its own)");
+  // -- attention as two GEMMs, on gemm_rtp's OWN attn_qk/attn_av slots.
+  //
+  // No separate design and no extra hw_context: the streams are inside the set
+  // design_ already loaded, which is why this costs a slot and nothing else.
+  // A set without them was exported before the registry honoured `attn` for
+  // kinds.cls, and asking for the array on it is refused by name rather than
+  // answered from the host.
+  //
+  // n_kv comes from the CONTAINER's max_seq_len, not from geom_.n_pos: this
+  // container preslices to its own window, and building a panel wider than a
+  // tensor that cannot address past it is the failure resolve.py already
+  // documents. geom_.n_pos is what the runtime walks; the padded count is what
+  // the design was built at, and NpuAttention takes the former for the real
+  // key count and the latter from the stream.
+  if (npu_ops.count("attn")) {
+    const app::StreamEntry &qk = find_op(streams, "attn_qk", tiers[0]);
+    const app::StreamEntry &av = find_op(streams, "attn_av", tiers[0]);
+    const int64_t hd = geom_.head_dim;
+    if (qk.N != av.K)
+      throw std::runtime_error(artifacts + "/gemm_rtp: attn_qk's N is " +
+                               std::to_string(qk.N) + " and attn_av's K is " +
+                               std::to_string(av.K) +
+                               ". The score chunk travels from one to the other "
+                               "as the A operand, so the two are the same padded "
+                               "n_kv.");
+    if (qk.K < hd || qk.K % hd)
+      throw std::runtime_error(
+          artifacts + "/gemm_rtp: attn_qk's K is " + std::to_string(qk.K) +
+          " and this container's head_dim is " + std::to_string(hd) +
+          ". The Q operand of a score is one head, so K is the head width padded "
+          "UP to the design's tile_k -- never down to a head, and never a value a "
+          "head does not divide.");
+    if (av.N < hd)
+      throw std::runtime_error(artifacts + "/gemm_rtp: attn_av's N is " +
+                               std::to_string(av.N) + " and a head is " +
+                               std::to_string(hd) +
+                               " wide. The design pads this one UP to its own N "
+                               "granularity, never down to a head.");
+    if (sm_ && sm_->cols() != qk.N)
+      throw std::runtime_error(
+          artifacts + "/softmax has rows " + std::to_string(sm_->cols()) +
+          " wide and the attn streams' score row is " + std::to_string(qk.N) +
+          ". The softmax design reduces along the whole row, so it has to be the "
+          "width of the score row it is handed.");
+    attn_ = std::make_unique<npue::whisper::NpuAttention>(*design_, *pool_,
+                                                         qk.N, hd, av.N);
+    attn_->set_streams(static_cast<size_t>(qk.slot),
+                       static_cast<size_t>(av.slot), qk.M, qk.K);
+    attn_->set_softmax(sm_.get());
+    // A ViT's encoder attends over every position it was given and there is no
+    // padding to mask -- geom_.n_pos is the whole image, CLS included. So no
+    // additive mask here, which is why set_additive_mask is never called: null
+    // is the class's own default, not an oversight.
+    attn_->alloc_buffers();
+    ops_.push_back("attn  at slots " + std::to_string(qk.slot) + "/" +
+                   std::to_string(av.slot) + ", M " + std::to_string(qk.M) +
+                   ", K " + std::to_string(qk.K) + ", score row " +
+                   std::to_string(qk.N) + ", context " + std::to_string(av.N));
+  }
   enc_.set_layernorm(ln_.get());
   enc_.set_gelu(gelu_.get());
+  enc_.set_attention(attn_.get());
+  enc_.set_softmax(sm_.get());   // read only when attention is on the host
 
   staged_ = enc_.stage_all();
 
@@ -273,7 +353,13 @@ Prediction Session::classify(const npue::vit::Image &im) {
   t = app::now_s();
   enc_.classify(h, r.logits);
   r.head_s = app::now_s() - t;
-  r.n_dispatch = enc_.gemm().n_dispatch;
+  // GEMMs plus the two attention GEMMs when `attn` asked for them. One number
+  // for both because they are the same kind of work on the same xclbin -- the
+  // field is not "the four layer GEMMs", it is how many times the array was
+  // asked to multiply, and an `attn` run that reported 49 while dispatching
+  // 49+2*12*n_pos would be reporting a number no reader can reconcile with the
+  // time beside it.
+  r.n_dispatch = enc_.gemm().n_dispatch + enc_.attn_dispatch();
   r.n_elt_dispatch = enc_.elt_dispatch();
 
   // The argmax, and then the softmax over the FULL logit row -- the max is
@@ -356,11 +442,12 @@ std::string prediction_json(const Prediction &p, const std::string &label_name,
     o += "]";
   }
   // Two dispatch counts, because they are two different questions. `dispatches`
-  // is the 49 GEMMs and is what it has always been; `elt_dispatches` is the
-  // elementwise designs, and it is 0 on a run that asked for none -- which is
-  // what makes the field worth carrying. A single number would have to be 49 on
-  // a run that made 49+25+12=86, and 49 is a true answer to a different
-  // question, not a true count of the work.
+  // is the layer GEMMs plus, when `attn` is on, attn_qk and attn_av -- 49 on a
+  // host run and 49 + 2*12*n_pos on an array one, because both are GEMMs on the
+  // same xclbin. `elt_dispatches` is the sibling elementwise designs, and it is
+  // 0 on a run that asked for none -- which is what makes the field worth
+  // carrying: a `--npu-ops softm` run that reported 0 there would be reporting
+  // that the flag moved nothing, which is exactly the claim it must not make.
   o += ", \"front_end_s\": " + pnum(p.front_end_s) +
        ", \"encoder_s\": " + pnum(p.encoder_s) +
        ", \"head_s\": " + pnum(p.head_s) +

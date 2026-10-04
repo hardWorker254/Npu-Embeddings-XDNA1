@@ -91,6 +91,15 @@ TOOLSET = [
     ("verify_design_numerics", "verify/verify_design_numerics.py",
      "does a design set COMPUTE what it claims to (needs the NPU)",
      ("numpy", "npu", "designs")),
+    # The registry gate. It pins what all 40 (code x architecture) cells say --
+    # the registry's own shape, all four GENERATED documents against it, the
+    # C++ table against the Python one -- and then runs every cell against the
+    # binary, so a cell that says `honours` and does not dispatch fails it.
+    # The needs are the union of those two halves: the documents need no
+    # device, the 40 runs need the built binary, a container and a design set.
+    ("verify_npu_op_matrix", "verify/verify_npu_op_matrix.py",
+     "every code against every architecture: registry, docs, C++ table, binary",
+     ("npu", "runtime", "container", "designs")),
     ("verify_whisper_tokenizer", "verify/verify_whisper_tokenizer.py",
      "the Whisper tokenizer three ways: C++, reference, HuggingFace",
      ("numpy", "transformers")),
@@ -260,7 +269,15 @@ GATE_TIERS = {
     # returns the RIGHT tensor needs the model directory beside it.
     "container": ("verify_onnx_reader", "verify_npue", "verify_pack_parity",
                   "verify_npue_nomic", "verify_vit"),
-    "npu": ("verify_design_numerics", "verify_whisper_model"),
+    # verify_npu_op_matrix is here rather than in "cheap" for the same reason
+    # verify_design_numerics is: it runs every registry cell against the BINARY,
+    # so it needs the build and the device, and its other claims (the registry's
+    # shape, all four generated documents, the C++ table) are the ones that keep
+    # NPU_OPS*.md and NPU_MODELS*.md from drifting from the code. A gate that
+    # pins what every cell says about every architecture and is not in the list
+    # that gets run is a gate that is only run by hand, which is not a gate.
+    "npu": ("verify_design_numerics", "verify_whisper_model",
+            "verify_npu_op_matrix"),
     "whisper": ("verify_whisper_tokenizer", "verify_whisper_features",
                 "verify_whisper_cli", "verify_whisper"),
     # verify_serve_dispatch is here rather than under "release" because it needs no

@@ -50,16 +50,34 @@
 // kinds.cls exactly as they do for kinds.stt. So the two codes below are real
 // per-op host/array choices and the flag says so.
 //
-// SOFTMAX IS NOT, and no export will make it so. A transformer's softmax is
-// inside its attention: moving it alone means shipping the whole seq x seq score
-// matrix to the array and back for one elementwise pass, and the two GEMMs that
-// bracket it (QK^T and softmax.V) are what would actually be worth sending --
-// they are the `attn` code, which adds attn_qk / attn_av instruction streams to
-// the gemm_rtp set, and kinds.cls does not carry them. It would also be a
-// measurement where this repository has none: npu_targets.json says outright
-// that no attention measurement above seq 64 exists here and a ViT has 197
-// positions. So `softm` is refused by name, with that reason, rather than
-// accepted and left to do nothing.
+// SOFTMAX IS A PER-OP CHOICE AS WELL, and it was not always one. The sentence
+// that used to live here refused it by name on the grounds that shipping the
+// seq x seq score matrix to the array and back for one elementwise pass could
+// only lose against a host softmax that never crosses a bus at all. That
+// argument predicted the SIGN and got the MAGNITUDE wrong in a way that had to
+// be measured rather than argued: on vit-base-patch16-224 (197 positions, 12
+// layers, 12 heads) the host encoder takes 0.244 s and --npu-ops softm takes
+// 0.822 s for exactly 12 dispatches, because the design fills its whole row
+// capacity on every one of them whether this model has 2364 score rows to
+// normalise or the kernel was built for 12288. The array is 3.4x slower here,
+// the same direction as the argument and not the same size as it.
+//
+// What the argument also got wrong was that this is a *choice* with nothing to
+// move: kinds.cls's attn_qk/attn_av streams exist now (resolve.py consults the
+// registry for every kind, not only stt), so the two GEMMs bracketing the
+// softmax are the separate `attn` code, and a run may take one, the other, or
+// both. NpuAttention runs the three phases when both are asked for and hands
+// the score row to this operator between its own two dispatches; with `softm`
+// alone the GEMMs stay on the host and only the score row crosses. A score row
+// is padded to the design's width with -1.0e30f, a value the exp() underflows
+// to zero and the row max never picks up, so the padding is not a term in any
+// normalisation this pass produces.
+//
+// The throughput claim above seq 64 is a measurement now rather than a hole:
+// the array's attention came out SLOWER than the host at 197 positions (0.349 s
+// against 0.244 s of encoder), which is the same story the embedders told at
+// their own sequence lengths. These codes make the model RUN on the array, not
+// run faster on it.
 //
 // SPDX-License-Identifier: Apache-2.0
 //===----------------------------------------------------------------------===//
@@ -76,6 +94,7 @@
 #include "vit/geometry.hpp"
 #include "whisper/eltwise.hpp"    // NpuEltwise, the two elementwise designs
 #include "whisper/npu_ops.hpp"   // NpuGemm, layernorm_rows, gelu_erf_inplace, attention
+#include "whisper/attention_npu.hpp"  // NpuAttention -- attn as two GEMMs
 
 namespace npue::vit {
 
@@ -117,11 +136,28 @@ public:
   // than inherited.
   void set_layernorm(npue::whisper::NpuEltwise *ln) { ln_ = ln; }
   void set_gelu(npue::whisper::NpuEltwise *gelu) { gelu_ = gelu; }
+  // Attention as two GEMMs on the set's own attn_qk/attn_av slots. Null is the
+  // host pass -- a real path and not a fallback. Installed by the classify
+  // wrapper only after the same geometry checks Whisper makes, so a set that
+  // cannot carry this shape never reaches the loop below.
+  void set_attention(npue::whisper::NpuAttention *a) { attn_ = a; }
+  // The softmax design, for `softm` WITHOUT `attn`. When attention itself is on
+  // the array the two GEMMs carry the softmax with them inside NpuAttention and
+  // this pointer is unused there; it is the host attention below that reads it,
+  // and it takes the score row wide enough for the kernel.
+  void set_softmax(npue::whisper::NpuEltwise *s) { softm_ = s; }
 
   // True when that pass is on the array. Read by the status block so the block
   // reports where a thing actually ran rather than what was requested.
   bool layernorm_on_array() const { return ln_ != nullptr; }
   bool gelu_on_array() const { return gelu_ != nullptr; }
+  // True when THIS encoder will put the softmax on the array -- which it does
+  // only when attention itself is on the host, because NpuAttention takes the
+  // same operator through its own set_softmax() and runs it between its two
+  // GEMMs. `attn` alone therefore still normalises on the host and is not
+  // reported as a softm run; `attn,softm` puts it on the array here too, so
+  // the pointer is the single source for both questions.
+  bool softmax_on_array() const { return softm_ != nullptr; }
 
   // The elementwise dispatches this encoder made. Reported as its own number
   // rather than added into the GEMM's, because they answer a different question:
@@ -133,8 +169,17 @@ public:
   // before any image has been classified and per-image timings already come back
   // in the result -- so an accessor would be a public number with no reader.
   int64_t elt_dispatch() const {
-    return (ln_ ? ln_->n_dispatch : 0) + (gelu_ ? gelu_->n_dispatch : 0);
+    return (ln_ ? ln_->n_dispatch : 0) + (gelu_ ? gelu_->n_dispatch : 0) +
+           (softm_ ? softm_->n_dispatch : 0);
   }
+
+  // The two attention GEMMs, counted apart from the 49 and added back by the
+  // caller. Reading it here rather than inside elt_dispatch() is deliberate:
+  // attn_qk and attn_av are GEMMs on gemm_rtp's own slots, so they belong in
+  // `dispatches` and not in `elt_dispatches` -- a softmax design is a separate
+  // xclbin and these two are not. `reset_timers()` drains it, so the number is
+  // this classify's and not this process's.
+  int64_t attn_dispatch() const { return attn_ ? attn_->n_dispatch : 0; }
 
   // Stage every operand, every LayerNorm and the two front-end tables. Returns
   // the bytes staged, for the status line.
@@ -185,6 +230,8 @@ private:
   npue::whisper::NpuGemm g_;
   // The array's two elementwise designs, or null for host. See set_layernorm.
   npue::whisper::NpuEltwise *ln_ = nullptr, *gelu_ = nullptr;
+  npue::whisper::NpuAttention *attn_ = nullptr;
+  npue::whisper::NpuEltwise *softm_ = nullptr;
   app::Pool &pool_;
   Geometry geom_;
   EncoderStreams streams_;

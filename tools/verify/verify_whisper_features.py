@@ -69,6 +69,12 @@ def build_exe(path):
     if (XRT / "include" / "xrt" / "xrt_device.h").exists():
         srcs += [
             str(REPO / "runtime" / "src" / "whisper" / "npu_ops.cpp"),
+            # eltwise.cpp rides along because npu_ops.cpp's attention() calls
+            # NpuEltwise::softmax() when a softmax design is handed to it. It
+            # used to be reachable from this harness only as an undefined
+            # reference, which is why the link -- not the gate -- was what
+            # reported the problem.
+            str(REPO / "runtime" / "src" / "whisper" / "eltwise.cpp"),
             str(REPO / "runtime" / "src" / "whisper" / "fft_npu.cpp"),
             str(REPO / "runtime" / "src" / "whisper" / "mel_proj.cpp"),
             str(REPO / "runtime" / "src" / "device.cpp"),

@@ -93,7 +93,13 @@ inline const std::vector<NpuOp> &npu_op_table() {
       // gemm_rtp_dec directories rather than beside them. At run time the
       // streams are either in design.json or they are not, and asking for this
       // code when they are not is refused by name.
-      {"attn", "", "Whisper's attention, as GEMMs"},
+      // Model-neutral, and the two files must say the same thing: this same
+      // NpuAttention now dispatches for BERT, ViT and gemma as well as
+      // Whisper, so a long name that says "Whisper's" would be printed in
+      // their status lines as a claim about the wrong model. The provenance
+      // is in each cell's reason in tools/lib/npu_ops.py, which is where a
+      // reader looks for it.
+      {"attn", "", "attention, as two GEMMs"},
       {"mproj", "", "Whisper's mel filter bank, as a GEMM"},
       {"fft", "", "Whisper's 400-point transform, as a GEMM"},
       {"logit", "", "the vocabulary projection, as a GEMM"},
@@ -147,7 +153,8 @@ inline std::set<std::string> parse_npu_ops(const std::string &list) {
           "--npu-ops: '" + code +
           "' is not an op this build knows. Valid codes: [" + npu_op_codes() +
           "] (layn = LayerNorm, softm = softmax, gelu = GELU, conv = Whisper's "
-          "conv1/conv2, attn = Whisper's attention as GEMMs, mproj = the mel "
+          "conv1/conv2, attn = attention as two GEMMs (QK^T and softmax.V), "
+          "mproj = the mel "
           "filter bank as a GEMM, fft = the 400-point transform as a GEMM, "
           "logit = the vocabulary projection as a GEMM). "
           "Nothing listed means every op runs on the host, which is the "

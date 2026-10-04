@@ -190,6 +190,12 @@ void VitEncoder::reset_timers() {
   g_.n_dispatch = 0;
   g_.t_dispatch = 0.0;
   g_.t_convert = 0.0;
+  // The attention's too, by draining rather than assigning: NpuAttention
+  // accumulates across images and take_timers() is its read-and-zero. Leaving
+  // it undrained would print the FIRST image's attention dispatches after the
+  // fifth image and the sum of all five after the fifth -- a count that grows
+  // while the work it describes does not.
+  if (attn_) attn_->take_timers();
 }
 
 std::vector<float> VitEncoder::run(const std::vector<float> &patches) {
@@ -299,12 +305,25 @@ std::vector<float> VitEncoder::run(const std::vector<float> &patches) {
   std::vector<float> proj(static_cast<size_t>(rows) * d);
   std::vector<float> up(static_cast<size_t>(rows) * inter);
   std::vector<float> down(static_cast<size_t>(rows) * d);
-  // The host score matrix, n_pos * heads * n_pos: 197*12*197 = 466 k floats,
-  // 1.9 MB. Attention is a host pass because `kinds.cls` lists no attn streams
-  // -- and this repository has no measurement of array attention at this width,
-  // so the choice is stated rather than justified by a number.
-  std::vector<float> scores(static_cast<size_t>(geom_.n_pos) * geom_.heads *
-                            geom_.n_pos, 0.f);
+  // The host score matrix. Only when the host path will READ it: on the array
+  // QK^T writes its own scratch, so this buffer would be allocated, sized and
+  // never touched. An earlier version of this comment said attention was a host
+  // pass because kinds.cls listed no attn streams -- that described the export
+  // rather than the model, and the streams are built for kinds.cls now.
+  //
+  // The ROW STRIDE is the softmax design's width and not n_pos, when `softm`
+  // asked for the array: that kernel reduces over its whole row, so the row it
+  // is handed has to BE its whole width. n_pos is 197 and the design is built
+  // at n_kv = 384 (197 padded to tile_n*cols = 192), which makes this buffer
+  // 197*12*384 = 908 k floats, 3.6 MB rather than 1.9 MB -- and the columns
+  // past 197 are filled with -1e30 inside attention() so they contribute
+  // nothing to the denominator. Without `softm` there is no such kernel and the
+  // rows are n_pos wide, which is what the host pass has always used.
+  const int64_t score_stride = softm_ ? softm_->cols() : geom_.n_pos;
+  std::vector<float> scores(
+      attn_ ? 0
+            : static_cast<size_t>(geom_.n_pos) * geom_.heads * score_stride,
+      0.f);
 
   // The attention scale is inside the Q weight and the Q bias unless the
   // container was packed with --no-fold-scale. Applying it here as well would
@@ -326,14 +345,28 @@ std::vector<float> VitEncoder::run(const std::vector<float> &patches) {
                 qkv_all.begin() + r0 * 3 * d);
     });
     // The fused [Q|K|V] row is Q at offset 0 and a K|V block at offset d, both
-    // with row stride 3*d_model -- the same layout the Whisper encoder reads,
-    // and the same `attention()` call, because it is the same function on the
-    // same bytes. There is NO mask: a ViT's encoder attends over every position
-    // it was given, and every position is a real one.
-    npue::whisper::attention(qkv_all.data(), 3 * d, qkv_all.data() + d, 3 * d,
-                              geom_.n_pos, geom_.n_pos, d, geom_.heads,
-                              geom_.head_dim, scale, ctx.data(), scores.data(),
-                              pool_);
+    // with row stride 3*d_model -- the same layout the Whisper encoder reads.
+    // There is NO mask: a ViT's encoder attends over every position it was
+    // given, and every position is a real one, so set_additive_mask is never
+    // called and the class's null default is the right answer.
+    //
+    // The two paths write the same `ctx`, and the host one below is not a
+    // fallback for the array one: it is the reference the array one is measured
+    // against. On the array the score matrix below is not used at all -- QK^T
+    // writes its own buffer and NpuAttention reads it back -- which is why it
+    // is only allocated when the host path will read it.
+    if (attn_) {
+      attn_->run(qkv_all.data(), 3 * d, qkv_all.data() + d, 3 * d,
+                 geom_.n_pos, geom_.n_pos, d, scale, ctx.data());
+    } else {
+      // `softm_` only when it was asked for: it splits this into QK^T, the
+      // softmax on the array, and softmax.V, and moves exactly that one op --
+      // the two GEMMs stay on the host, because moving them is `attn`.
+      npue::whisper::attention(qkv_all.data(), 3 * d, qkv_all.data() + d, 3 * d,
+                               geom_.n_pos, geom_.n_pos, d, geom_.heads,
+                               geom_.head_dim, scale, ctx.data(), scores.data(),
+                               pool_, softm_, score_stride);
+    }
     chunks(geom_.n_pos, [&](int64_t r0, int64_t r1) {
       const int64_t n = r1 - r0;
       g_.run(streams_.attn_out, ctx.data() + r0 * d, n, rows, d, ao_[L].slot,

@@ -125,6 +125,20 @@ KNOWN_MODEL_KEYS = {
     "kind", "hidden", "intermediate", "gated_ffn", "qkv_n", "datapath",
     "overrides", "heads", "head_dim", "enc_layers", "dec_layers", "mel_bins",
     "frames", "max_target",
+    # The context this model's CONTAINER was packed for, and the width of one
+    # attention head -- the two numbers the attn_qk/attn_av streams are built
+    # from for every kind that honours `attn` (`frames` covers kind stt, whose
+    # window is audio; this covers an embedder's, whose is token positions).
+    #
+    # It is deliberately NOT the checkpoint's max_position_embeddings. The
+    # exporter cannot see the container, and the two genuinely differ: every
+    # shipped embedder is packed to 256 positions whatever its config declares
+    # (nomic 2048, gte 8192) because the packer preslices, so a target read from
+    # config.json would ask for a panel wider than the tensor it addresses.
+    # `sliding_window` is gemma's third number and is not optional next to it:
+    # that model's attention is BANDED, so n_kv is the window rather than the
+    # packed context, and an entry carrying neither cannot be exported honestly.
+    "max_seq_len", "sliding_window",
     # The vocabulary size, which is the number of columns the tied-embedding
     # projection is chunked into. It is the CONTAINER's vocab_size, and a target
     # that pins a different one would build chunks for the wrong vocabulary.

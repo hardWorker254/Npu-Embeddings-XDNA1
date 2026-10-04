@@ -13,6 +13,7 @@
 #include "encoders/gemma_kernels.hpp"
 #include "runtime/model.hpp"
 #include "tokenizers/tokenizer_facade.hpp"
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -125,6 +126,11 @@ int64_t BertEncoder::use_tier(int64_t want) {
   is_ao = tier_slots[pick][1];
   is_fu = tier_slots[pick][2];
   is_fd = tier_slots[pick][3];
+  // Attention follows the tier. Null here is the host path -- not an oversight:
+  // a tier whose set carries no attn_qk/attn_av is a tier that was exported
+  // without the code, and load-time refuses that combination by name rather
+  // than letting it silently drop to the host per tier.
+  attn_ = pick < attns.size() ? attns[pick] : nullptr;
   return batch;
 }
 
@@ -134,6 +140,16 @@ void BertEncoder::reset_timers() {
   t_hostln = t_hostsm = t_hostgelu = 0.0;
   t_conv = t_in = t_disp = t_out = t_bias = 0.0;
   n_dispatch = 0;
+  // NpuAttention times itself, and those counters are ADDED into t_qk/t_av
+  // above -- so they are accumulators across every request since the last
+  // reset, not per-request values. Leaving them running makes the status block
+  // print a QK^T larger than the attention total it is a sub-item of, which is
+  // the one inconsistency this block is not allowed to have.
+  for (auto *a : attns) {
+    a->t_qk = 0.0;
+    a->t_av = 0.0;
+    a->n_dispatch = 0;
+  }
 }
 
 template <typename F>
@@ -392,16 +408,20 @@ void BertEncoder::layer_norm_cpu(std::vector<float> &x, size_t site) {
 
 void BertEncoder::add_additive_mask(std::vector<float> &scores) {
   const int64_t rows_per_seq = g_heads * g_seq;
-  const int64_t n_rows = static_cast<int64_t>(scores.size()) / g_seq;
+  const int64_t n_rows = static_cast<int64_t>(scores.size()) / sc_cols;
   pool_.run([&](int w, int nw) {
     for (int64_t r = w; r < n_rows; r += nw) {
-      float *row = scores.data() + r * g_seq;
+      float *row = scores.data() + r * sc_cols;
       const float *mk = add_mask.data() + (r / rows_per_seq) * g_seq;
       for (int64_t j = 0; j < g_seq; ++j) row[j] += mk[j];
     }
   });
 }
 
+// Only ever called with host_sm set, and run() makes sc_cols == g_seq exactly
+// then, so every stride below is the row's true width. The array branch uses
+// add_additive_mask() + eltwise() instead, at sc_cols, with the padded tail
+// already in the row.
 void BertEncoder::softmax_cpu(std::vector<float> &scores) {
   double t0 = now_s();
   const int64_t n_rows = static_cast<int64_t>(scores.size()) / g_seq;
@@ -890,7 +910,11 @@ void BertEncoder::qk_impl(const std::vector<float> &qkvbuf,
       const int64_t b = p / g_heads, h = p % g_heads;
       for (int64_t i = 0; i < g_seq; ++i) {
         const float *q = &qkv_p[(b * g_seq + i) * 3 * g_hidden + h * g_head_dim];
-        float *dst = &sc_p[(p * g_seq + i) * g_seq];
+        // At `sc_cols`, not g_seq: see run() for the two widths. The columns
+        // past g_seq are filled with -1.0e30 below rather than left stale, and
+        // std::fill of an empty range when the two are equal costs nothing, so
+        // the host-softmax run is byte for byte what it was.
+        float *dst = &sc_p[(p * g_seq + i) * sc_cols];
 #if defined(__AVX512F__)
         const int64_t nv = NV ? NV : g_head_dim / 8;
         const int64_t nz = nv / 2;
@@ -926,6 +950,9 @@ void BertEncoder::qk_impl(const std::vector<float> &qkvbuf,
           dst[j] = s;
 #endif
         }
+        // The padding column, only when the array's softmax is what will read
+        // this row and it was compiled wider than the sequence.
+        std::fill(dst + g_seq, dst + sc_cols, -1.0e30f);
       }
     }
   });
@@ -951,7 +978,9 @@ void BertEncoder::av_impl(const std::vector<float> &scores,
     for (int64_t p = w; p < pairs; p += nw) {
       const int64_t b = p / g_heads, h = p % g_heads;
       for (int64_t i = 0; i < g_seq; ++i) {
-        const float *a = &sc_p[(p * g_seq + i) * g_seq];
+        // At the score row's own stride -- the padded tail is not a key and is
+        // not read; av() stops at g_seq regardless of how wide the row is.
+        const float *a = &sc_p[(p * g_seq + i) * sc_cols];
         float *o = &ctx_p[(b * g_seq + i) * g_hidden + h * g_head_dim];
 #if defined(__AVX2__)
 #if defined(__AVX512F__)
@@ -1010,6 +1039,52 @@ void BertEncoder::av(const std::vector<float> &scores,
     case 64: av_impl<8>(scores, qkv, ctx); break;
     default: av_impl<0>(scores, qkv, ctx); break;
   }
+}
+
+// QK^T, softmax and softmax.V as two GEMMs on the set's attn_qk/attn_av
+// streams, ONE CALL PER SEQUENCE.
+//
+// Per sequence, and that is forced by the hardware rather than chosen: attn_qk's
+// B operand is ONE K panel of [head_dim, n_kv], shared by every query row the
+// dispatch computes. A batched call would therefore hand every sequence the
+// keys of whichever sequence's rows the panel was built from -- sequence 0's --
+// and produce plausible scores for a model that never existed. There is no
+// arrangement of one [head_dim, n_kv] panel that serves sixteen sequences, so
+// the loop is the contract and not an inconvenience.
+//
+// The per-sequence mask rides along: set_additive_mask() is given this
+// sequence's own row, so a padded position attends to nothing exactly as the
+// host path's add_additive_mask() makes it.
+void BertEncoder::attention_npu(const std::vector<float> &qkv,
+                                std::vector<float> &ctx) {
+  const int64_t stride = 3 * g_hidden;
+  const int64_t row = stride * g_seq;
+  const float *qkvp = qkv.data();
+  const bool masked = add_mask.size() >= static_cast<size_t>(batch * g_seq);
+  for (int64_t b = 0; b < batch; ++b) {
+    const float *base = qkvp + b * row;
+    // Scale 1.0: the packer folded 1/sqrt(head_dim) into Q's weight and bias
+    // (the container records qk_scale_folded_into_q), which is why the host qk()
+    // above applies no scale either. Passing a real 1/sqrt(head_dim) here would
+    // fold it twice and compute a different model -- the failure
+    // whisper::attention documents for the same flag.
+    attn_->set_additive_mask(masked ? add_mask.data() + b * g_seq : nullptr);
+    // kv = the row plus d_model, so K lands at 0 and V at d_model -- the layout
+    // NpuAttention's panels read, and the same one whisper::attention's contract
+    // states. BERT's qkv is Q|K|V with each part g_hidden wide.
+    attn_->run(base, stride, base + g_hidden, stride, g_seq, g_seq, g_hidden,
+               1.0f, ctx.data() + b * g_seq * g_hidden);
+  }
+  // QK^T, A*V and the dispatch count are TAKEN, not read: the class accumulates
+  // across the layers while this method is called once per layer, so adding the
+  // current value each time sums 1+2+...+N calls' worth. Measured: the status
+  // block printed 293 ms of QK^T for 87 ms of attention that actually ran,
+  // under a 192 ms attention total -- two sub-items of a block, larger than the
+  // block, in the one display not allowed to be self-contradictory.
+  const auto tu = attn_->take_timers();
+  n_dispatch += static_cast<int>(tu.dispatch);
+  t_qk += tu.qk;
+  t_av += tu.av;
 }
 
 void BertEncoder::add_into(std::vector<float> &x, const std::vector<float> &y) {
@@ -1258,7 +1333,38 @@ std::vector<float> BertEncoder::run(const std::vector<float> &emb_in) {
   up.resize(rows * (g_gated_ffn ? 2 : 1) * g_ffn);
   if (g_gated_ffn) gated.resize(rows * g_ffn);
   down.resize(rows * g_hidden);
-  scores.resize(batch * g_heads * g_seq * g_seq);
+  // The row stride of `scores`, and why it is not simply g_seq.
+  //
+  // The host's own qk_impl writes one score row per (sequence, head, query
+  // position) and that row is g_seq wide -- the real key count, unpadded. The
+  // softmax design is built for the PADDED key count (resolve.py sets sm_cols =
+  // n_kv; 64 -> 384 for bge-base), because NpuAttention, the design's other
+  // consumer, pads its score rows to the kernel's own width. So when the array
+  // takes the softmax but NOT the attention, the two widths disagree -- and
+  // elt_chunks does not catch it, because its only guard is `n % cols != 0` and
+  // batch*heads*g_seq*g_seq is a multiple of 384 anyway. Measured on bge-base:
+  // the kernel normalised 384-element windows, six real score rows at a time,
+  // and the embedding came back at relfro 7.08e-01 / cos 0.749237895 against the
+  // host. With `attn,softm` the same design is correct (relfro 1.9e-02), because
+  // NpuAttention lays the rows out at the width it was built for.
+  //
+  // The pad is -1.0e30 and not zero, for the same reason NpuAttention pads the
+  // way it does: exp(-1e30 - rowmax) underflows to0, so a padded column is a 0
+  // term in the row's sum, and av() stops at g_seq so it never reads one. A zero
+  // would be a real key attending to everything.
+  sc_cols = g_seq;
+  if (!host_sm) {
+    const int64_t want = softmax_.info().cols;
+    if (want < g_seq)
+      throw std::runtime_error(
+          "softmax/ was built with cols " + std::to_string(want) +
+          " but this container's sequence is " + std::to_string(g_seq) +
+          " wide. The design normalises whatever row width it was compiled for "
+          "and cannot be handed a longer one, so the scores would be computed "
+          "at the wrong length. Re-export it with sm_cols >= seq.");
+    sc_cols = want;
+  }
+  scores.resize(batch * g_heads * g_seq * sc_cols);
 
   residual.resize(x.size());
   bool qkv_a_ready = false;
@@ -1271,20 +1377,29 @@ std::vector<float> BertEncoder::run(const std::vector<float> &emb_in) {
     qkv_a_ready = false;
     if (g_rope) apply_rope_qkv(qkvbuf);
 
-    double ta = now_s();
-    qk(qkvbuf, scores);
-    t_attn += now_s() - ta; t_qk += now_s() - ta;
-
-    if (host_sm) {
-      softmax_cpu(scores);
+    // Attention, on whichever path --npu-ops attn named. Both paths write the
+    // same `ctx`, and the host one below is not a fallback for the array one:
+    // it is the reference the array one is measured against.
+    if (attn_) {
+      double ta = now_s();
+      attention_npu(qkvbuf, ctx);
+      t_attn += now_s() - ta;
     } else {
-      add_additive_mask(scores);
-      eltwise(softmax_, slots_sm, scores.data(), scores.size());
-    }
+      double ta = now_s();
+      qk(qkvbuf, scores);
+      t_attn += now_s() - ta; t_qk += now_s() - ta;
 
-    ta = now_s();
-    av(scores, qkvbuf, ctx);
-    t_attn += now_s() - ta; t_av += now_s() - ta;
+      if (host_sm) {
+        softmax_cpu(scores);
+      } else {
+        add_additive_mask(scores);
+        eltwise(softmax_, slots_sm, scores.data(), scores.size());
+      }
+
+      ta = now_s();
+      av(scores, qkvbuf, ctx);
+      t_attn += now_s() - ta; t_av += now_s() - ta;
+    }
 
     gemm(attn_out_, is_ao, ctx, s_ao[L], b_ao[L], proj, g_hidden,
          i8w(ws_ao, L), i8w(as_ao, L));

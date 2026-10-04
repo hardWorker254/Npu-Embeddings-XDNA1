@@ -312,66 +312,116 @@ def resolve_args(args: argparse.Namespace) -> list[ResolvedArch]:
         ns.sm_cols = None
         ns.sm_rows = args.sm_rows
         ns.sm_variant = args.sm_variant
-        if model_spec.get("kind") == "stt":
-            # Padded to the LEAST COMMON MULTIPLE of the two tiles, not to
-            # tile_n alone: attn_qk's N only has to divide by tile_n, but
-            # attn_av's K is the same n_kv and has to divide by tile_k as well,
-            # and 1500 rounds to 1504 against 32 -- which attn_av cannot tile.
-            # 1536 is the number both of them accept.
+
+        # EVERY code this model honours, built unconditionally. There is no
+        # longer a flag that could ask for one and not another, so this asks the
+        # registry instead of the command line. It reads the row for THIS model
+        # -- kind AND target name, because gemma's row differs from its kind's --
+        # and every geometry below is derived from what that row says is
+        # applicable, not from which kind this is. The `kind == "stt"` gate this
+        # replaced only ever asked the registry about Whisper; the codes it
+        # answered for were stt's, so the gate was equivalent to hardcoding
+        # "only Whisper has ops".
+        kind = model_spec.get("kind", "gemm_rtp")
+        reg = npu_ops.registry_for(kind, args.target)
+        honours = {c for c, (status, _) in reg.items()
+                   if status == npu_ops.HONOURS}
+
+        # n_kv: the widest key count this model's CONTAINER can hold, padded to
+        # the LEAST COMMON MULTIPLE of the two tiles -- attn_qk's N only has to
+        # divide by tile_n, but attn_av's K is the same n_kv and has to divide by
+        # tile_k as well, and 1500 rounds to 1504 against a 64 step, which
+        # attn_av cannot tile. 1536 is the number both of them accept.
+        #
+        # Whisper's source is `frames` because it attends over its whole audio
+        # window. An embedder has no such key: it attends over token positions,
+        # so its n_kv is the context the container was PACKED for -- which is not
+        # the checkpoint's max_position_embeddings. all-MiniLM-L6-v2 declares
+        # 512 positions in config.json, but its container carries max_seq_len
+        # 256 because the packer preslices the position table to 256: reading
+        # config.json here would build a design 512 wide over a tensor that
+        # cannot address past 256. The container is the authority on its own
+        # geometry.
+        #
+        # gemma is the one model whose widest span is NOT its window: its
+        # attention is banded by sliding_window (512, every 6th layer), so a
+        # token at position 2048 never sees position 0. NpuAttention masks a
+        # SUFFIX of the score row -- the padding past the sequence -- and a band
+        # is not a suffix, so n_kv is the window and the runtime refuses a
+        # longer sequence rather than computing full attention where the model
+        # computes local attention. The container already records this limit:
+        # "sliding-window mask (exact for seq_len<=512)".
+        n_kv_src = model_spec.get("frames") if kind == "stt" else \
+            model_spec.get("max_seq_len")
+        if kind == "gemm_rtp" and (model_spec.get("sliding_window") or
+                                  (args.target or "") == "embeddinggemma-300m"):
+            n_kv_src = model_spec.get("sliding_window") or n_kv_src
+        n_kv = None
+        if n_kv_src is not None:
             import math as _math
             step = _math.lcm(int(ns.n), int(ns.k))
-            n_kv = -(-int(model_spec.get("frames", 1500)) // step) * step
+            n_kv = -(-int(n_kv_src) // step) * step
 
-            # EVERY code this model honours, built unconditionally. There is no
-            # longer a flag that could ask for one and not another, so this block
-            # asks the registry instead of the command line -- and the registry
-            # says all eight are `honours` for kind stt, which is why it reads as
-            # a straight line rather than four conditionals. Two of them carry a
-            # validation that used to be reachable only by asking for them:
-            # `logit` needs the model's vocab, and `softm` needs a row as wide as
-            # the score matrix. Those stay refusals, and they are the whole reason
-            # this cannot be "build whatever exists" -- a target without a vocab
-            # must fail the export rather than silently ship a decoder that cannot
-            # produce tokens.
-            reg = npu_ops.registry_for("stt", args.target)
-            honours = {c for c, (status, _) in reg.items() if status == npu_ops.HONOURS}
-
-            if "attn" in honours:
-                ns.attn_streams = npu_ops.GEMM_STREAMS["attn"]
-                ns.attn_geometry = (int(model_spec["head_dim"]), n_kv)
-            if "mproj" in honours:
-                # (n_bins, n_mels) of the slaney bank: 201 frequency bins, and
-                # the model's own mel count. Both belong to the front end, not
-                # to the encoder, which is why neither is an override.
-                ns.attn_streams = ns.attn_streams + npu_ops.GEMM_STREAMS["mproj"]
-                ns.mel_geometry = (201, int(model_spec["mel_bins"]))
-            if "fft" in honours:
-                # (n_fft, n_bins) of the front end's transform: Whisper's own
-                # 400 and its own 201 half-spectrum bins. Neither is an encoder
-                # number, which is why they are read here and not from
-                # overrides.
-                ns.attn_streams = ns.attn_streams + npu_ops.GEMM_STREAMS["fft"]
-                ns.fft_geometry = (400, 201)
-            if "logit" in honours:
-                if "vocab" not in model_spec:
-                    raise SystemExit(
-                        f"--target {args.target}: the logit design is the tied "
-                        f"embedding, so it needs the model's `vocab` (its "
-                        f"columns), and this target does not carry one. Add it "
-                        f"from the checkpoint's config.json.")
-                ns.logit_geometry = (int(model_spec["hidden"]),
-                                     int(model_spec["vocab"]),
-                                     len(npu_ops.GEMM_STREAMS["logit"]))
-            if "softm" in honours:
-                # A Whisper score row is n_kv wide, which kernels/softmax.cc
-                # cannot hold at 64 columns, so the width and the kernel travel
-                # together: asking for a wide row with the shipped variant is
-                # refused rather than quietly building a 64-column design.
-                ns.sm_cols = n_kv
-                ns.sm_variant = "wide"
-                # One attention dispatch is one QUERY CHUNK, so the softmax
-                # design needs the chunk and not the embedder's batch*heads*seq:
-                ns.sm_rows = int(ns.batch) * int(ns.seq)
+        # `attn` needs BOTH n_kv and head_dim, and both come from the target.
+        # A target carrying neither -- a targets file written before attn was
+        # buildable, or a hand-written one for a model someone is adding --
+        # used to abort the WHOLE export, which threw away every other code
+        # the registry honours over a geometry only one of them needs, and
+        # turned "no window for the attention design" into "nothing can be
+        # exported at all". Now it builds the rest and leaves attn_qk/attn_av
+        # out of the set, which is exactly what the exporter did before attn
+        # existed. It is a SKIP and not a refusal on purpose: what has to be
+        # loud is asking the resulting set for the code it does not carry, and
+        # that is where the runtime answers, by NAME, naming this cause among
+        # the others (run_setup.hpp). Nothing here silently answers `attn`
+        # from the host -- there is no set to dispatch on, so there is
+        # nothing to be quietly wrong about.
+        if "attn" in honours and n_kv is not None:
+            if "head_dim" not in model_spec:
+                raise SystemExit(
+                    f"--target {args.target}: the attn design needs the model's "
+                    f"`head_dim`, which is one head's width -- the GEMM's K for "
+                    f"attn_qk and its N for attn_av. Take it from the "
+                    f"checkpoint's config.json (hidden_size / num_attention_heads "
+                    f"where head_dim is absent)."
+                )
+            ns.attn_streams = npu_ops.GEMM_STREAMS["attn"]
+            ns.attn_geometry = (int(model_spec["head_dim"]), n_kv)
+        if "mproj" in honours:
+            # (n_bins, n_mels) of the slaney bank: 201 frequency bins, and
+            # the model's own mel count. Both belong to the front end, not
+            # to the encoder, which is why neither is an override.
+            ns.attn_streams = ns.attn_streams + npu_ops.GEMM_STREAMS["mproj"]
+            ns.mel_geometry = (201, int(model_spec["mel_bins"]))
+        if "fft" in honours:
+            # (n_fft, n_bins) of the front end's transform: Whisper's own
+            # 400 and its own 201 half-spectrum bins. Neither is an encoder
+            # number, which is why they are read here and not from
+            # overrides.
+            ns.attn_streams = ns.attn_streams + npu_ops.GEMM_STREAMS["fft"]
+            ns.fft_geometry = (400, 201)
+        if "logit" in honours:
+            if "vocab" not in model_spec:
+                raise SystemExit(
+                    f"--target {args.target}: the logit design is the tied "
+                    f"embedding, so it needs the model's `vocab` (its "
+                    f"columns), and this target does not carry one. Add it "
+                    f"from the checkpoint's config.json.")
+            ns.logit_geometry = (int(model_spec["hidden"]),
+                                 int(model_spec["vocab"]),
+                                 len(npu_ops.GEMM_STREAMS["logit"]))
+        if "softm" in honours and n_kv is not None:
+            # A score row is n_kv wide, which kernels/softmax.cc cannot hold at
+            # 64 columns, so the width and the kernel travel together: asking
+            # for a wide row with the shipped variant is refused rather than
+            # quietly building a 64-column design. Softmax is INSIDE attention
+            # for every model except Whisper, which is why n_kv is the width
+            # that matters and not the embedder's hidden.
+            ns.sm_cols = n_kv
+            ns.sm_variant = "wide"
+            # One attention dispatch is one QUERY CHUNK, so the softmax design
+            # needs the chunk and not the model's batch*heads*seq.
+            ns.sm_rows = int(ns.batch) * int(ns.seq)
         ns.ln_cols = _pick(args.ln_cols, model_spec.get("layer_norm_cols"),
                            model_spec.get("hidden"), defaults.get("hidden"),
                            FALLBACK_HIDDEN)

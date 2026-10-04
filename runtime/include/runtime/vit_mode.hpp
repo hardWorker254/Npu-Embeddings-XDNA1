@@ -118,7 +118,7 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
   // "1" and then trips over the second load.
   std::set<std::string> npu_ops;
 
-  // --npu-ops: TWO CODES ARE HONOURED AND SIX ARE REFUSED, each by name.
+  // --npu-ops: SIX CODES ARE HONOURED AND FOUR ARE REFUSED, each by name.
   //
   // `layn` and `gelu` are genuine per-op host/array choices here, and were not
   // for a while: the refusal below once said this architecture's design set
@@ -132,13 +132,6 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
   // The other six are refused, and the reasons are per code because they are not
   // one reason:
   //
-  //   softm  softmax is INSIDE attention. Moving it alone means shipping the
-  //          whole 197x197 score matrix to the array and back for one
-  //          elementwise pass. The two GEMMs that bracket it are what would be
-  //          worth sending, and those are `attn`.
-  //   attn   QK^T and softmax.V as GEMMs -- the `attn_qk`/`attn_av` instruction
-  //          streams Whisper's gemm_rtp carries and kinds.cls's does not. This is
-  //          a design change, not a flag.
   //   conv   Whisper's audio front end. A ViT's front end is decode, resize,
   //          normalise and im2col -- all host image work, not convolutions over
   //          a feature map, so there is nothing this code names.
@@ -149,17 +142,25 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
   //          tile_n*cols = 48*4 = 192, so no legal B panel of that width exists
   //          on this array (tools/pack/packers/vit.py's header has the long form).
   //
-  // And one measurement caveat that belongs here rather than only in the README:
-  // npu_targets.json says outright that this repository has no attention
-  // measurement above seq 64, and a ViT has 197 positions. `attn` would be a
-  // first.
+  // `attn` and `softm` were refused here too, and the sentence that refused them
+  // has since been retired because it described the export rather than the
+  // model: kinds.cls does not carry attn_qk/attn_av was true only until
+  // resolve.py's registry consult stopped being gated on kind == "stt". The
+  // streams are built for a cls container now, and the encoder dispatches
+  // through the same NpuAttention Whisper does -- one class, two branches.
+  //
+  // And one measurement note that belongs here rather than only in the README:
+  // the numbers for `attn` at these 197 positions are a measurement (0.349 s of
+  // encoder against 0.244 s of host, i.e. the array SLOWER), printed as such
+  // further down. They say what this container does; they are not a claim that
+  // the flag is worth taking for speed, and nothing here predicts a seq this
+  // machine has not been run at.
   {
     std::string listing;
     for (int i = 1; i < argc - 1; ++i)
       if (std::string(argv[i]) == "--npu-ops") listing = argv[i + 1];
     const std::set<std::string> codes = parse_npu_ops(listing);
-    const std::set<std::string> dead = {
-        "softm", "attn", "conv", "mproj", "fft", "logit"};
+    const std::set<std::string> dead = {"conv", "mproj", "fft", "logit"};
     std::vector<std::string> refused;
     for (const auto &c : codes)
       if (dead.count(c)) refused.push_back(c);
@@ -167,16 +168,11 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
       std::string seen;
       for (const auto &c : refused) { if (!seen.empty()) seen += ", "; seen += c; }
       std::string keep;
-      for (const auto &c : {"layn", "gelu"})
+      for (const auto &c : {"layn", "gelu", "attn", "softm"})
         if (codes.count(c)) { keep += keep.empty() ? c : ", " + std::string(c); }
       throw std::runtime_error(
           "--npu-ops " + seen + ": this architecture has no such "
-          "host/array choice to make. softm is softmax inside attention, and "
-          "moving it alone would ship the whole 197x197 score matrix to the "
-          "array and back for one elementwise pass; attn is the two GEMMs that "
-          "bracket it (attn_qk/attn_av instruction streams), which kinds.cls "
-          "does not carry and which npu_targets.json records as UNMEASURED "
-          "above seq 64 -- a ViT has 197 positions. conv, mproj and fft name "
+          "host/array choice to make. conv, mproj and fft name "
           "Whisper's audio front end, mel bank and transform. The one "
           "convolution this architecture has -- the patch embedding, "
           "Conv2d(3, d, kernel, stride=kernel) -- is ALREADY on the array: "
@@ -195,13 +191,19 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
     npu_ops = codes;
   }
 
-  // One hw_context per design set: gemm_rtp always, plus one each for `layn`
-  // and `gelu`. The two eltwise designs are siblings -- separate xclbins,
-  // separate contexts -- which is the cost this check exists to make visible,
-  // because it is the only price the flag has and the flag itself prints none.
+  // One hw_context per design set: gemm_rtp always, plus one each for a
+  // sibling eltwise design (`layn`, `gelu`, `softm`). The eltwise designs are
+  // siblings -- separate xclbins, separate contexts -- which is the cost this
+  // check exists to make visible, because it is the only price the flag has and
+  // the flag itself prints none.
+  //
+  // `attn` is NOT in the sum: its attn_qk/attn_av are instruction streams
+  // INSIDE gemm_rtp's own xclbin, so honouring it costs a slot and nothing
+  // else. Counting it would refuse a run whose actual context count is one.
   {
     const int want = 1 + static_cast<int>(npu_ops.count("layn")) +
-                     static_cast<int>(npu_ops.count("gelu"));
+                     static_cast<int>(npu_ops.count("gelu")) +
+                     static_cast<int>(npu_ops.count("softm"));
     if (want > 1 &&
         !npu::require_context_budget(npu::survey_contexts(), want,
                                      has("--allow-contention"), stderr))
@@ -443,15 +445,46 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
                 .c_str());
     elt_row("gelu", session.gelu_on_array(),
             "exact erf, fp32; --npu-ops gelu moves it");
-    std::fprintf(stderr, "             %-26s %-5s %s\n", "softmax", "host",
-                 ("O(seq^2) attention on the host: " +
-                  std::to_string(g.n_pos) + "x" + std::to_string(g.n_pos) +
-                  " scores x " + std::to_string(g.heads) +
-                  " heads; moving softmax alone would ship the whole score "
-                  "matrix to the array and back for one elementwise pass, and "
-                  "the two GEMMs that bracket it (--npu-ops attn) are "
-                  "unmeasured above seq 64 in this repository")
-                     .c_str());
+    // WHERE THE ATTENTION'S SOFTMAX RAN, read off the session the way the two
+    // rows above are -- and unlike those two it also prints the MEASURED price,
+    // because this row used to be an argument rather than a status: it asserted
+    // that moving the softmax would "ship the whole score matrix to the array
+    // and back for one elementwise pass" and stopped at the prediction. The
+    // prediction was right about the direction and wrong about the precision,
+    // and a line that reports an intention while a different number sits beside
+    // it is the failure this block exists to prevent. Measured on this container
+    // (197 positions, 12 layers, 12 heads): the host encoder takes 0.244 s,
+    // --npu-ops softm takes 0.822 s for 12 dispatches, and the reason is the
+    // design's own row capacity -- every dispatch fills it whether the model has
+    // 2364 score rows or 12288.
+    const bool sm_on = session.softmax_on_array();
+    std::string sm_why;
+    if (sm_on) {
+      for (const auto &note : session.eltwise_notes()) {
+        const size_t colon = note.find(':');
+        if (colon != std::string::npos && note.compare(0, colon, "softmax") == 0) {
+          sm_why = note.substr(colon + 1);
+          break;
+        }
+      }
+      if (sm_why.empty()) sm_why = "softmax/ xclbin, its own hw_context";
+      // The measurements are this repository's, on the container they belong to
+      // -- 197 positions is vit-base's -- and are printed only for it. Another
+      // container gets no number rather than someone else's.
+      if (g.n_pos == 197)
+        sm_why += "; MEASURED 0.822 s for 12 dispatches against 0.244 s of "
+                  "host encoder, and with --npu-ops attn too NpuAttention "
+                  "dispatches it once per head per layer (144 here) for 6.7 s";
+    } else {
+      sm_why = "O(seq^2) on the host: " + std::to_string(g.n_pos) + "x" +
+               std::to_string(g.n_pos) + " scores x " + std::to_string(g.heads) +
+               " heads in fp32; --npu-ops softm moves it to softmax/, its own "
+               "hw_context";
+      if (g.n_pos == 197)
+        sm_why += ", at a MEASURED 0.822 s against 0.244 s of host encoder";
+    }
+    std::fprintf(stderr, "             %-26s %-5s %s\n", "softmax",
+                 sm_on ? "npu" : "host", sm_why.c_str());
     std::fprintf(stderr, "             %-26s %-5s %s\n", "classifier head", "host",
                  (std::to_string(g.d_model) + "x" + std::to_string(g.num_labels) +
                   " matvec: " + std::to_string(g.num_labels) +
@@ -463,12 +496,24 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
                        "staged on it)\n",
                t_setup, 1 + session.eltwise_notes().size(),
                session.eltwise_notes().empty() ? "" : "s");
+  // This line used to say that no timing above seq 64 had been taken anywhere
+  // in the repository while this container has 197. That was a true sentence
+  // when it was written and is not one now: the array attention at 197 has been
+  // measured on vit-base-patch16-224 (0.244 s of host encoder against 0.349 s
+  // with --npu-ops attn), and a status line left carrying a claim the run below
+  // it contradicts is worse than no line. The second half is still worth saying
+  // -- the numbers are one image and one machine -- so that is what it says, and
+  // the measurement is only claimed for the container it was taken on.
   std::fprintf(stderr,
-               "  unmeasured no timing above seq 64 has been taken in this "
-               "repository, and this container has %lld positions. The "
-               "per-image figures below are real; the throughput is not "
-               "predicted.\n",
-               static_cast<long long>(g.n_pos));
+               "  measured   every figure below is THIS run's measurement of "
+               "THIS image, not a throughput claim.%s\n",
+               g.n_pos == 197
+                   ? " Attention at these 197 positions has been measured in "
+                     "this repository, and the array came out SLOWER than the "
+                     "host: 0.349 s of encoder against 0.244 s."
+                   : " Attention at this container's position count has not "
+                     "been measured, so nothing is extrapolated from the "
+                     "seq-64 designs the catalogue was built on.");
 
   // -- the HTTP endpoint --------------------------------------------------
   //

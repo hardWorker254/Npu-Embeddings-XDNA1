@@ -68,8 +68,17 @@ DOCS = (REPO / "NPU_OPS.md", REPO / "NPU_OPS.ru.md")
 # cell's reason in the registry). Changing one means a cell's status changed,
 # which is a behaviour change -- so this gate should have to be edited on purpose
 # rather than a number quietly moving under a document that still says 14.
-EXPECTED_COUNTS = {"honours": 14, "on_array": 1, "unimplemented": 5,
+EXPECTED_COUNTS = {"honours": 19, "on_array": 1, "unimplemented": 0,
                    "blocked": 3, "absent": 17}
+# Why these numbers are 19 and 0 rather than 14 and 5: five cells were flipped
+# from `unimplemented` to `honours` when the branches were written --
+# gemm_rtp/attn, cls/attn, embeddinggemma-300m/attn, cls/softm and
+# embeddinggemma-300m/softm. Each was verified against the host before it was
+# counted (see NPU_OPS.md's per-cell reason), and section 4 below then runs all
+# 40 cells against the binary, so a cell that says `honours` and does not
+# dispatch fails this same gate. The pin is edited ON PURPOSE, with the cells
+# named, because the alternative -- a number moving under a document that still
+# says 14 -- is the failure the comment above describes.
 
 # One container per architecture row, and the command line that reaches it.
 # `kind` is npu_targets.json's word; the row in the registry is looked up by it,
@@ -95,7 +104,20 @@ FIXTURES = {
                                 container="models/embeddinggemma-300m.npue",
                                 artifacts="runtime/artifacts/"
                                           "embeddinggemma-300m",
-                                argv=["embed"], input="txt"),
+                                # `--prefix query` in `tail`, because this
+                                # container carries task prefixes and refuses to
+                                # pick one on its own. Without it EVERY cell of
+                                # this row exits 2 at the prefix check, so the
+                                # six refused cells passed for a reason that was
+                                # not theirs and the two honoured cells failed
+                                # for one that was not theirs either -- a gate
+                                # that measures the wrong refusal is worse than
+                                # no gate. The value is one of the container's
+                                # own listed prefixes; it goes in `tail` and not
+                                # `argv` because the reader takes the model as
+                                # the first non-flag argument.
+                                argv=["embed"], tail=["--prefix", "query"],
+                                input="txt"),
     # Pose reads the SAME two command-line words as every other row -- `pose` then
     # the container then the image -- so there is nothing pose-shaped about the
     # invocation. What was missing was this entry, and with it the whole row was
@@ -213,8 +235,14 @@ def main() -> int:
                 print(f"  FAIL  {label}/{code}: empty reason -- a cell with no "
                       f"reason is a claim, not a table")
                 bad += 1
-    if total != EXPECTED_COUNTS:
-        print(f"  FAIL  tally {total} != the pinned {EXPECTED_COUNTS}")
+    # Zero entries dropped on both sides: a status with no cells at all is not
+    # a KEY in the tally, so comparing a dict that lacks `unimplemented` against
+    # one that carries it as 0 would fail forever while saying nothing. The
+    # counts that a reader of NPU_OPS.md sees are the non-zero ones anyway.
+    total_nz = {k: v for k, v in total.items() if v}
+    pinned_nz = {k: v for k, v in EXPECTED_COUNTS.items() if v}
+    if total_nz != pinned_nz:
+        print(f"  FAIL  tally {total_nz} != the pinned {pinned_nz}")
         bad += 1
     else:
         print(f"  ok    tally {total}")
@@ -344,6 +372,15 @@ def main() -> int:
         cmd = [str(BIN)] + spec["argv"] + [str(REPO / spec["container"]),
                                            str(fx[spec["input"]]),
                                            "--artifacts", str(gens)]
+        # Flags that have to come AFTER the positionals, because the argument
+        # reader takes the model as the first non-flag argument and stops
+        # collecting positionals at the first flag. `argv` therefore holds only
+        # the verb; `tail` holds what this particular container needs and cannot
+        # be given earlier. It is appended here rather than folded into argv so
+        # the distinction stays visible: a fixture that put a flag in `argv` for
+        # a container that reads positionals first would fail as "needs a model
+        # name", which names the wrong thing entirely.
+        cmd += spec.get("tail", [])
         for code in npu_ops.OPS:
             status, _reason = row[code]
             proc = subprocess.run(cmd + ["--npu-ops", code],

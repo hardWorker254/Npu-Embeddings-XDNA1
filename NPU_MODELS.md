@@ -18,9 +18,9 @@ The second is the actual reason this file exists: `--npu-ops gelu` is **refused*
 
 Tally over the 128 cells:
 
-- **70** **yes** -- runs on the array today
+- **81** **yes** -- runs on the array today
 - **1** already -- the work is already dispatched without a code, and the code is refused
-- **11** no code -- the model has the operation, no array branch reaches it
+- **0** no code -- the model has the operation, no array branch reaches it
 - **3** blocked -- cannot be moved on this board; the reason is in NPU_OPS.md
 - **41** - -- the model has no such operation
 - **2** **gated** -- this model's FFN has no standalone activation pass -- see below
@@ -29,21 +29,21 @@ Tally over the 128 cells:
 
 | model | `gelu` | `layn` | `softm` | `conv` | `attn` | `mproj` | `fft` | `logit` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `all-MiniLM-L6-v2` | **yes** | **yes** | **yes** | - | no code | - | - | - |
-| `bge-small-en-v1.5` | **yes** | **yes** | **yes** | - | no code | - | - | - |
-| `bge-micro-v2` | **yes** | **yes** | **yes** | - | no code | - | - | - |
-| `bge-base-en-v1.5` | **yes** | **yes** | **yes** | - | no code | - | - | - |
-| `bge-large-en-v1.5` | **yes** | **yes** | **yes** | - | no code | - | - | - |
-| `nomic-embed-text-v1.5` | **gated** | **yes** | **yes** | - | no code | - | - | - |
-| `embeddinggemma-300m` | blocked | blocked | no code | - | no code | - | - | - |
-| `gte-multilingual-base` | **gated** | **yes** | **yes** | - | no code | - | - | - |
+| `all-MiniLM-L6-v2` | **yes** | **yes** | **yes** | - | **yes** | - | - | - |
+| `bge-small-en-v1.5` | **yes** | **yes** | **yes** | - | **yes** | - | - | - |
+| `bge-micro-v2` | **yes** | **yes** | **yes** | - | **yes** | - | - | - |
+| `bge-base-en-v1.5` | **yes** | **yes** | **yes** | - | **yes** | - | - | - |
+| `bge-large-en-v1.5` | **yes** | **yes** | **yes** | - | **yes** | - | - | - |
+| `nomic-embed-text-v1.5` | **gated** | **yes** | **yes** | - | **yes** | - | - | - |
+| `embeddinggemma-300m` | blocked | blocked | **yes** | - | **yes** | - | - | - |
+| `gte-multilingual-base` | **gated** | **yes** | **yes** | - | **yes** | - | - | - |
 | `whisper-tiny` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
 | `whisper-base` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
 | `whisper-small` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
 | `whisper-medium` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
 | `whisper-large-v3` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
 | `whisper-large-v3-turbo` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
-| `vit-base-patch16-224` | **yes** | **yes** | no code | already | no code | - | - | blocked |
+| `vit-base-patch16-224` | **yes** | **yes** | **yes** | already | **yes** | - | - | blocked |
 | `yolov8n-pose` | - | - | - | **yes** | - | - | - | - |
 
 ## Where these two models differ from their kind
@@ -78,7 +78,7 @@ Note what is **absent** from it: the five codes with no design directory of thei
 | `bge-base-en-v1.5` | `gemm_rtp` | `gelu`, `layn`, `softm` | 768 | 1e-12 (fallback) | — |
 | `bge-large-en-v1.5` | `gemm_rtp` | `gelu`, `layn`, `softm` | 1024 | 1e-12 (fallback) | — |
 | `nomic-embed-text-v1.5` | `gemm_rtp` | `layn`, `softm` | 768 | 1e-12 (fallback) | — |
-| `embeddinggemma-300m` | `gemm_rtp` | _none_ | — | — | — |
+| `embeddinggemma-300m` | `gemm_rtp` | `softm` | — | — | — |
 | `gte-multilingual-base` | `gemm_rtp` | `layn`, `softm` | 768 | 1e-12 (fallback) | — |
 | `whisper-tiny` | `stt` | `gelu`, `layn`, `softm` | 384 | 1e-05 | 51865 |
 | `whisper-base` | `stt` | `gelu`, `layn`, `softm` | 512 | 1e-05 | 51865 |
@@ -86,7 +86,7 @@ Note what is **absent** from it: the five codes with no design directory of thei
 | `whisper-medium` | `stt` | `gelu`, `layn`, `softm` | 1024 | 1e-05 | 51865 |
 | `whisper-large-v3` | `stt` | `gelu`, `layn`, `softm` | 1280 | 1e-05 | 51866 |
 | `whisper-large-v3-turbo` | `stt` | `gelu`, `layn`, `softm` | 1280 | 1e-05 | 51866 |
-| `vit-base-patch16-224` | `cls` | `gelu`, `layn` | 768 | 1e-12 | — |
+| `vit-base-patch16-224` | `cls` | `gelu`, `layn`, `softm` | 768 | 1e-12 | — |
 | `yolov8n-pose` | `pose` | _none_ | — | — | — |
 
 ## Why sixteen rows and four kinds

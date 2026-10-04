@@ -6,6 +6,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "whisper/npu_ops.hpp"
+#include "whisper/eltwise.hpp"   // NpuEltwise::softmax, for the array path
 
 #include <algorithm>
 #include <cmath>
@@ -359,7 +360,8 @@ void gelu_erf_inplace(float *x, size_t n, app::Pool &pool) {
 void attention(const float *q, int64_t q_stride, const float *kv,
                int64_t kv_stride, int64_t n_q, int64_t n_kv, int64_t d_model,
                int64_t heads, int64_t head_dim, float scale, float *out,
-               float *scores, app::Pool &pool) {
+               float *scores, app::Pool &pool, NpuEltwise *softm,
+               int64_t score_stride) {
   if (heads * head_dim != d_model)
     throw std::runtime_error("whisper attention: " + std::to_string(heads) +
                              " heads x " + std::to_string(head_dim) +
@@ -368,68 +370,158 @@ void attention(const float *q, int64_t q_stride, const float *kv,
     throw std::runtime_error("whisper attention: K|V row stride " +
                              std::to_string(kv_stride) + " cannot hold " +
                              std::to_string(2 * d_model) + " values");
+  // A stride narrower than the keys each row carries overlaps the next row, and
+  // the score row is exactly the buffer that decides whether an array softmax
+  // computed the right denominator. Checked rather than assumed: the caller
+  // passes this number, and a wrong one reads as plausible garbage.
+  if (score_stride <= 0) score_stride = n_kv;
+  if (score_stride < n_kv)
+    throw std::runtime_error("whisper attention: score row stride " +
+                             std::to_string(score_stride) + " is narrower than " +
+                             std::to_string(n_kv) + " keys");
+  const int64_t st = score_stride;
+  // The kernel reduces over its WHOLE row, so a row wider than the design's
+  // own width would run off the end of the buffer and a row narrower than it
+  // would softmax columns that are not there. Equal is the only answer.
+  if (softm && st != softm->cols())
+    throw std::runtime_error(
+        "whisper attention: score rows are " + std::to_string(st) +
+        " wide and the softmax design was built for " +
+        std::to_string(softm->cols()) + ". Re-export the softmax design at this "
+        "model's n_kv -- tools/export/export_gemm_rtp.py takes it from the "
+        "target's own window, not from a flag.");
 
   // The decoder's steps pass no scratch: one query row against up to 1500 keys
-  // is heads * n_kv floats, which is worth allocating rather than making every
-  // caller own a buffer it will not look at again.
+  // is heads * score_stride floats, which is worth allocating rather than
+  // making every caller own a buffer it will not look at again. Every caller
+  // that DOES pass scratch sized it at n_kv rows, which is why score_stride
+  // defaults to n_kv -- see the header.
   std::vector<float> local_scores;
   if (!scores) {
-    local_scores.resize(static_cast<size_t>(n_q) * heads * n_kv);
+    local_scores.resize(static_cast<size_t>(n_q) * heads * st);
     scores = local_scores.data();
   }
 
-  pool.run([&](int w, int nw) {
-    for (int64_t i = w; i < n_q; i += nw) {
-      const float *qr = q + i * q_stride;
-      for (int64_t h = 0; h < heads; ++h) {
-        const float *qh = qr + h * head_dim;
-        float *sc = scores + (i * heads + h) * n_kv;
-        // q @ K^T, one row of scores at a time. head_dim is a multiple of 8 on
-        // every shipped size (64 for all of them), but the tail loop is scalar
-        // so a head_dim that is not still computes the right answer.
-        for (int64_t j = 0; j < n_kv; ++j) {
-          const float *kj = kv + j * kv_stride + h * head_dim;
-          float acc = 0.f;
-          int64_t t = 0;
+  // The three parts of one attention row, named once and used in both shapes
+  // below.
+  //
+  // Splitting them out is what keeps the default path exactly what it was: the
+  // same three operations, in the same order, over the same rows, in the same
+  // vectorized loops. A caller passing no softmax operator gets the arithmetic
+  // this function has always done, so Whisper's three call sites -- and every
+  // number measured from them -- cannot move because a parameter was appended
+  // to a signature.
+  const auto qk_row = [&](int64_t i, int64_t h, float *sc) {
+    const float *qh = q + i * q_stride + h * head_dim;
+    // q @ K^T, one row of scores at a time. head_dim is a multiple of 8 on
+    // every shipped size (64 for all of them), but the tail loop is scalar
+    // so a head_dim that is not still computes the right answer.
+    for (int64_t j = 0; j < n_kv; ++j) {
+      const float *kj = kv + j * kv_stride + h * head_dim;
+      float acc = 0.f;
+      int64_t t = 0;
 #if defined(__AVX2__)
-          __m256 a = _mm256_setzero_ps();
-          for (; t + 8 <= head_dim; t += 8)
-            a = _mm256_fmadd_ps(_mm256_loadu_ps(qh + t), _mm256_loadu_ps(kj + t), a);
-          acc = app::hsum256(a);
+      __m256 a = _mm256_setzero_ps();
+      for (; t + 8 <= head_dim; t += 8)
+        a = _mm256_fmadd_ps(_mm256_loadu_ps(qh + t), _mm256_loadu_ps(kj + t), a);
+      acc = app::hsum256(a);
 #endif
-          for (; t < head_dim; ++t) acc += qh[t] * kj[t];
-          sc[j] = acc * scale;
-        }
-        // Softmax with the maximum subtracted, the same reduction HF's own
-        // attention does. There is no mask: the encoder attends over every
-        // position it was given, and the decoder's cache holds only positions
-        // at or before the current one, so causality is structural rather than
-        // applied.
-        float mx = sc[0];
-        for (int64_t j = 1; j < n_kv; ++j) mx = std::max(mx, sc[j]);
-        float sum = 0.f;
-        for (int64_t j = 0; j < n_kv; ++j) {
-          sc[j] = std::exp(sc[j] - mx);
-          sum += sc[j];
-        }
-        const float inv = sum > 0.f ? 1.0f / sum : 0.f;
-        // softmax @ V, into this head's slice of the output row.
-        float *o = out + i * d_model + h * head_dim;
-        std::fill(o, o + head_dim, 0.f);
-        for (int64_t j = 0; j < n_kv; ++j) {
-          const float a = sc[j] * inv;
-          const float *vj = kv + j * kv_stride + d_model + h * head_dim;
-          int64_t t = 0;
-#if defined(__AVX2__)
-          const __m256 av = _mm256_set1_ps(a);
-          for (; t + 8 <= head_dim; t += 8)
-            _mm256_storeu_ps(o + t, _mm256_fmadd_ps(av, _mm256_loadu_ps(vj + t),
-                                                    _mm256_loadu_ps(o + t)));
-#endif
-          for (; t < head_dim; ++t) o[t] += a * vj[t];
-        }
-      }
+      for (; t < head_dim; ++t) acc += qh[t] * kj[t];
+      sc[j] = acc * scale;
     }
+  };
+  // Softmax with the maximum subtracted, the same reduction HF's own attention
+  // does. There is no mask: the encoder attends over every position it was
+  // given, and the decoder's cache holds only positions at or before the
+  // current one, so causality is structural rather than applied. The loop runs
+  // to n_kv and not to st, so a padded row stride is invisible here.
+  // Returns the reciprocal sum rather than folding it into the row: the caller
+  // applies it inside its own walk over the row, which is the shape this
+  // function has always had and the shape that reads each score exactly once.
+  // Folding it in here would add a full pass over a buffer that is 13.5 MB for
+  // whisper-tiny and 54 MB for large-v3, and a second read of every score for
+  // no change in any value is still a change to what Whisper's numbers measure.
+  const auto softmax_row = [&](float *sc) -> float {
+    float mx = sc[0];
+    for (int64_t j = 1; j < n_kv; ++j) mx = std::max(mx, sc[j]);
+    float sum = 0.f;
+    for (int64_t j = 0; j < n_kv; ++j) {
+      sc[j] = std::exp(sc[j] - mx);
+      sum += sc[j];
+    }
+    return sum > 0.f ? 1.0f / sum : 0.f;
+  };
+  const auto av_row = [&](int64_t i, int64_t h, const float *sc, float inv) {
+    // softmax @ V, into this head's slice of the output row. `inv` is 1.0f on
+    // the array path -- the design already normalized the row -- and a multiply
+    // by one is exact, so the two paths differ in no bit of it.
+    float *o = out + i * d_model + h * head_dim;
+    std::fill(o, o + head_dim, 0.f);
+    for (int64_t j = 0; j < n_kv; ++j) {
+      const float a = sc[j] * inv;
+      const float *vj = kv + j * kv_stride + d_model + h * head_dim;
+      int64_t t = 0;
+#if defined(__AVX2__)
+      const __m256 av = _mm256_set1_ps(a);
+      for (; t + 8 <= head_dim; t += 8)
+        _mm256_storeu_ps(o + t, _mm256_fmadd_ps(av, _mm256_loadu_ps(vj + t),
+                                                _mm256_loadu_ps(o + t)));
+#endif
+      for (; t < head_dim; ++t) o[t] += a * vj[t];
+    }
+  };
+
+  if (!softm) {
+    // One pass, three operations per row, in place -- what this function has
+    // always done, and the path every existing caller takes.
+    pool.run([&](int w, int nw) {
+      for (int64_t i = w; i < n_q; i += nw)
+        for (int64_t h = 0; h < heads; ++h) {
+          float *sc = scores + (i * heads + h) * st;
+          qk_row(i, h, sc);
+          av_row(i, h, sc, softmax_row(sc));
+        }
+    });
+    return;
+  }
+
+  // -- three phases, with the softmax in the middle and on the array --------
+  //
+  // This is the only shape in which `softm` can mean anything for a model
+  // whose softmax has no pass of its own: the softmax is INSIDE the attention,
+  // so the attention has to step aside between its two GEMMs. What does not
+  // move is those two GEMMs -- they stay on the host, because `softm` named one
+  // op and moving QK^T and softmax.V is the `attn` code.
+  //
+  // Phase 1: QK^T, still parallel, and the score rows PADDED to the design's
+  // width so that the kernel's whole row is a real row. The columns past n_kv
+  // are -1e30 rather than zero for the reason that decides correctness: the
+  // kernel normalizes over every column it is given, so a padded column left at
+  // zero would add exp(0 - max) to the denominator and shrink every weight in
+  // the row. exp(-1e30 - max) is zero, so the real weights are untouched.
+  pool.run([&](int w, int nw) {
+    for (int64_t i = w; i < n_q; i += nw)
+      for (int64_t h = 0; h < heads; ++h) {
+        float *sc = scores + (i * heads + h) * st;
+        qk_row(i, h, sc);
+        for (int64_t j = n_kv; j < st; ++j) sc[j] = -1.0e30f;
+      }
+  });
+  // Phase 2: the softmax itself, serially, over every row at once.
+  //
+  // It cannot be inside the parallel pass above: the design has ONE input and
+  // ONE output buffer, so two workers dispatching into it would hand each
+  // other's rows back -- the same failure the eltwise slots comment describes.
+  // NpuEltwise::softmax walks the whole range in chunks of the design's own row
+  // capacity, so any row count fits and the dispatch count is that count
+  // divided by the capacity, not the count itself.
+  softm->softmax(scores, n_q * heads);
+  // Phase 3: softmax.V, parallel again, reading the first n_kv columns of each
+  // row. The padded tail was never a key; it is not read.
+  pool.run([&](int w, int nw) {
+    for (int64_t i = w; i < n_q; i += nw)
+      for (int64_t h = 0; h < heads; ++h)
+        av_row(i, h, scores + (i * heads + h) * st, 1.0f);
   });
 }
 

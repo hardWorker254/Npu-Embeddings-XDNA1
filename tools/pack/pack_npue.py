@@ -1831,9 +1831,12 @@ def main():
                          "either way -- this is the array path's half-written, "
                          "and the shape it takes is the same one the gemm_rtp "
                          "exporter produces, so the design set can be built for "
-                         "it. UNMEASURED: the pose array path has not been run "
-                         "on hardware in this tree, and this flag does not change "
-                         "that.")
+                         "it. MEASURED rather than assumed: the array path this "
+                         "flag stages has been run, and the registry records "
+                         "it for pose/conv -- the 72 convolutions at 640x640 "
+                         "take 290 ms against the host's 150 ms, 1.4x SLOWER. "
+                         "This flag only stages the panels and records their "
+                         "streams; it does not change who wins.")
     args = ap.parse_args()
 
     # Kept BEFORE the generic --int4-group defaulting below, which would

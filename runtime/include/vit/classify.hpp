@@ -33,7 +33,8 @@
 #include "vit/encoder.hpp"
 #include "vit/geometry.hpp"
 #include "vit/image.hpp"   // npue::vit::Image -- what classify() takes
-#include "whisper/eltwise.hpp"  // NpuEltwise -- the two optional designs
+#include "whisper/eltwise.hpp"  // NpuEltwise -- the optional designs
+#include "whisper/attention_npu.hpp"  // NpuAttention -- attn as two GEMMs
 
 namespace npue::vit {
 
@@ -82,6 +83,7 @@ public:
   // while the array was doing it.
   bool layernorm_on_array() const { return enc_.layernorm_on_array(); }
   bool gelu_on_array() const { return enc_.gelu_on_array(); }
+  bool softmax_on_array() const { return enc_.softmax_on_array(); }
   bool int8() const { return enc_.int8(); }
   // The stage names the loaded set carries, in slot order, for the status line.
   const std::vector<std::string> &stream_ops() const { return ops_; }
@@ -112,10 +114,14 @@ private:
   std::unique_ptr<npu::Device> dev_;
   std::unique_ptr<app::Pool> pool_;
   std::unique_ptr<npu::Design> design_;
-  // The two optional elementwise designs. Declared AFTER design_ and BEFORE
+  // The three optional elementwise designs. Declared AFTER design_ and BEFORE
   // enc_ for the same reason design_ is: the encoder holds pointers into them.
-  std::unique_ptr<npu::Design> ln_design_, gelu_design_;
-  std::unique_ptr<npue::whisper::NpuEltwise> ln_, gelu_;
+  std::unique_ptr<npu::Design> ln_design_, gelu_design_, sm_design_;
+  std::unique_ptr<npue::whisper::NpuEltwise> ln_, gelu_, sm_;
+  // Attention as two GEMMs on design_'s OWN attn_qk/attn_av slots -- no design
+  // of its own and no extra hw_context, which is why this is declared after
+  // design_ and points into it. Null unless --npu-ops attn named it.
+  std::unique_ptr<npue::whisper::NpuAttention> attn_;
   VitEncoder enc_;
   std::vector<std::string> ops_;
   // One line per eltwise design actually opened, for the status block: its

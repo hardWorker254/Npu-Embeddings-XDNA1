@@ -32,9 +32,11 @@
 #                         than the ~150 us a dispatch to ask the array for it.
 #     the image front end  resize/normalize/im2col, which is pixels not GEMMs.
 #     attention itself     O(seq^2) on the host, exactly as in the BERT path --
-#                         the file has no measurement above seq 64 and 197 is
-#                         three times that, so this is stated as untested
-#                         rather than assumed fast.
+#                         the array branch of that same pass is now measured at
+#                         these 197 positions (0.349 s of encoder against
+#                         0.244 s of host, i.e. the array slower), so this is
+#                         kept on the host for speed rather than because the
+#                         array cannot do it.
 #
 # THE ONE REAL ARCHITECTURAL DIFFERENCE FROM BERT: PRE-LN.
 # BERT here is post-LN (residual then normalise); a ViT layer normalises BEFORE
@@ -568,10 +570,10 @@ def pack_vit(model_dir, out, fold_scale=True, dry_run=False, device=None,
             "crop_size, image_mean, image_std, resample), read from the "
             "checkpoint's own preprocessor_config.json and refused rather than "
             "defaulted, so a consumer never has to guess them",
-            "attention is O(seq^2) on the host, as in the BERT path. This repo "
-            "has no measurement above seq 64 and 197 positions is three times "
-            "that, so the throughput is stated as unmeasured rather than "
-            "assumed",
+            "attention is O(seq^2) on the host, as in the BERT path. The array "
+            "branch of that same pass is measured at these 197 positions: "
+            "0.349 s of encoder against 0.244 s of host, so the host is the "
+            "faster of the two and stays the default",
             "batching more than one image per request is a host-side loop, not "
             "a batch tier: the design set's M is a multiple of 256 and a "
             "ViT's is 197 padded to 256",

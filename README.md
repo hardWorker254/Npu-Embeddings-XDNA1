@@ -223,31 +223,37 @@ against every container on this machine with a real invocation of each mode, not
 read off the source. They now live in a registry — `tools/lib/npu_ops.py` — which
 the exporter reads to decide what to build, and
 [**NPU_OPS.md**](NPU_OPS.md) is generated from it with a reason per cell.
-`tools/verify/verify_npu_op_matrix.py` runs the 32 cells that have a container in
-this checkout against the binary and fails if the runtime and the table disagree;
-the eight pose cells are skipped there for want of a container, and the gate says
-so. **One flat table would hide the thing worth knowing: the empty cells are five
+`tools/verify/verify_npu_op_matrix.py` runs all 40 cells against the binary and
+fails if the runtime and the table disagree — every architecture row has a
+fixture now, pose included, so nothing is skipped for want of a container.
+**One flat table would hide the thing worth knowing: the empty cells are four
 different situations, and only one of them is permanent.**
 
 | | BERT | gemma-300m | whisper | ViT | pose |
 |---|---|---|---|---|---|
 | `gelu` | ✓ | △ | ✓ | ✓ | — |
 | `layn` | ✓ | ◇ | ✓ | ✓ | — |
-| `softm` | ✓ | ▢ | ✓ | ▢ | — |
+| `softm` | ✓ | ✓ | ✓ | ✓ | — |
 | `conv` | — | — | ✓ | ⊕ | ✓ |
-| `attn` | ▢ | ▢ | ✓ | ▢ | — |
+| `attn` | ✓ | ✓ | ✓ | ✓ | — |
 | `mproj` | — | — | ✓ | — | — |
 | `fft` | — | — | ✓ | — | — |
 | `logit` | — | — | ✓ | ◇ | — |
-| **counts** | 3 ✓ | 1 ✓ | 8 ✓ | 3 ✓ | 1 ✓ |
+| **counts** | 4 ✓ | 2 ✓ | 8 ✓ | 5 ✓ | 1 ✓ |
 
-* **✓ — runs on the array now** (14 cells).
-* **▢ — the model HAS the operation, the code does not reach the array** (5
-  cells: `attn` for BERT, gemma and ViT, and `softm` for gemma and ViT).
-  Unimplemented work, not a property of the model. See the caveat below.
+* **✓ — runs on the array now** (19 cells).
+* **⊕ — already on the array, with nothing for the code to select** (1 cell:
+  `ViT conv`), explained below.
 * **— — the model has no such operation** (17 cells). Permanent, and correct.
-* **△ ◇ ⊕ — four cells in three special situations** (4 cells; `◇` takes two of
-  them), explained per symbol below. 14 + 5 + 17 + 4 = 40.
+* **△ ◇ — the model has the operation and this board cannot compute it** (3
+  cells; `◇` takes two of them), explained per symbol below.
+  19 + 1 + 17 + 3 = 40.
+
+There is no longer an "unimplemented" symbol in this table, and that is the
+change worth noticing: the five cells that used to read **▢** — `attn` for BERT,
+gemma and ViT, `softm` for gemma and ViT — are ✓ now, each with a measured reason
+in NPU_OPS.md. The counts row is codes on the array (19 honoured + 1 already
+there = 20), not a count of ticks in one column.
 
 The 17 permanent cells, by reason:
 
@@ -264,12 +270,12 @@ ViT's patch embedding is `Conv2d(3, 768, kernel=16, stride=16)`, im2col'd to
 `[197, 768] @ [768, 768]`. That K and N are exactly `attn_out`'s shape, so it is
 dispatched on `attn_out`'s instruction slot — unconditionally, with no flag, as
 one of the 49 GEMMs (`runtime/src/vit/encoder.cpp:267`,
-`g_.run(streams_.attn_out, ...)`). The cell is empty because **the work is
-already done**: `conv` names Whisper's `conv1`/`conv2` streams, which a ViT's
-design set does not carry, and honouring it would dispatch nothing new. This is
-the one empty cell that is better than a tick — and asking for it is **refused**,
-with exactly that as the reason, because a code that selects nothing is the
-failure this project treats as worst.
+`g_.run(streams_.attn_out, ...)`). The cell carries ⊕ rather than a tick because
+**the work is already done**: `conv` names Whisper's `conv1`/`conv2` streams,
+which a ViT's design set does not carry, and honouring it would dispatch nothing
+new. This is the one cell that is better as it stands than as a tick — and asking
+for it is **refused**, with exactly that as the reason, because a code that
+selects nothing is the failure this project treats as worst.
 
 **⚠ Caveat on `gelu`, `ViT` and `gemm_rtp` rows — the activation is the `poly`
 fit, not the exact erf.** Only `kind: stt` gets the exact-erf kernel; a BERT or a
@@ -309,63 +315,89 @@ on this board. The same numbers are in `runtime/include/vit/encoder.hpp:37` and
 the header of `tools/pack/packers/vit.py`. (The head is also 0.8% of the image
 cost as a host matvec, so the point is moot for speed either way.)
 
-#### The 5 cells that are unimplemented work
+#### The 5 cells that were unimplemented work — done, and measured
 
-These are the honest gap. Each model computes the operation on the host with no
-host/array choice:
+All five of them computed the operation on the host with no host/array choice,
+and the gap was never a missing kernel: it was a missing branch in a host path
+this repository already shared between architectures.
 
 ```cpp
-// runtime/src/encoders/bert_encoder.cpp, BertEncoder::run
+// runtime/src/encoders/bert_encoder.cpp, BertEncoder::run — the old shape
 qk(qkvbuf, scores);                          // host, no choice
 if (host_sm) softmax_cpu(scores);
-else eltwise(softmax_, slots_sm, ...);       // softm IS array-capable -- a ✓
+else eltwise(softmax_, slots_sm, ...);       // softm was already array-capable
 av(scores, qkvbuf, ctx);                     // host, no choice
 ```
 
-That one `if` is exactly why `softm` works for BERT while `attn` does not:
+That one `if` was exactly why `softm` worked for BERT while `attn` did not:
 softmax is a standalone pass over a finished tensor and needed only the eltwise
-design, whereas the two GEMMs that bracket it have **no array branch at all**.
-`gemma_npu_encoder.cpp:166` is `attention(qkvbuf, ctx)` with no alternative
-either. And ViT does not even have its own attention: `vit/encoder.cpp:333`
-calls **`npue::whisper::attention(qkv_all.data(), ...)`** — the same shared
-function, the same signature. So the host path is already literally shared
-between two architectures; what is missing everywhere is only the branch inside
-it.
+design, whereas the two GEMMs that bracket it had **no array branch at all**.
+`gemma_npu_encoder.cpp` was `attention(qkvbuf, ctx)` with no alternative either,
+and ViT does not even have its own attention — `vit/encoder.cpp` calls
+**`npue::whisper::attention(qkv_all.data(), ...)`**, the same shared function,
+the same signature. The host path was already literally shared between two
+architectures; what was missing everywhere was only the branch inside it.
 
-The obstacle is a single gate in the exporter —
-`if model_spec.get("kind") == "stt":` before `ns.attn_streams = ...`
-(`tools/exporters/gemm_rtp/resolve.py:300`). Attention as two GEMMs is
-architecture-independent: `runtime/src/whisper/attention_npu.cpp` takes
-`(rows, head_dim, n_kv)` and a mask policy and does not otherwise depend on
-Whisper. Two per-model details it would have to be taught: BERT's and ViT's
-additive **padding** mask (Whisper's encoder has none), and gemma's **RoPE**,
-which is applied to the qkv buffer before `attention()` runs.
+That branch now exists in one place — `NpuAttention`, reached from
+`BertEncoder::attention_npu()`, from gemma's `GemmaNpuEncoder::attention()` and
+from ViT through the shared `whisper::attention()` — and the exporter's
+`if model_spec.get("kind") == "stt":` gate in front of `ns.attn_streams` is
+replaced by a consult of this same registry, so the streams are built for any
+kind that honours `attn`. `--npu-ops attn` moves QK^T and scores·V to the array
+and leaves the softmax wherever `softm` says; `--npu-ops softm` moves the
+softmax alone. **Three per-model details the array branch had to be taught, all
+still true and all spelled out in the per-cell reasons:**
 
-**Two caveats before treating these as free cells:**
+* BERT's and ViT's additive **padding mask** (Whisper's encoder has none) rides
+  the call — one mask row per sequence, added to the scores before the softmax.
+* gemma's **RoPE** is applied to the qkv buffer before `attention()` runs, so
+  the array's A operand is already post-RoPE and nothing has to move it.
+* gemma's **MQA** forces K|V width and head count to be separate parameters
+  from `d_model`, and its **sliding window** is a band rather than a suffix, so
+  `n_kv` is the window (512, padded to 576) and a longer sequence is
+  **refused** rather than silently computed as full attention.
 
-1. **Lifting the gate alone would build the WRONG design.** The geometry is
-   `n_kv = ceil(frames / lcm(tile_n, tile_k)) * step`, read as
-   `int(model_spec.get("frames", 1500))` — and **only `kind == "stt"` models
-   carry `frames`** (1500). BERT and ViT have no such key, so they would inherit
-   the default 1500 → `n_kv = 1536`, a design three to seven times wider than
-   the 256 and 197 positions actually needed. The geometry has to be taught to
-   read the position count instead: BERT's sequence is 256
-   (`pack_npue.py` pre-slices `position_embeddings` to it) and a ViT's is fixed
-   at `(image_size/patch_size)^2 + 1 = 197`. On top of that, **`kinds.cls` does
-   not list `attn_qk`/`attn_av`** in its stream list, so the ViT/BERT design set
-   would need a new stream list too. None of this has been exported or run —
-   this table reports the refusal, not a successful export.
+**The geometry caveat is resolved.** `n_kv` is no longer read as
+`model_spec.get("frames", 1500)`; it comes from the container's own geometry,
+which is why BERT exports `attn_qk` for its 256 positions (padded to 384), ViT
+for its fixed 197 (also 384) and gemma for its 512 window rather than the 2048
+the container is packed to. `kinds.cls` carries `attn_qk`/`attn_av` now. All
+three sets exported and ran, so none of that paragraph is a prediction any
+more.
 
-   And separately: `tools/data/npu_targets.json` states that **this repo has no
-   attention measurement above seq 64**, while a ViT has 197 positions and BERT
-   256 — three to four times that. The catalogue already marks its own ViT
-   entry's throughput `UNMEASURED` for exactly this reason.
-2. **Whisper's `attn` is already measured at 4.32 s against 0.94 s on the host
-   — 4.6× SLOWER.** BERT's and ViT's `n_kv` is smaller (256 and 197 against
-   1504), so the array's per-dispatch fixed cost amortises *worse*, not better.
-   Implementing these five cells would fill the table and would not make any
-   run faster; that is the whole reason it is written down here rather than
-   done.
+**The speed caveat is confirmed rather than refuted — every one of these cells
+is slower than the host it replaces:**
+
+| container | code | host | array | ratio |
+|---|---|---|---|---|
+| bge-base, 15 texts | `attn` | 0.16 s | 1.38 s | 8.6× slower |
+| bge-base, 15 texts | `softm` | 0.16 s | 1.70 s | 10.6× slower |
+| ViT, bus.jpg encoder | `attn` | 0.244 s | 0.349 s | 1.43× slower |
+| ViT, bus.jpg encoder | `softm` | 0.244 s | 0.822 s | 3.4× slower |
+| gemma-300m, attention column | `attn` | 21 ms | 358 ms | 17× slower |
+| gemma-300m, attention column | `softm` | 21 ms | 1497 ms | 71× slower |
+| whisper, 3 s window | `attn` | 0.94 s | 4.32 s | 4.6× slower |
+
+And the one combination nobody would guess: `attn,softm` together is
+**100.90 s** on bge-base against 1.38 s for `attn` alone, **6.685 s** on ViT
+against 0.349 s, and **18.7 s** on gemma against 0.358 s. The cause is one line
+long — `NpuAttention` calls the softmax once per head per chunk while every
+call fills the softmax design's whole 12288-row capacity — and it is why that
+combination is printed as a measurement rather than offered as a default.
+
+Correctness was held against the host on the **whole tensor**, not on the label
+that would have agreed anyway: bge-base `attn` relfro 1.58e-02 / cos 0.999876
+and `softm` 1.15e-02 / 0.999933; ViT's full 1000-way probability row relfro
+4.384e-03 with `attn` and 1.959e-02 with `softm`, top-5 and label identical;
+gemma relfro 5.735e-03 / 6.227e-03. One trap that measurement caught rather
+than review: the softmax design is compiled for the **padded** key count,
+because that is the row width `NpuAttention` hands it, while BERT's own host
+`qk_impl` wrote rows `seq` wide — and `elt_chunks`' only guard (`n % cols != 0`)
+happens to pass anyway. `--npu-ops softm` alone on bge-base came back at relfro
+**7.08e-01** for exactly that reason and is fixed by laying the rows out at the
+design's width with `-1e30` past the live ones. The default path with no
+`--npu-ops` at all is byte-identical to what it was before any of this existed —
+checked by comparing the output files, not by inspection.
 
 **Which of them is worth asking for is a measurement, not a preference** — see
 [What to move to the NPU](#what-to-move-to-the-npu).
@@ -386,11 +418,10 @@ point is "put this on the array" must not quietly not do that. Each op also
 costs one more `hw_context` out of six.
 
 Which codes a given architecture honours is a table with a reason per cell, not
-a flag to guess at: [**NPU_OPS.md**](NPU_OPS.md). Of the 40 cells, 14 run on the
+a flag to guess at: [**NPU_OPS.md**](NPU_OPS.md). Of the 40 cells, 19 run on the
 array today, 1 is already dispatched without a code (and the code is refused,
-because there is nothing for it to select), 5 are operations the model has and no
-array branch reaches, 3 cannot be moved on this board for a stated reason, and 17
-do not exist in that model at all.
+because there is nothing for it to select), 3 cannot be moved on this board for a
+stated reason, and 17 do not exist in that model at all.
 
 That table is per ARCHITECTURE. For the question you actually have — what can
 *this* model name do — there is a second generated table,
@@ -919,8 +950,9 @@ one request; calling it "per image" would report 0 for a model that in fact cost
 | patch embedding | yes — it rides `attn_out`'s stream | — |
 | 12 x qkv / attn_out / ffn | yes, 49 dispatches | — |
 | image front end | — | decode, PIL-equivalent resize to 224, `(x/255 - mean)/std`, im2col |
-| LayerNorm | — | fp32, with the container's own epsilon |
-| softmax, GELU | — | O(seq^2) attention on the host: 197x197 x 12 heads |
+| LayerNorm (25 sites) | `--npu-ops layn` | fp32, with the container's own epsilon (the default) |
+| GELU | `--npu-ops gelu` | yes (the default) |
+| attention: QK^T, softmax, scores·V | `--npu-ops attn,softm` | the whole pass, `197x197 x 12 heads` (the default) |
 | classifier head | — | 768x1000 matvec |
 
 The patch embedding is free: its shape `[196, 768] x [768, 768]` **is**
@@ -1005,9 +1037,12 @@ Read this before quoting the table above as a result.
   transposed panel or a drifted `im2col` would print smooth, confident, entirely
   wrong labels; `verify_vit_model.py` exists because that is the failure mode
   that does not announce itself, and it holds the host half of it.
-- **Throughput is not predicted.** Same caveat as the Whisper section above: no
-  measurement in this repository exists above seq 64, and this container has 197
-  positions.
+- **Attention on the array is measured, and it is slower.** The flag exists and
+  works — 0.349 s of encoder against 0.244 s on the host for `--npu-ops attn`,
+  0.822 s for `--npu-ops softm`, and 6.685 s for both at once — but that is one
+  image, one machine and one run, not a throughput curve. What is still not
+  predicted is any *other* shape: nothing here extrapolates to a different
+  position count, a different batch or a loaded device.
 - **`npu2` is untested.** No second board was available.
 - **Still no capacity or scaling curve.** The requests-per-second figures below
   are `n` sequential requests from ONE client on one machine, which bounds an

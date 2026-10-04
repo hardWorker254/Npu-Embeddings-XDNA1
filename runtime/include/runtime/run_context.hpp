@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "encoders/bert_encoder.hpp"
+#include "whisper/eltwise.hpp"       // NpuEltwise, for the array softmax
 #include "common/design_selection.hpp"  // StreamEntry
 #include "runtime/model.hpp"
 #include "runtime/design.hpp"    // npu::Device, npu::Design
@@ -105,6 +106,29 @@ struct RunContext {
   std::vector<std::unique_ptr<Pool>> pools;
   std::unique_ptr<npue::BertEncoder> enc;
   std::vector<std::unique_ptr<npue::BertEncoder>> lanes;
+  // One NpuAttention PER TIER, owned here because the encoder outlives nothing
+  // and these are built against a design set that the context also owns. The
+  // encoder holds raw pointers into this vector; nothing is copied, so the
+  // order of construction is the order of tiering.
+  //
+  // PER LANE, and not shared between lanes, and the reason is the same one the
+  // staged weights and the eltwise slots give: a NpuAttention allocates its A
+  // and C buffers ON THE SHARED DESIGN. Two lanes dispatching through one
+  // instance would overwrite the rows the other was still feeding and read back
+  // the other's results -- and which lane won would be thread-scheduling
+  // dependent, so the same request would answer differently from one call to the
+  // next. Worse than the host path it would replace, and silent. The softmax
+  // operator has exactly one A and one C buffer and the same argument, so it
+  // travels in the same bundle rather than being shared behind a lane's back.
+  //
+  // `softmax` is null unless --npu-ops softm named it, which is a decision
+  // independent of attn -- attention on the array with the softmax still on the
+  // host is a real combination and both status lines have to be able to say so.
+  struct AttnLane {
+    std::vector<std::unique_ptr<npue::whisper::NpuAttention>> attn;
+    std::unique_ptr<npue::whisper::NpuEltwise> softmax;
+  };
+  std::vector<AttnLane> attn_lanes;   // index == lane; empty when no lanes
 
   // Unified-vs-per-op design aliasing. All return references so the old
   // `Design &d_qkv = ...` call sites become `c.d_qkv()` verbatim.

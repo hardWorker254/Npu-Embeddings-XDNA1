@@ -333,35 +333,17 @@ inline void setup_flags_pools(RunContext &ctx) {
   // op, and dropping it would be the "the flag was there and nothing happened"
   // failure the subcommand whitelist exists to prevent.
   //
-  // `attn` does NOT get that message, and the difference is the whole point of
-  // splitting the code apart here. Attention has no front end: this model has
-  // real attention -- 12 heads over 256 tokens -- and `qk()` / `av()` in
-  // BertEncoder::run compute it on the host with no array branch to take. So
-  // the reason is what is MISSING, not what the model LACKS, and handing it
-  // conv's sentence would be a category error that reads as "this architecture
-  // cannot do attention" when the truth is "nobody has written the branch".
-  // That distinction is what a per-code refusal table is for; see README.md's
-  // "Which architecture honours which code".
+  // `attn` is NOT in this table, and its absence is deliberate: attention has no
+  // front end, so an embedder's question is not "does this model have attention"
+  // (it always does) but "does the loaded set carry the streams". That is
+  // answered by NAME against the loaded stream table further down, where a set
+  // without attn_qk/attn_av is refused as an artifact that was never exported
+  // for this model -- not as a missing capability.
   for (const auto &code : ctx.npu_ops) {
-    if (code == "gelu" || code == "layn" || code == "softm") continue;
+    if (code == "gelu" || code == "layn" || code == "softm" ||
+        code == "attn")
+      continue;
     const NpuOp *op = find_npu_op(code);
-    if (code == "attn") {
-      throw std::runtime_error(
-          std::string("--npu-ops ") + code + " (" +
-          (op ? op->long_name : "unknown op") + "): this model HAS attention -- "
-          "BertEncoder::run's qk() and av() over the sequence -- and computes "
-          "it on the host with no array branch, so this is unimplemented work "
-          "rather than a missing operation. Three things are in the way, none "
-          "of them the model: export_gemm_rtp only builds attn_qk/attn_av "
-          "instruction streams under `kind == \"stt\"` (resolve.py); those "
-          "streams are absent from kinds.cls's stream list; and the n_kv "
-          "geometry is read from `frames`, which an embedder does not carry, so "
-          "it would default to Whisper's 1500 instead of this model's 256 "
-          "positions. No such design has been exported or run. Note also that "
-          "Whisper's own `attn` measures 4.6x SLOWER than its host path, so "
-          "filling this cell would not make anything faster. The codes this "
-          "container genuinely does not have are conv, mproj, fft and logit.");
-    }
     throw std::runtime_error(
         std::string("--npu-ops ") + code + " (" +
         (op ? op->long_name : "unknown op") +
@@ -445,6 +427,94 @@ inline void setup_flags_pools(RunContext &ctx) {
 inline int setup_encoder(RunContext &ctx) {
   Pool &pool = *ctx.pools[0];
 
+  // One NpuAttention per tier for ONE lane, in the same order as the tier
+  // tables the encoder holds. Declared at function scope because the extra-lane
+  // loop at the bottom of this function needs it too.
+  //
+  // The geometry checks are Whisper's, restated for an embedder: the score
+  // chunk one dispatch produces IS the query chunk the next GEMM reads, so
+  // attn_qk's M is the row count and attn_av's K is attn_qk's N, and both are
+  // the PADDED n_kv. A set that says otherwise is not one of ours, and each
+  // message names the two numbers rather than the stream.
+  //
+  // A LAMBDA, called once per lane, because a lane needs its own buffers on
+  // the shared design and its own scratch: sharing one instance across lanes
+  // is the failure the eltwise slots below already describe, where the
+  // winner is thread-scheduling dependent and the same request answers
+  // differently from one call to the next.
+  // The runtime's dispatch mutex, declared HERE rather than where the extra
+  // lanes are created forty lines below: build_attn_lane() needs it too. This
+  // is shared mutable state on the Design (see NpuAttention::set_npu_mutex),
+  // and a lane whose attention dispatches unlocked is a lane that can tear
+  // another lane's binding mid-sync.
+  static std::mutex npu_mutex;
+
+  auto build_attn_lane = [&](app::Pool &p) {
+  const std::string dir = ctx.art + "/gemm_rtp";
+  const int64_t hd = app::g_head_dim;
+  RunContext::AttnLane lane;
+  // The array softmax for THIS lane. Only when softm was asked for; attn
+  // alone leaves it on the host, and that is a combination the status
+  // block has to be able to report.
+  if (ctx.on_array("softm") && ctx.ld_sm) {
+    lane.softmax = std::make_unique<npue::whisper::NpuEltwise>(
+        *ctx.ld_sm, p, npue::whisper::EltwiseKind::Softmax);
+    lane.softmax->alloc_buffers();
+    lane.softmax->npu_mu = &npu_mutex;
+  }
+  for (const auto &row : ctx.enc->tier_slots) {
+    const app::StreamEntry *qk = nullptr, *av = nullptr;
+    for (const auto &s : ctx.streams) {
+      if (static_cast<size_t>(s.slot) == row[4]) qk = &s;
+      if (static_cast<size_t>(s.slot) == row[5]) av = &s;
+    }
+    if (!qk || !av)
+      throw std::runtime_error(dir + ": tier slots 4 and 5 do not name "
+                               "two streams of this set");
+    if (qk->N != av->K)
+      throw std::runtime_error(
+          dir + ": attn_qk's N is " + std::to_string(qk->N) +
+          " and attn_av's K is " + std::to_string(av->K) +
+          ". The score chunk travels from one to the other as the A "
+          "operand, so the two are the same padded n_kv.");
+    if (qk->K < hd || qk->K % hd)
+      throw std::runtime_error(
+          dir + ": attn_qk's K is " + std::to_string(qk->K) +
+          " and this container's head_dim is " + std::to_string(hd) +
+          ". The Q operand of a score is one head, so K is the head "
+          "width padded UP to the design's tile_k -- never down to a head, "
+          "and never a value a head does not divide.");
+    if (av->N < hd)
+      throw std::runtime_error(
+          dir + ": attn_av's N is " + std::to_string(av->N) +
+          " and a head is " + std::to_string(hd) +
+          " wide. The design pads this one UP to its own N granularity, "
+          "never down to a head.");
+    if (lane.softmax && lane.softmax->cols() != qk->N)
+      throw std::runtime_error(
+          dir + "/softmax has rows " +
+          std::to_string(lane.softmax->cols()) +
+          " wide and the attn streams' score row is " +
+          std::to_string(qk->N) +
+          ". The softmax design reduces along the whole row, so it has to "
+          "be the width of the score row it is handed.");
+    lane.attn.push_back(std::make_unique<npue::whisper::NpuAttention>(
+        ctx.d_qkv(), p, qk->N, hd, av->N));
+    lane.attn.back()->set_streams(static_cast<size_t>(qk->slot),
+                                  static_cast<size_t>(av->slot), qk->M,
+                                  qk->K);
+    // The softmax follows --npu-ops softm, which is a SEPARATE decision:
+    // attn on the array does not imply the softmax on it, and reading the
+    // flag rather than assuming is what keeps the status line's two
+    // entries independent. ctx.ld_sm is null unless softm was asked for,
+    // which is exactly the condition for having something to hand over.
+    lane.attn.back()->set_softmax(lane.softmax.get());
+    lane.attn.back()->set_npu_mutex(&npu_mutex);
+    lane.attn.back()->alloc_buffers();
+  }
+  return lane;
+};
+
   // Build the encoder on the host side of the designs. The model, designs and
   // pool are references -- they outlive the encoder via RunContext. The mask
   // is installed after construction: the active tier, not the constructor,
@@ -473,11 +543,19 @@ inline int setup_encoder(RunContext &ctx) {
     if (!ctx.streams.empty()) {
       std::set<int64_t> tset;
       for (const auto &s : ctx.streams) tset.insert(s.batch);
+      // --npu-ops attn asked for the array. The stream slots and the row count
+      // are per tier, so this is checked ONCE PER TIER and refused by name
+      // rather than answered from the host: a set exported without the code has
+      // no attn_qk/attn_av at all, and saying so is the difference between
+      // "re-run the exporter" and a model that quietly computes the same
+      // numbers it always did.
+      const bool want_attn = ctx.on_array("attn");
       for (int64_t b : tset) {
-        std::array<size_t, 4> slots{};
+        std::array<size_t, 6> slots{};
         bool complete = true;
-        const char *ops[4] = {"qkv", "attn_out", "ffn_up", "ffn_down"};
-        for (int k = 0; k < 4; ++k) {
+        const char *ops[6] = {"qkv", "attn_out", "ffn_up", "ffn_down",
+                              "attn_qk", "attn_av"};
+        for (int k = 0; k < (want_attn ? 6 : 4); ++k) {
           auto it = std::find_if(ctx.streams.begin(), ctx.streams.end(),
                                  [&](const StreamEntry &s) {
                                    return s.batch == b && s.op == ops[k];
@@ -485,9 +563,62 @@ inline int setup_encoder(RunContext &ctx) {
           if (it == ctx.streams.end()) { complete = false; break; }
           slots[k] = static_cast<size_t>(it->slot);
         }
-        if (!complete) continue;         // a tier missing an op is not a tier
+        if (!complete) {
+          if (!want_attn) continue;   // a tier missing an op is not a tier
+          // WHICH stream is missing decides what the message can honestly say.
+          // A tier with no attn_qk/attn_av at all is a set exported without the
+          // code; a tier whose four GEMMs are incomplete is something else
+          // entirely, and conflating the two would send a reader to re-export
+          // a set that was never the problem.
+          const bool no_gemm = slots[0] == 0 || slots[1] == 0 || slots[2] == 0
+                                   || slots[3] == 0;
+          const char *missing = no_gemm ? "four GEMM streams (qkv/attn_out/"
+                                          "ffn_up/ffn_down)"
+                                        : "attn_qk/attn_av";
+          // AND the CAUSE follows from the same split. Four GEMMs present but
+          // no attention streams means the target could not size them:
+          // resolve.py needs the model's window (`max_seq_len`, or `frames`
+          // for a stt kind) for attn_qk's N and attn_av's K, and an entry
+          // carrying neither is skipped over rather than guessed at, because
+          // guessing Whisper's 1500 positions for a model with 256 builds a
+          // design that cannot answer for it. So for THIS case a re-export of
+          // the same targets file would produce the same set, and saying only
+          // "re-export" would send a reader round a loop. Naming the key to
+          // add is the difference between an instruction and a loop; the four-
+          // GEMM case gets no such hint because no key is missing there.
+          const std::string cause =
+              no_gemm
+                  ? std::string(
+                        ". The exporter builds every stream the target's op "
+                        "list honours and prints the list it chose, so a set "
+                        "without these was built against a container whose "
+                        "registry did not honour `attn`, or against a "
+                        "different model.")
+                  : std::string(
+                        ". Either this target's registry row does not honour "
+                        "`attn`, or its entry in tools/data/npu_targets.json "
+                        "carries no window (`max_seq_len`, or `frames` for a "
+                        "stt kind), which is what attn_qk's N and attn_av's K "
+                        "are sized from -- the exporter builds the rest of the "
+                        "set and leaves these two out rather than inventing a "
+                        "width. Add the key, then re-export.");
+          throw std::runtime_error(
+              std::string("--npu-ops attn was given, but the loaded design set "
+                          "carries no ") +
+              missing + " at batch tier " + std::to_string(b) + cause +
+              " Re-run: python "
+              "tools/export/export_gemm_rtp.py --target <model> --arch " +
+              std::to_string(ctx.design_arch ? ctx.design_arch : 1) +
+              " --out " + ctx.art + " --artifacts " + ctx.art +
+              ". Or drop attn from --npu-ops and run the host path, which is "
+              "the measured-faster one.");
+        }
         ctx.enc->tiers.push_back(b);
         ctx.enc->tier_slots.push_back(slots);
+      }
+      if (want_attn) {
+        ctx.attn_lanes.push_back(build_attn_lane(pool));
+        for (auto &a : ctx.attn_lanes[0].attn) ctx.enc->attns.push_back(a.get());
       }
       ctx.enc->use_tier(ctx.batch);
       std::printf("  tiers      ");
@@ -555,6 +686,24 @@ inline int setup_encoder(RunContext &ctx) {
     where("gelu", ctx.host_gelu, ctx.d_gelu(), gelu_note);
     where("softm", ctx.host_sm, ctx.d_sm(), sm_note);
     where("layn", ctx.host_ln, ctx.d_ln(), ln_note);
+    // AND `attn`, which was the one code this block stayed silent about. The
+    // silence was not neutral: a `--npu-ops attn` run puts 2 GEMMs x heads x
+    // layers x query chunks on attn_qk/attn_av -- 4608 dispatches over the
+    // block's 144 on bge-base, 15 texts -- and the block printed the three
+    // elementwise lines and said nothing about attention, so the only place
+    // the reader could learn that the array had taken it was the QK^T and
+    // A*V rows of the time split further down. Every other mode already
+    // prints this line (stt_mode, vit_mode, gemma_mode); the BERT path was
+    // the one that did not, and it is the path the `attn` measurements in
+    // the registry were taken on.
+    //
+    // Read off `attn_`, which use_tier() resolves from the loaded stream
+    // table rather than from the flag -- the same rule this block opens
+    // with. The design named is the gemm set's, because attn_qk and attn_av
+    // are streams INSIDE it (the slot lookup above) and not a set of their
+    // own, so there is no d_attn() to name.
+    where("attn", ctx.enc->attn_ == nullptr, ctx.d_qkv(),
+          "QK^T and softmax.V as host passes, no attn_qk/attn_av dispatches");
   }
   const size_t staged = ctx.enc->stage_all();
   // What the allocation mode actually bought, in addresses. Printed
@@ -566,7 +715,6 @@ inline int setup_encoder(RunContext &ctx) {
   std::printf("  weights    %.2f MB staged on the device once, not per call\n",
               staged / 1e6);
 
-  static std::mutex npu_mutex;
   if (ctx.pipeline > 1) {
     if (!ctx.unified)
       throw std::runtime_error(
@@ -610,6 +758,18 @@ inline int setup_encoder(RunContext &ctx) {
       // measured as 1-cos 1.0 on whichever chunk that lane happened to take.
       e2.tiers = ctx.enc->tiers;
       e2.tier_slots = ctx.enc->tier_slots;
+      // Attention is POLICY like the tier table, and a lane without it would
+      // quietly compute on the host while lane 0 computes on the array -- the
+      // flag said the array and three quarters of the requests did not use it,
+      // which is exactly the intention-versus-value failure this file keeps
+      // fixing elsewhere. The instances are BUILT PER LANE, not shared: they
+      // allocate their A and C buffers on the shared design, and one instance
+      // under four concurrent lanes hands back whichever lane's rows finished
+      // last. Same construction, same refusals, this lane's pool.
+      if (!ctx.attn_lanes.empty() || ctx.enc->attns.size()) {
+        ctx.attn_lanes.push_back(build_attn_lane(*ctx.pools[l]));
+        for (auto &a : ctx.attn_lanes.back().attn) e2.attns.push_back(a.get());
+      }
       e2.use_tier(ctx.batch);
       // Each extra lane gets its own A and C buffers on the shared design;
       // lane 0 keeps the base slots.

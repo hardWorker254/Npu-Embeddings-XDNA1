@@ -123,70 +123,88 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
   // RMSNorm, softmax and GeGLU on the host and reads no per-op host/array
   // choice at all, so there is no flag to switch and no stream to switch it
   // to. The flag would parse, set nothing and change nothing -- measured as
-  // bit-identical output (max|d| 0.000e+00) for every one of the three codes
-  // plus `attn`, which this path did not even reject. That is the "the flag
-  // was there and nothing happened" failure run_setup.hpp refuses by name for
-  // the BERT path and vit_mode.hpp refuses for the classifier, so the codes
-  // that WOULD be ignored are named here too rather than silently run.
+  // bit-identical output (max|d| 0.000e+00), which is the "the flag was there
+  // and nothing happened" failure run_setup.hpp refuses by name for the BERT
+  // path and vit_mode.hpp refuses for the classifier.
+  //
+  // That measurement covered `attn` too, and `attn` is no longer part of it:
+  // attention IS a separate pass here, and it now has a branch (see
+  // GemmaNpuEncoder::attention). The codes that are still ignored -- `layn`,
+  // `gelu` -- are named rather than silently accepted, exactly as before.
+  std::set<std::string> npu_codes;   // the parsed --npu-ops, needed later too
   {
     std::string listing;
     for (int i = 1; i < argc - 1; ++i)
       if (std::string(argv[i]) == "--npu-ops") listing = argv[i + 1];
-    const std::set<std::string> codes = parse_npu_ops(listing);
-    if (!codes.empty()) {
-      // The reason is the ENCODER, not the directories. An earlier version of
-      // this sentence led with "its design set carries only gemm_rtp -- no
-      // gelu/, layernorm/ or softmax/ directory", which was a claim about the
-      // filesystem and became FALSE the moment an export built those three for
-      // arch=1: they existed, the refusal still fired, and the true reason --
-      // that GemmaNpuEncoder has no host/array choice to read -- was no longer
-      // stated anywhere. A diagnostic that names the wrong cause sends the
-      // reader to delete a directory that is not the problem.
+    npu_codes = parse_npu_ops(listing);
+    if (!npu_codes.empty()) {
+      // TWO CODES ARE HONOURED AND SIX ARE REFUSED, and the split is by what a
+      // refusal has to say about them rather than by whether they parse.
       //
-      // Both sides now refuse on the same reason, so the exporter no longer
-      // builds sets for this architecture at all (tools/export/exporters/
-      // gemm_rtp/build.py refuses the same codes for the same arch).
-      std::string seen;
-      for (const auto &c : codes) { if (!seen.empty()) seen += ", "; seen += c; }
-      // `attn` gets a different sentence, for the same reason run_setup.hpp
-      // splits it off BERT's: the sentence above is true of layn/softm/gelu
-      // (gemma runs RMSNorm, softmax and a GATED GeGLU, so there is no separate
-      // pass a design could take over), but attention IS a separate pass --
-      // `attention(qkvbuf, ctx)` in GemmaNpuEncoder -- and what is missing is
-      // the branch, not the capability. Telling a reader "exporting will not
-      // help" about a cell that is merely unwritten sends them to conclude the
-      // model cannot do it. Note the measured part still holds for attn: with
-      // no branch written, accepting it today returns bit-identical vectors.
-      if (codes.count("attn")) {
-        throw std::runtime_error(
-            "--npu-ops " + listing + ": `attn` is unimplemented here, "
-            "not unsupported. GemmaNpuEncoder::attention() computes real "
-            "attention over this model's tokens on the host with no array "
-            "branch, so asking for attn today changes nothing and returns "
-            "identical vectors -- measured, max|d| 0.000e+00 -- because the "
-            "branch was never written, not because there is nothing to move. "
-            "Three things stand in the way, none of them the model: "
-            "export_gemm_rtp builds attn_qk/attn_av streams only under `kind "
-            "== \"stt\"` (resolve.py); kinds.cls's stream list does not carry "
-            "them; and n_kv is read from `frames`, which an embedder does not "
-            "have, so it would default to Whisper's 1500 instead of this "
-            "model's positions. And gemma applies RoPE to the qkv buffer "
-            "before attention() runs, so the array's A operand would be those "
-            "post-RoPE activations -- a per-model detail the shared host path "
-            "gets for free. Whisper's own `attn` measures 4.6x "
-            "SLOWER than its host path, so this cell is written down rather "
-            "than filled. Asked for: " + seen + ".");
+      // `attn` and `softm` are honoured. Attention is a separate pass --
+      // `attention(qkvbuf, ctx)` in GemmaNpuEncoder -- and takes the same
+      // NpuAttention Whisper and the BERT encoder use; `softm` is the softmax
+      // inside it, dispatched on art + "/softmax", its own xclbin, so the two
+      // flags compose without either implying the other.
+      //
+      // The other six are refused, and they are refused for two different
+      // reasons that are kept apart on purpose:
+      //
+      //   layn, gelu   this encoder runs RMSNorm and its GATED GeGLU on the
+      //                host and has no per-op host/array choice to read --
+      //                unlike the BERT encoder it takes no flag per op. So
+      //                accepting them would print nothing, change nothing and
+      //                hand back identical vectors, which is the failure this
+      //                file exists to rule out. The registry marks these two
+      //                cells blocked for this model, with the same reason.
+      //
+      //   conv, mproj, fft, logit   four operations of a DIFFERENT model. conv
+      //                is Whisper's mel front end, mproj the mel filter bank,
+      //                fft the 400-point transform, logit the vocabulary
+      //                projection -- an embedder has none of them, so the
+      //                registry marks these cells absent rather than blocked,
+      //                and a refusal that called them blocked would tell a
+      //                reader that exporting harder might work.
+      //
+      // An earlier version of this comment said the exporter built
+      // attn_qk/attn_av only under `kind == "stt"` and that n_kv came from
+      // `frames`. Both were true when written and both were the export's
+      // policy rather than the model's; they are fixed, and a refusal naming a
+      // reason that no longer holds sends the reader to repair the wrong thing.
+      const std::set<std::string> honoured = {"attn", "softm"};
+      std::string deadseen, onhost, absent;
+      for (const auto &c : npu_codes) {
+        if (honoured.count(c)) continue;
+        if (!deadseen.empty()) deadseen += ", ";
+        deadseen += c;
+        if (c == "layn" || c == "gelu") {
+          if (!onhost.empty()) onhost += ", ";
+          onhost += c;
+        } else {
+          if (!absent.empty()) absent += ", ";
+          absent += c;
+        }
       }
-      throw std::runtime_error(
-          "--npu-ops " + listing + ": this architecture runs RMSNorm, "
-          "softmax and GeGLU on the host. GemmaNpuEncoder has no per-op "
-          "host/array choice to read -- unlike the BERT encoder it takes no "
-          "flag per op -- so these codes would move nothing: accepting them "
-          "prints nothing, changes nothing and hands back identical vectors. "
-          "Asked for: " + seen + ". This is not a missing design set and "
-          "exporting one will not help: the exporter reads the same registry "
-          "(NPU_OPS.md) and skips these codes for this model, printing the "
-          "reason as it goes. Drop them.");
+      if (!deadseen.empty()) {
+        std::string why;
+        if (!onhost.empty())
+          why += "\n    " + onhost + ": this encoder runs RMSNorm and its "
+                "GATED GeGLU on the host and has no per-op host/array choice "
+                "to read for them. Accepting them would print nothing, change "
+                "nothing and hand back identical vectors -- measured as max|d| "
+                "0.000e+00 -- and exporting a design will not help either: the "
+                "exporter reads the same registry and marks these cells blocked "
+                "for this model.";
+        if (!absent.empty())
+          why += "\n    " + absent + ": Whisper's audio front end, mel filter "
+                "bank, 400-point transform and vocabulary projection. An "
+                "embedder has no such operation, so these cells are absent -- "
+                "there is nothing to move, and a design directory for them "
+                "would be opened by nothing.";
+        throw std::runtime_error(
+            "--npu-ops " + deadseen + ":" + why +
+            "\n  This architecture honours --npu-ops attn and --npu-ops softm.");
+      }
     }
   }
 
@@ -487,6 +505,24 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
   for (int l = 0; l < nlanes; ++l)
     pools.push_back(std::make_unique<Pool>(std::max(1, nthreads / nlanes)));
 
+  // Per-lane array state, declared BEFORE the encoders so it outlives them:
+  // a lane's NpuAttention holds a pointer into its NpuEltwise, and an object
+  // destroyed while something still points at it is a bug that only fires on
+  // the run after a failure. One softmax design per lane for the same reason
+  // the BERT path gives every lane its own: the design has ONE input and ONE
+  // output buffer, so two lanes dispatching into it would hand each other's
+  // rows back -- thread-scheduling dependent, and worse, self-consistent.
+  struct GemmaAttnLane {
+    std::unique_ptr<npue::whisper::NpuEltwise> softmax;
+    std::vector<std::unique_ptr<npue::whisper::NpuAttention>> attn;
+  };
+  std::vector<GemmaAttnLane> attn_lanes(1);   // lane 0 now; lanes 1+ below
+  // The softmax design itself, open only when `softm` named it. Declared here
+  // rather than inside the builder because it outlives every encoder: the
+  // NpuEltwise a lane holds points into it, and a design destroyed one scope
+  // earlier than the thing dispatching into it is a crash on teardown and
+  // nothing between.
+  std::unique_ptr<npu::Design> sm_design;
   npue::GemmaNpuEncoder enc(model, d, *pools[0]);
   // T37 (tasks/0082). Same switch as the BERT path, for the same reason: the
   // fused and unfused epilogues must both stay runnable so they can be A/B'd
@@ -499,7 +535,7 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
   std::set<int64_t> tset;
   for (const auto &s : streams) tset.insert(s.batch);
   for (int64_t b : tset) {
-    std::array<size_t, 4> slots{};
+    std::array<size_t, 6> slots{};
     bool complete = true;
     const char *ops[4] = {"qkv", "attn_out", "ffn_up", "ffn_down"};
     for (int k = 0; k < 4; ++k) {
@@ -511,6 +547,21 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
       slots[k] = static_cast<size_t>(it->slot);
     }
     if (!complete) continue;
+    // The two attention streams, looked up the same way and left at ZERO when
+    // absent. Zero rather than absent-from-the-row: a tier row has to be the
+    // same shape whether or not this set was exported with `attn`, and a row
+    // that silently shrank for one export would be read by code that indexes it
+    // four deep. The zero is then refused below, by tier, if and only if the
+    // flag asked for `attn` -- because a set without them is a perfectly good
+    // set for a run that did not ask.
+    for (int k = 4; k < 6; ++k) {
+      const char *want = (k == 4) ? "attn_qk" : "attn_av";
+      auto it = std::find_if(streams.begin(), streams.end(),
+                             [&](const StreamEntry &s) {
+                               return s.batch == b && s.op == want;
+                             });
+      if (it != streams.end()) slots[k] = static_cast<size_t>(it->slot);
+    }
     enc.tiers.push_back(b);
     enc.tier_slots.push_back(slots);
   }
@@ -518,13 +569,118 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
   enc.slot_c = d.stage_alloc(2, d.info().buffer_bytes[2]);
   const size_t staged = enc.stage_all();
 
+  // -- the array softmax, and the attention when `attn` was asked for ------
+  //
+  // The softmax is its OWN xclbin: art + "/softmax", its own design, its own
+  // hw_context, its own input and output buffers per lane. That is what makes
+  // `softm` a real choice on a model whose softmax has no pass of its own to
+  // take -- it lives inside attention(), so the design does not need a pass to
+  // ride, it needs a buffer to be handed a score row. This model's rows are
+  // seq_ wide and the design is built at this target's n_kv, so the score rows
+  // handed to it are padded and the tail is -1e30 (see
+  // GemmaNpuEncoder::attention) -- the same value NpuAttention writes, proven
+  // on the BERT path.
+  //
+  // The builder is a LAMBDA per lane, for the reason run_setup.hpp's identical
+  // one is: every lane needs its own buffers on the shared design, and one
+  // instance handed to several lanes answers with whichever lane finished last.
+  // The dispatch mutex, declared HERE rather than forty lines below where the
+  // extra lanes are built: build_attn_lane() needs it too, and an attention
+  // dispatch that skips it tears another lane's `active` binding. Same object
+  // for the softmax design as for the GEMM one, matching what BertEncoder says
+  // at eltwise() -- one mutex, because the runtime already treats "the NPU is
+  // being driven by another lane" as one condition rather than per-design
+  // conditions, and a second mutex would only add a lock-order question.
+  static std::mutex npu_mutex;
+
+  auto build_attn_lane = [&](Pool &p, size_t lane_index) {
+    GemmaAttnLane lane;
+    if (npu_codes.count("softm")) {
+      lane.softmax = std::make_unique<npue::whisper::NpuEltwise>(
+          *sm_design, p, npue::whisper::EltwiseKind::Softmax);
+      lane.softmax->alloc_buffers();
+      lane.softmax->npu_mu = &npu_mutex;
+    }
+    if (!npu_codes.count("attn")) return lane;
+    if (enc.tiers.empty())
+      throw std::runtime_error(
+          art + "/gemm_rtp: --npu-ops attn was given, but this set carries no "
+          "complete tier at all (all four of qkv/attn_out/ffn_up/ffn_down), so "
+          "there is nothing to attach an attention to. Re-export with "
+          "tools/export/export_gemm_rtp.py.");
+    for (size_t t = 0; t < enc.tier_slots.size(); ++t) {
+      const std::array<size_t, 6> &row = enc.tier_slots[t];
+      const StreamEntry *qk = nullptr, *av = nullptr;
+      for (const auto &st : streams) {
+        if (row[4] && static_cast<size_t>(st.slot) == row[4]) qk = &st;
+        if (row[5] && static_cast<size_t>(st.slot) == row[5]) av = &st;
+      }
+      if (!qk || !av)
+        throw std::runtime_error(
+            art + "/gemm_rtp: --npu-ops attn was given, but batch tier " +
+            std::to_string(enc.tiers[t]) + " carries no attn_qk/attn_av. The "
+            "flag says these streams run on the array, and a set without them "
+            "would answer from the host under a flag that says otherwise. "
+            "Re-export this target with the registry's `attn` cell honoured.");
+      if (qk->N != av->K)
+        throw std::runtime_error(
+            art + ": attn_qk's N is " + std::to_string(qk->N) +
+            " and attn_av's K is " + std::to_string(av->K) +
+            ". The score chunk travels from one to the other as the A operand, "
+            "so the two are the same padded n_kv.");
+      if (qk->K < enc.head_dim || qk->K % enc.head_dim)
+        throw std::runtime_error(
+            art + ": attn_qk's K is " + std::to_string(qk->K) +
+            " and this container's head_dim is " + std::to_string(enc.head_dim) +
+            ". The Q operand of a score is one head, so K is the head width "
+            "padded UP to the design's tile_k -- never down to a head.");
+      if (av->N < enc.head_dim)
+        throw std::runtime_error(art + ": attn_av's N is " +
+                                 std::to_string(av->N) + " and a head is " +
+                                 std::to_string(enc.head_dim) + " wide.");
+      if (lane.softmax && lane.softmax->cols() != qk->N)
+        throw std::runtime_error(
+            art + "/softmax has rows " + std::to_string(lane.softmax->cols()) +
+            " wide and the attn streams' score row is " + std::to_string(qk->N) +
+            ". The softmax design reduces along the whole row, so it has to be "
+            "the width of the score row it is handed.");
+      lane.attn.push_back(std::make_unique<npue::whisper::NpuAttention>(
+          d, p, qk->N, enc.head_dim, av->N));
+      auto &a = lane.attn.back();
+      a->set_streams(row[4], row[5], qk->M, qk->K);
+      // MULTI-QUERY, and both numbers are spelled out rather than derived: this
+      // model has ONE key/value head against `heads` query heads, and a K|V
+      // half-width of kv_w (256) and not d_model (768). Handing it d_model
+      // would walk 768 floats past a 256-wide block on the second query head
+      // and return a plausible-looking wrong answer.
+      a->set_kv_geometry(enc.kv_w, enc.kv_heads);
+      a->set_softmax(lane.softmax.get());
+      a->set_npu_mutex(&npu_mutex);
+      a->alloc_buffers();
+    }
+    (void)lane_index;
+    return lane;
+  };
+
+  sm_design = npu_codes.count("softm")
+                  ? std::make_unique<npu::Design>(dev, art + "/softmax")
+                  : nullptr;
+  if (sm_design) {
+    attn_lanes[0] = build_attn_lane(*pools[0], 0);
+    enc.attns = std::move(attn_lanes[0].attn);
+    enc.set_softmax(attn_lanes[0].softmax.get());
+  } else if (npu_codes.count("attn")) {
+    attn_lanes[0] = build_attn_lane(*pools[0], 0);
+    enc.attns = std::move(attn_lanes[0].attn);
+    enc.set_softmax(nullptr);
+  }
+
   // Extra lanes. The staged weights and the tier table belong to the DESIGN,
   // not to a lane, and are copied rather than re-staged; only the A and C
   // buffers are per-lane. A lane missing the tier table would silently fall
   // back to the flat (0,1,2,3) slot contract, which under a 16-stream export
   // selects entirely the wrong shapes -- measured as 1-cos 1.0 on the BERT
   // path when exactly that happened (tasks/0037).
-  static std::mutex npu_mutex;
   std::vector<std::unique_ptr<npue::GemmaNpuEncoder>> extra;
   if (nlanes > 1) {
     enc.npu_mu = &npu_mutex;
@@ -551,6 +707,14 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
       e2.as_qkv = enc.as_qkv; e2.as_ao = enc.as_ao;
       e2.as_fu = enc.as_fu;   e2.as_fd = enc.as_fd;
       e2.fuse_ffn_epilogue = enc.fuse_ffn_epilogue;
+      // Its OWN attention and its OWN softmax, built after the tier table is
+      // copied and BEFORE use_tier(), which is what reads attns. A lane whose
+      // attns came after the tier pick would run one job with a null attn_ and
+      // answer from the host, under a flag that says otherwise -- and only on
+      // lanes 1+, which is the shape that hides it from a one-lane test.
+      attn_lanes.push_back(build_attn_lane(*pools[l], attn_lanes.size()));
+      e2.attns = std::move(attn_lanes.back().attn);
+      e2.set_softmax(attn_lanes.back().softmax.get());
       e2.use_tier(enc.batch);
       e2.slot_a = d.stage_alloc(0, d.info().buffer_bytes[0]);
       e2.slot_c = d.stage_alloc(2, d.info().buffer_bytes[2]);
@@ -603,8 +767,49 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
   std::printf("  staged     %.1f MB of tiled %s weights on the device\n",
               staged / 1e6,
               enc.d.info().a_elem_bytes == 1 ? "int8" : "bf16");
-  std::printf("  host       RMSNorm x%lld, RoPE, GeGLU, MQA attention "
-              "(2.3%% of MACs)\n", (long long)(4 * enc.layers + 1));
+  // WHERE EACH PIECE OF THE ATTENTION RUNS, read off the objects built above
+  // and never off the flag that led here -- the same rule and the same wording
+  // run_setup.hpp's status block follows for the BERT path, because the two
+  // blocks have to be readable side by side.
+  //
+  // This line used to be one unconditional "host ... MQA attention (2.3% of
+  // MACs)", so a --npu-ops attn run that had just put 2 x heads x layers GEMMs
+  // onto attn_qk/attn_av was described by a status saying the opposite of the
+  // time beside it, and a --npu-ops softm run was described as doing nothing at
+  // all while its softmax sat on the array for 1.5 s. A status that cannot be
+  // reconciled with the numbers next to it is the failure this file is supposed
+  // to rule out.
+  const bool attn_on_array = !enc.attns.empty();
+  const bool softm_on_array = sm_design != nullptr;
+  auto where = [](const char *code, bool host, const npu::Design &d,
+                  const char *host_note) {
+    const NpuOp *op = find_npu_op(code);
+    if (host) {
+      std::printf("  %-6s %-10s on the HOST (fp32) -- %s\n", code,
+                  op ? op->long_name : "?", host_note);
+    } else {
+      std::printf("  %-6s %-10s on the ARRAY (%s, arch %lld%s%s)\n", code,
+                  op ? op->long_name : "?",
+                  d.info().name.empty() ? d.info().kind.c_str()
+                                       : d.info().name.c_str(),
+                  (long long)d.info().arch,
+                  d.info().device.empty() ? "" : " ",
+                  d.info().device.c_str());
+    }
+  };
+  std::printf("  host       RMSNorm x%lld, RoPE, GeGLU%s\n",
+              (long long)(4 * enc.layers + 1),
+              attn_on_array && softm_on_array
+                  ? ""
+                  : attn_on_array
+                        ? ", MQA softmax"
+                        : softm_on_array ? ", MQA QK^T and softmax.V"
+                                         : ", MQA attention (2.3% of MACs)");
+  where("attn", !attn_on_array, d,
+        "MQA attention over the same 2.3% of MACs, on the host");
+  where("softm", !softm_on_array,
+        softm_on_array ? *sm_design : d,
+        "softmax inside attention, on the host");
   // ALWAYS SAY WHICH PREFIX WAS APPLIED, and refuse an unknown name by
   // listing the real ones -- the standard tasks/0071 set for nomic, which this
   // arch had not been held to. It matters most for MTEB: the harness applies
@@ -727,18 +932,29 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
     enc.t_out += e->t_out;   enc.t_bias += e->t_bias; enc.t_norm += e->t_norm;
     enc.t_attn += e->t_attn; enc.t_rope += e->t_rope; enc.t_geglu += e->t_geglu;
     enc.t_tok += e->t_tok;   enc.n_dispatch += e->n_dispatch;
+    enc.n_elt_dispatch += e->n_elt_dispatch;
   }
   std::printf("  embedded   %zu texts in %.2f s  ->  %.1f seq/s (wall clock, "
               "end-to-end -- NOT an NPU kernel claim, CLAUDE.md rule 1)\n",
               texts.size(), el, texts.size() / std::max(el, 1e-9));
+  // The softmax's OWN dispatches, when the attention put them on the array:
+  // `n_dispatch` counts what went through the gemm_rtp xclbin's hw_context and
+  // a softmax running in softmax/ has a context of its own, so without this
+  // suffix `--npu-ops softm` reported the same 96 dispatches as a run that did
+  // not ask for it while spending 1.5 s inside those dispatches.
+  const std::string elt_note =
+      enc.n_elt_dispatch > 0
+          ? " + " + std::to_string(static_cast<long long>(enc.n_elt_dispatch)) +
+                " softmax dispatches"
+          : std::string();
   std::printf("  breakdown  npu %.0f ms (in %.0f, dispatch %.0f, out %.0f) | "
               "conv %.0f | bias %.0f | norm %.0f | attn %.0f | rope %.0f | "
-              "geglu %.0f | tok %.0f  [%d dispatches]\n",
+              "geglu %.0f | tok %.0f  [%d dispatches%s]\n",
               (enc.t_in + enc.t_disp + enc.t_out) * 1e3, enc.t_in * 1e3,
               enc.t_disp * 1e3, enc.t_out * 1e3, enc.t_conv * 1e3,
               enc.t_bias * 1e3, enc.t_norm * 1e3, enc.t_attn * 1e3,
               enc.t_rope * 1e3, enc.t_geglu * 1e3, enc.t_tok * 1e3,
-              enc.n_dispatch);
+              enc.n_dispatch, elt_note.c_str());
   write_out(out, enc.hidden_);
   return 0;
 }
