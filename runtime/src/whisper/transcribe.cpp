@@ -262,13 +262,13 @@ Session::Session(npue::File &model, const std::string &model_name,
       if (got <= 0.0 || std::abs(got - want) > 1e-12 * std::max(1.0, want))
         throw std::runtime_error(
             dir + "/design.json was built with layer_norm_eps " +
-            std::to_string(got) + " and this container says " +
-            std::to_string(want) +
+            app::eps_text(got) + " and this container says " +
+            app::eps_text(want) +
             ". The epsilon is inside a square root, so the two are not a "
             "rounding difference. Re-export the design for this container.");
       elt_notes_.push_back(dir + ": " + std::to_string(op->rows()) + " rows x " +
                            std::to_string(op->cols()) + ", eps " +
-                           std::to_string(got));
+                           app::eps_text(got));
     } else if (kind == EltwiseKind::Gelu) {
       // One flat span of activations, so the pair that reads as "1 rows x N" is
       // spelled as what it is: the elements one dispatch covers.

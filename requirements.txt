@@ -8,9 +8,9 @@
 # requirements.lock.txt, which is what bootstrap.sh installs. Bump a pin here,
 # then re-freeze.
 #
-# Targets Python 3.14 on x86_64. The MLIR-AIE / Triton-XDNA wheels are built
-# per-ABI (cp314, cp313, cp312, cp311), so a different Python needs a
-# different tag in requirements.amd.txt.
+# Targets Python 3.14 on x86_64. The MLIR-AIE wheels are built per-ABI (cp314,
+# cp313, cp312, cp311), so a different Python needs a different tag in
+# requirements.amd.txt.
 
 # The extra index torch's +cpu wheels live on. PyPI's torch is the CUDA build
 # (a much larger wheel, and useless here -- there is no NVIDIA device).
@@ -34,6 +34,27 @@ pillow==12.3.0
 protobuf==7.36.1
 tqdm==4.70.1
 regex==2026.9.3
+
+# --- the webcam pose demo ------------------------------------------------
+# opencv-python  examples/pose_webcam.py -- capture a webcam and draw the
+#          skeleton. The FULL package and not opencv-python-headless, because
+#          the demo's whole point is cv2.imshow: headless has VideoCapture and
+#          not the window, so the headless wheel would install cleanly and then
+#          refuse at the one call the user came for. That choice costs something
+#          on a machine with no desktop -- the full wheel links libGL, so
+#          `import cv2` on a bare server dies with "libGL.so.1: cannot open
+#          shared object file" unless libgl1 is present. It is a build-time
+#          requirement like everything else here, so this is the cost of putting
+#          a demo in the default set rather than the cost of the runtime, which
+#          is C++ and has none of it.
+#
+#          The wheel is cp37-abi3, so one artifact serves 3.11 through 3.14 and
+#          does not need an AIE_ABI-style pin per interpreter. It adds NO new
+#          transitive requirement -- its only dependency is numpy, already
+#          pinned above -- so this is one line in the lock. Verified: `pip
+#          freeze` gains only opencv-python, and `pip check` still reports
+#          nothing but the pre-existing llvm-aie platform note.
+opencv-python==5.0.0.93
 
 # --- reading .onnx checkpoints --------------------------------------------
 # onnx     parses a graph's initializer + node names, and is the REFERENCE the

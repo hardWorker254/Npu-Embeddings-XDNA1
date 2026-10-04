@@ -22,6 +22,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,7 @@
 #include "vit/encoder.hpp"
 #include "vit/geometry.hpp"
 #include "vit/image.hpp"   // npue::vit::Image -- what classify() takes
+#include "whisper/eltwise.hpp"  // NpuEltwise -- the two optional designs
 
 namespace npue::vit {
 
@@ -43,13 +45,29 @@ struct Prediction {
   double front_end_s = 0.0;      // decode + resize + normalise + im2col
   double encoder_s = 0.0;
   double head_s = 0.0;
-  int64_t n_dispatch = 0;
+  int64_t n_dispatch = 0;        // the GEMMs
+  // The elementwise designs, on top of those. 0 when LayerNorm and GELU are on
+  // the host, which is the default -- so this is the field that says whether
+  // --npu-extra-ops actually reached the array, and it is measured rather than
+  // derived from the model so a design with a smaller row capacity than
+  // expected shows up instead of hiding behind a wrong constant.
+  int64_t n_elt_dispatch = 0;
 };
 
 class Session {
 public:
+  // `npu_ops` is the --npu-extra-ops set, passed in rather than read off argv
+  // here: this file opens devices and the mode that owns argv is the thing that
+  // parses flags, and a Session that read them itself would be a second parser.
+  //
+  // Only `layn` and `gelu` are honoured, and vit_mode.hpp has already refused
+  // the other six by name before it gets here. Each honoured code costs one more
+  // xclbin and one more hw_context; a session that opened all eight would be a
+  // device-budget question, and the codes it cannot honour are refused upstream
+  // rather than counted here.
   Session(npue::File &model, const std::string &model_name,
-          const std::string &artifacts, int threads);
+          const std::string &artifacts, int threads,
+          const std::set<std::string> &npu_ops = {});
 
   const Geometry &geometry() const { return geom_; }
   const std::string &name() const { return name_; }
@@ -58,9 +76,17 @@ public:
   // name per label, so a caller can print "tabby cat" instead of 281.
   const std::vector<std::string> &labels() const { return labels_; }
   int64_t n_dispatch() const { return enc_.gemm().n_dispatch; }
+  // WHERE the two elementwise passes ran, read from the encoder's pointers
+  // rather than from the flag. The status block uses these, and reading the
+  // pointer is what makes the block unable to claim the host was doing work
+  // while the array was doing it.
+  bool layernorm_on_array() const { return enc_.layernorm_on_array(); }
+  bool gelu_on_array() const { return enc_.gelu_on_array(); }
   bool int8() const { return enc_.int8(); }
   // The stage names the loaded set carries, in slot order, for the status line.
   const std::vector<std::string> &stream_ops() const { return ops_; }
+  // One line per elementwise design opened, for the status block.
+  const std::vector<std::string> &eltwise_notes() const { return elt_notes_; }
   int64_t rows_per_dispatch() const { return rows_; }
   size_t staged_bytes() const { return staged_; }
 
@@ -86,8 +112,15 @@ private:
   std::unique_ptr<npu::Device> dev_;
   std::unique_ptr<app::Pool> pool_;
   std::unique_ptr<npu::Design> design_;
+  // The two optional elementwise designs. Declared AFTER design_ and BEFORE
+  // enc_ for the same reason design_ is: the encoder holds pointers into them.
+  std::unique_ptr<npu::Design> ln_design_, gelu_design_;
+  std::unique_ptr<npue::whisper::NpuEltwise> ln_, gelu_;
   VitEncoder enc_;
   std::vector<std::string> ops_;
+  // One line per eltwise design actually opened, for the status block: its
+  // geometry and, for LayerNorm, the epsilon compiled into its kernel.
+  std::vector<std::string> elt_notes_;
   int64_t rows_ = 0;
   size_t staged_ = 0;
 };

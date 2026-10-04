@@ -206,6 +206,55 @@ them **by name** rather than answering from the host. The three elementwise
 ones are whole xclbins of their own and cost one context each, so all three is
 five contexts of the six npu1 allows.
 
+### Which architecture honours which code
+
+**One flag, eight codes, one parser — and the set a given architecture can
+honour is a property of the MODEL, not of the flag.** There are no
+architecture-specific NPU flags anywhere in the tree; the GEMMs are on the array
+everywhere and unconditionally, with no flag, because there is no GEMM code.
+
+This table was measured by running all eight codes against all five containers
+on this machine (`--npu-extra-ops CODE` on a real invocation of each mode), not
+read off the source:
+
+| code | embeddings (BERT) | gemma-300m | whisper | ViT | pose |
+|---|---|---|---|---|---|
+| `gelu` | yes | — | yes | **yes** | — |
+| `layn` | yes | — | yes | **yes** | — |
+| `softm` | yes | — | yes | — | — |
+| `conv` | — | — | yes | — | yes |
+| `attn` | — | — | yes | — | — |
+| `mproj` | — | — | yes | — | — |
+| `fft` | — | — | yes | — | — |
+| `logit` | — | — | yes | — | — |
+
+`—` means **refused by name**, with the reason in the message. The reasons are
+per architecture, and they are not one reason:
+
+* **gemma** takes no per-op flag at all: `GemmaNpuEncoder` has no host/array
+  choice to read, and its FFN is gated, so the activation is inside the gated
+  path rather than a separate pass. Honouring a code would move nothing while
+  printing "on the ARRAY", so the exporter refuses to build the design too.
+* **ViT** now honours `layn` and `gelu` — the same two kernels Whisper runs, on
+  the same pre-LN and ungated exact-erf structure. It refuses `softm` because
+  softmax is *inside* attention: moving it alone ships the whole 197×197 score
+  matrix to the array and back for one elementwise pass, and the two GEMMs that
+  bracket it are `attn`, which `kinds.cls` does not carry and which
+  `npu_targets.json` records as unmeasured above seq 64.
+* **pose** has exactly one array-able op. Its SiLU is fused into the convolution
+  epilogue and it has no attention, no norm and no vocabulary, so there is
+  nothing else for a code to name.
+* **embeddings** refuse the five speech codes because they name Whisper's audio
+  front end, mel bank, transform and logit projection; a text encoder has none
+  of those, and it has its own vocabulary projection fused into the FFN.
+
+`layn` for gemma is the one cell that would need a **ninth** code: gemma uses
+RMSNorm, not LayerNorm, and RMSNorm is a different kernel (no mean pass, no
+beta) with a different epsilon (`rms_norm_eps`). Adding it would make the code
+set larger and *less* uniform — three of the four transformer architectures
+would have a norm code and one would not — so it is not done, and `layn` stays
+refused there rather than quietly meaning two different operations.
+
 **Which of them is worth asking for is a measurement, not a preference** — see
 [What to move to the NPU](#what-to-move-to-the-npu).
 
@@ -259,6 +308,39 @@ resource; `wall` is what a caller waits.
 
 Run-to-run spread on this box is a few percent on wall and up to 10% on CPU, so
 read the ratios, not the last digit.
+
+### The same question asked of a ViT
+
+The table above is Whisper's, because Whisper is where all eight codes are
+reachable. For a classifier only two of them are, and the answer for those two
+is the same one the Whisper table already gives — **the work per dispatch has to
+beat the dispatch**, and a ViT's elementwise passes are too small for it.
+
+Measured on `vit-base-patch16-224.npue` bf16, `bus.jpg` (810×1080), 16 host
+threads, best of 8 after a warm-up run. Wall is front end + encoder, which is
+the whole per-image cost minus the 0.9 ms head:
+
+| `--npu-extra-ops` | wall, s | vs host | label | p | elt dispatches |
+|---|---:|---:|---|---:|---:|
+| *(nothing)* | **0.248** | 1.00× | minibus | 0.629 | 0 |
+| `gelu` | 0.343 | 1.38× slower | minibus | 0.635 | 12 |
+| `layn` | 0.377 | 1.52× slower | minibus | 0.631 | 25 |
+| `layn,gelu` | 0.449 | 1.81× slower | minibus | 0.640 | 37 |
+
+The **labels agree in all four rows** and the confidences agree to within 0.011
+absolute — that spread is the bf16 datapath, not the schedule, and it is the
+same order as the int8 row in the table above. So the flag is honest: it puts
+the work where it was asked to and returns the same answer.
+
+The dispatch counts are **measured per image**, not derived from the model's
+layer count: 25 LayerNorm sites (2 per layer plus the final one) and 12 GELU
+blocks, and they are reported as `elt_dispatches` in the `classify --json`
+object — a separate field from `dispatches`, which is the 49 GEMMs and stays 49.
+
+So the honest summary for a classifier is the same as for Whisper's `layn` and
+`gelu`: **both codes work, both are slower, and the default stays on the host.**
+They are implemented because the flag is then uniform across the architectures
+that have a choice to make — not because they are worth asking for.
 
 ### 1. Maximum performance: `conv`, and only `conv`
 
@@ -995,6 +1077,54 @@ running) and `http` (a `serve` child started on first use and stopped by
 `bus.jpg` costs 0.30 s rather than a second model load). Both return the same
 object — verified identical landmark-for-landmark.
 
+### The webcam demo
+
+`examples/pose_webcam.py` draws the skeleton over a live camera with OpenCV — a
+thin drawing loop over the facade above, which invents none of the numbers it
+draws.
+
+```console
+$ pip install opencv-python          # already in requirements.txt
+$ python examples/pose_webcam.py
+camera 0: 1280x720 at 10 fps reported
+q/ESC quit   s save   space pause   c colours   -/+ thickness
+input 640px, letterbox {'scale': 0.5, 'pad_x': 0, 'pad_y': 140}, backend host
+```
+
+`q`/ESC quit, `s` saves a frame to `out/`, space pauses, `c` cycles the palette,
+`-`/`+` change the line thickness. Other flags: `--camera N`, `--image PATH` to
+run on one still (no camera needed), `--no-window` to write every frame to
+`--out` instead of opening a window, `--conf`/`--kpt`/`--max-det`, and `--array`
+for the convolutions on the NPU.
+
+Measured on this machine, i8 container, 16 threads, one 1280×720 camera frame at
+640 px: **0.73 s per frame, 1.36 fps.** The 0.59 s of that is the model (the
+same 0.589 s the CLI reports on `bus.jpg`); the rest is the PNG the facade
+encodes to upload the frame, the `cvtColor`, and the drawing. At that rate a loop
+is a check that the detection works, not a preview — which is the point of it.
+`--array` is refused on a container with no design set on disk, and says so.
+
+Two things the drawing does that a naive version gets wrong, both visible in the
+output rather than argued here:
+
+- **BGR → RGB before the model.** `cv2` hands back BGR and the runtime's front
+  end reads an array as RGB. Handing it BGR trains the model on swapped
+  channels; the pose mostly still lands, which is exactly what makes it worth
+  doing deliberately.
+- **A bone is drawn only when both its joints cleared `--kpt`.** Drawing the
+  surviving half would join a wrist to a shoulder across a gap the model said
+  was not there, and the eye reads that as a straight arm rather than as a
+  low-confidence one. Bone colour is blended with the mean confidence of its two
+  joints, because the informative end of a limb is its middle and a dot per
+  joint cannot show that.
+
+And one measured behaviour worth knowing before you point this at a room: a
+person **mostly out of frame still scores high** — 0.85 for a sitter at the left
+edge with head and shoulders cropped, surviving `--conf 0.7` — and the skeleton
+drawn is the visible part, with the absent bones left absent rather than
+extrapolated. That is why the default `--conf` stays at YOLO's 0.25 and is not
+raised to make a demo look tidy.
+
 Two differences from MediaPipe are structural, and both are stated in the module
 rather than discovered later:
 
@@ -1640,6 +1770,10 @@ python/                   the runtime's optional Python face
   npue_pose.py             MediaPipe-shaped PoseLandmarker over the CLI or the
                            HTTP endpoint. Stdlib only -- no numpy, no torch --
                            and it holds no numerics of its own
+examples/
+  pose_webcam.py           draw your skeleton from a webcam with OpenCV. The only
+                           file in the tree that imports cv2, which is why cv2 is
+                           in requirements.txt and nothing else here needs it
 docs/                      research notes and the running status log
 models/                    vendored checkpoints (large)
 ```

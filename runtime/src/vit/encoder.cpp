@@ -119,6 +119,34 @@ size_t VitEncoder::stage_all() {
   final_beta_ = model_.raw("layernorm.bias").as<float>();
   bytes += 2 * static_cast<size_t>(d) * sizeof(float);
 
+  // The gamma|beta pairs, staged as the LayerNorm design's parameter operand --
+  // but only when that design exists. This is 2*12+1 = 25 slots of 2*768 floats,
+  // staged once for the life of the session because a LayerNorm site is a fixed
+  // weight and re-staging it per dispatch would be a per-layer transfer to save
+  // nothing. The order here IS the order run() indexes ln_slot_ by (all the
+  // pre-LN sites in layer order, then the final one), and it is written as a
+  // loop over the same two collections the host path reads rather than as 25
+  // separate calls, so a site cannot be staged in one order and visited in
+  // another.
+  if (ln_) {
+    // gamma|beta in ONE buffer, gamma first: the core tile's two input DMA
+    // channels take the parameters as a pair, so there is one staging call per
+    // site and not two. That pairing is why a site is staged once and read by
+    // index, rather than the two halves being staged separately.
+    const int64_t d = geom_.d_model;
+    std::vector<float> gb(static_cast<size_t>(2 * d));
+    auto site = [&](const float *gamma, const float *beta) {
+      std::copy(gamma, gamma + d, gb.begin());
+      std::copy(beta, beta + d, gb.begin() + d);
+      return ln_->stage_params(gb);
+    };
+    for (size_t i = 0; i < ln1_gamma.size(); ++i) {
+      ln_slot_.push_back(site(ln1_gamma[i], ln1_beta[i]));
+      ln_slot_.push_back(site(ln2_gamma[i], ln2_beta[i]));
+    }
+    ln_slot_.push_back(site(final_gamma_, final_beta_));
+  }
+
   // The head. Stored plain row-major F32 under the role `gemm_b_host`, with NO
   // layout and therefore no layout_hash, so there is nothing for it to
   // disagree with a design about -- it is the container's own statement that
@@ -169,6 +197,53 @@ std::vector<float> VitEncoder::run(const std::vector<float> &patches) {
   const int64_t rows = streams_.rows;
   if (rows <= 0)
     throw std::runtime_error("vit encoder: set_streams() before run()");
+
+  // The two elementwise passes, one call site each. Both are the same choice
+  // Whisper's encoder makes with the same two classes, and both read a pointer
+  // that is null unless --npu-extra-ops asked for the design -- so a run that
+  // asked for neither takes the host path without a second flag, and a run that
+  // asked cannot reach the host one by forgetting something.
+  //
+  // THREE helpers rather than one indexed by site number: the three call sites
+  // below already hold gamma and beta for their own site, and an index that
+  // turns (layer, which) back into that pair is a second, easier-to-misread
+  // spelling of what they already say.
+  auto ln1 = [&](float *x, int64_t n, int64_t L) {
+    if (ln_)
+      ln_->layernorm(x, n, ln_slot_[static_cast<size_t>(2 * L)]);
+    else
+      npue::whisper::layernorm_rows(x, n, d, ln1_gamma[static_cast<size_t>(L)],
+                                    ln1_beta[static_cast<size_t>(L)],
+                                    geom_.ln_eps, pool_);
+  };
+  auto ln2 = [&](float *x, int64_t n, int64_t L) {
+    if (ln_)
+      ln_->layernorm(x, n, ln_slot_[static_cast<size_t>(2 * L + 1)]);
+    else
+      npue::whisper::layernorm_rows(x, n, d, ln2_gamma[static_cast<size_t>(L)],
+                                    ln2_beta[static_cast<size_t>(L)],
+                                    geom_.ln_eps, pool_);
+  };
+  // The final one is over the whole finished stack rather than a chunk of a
+  // layer, and it has no layer index; NpuEltwise walks it in chunks of the
+  // design's own row capacity, so the row count handed over is n_pos either way.
+  auto ln_final = [&](float *x, int64_t n) {
+    if (ln_)
+      ln_->layernorm(x, n, ln_slot_[static_cast<size_t>(2 * geom_.layers)]);
+    else
+      npue::whisper::layernorm_rows(x, n, d, final_gamma_, final_beta_,
+                                    geom_.ln_eps, pool_);
+  };
+  // GELU is one flat span, not rows: the kernel's row capacity is 1 and the
+  // runtime walks the whole activation block in chunks of whatever the design
+  // holds, which is why the call takes an ELEMENT count here and a row count
+  // for the LayerNorms above.
+  auto gelu = [&](float *x, int64_t n_elems) {
+    if (gelu_)
+      gelu_->gelu(x, n_elems);
+    else
+      npue::whisper::gelu_erf_inplace(x, static_cast<size_t>(n_elems), pool_);
+  };
   if (static_cast<int64_t>(patches.size()) <
       geom_.n_patches * geom_.patch_dim)
     throw std::runtime_error(
@@ -244,8 +319,7 @@ std::vector<float> VitEncoder::run(const std::vector<float> &patches) {
     chunks(geom_.n_pos, [&](int64_t r0, int64_t r1) {
       const int64_t n = r1 - r0;
       std::copy(x.begin() + r0 * d, x.begin() + r1 * d, norm.begin());
-      npue::whisper::layernorm_rows(norm.data(), n, d, ln1_gamma[L], ln1_beta[L],
-                                    geom_.ln_eps, pool_);
+      ln1(norm.data(), n, L);
       g_.run(streams_.qkv, norm.data(), n, rows, d, qkv_[L].slot, qkv_[L].bias,
            3 * d, qkv_chunk.data());
       std::copy(qkv_chunk.begin(), qkv_chunk.begin() + n * 3 * d,
@@ -272,12 +346,10 @@ std::vector<float> VitEncoder::run(const std::vector<float> &patches) {
     chunks(geom_.n_pos, [&](int64_t r0, int64_t r1) {
       const int64_t n = r1 - r0;
       std::copy(x.begin() + r0 * d, x.begin() + r1 * d, norm.begin());
-      npue::whisper::layernorm_rows(norm.data(), n, d, ln2_gamma[L], ln2_beta[L],
-                                    geom_.ln_eps, pool_);
+      ln2(norm.data(), n, L);
       g_.run(streams_.ffn_up, norm.data(), n, rows, d, fu_[L].slot, fu_[L].bias,
            inter, up.data());
-      npue::whisper::gelu_erf_inplace(up.data(), static_cast<size_t>(n * inter),
-                                       pool_);
+      gelu(up.data(), n * inter);
       g_.run(streams_.ffn_down, up.data(), n, rows, inter, fd_[L].slot,
            fd_[L].bias, d, down.data());
       for (int64_t i = 0; i < n * d; ++i)
@@ -289,8 +361,9 @@ std::vector<float> VitEncoder::run(const std::vector<float> &patches) {
   // that normalised CLS row is what the head consumes. Skipping it changes the
   // logits by a scale, which changes which label wins, without changing any
   // shape -- so it is not a detail.
-  npue::whisper::layernorm_rows(x.data(), geom_.n_pos, d, final_gamma_,
-                                final_beta_, geom_.ln_eps, pool_);
+  // The whole n_pos in one call, not per chunk: this one is over the finished
+  // stack rather than over a chunk of a layer.
+  ln_final(x.data(), geom_.n_pos);
   return x;
 }
 

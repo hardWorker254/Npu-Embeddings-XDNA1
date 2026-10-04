@@ -19,6 +19,13 @@
 #include "common/host_kernels.hpp"
 #include "vit/image.hpp"
 
+// The two elementwise designs are Whisper's classes, not ViT's -- the kernels
+// and their dispatch are one implementation, shared on purpose. Two aliases
+// rather than 2*uses of the full name below, so the reader can see at the top
+// that these are borrowed and not local.
+using npue::whisper::EltwiseKind;
+using npue::whisper::NpuEltwise;
+
 namespace npue::vit {
 namespace {
 
@@ -69,7 +76,8 @@ const app::StreamEntry &find_op(const std::vector<app::StreamEntry> &streams,
 }  // namespace
 
 Session::Session(npue::File &model, const std::string &model_name,
-                 const std::string &artifacts, int threads)
+                 const std::string &artifacts, int threads,
+                 const std::set<std::string> &npu_ops)
     : model_(model),
       geom_(read_geometry(model, model_name)),
       art_(artifacts),
@@ -160,6 +168,61 @@ Session::Session(npue::File &model, const std::string &model_name,
           "--int8, or pass --artifacts for the matching set.");
   }
 
+  // -- the optional elementwise designs, opened BEFORE stage_all() so the
+  // encoder can stage its 25 gamma|beta pairs as part of the same pass.
+  //
+  // Same shape as Whisper's open_elt(), for the same reason: each design
+  // carries the MODEL's own width and epsilon compiled into its kernel, so the
+  // checks belong where the design is opened and nowhere later. A layernorm
+  // design exported for a different model would normalise the wrong number of
+  // channels and produce silently wrong logits -- no shape mismatch, no
+  // exception, just a different answer.
+  auto open_elt = [&](const std::string &code, const std::string &dir,
+                      EltwiseKind kind, std::unique_ptr<npu::Design> &design,
+                      std::unique_ptr<NpuEltwise> &op) {
+    if (!npu_ops.count(code)) return;
+    design = std::make_unique<npu::Design>(*dev_, artifacts + "/" + dir);
+    op = std::make_unique<NpuEltwise>(*design, *pool_, kind);
+    op->alloc_buffers();
+    if (kind == EltwiseKind::LayerNorm && op->cols() != geom_.d_model)
+      throw std::runtime_error(
+          dir + "/design.json has rows " + std::to_string(op->cols()) +
+          " columns wide, and this container's d_model is " +
+          std::to_string(geom_.d_model) +
+          ". The kernel's row width is compiled in, so this design normalises "
+          "the wrong number of channels. Re-export it for this model: "
+          "python tools/export/export_gemm_rtp.py --target " + name_ +
+          " --arch 1 --npu-extra-ops " + code);
+    if (kind == EltwiseKind::LayerNorm) {
+      // ViT's layer_norm_eps is 1e-12, an order of magnitude below the 1e-5 the
+      // Whisper designs are built with, so this check is the one that fires
+      // when somebody points --npu-extra-ops layn at a design set that a
+      // previous export happened to leave next to this one.
+      const double want = geom_.ln_eps;
+      const double got = design->info().ln_eps;
+      if (got <= 0.0 || std::abs(got - want) > 1e-12 * std::max(1.0, want))
+        throw std::runtime_error(
+            dir + "/design.json was built with layer_norm_eps " +
+            app::eps_text(got) + " and this container says " +
+            app::eps_text(want) +
+            ". The epsilon is inside a square root, so the two are not a "
+            "rounding difference. Re-export the design for this container.");
+      elt_notes_.push_back(dir + ": " + std::to_string(op->rows()) + " rows x " +
+                           std::to_string(op->cols()) + ", eps " +
+                           app::eps_text(got));
+    } else {
+      // One flat span of activations, so the pair that reads as "1 rows x N" is
+      // spelled as what it is: the elements one dispatch covers.
+      elt_notes_.push_back(dir + ": " +
+                           std::to_string(op->rows() * op->cols()) +
+                           " elements per dispatch");
+    }
+  };
+  open_elt("layn", "layernorm", EltwiseKind::LayerNorm, ln_design_, ln_);
+  open_elt("gelu", "gelu", EltwiseKind::Gelu, gelu_design_, gelu_);
+  enc_.set_layernorm(ln_.get());
+  enc_.set_gelu(gelu_.get());
+
   staged_ = enc_.stage_all();
 
   // -- the label vocabulary ------------------------------------------------
@@ -211,6 +274,7 @@ Prediction Session::classify(const npue::vit::Image &im) {
   enc_.classify(h, r.logits);
   r.head_s = app::now_s() - t;
   r.n_dispatch = enc_.gemm().n_dispatch;
+  r.n_elt_dispatch = enc_.elt_dispatch();
 
   // The argmax, and then the softmax over the FULL logit row -- the max is
   // taken first so the exponential cannot overflow, and the probability is
@@ -291,10 +355,17 @@ std::string prediction_json(const Prediction &p, const std::string &label_name,
     }
     o += "]";
   }
+  // Two dispatch counts, because they are two different questions. `dispatches`
+  // is the 49 GEMMs and is what it has always been; `elt_dispatches` is the
+  // elementwise designs, and it is 0 on a run that asked for none -- which is
+  // what makes the field worth carrying. A single number would have to be 49 on
+  // a run that made 49+25+12=86, and 49 is a true answer to a different
+  // question, not a true count of the work.
   o += ", \"front_end_s\": " + pnum(p.front_end_s) +
        ", \"encoder_s\": " + pnum(p.encoder_s) +
        ", \"head_s\": " + pnum(p.head_s) +
-       ", \"dispatches\": " + std::to_string(p.n_dispatch) + "}";
+       ", \"dispatches\": " + std::to_string(p.n_dispatch) +
+       ", \"elt_dispatches\": " + std::to_string(p.n_elt_dispatch) + "}";
   return o;
 }
 

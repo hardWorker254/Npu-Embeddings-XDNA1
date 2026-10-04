@@ -34,13 +34,32 @@
 //
 // WHAT IS ON THE HOST AND WHY
 // ---------------------------
-// LayerNorm, GELU, softmax and the head. The first three for the same reason
-// Whisper's are: a kind's stream list has no eltwise designs in it, and one
-// xclbin plus one hw_context apiece is not free. The HEAD for a harder reason,
-// which is in tools/pack/packers/vit.py's header: 1000 is not a multiple of
-// tile_n * cols = 48 * 4 = 192, so there is no legal B panel of that width for
-// this array at all, and a 768x1000 matvec per image costs far less than the
-// ~150 us a dispatch does.
+// The head, for a reason that is in tools/pack/packers/vit.py's header: 1000 is
+// not a multiple of tile_n * cols = 48 * 4 = 192, so there is no legal B panel
+// of that width for this array at all, and a 768x1000 matvec per image costs far
+// less than the ~150 us a dispatch does. The head is therefore NOT a --npu-
+// extra-ops code and never will be -- it is not missing, it does not exist on
+// this board.
+//
+// LayerNorm, GELU and softmax WERE host-only for a while, with the reason "a
+// kind's stream list has no eltwise designs in it". That was true and it was
+// the wrong kind of answer: it described the export, not the model. A ViT has
+// the same two pre-LN LayerNorms and the same ungated exact-erf FFN that
+// Whisper has, npue::whisper::NpuEltwise already implements both kernels, and
+// `--npu-extra-ops layn` / `gelu` now build the sibling design sets for
+// kinds.cls exactly as they do for kinds.stt. So the two codes below are real
+// per-op host/array choices and the flag says so.
+//
+// SOFTMAX IS NOT, and no export will make it so. A transformer's softmax is
+// inside its attention: moving it alone means shipping the whole seq x seq score
+// matrix to the array and back for one elementwise pass, and the two GEMMs that
+// bracket it (QK^T and softmax.V) are what would actually be worth sending --
+// they are the `attn` code, which adds attn_qk / attn_av instruction streams to
+// the gemm_rtp set, and kinds.cls does not carry them. It would also be a
+// measurement where this repository has none: npu_targets.json says outright
+// that no attention measurement above seq 64 exists here and a ViT has 197
+// positions. So `softm` is refused by name, with that reason, rather than
+// accepted and left to do nothing.
 //
 // SPDX-License-Identifier: Apache-2.0
 //===----------------------------------------------------------------------===//
@@ -55,6 +74,7 @@
 #include "runtime/model.hpp"
 #include "runtime/pool.hpp"
 #include "vit/geometry.hpp"
+#include "whisper/eltwise.hpp"    // NpuEltwise, the two elementwise designs
 #include "whisper/npu_ops.hpp"   // NpuGemm, layernorm_rows, gelu_erf_inplace, attention
 
 namespace npue::vit {
@@ -84,6 +104,37 @@ public:
              const Geometry &geom);
 
   void set_streams(const EncoderStreams &s) { streams_ = s; }
+
+  // The two elementwise passes, host by default and on the array when these are
+  // set. Null means host, and the HOST path is not a fallback: it is the
+  // measured-faster one here for the same reason it is in Whisper, and the two
+  // agree to bf16 rather than exactly, which is the datapath's own error and
+  // not this schedule's.
+  //
+  // NpuEltwise rather than a ViT-owned copy, for the reason the GEMM wrapper is
+  // shared too: the kernels and their dispatch are one implementation, so a
+  // divergence between the two architectures would have to be typed in rather
+  // than inherited.
+  void set_layernorm(npue::whisper::NpuEltwise *ln) { ln_ = ln; }
+  void set_gelu(npue::whisper::NpuEltwise *gelu) { gelu_ = gelu; }
+
+  // True when that pass is on the array. Read by the status block so the block
+  // reports where a thing actually ran rather than what was requested.
+  bool layernorm_on_array() const { return ln_ != nullptr; }
+  bool gelu_on_array() const { return gelu_ != nullptr; }
+
+  // The elementwise dispatches this encoder made. Reported as its own number
+  // rather than added into the GEMM's, because they answer a different question:
+  // 25 LayerNorm sites and 12 GELU blocks are 37 on top of the GEMM's 49, and
+  // the two together would be a number that cannot be attributed to either.
+  //
+  // The wall time of those dispatches is deliberately NOT exposed here. The GEMM
+  // wrapper's timer is not exposed either, because the status block prints
+  // before any image has been classified and per-image timings already come back
+  // in the result -- so an accessor would be a public number with no reader.
+  int64_t elt_dispatch() const {
+    return (ln_ ? ln_->n_dispatch : 0) + (gelu_ ? gelu_->n_dispatch : 0);
+  }
 
   // Stage every operand, every LayerNorm and the two front-end tables. Returns
   // the bytes staged, for the status line.
@@ -132,6 +183,8 @@ private:
 
   npue::File &model_;
   npue::whisper::NpuGemm g_;
+  // The array's two elementwise designs, or null for host. See set_layernorm.
+  npue::whisper::NpuEltwise *ln_ = nullptr, *gelu_ = nullptr;
   app::Pool &pool_;
   Geometry geom_;
   EncoderStreams streams_;
@@ -146,6 +199,17 @@ private:
   std::vector<Operand> qkv_, ao_, fu_, fd_;
   std::vector<const float *> ln1_gamma, ln1_beta, ln2_gamma, ln2_beta;
   const float *final_gamma_ = nullptr, *final_beta_ = nullptr;
+
+  // The staged gamma|beta slot per LayerNorm site, in the order run() visits
+  // them: 2*layers pre-LN sites then the final one. Empty when LayerNorm is on
+  // the host, and stage_all() fills it only then -- staging 25 parameter pairs
+  // that nothing reads would be 25 transfers of nothing.
+  //
+  // Site order is a list, not an index computed at the call site, because a
+  // site_index(L, which) helper would be a second way to say the same thing as
+  // the loop that stages it, and those two would disagree the first time a layer
+  // was added a third norm to.
+  std::vector<size_t> ln_slot_;
 
   // The head, host-side, row-major F32 [d_model, num_labels]. The arithmetic
   // is head_matvec() in vit/head.hpp -- its own translation unit, because it

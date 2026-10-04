@@ -110,43 +110,101 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
           "ext_1m");
   }
 
-  // One hw_context: gemm_rtp and nothing else. Counted here, before the Session
-  // opens anything, for the same reason the STT mode counts its two -- so a
-  // machine already busy with another process gets a sentence instead of a
-  // failed hw_context.
-  {
-    int want = 1;   // gemm_rtp
-    // kinds.cls lists no eltwise streams at all, so --npu-extra-ops is refused
-    // rather than accepted and ignored. See the refusal below.
-    if (want > 1 &&
-        !npu::require_context_budget(npu::survey_contexts(), want,
-                                     has("--allow-contention"), stderr))
-      throw std::runtime_error(
-          "NPU context budget: refusing to load " + std::to_string(want) +
-          " concurrent hw_context(s) -- see the report above (close the other "
-          "process, or pass --allow-contention)");
-  }
+  // --npu-extra-ops is parsed below, BEFORE any Design exists, because the
+  // answer decides how many hw_contexts this run will open: gemm_rtp always,
+  // plus one per honoured eltwise code. The budget check follows the parse for
+  // that reason -- a machine already busy with another process gets a sentence
+  // naming a count that includes the eltwise designs, rather than one that says
+  // "1" and then trips over the second load.
+  std::set<std::string> npu_ops;
 
-  // --npu-extra-ops is REFUSED here, not honoured. Every code it names is an
-  // eltwise design directory, and this architecture's design set has none:
-  // tools/data/npu_targets.json's kinds.cls.streams is gemm_rtp's four GEMM
-  // streams verbatim. Accepting the flag and running the host pass anyway is
-  // the "the flag was there and nothing happened" failure this project treats
-  // as worst, so the codes that WOULD be ignored are named and the ones that
-  // are not are named with them.
+  // --npu-extra-ops: TWO CODES ARE HONOURED AND SIX ARE REFUSED, each by name.
+  //
+  // `layn` and `gelu` are genuine per-op host/array choices here, and were not
+  // for a while: the refusal below once said this architecture's design set
+  // carries no eltwise designs, which described the export rather than the
+  // model. A ViT has the same two pre-LN LayerNorms and the same ungated
+  // exact-erf FFN Whisper has, NpuEltwise already implements both kernels, and
+  // --npu-extra-ops layn,gelu now builds the sibling design sets for kinds.cls
+  // exactly as for kinds.stt. Each costs one extra xclbin and one extra
+  // hw_context.
+  //
+  // The other six are refused, and the reasons are per code because they are not
+  // one reason:
+  //
+  //   softm  softmax is INSIDE attention. Moving it alone means shipping the
+  //          whole 197x197 score matrix to the array and back for one
+  //          elementwise pass. The two GEMMs that bracket it are what would be
+  //          worth sending, and those are `attn`.
+  //   attn   QK^T and softmax.V as GEMMs -- the `attn_qk`/`attn_av` instruction
+  //          streams Whisper's gemm_rtp carries and kinds.cls's does not. This is
+  //          a design change, not a flag.
+  //   conv   Whisper's audio front end. A ViT's front end is decode, resize,
+  //          normalise and im2col -- all host image work, not convolutions over
+  //          a feature map, so there is nothing this code names.
+  //   mproj  the mel filter bank;   fft the 400-point transform;
+  //   logit  the vocabulary projection. Three audio/decoder operations. The
+  //          nearest thing here is the classification head, and THAT is not a
+  //          code at all and never will be -- 1000 is not a multiple of
+  //          tile_n*cols = 48*4 = 192, so no legal B panel of that width exists
+  //          on this array (tools/pack/packers/vit.py's header has the long form).
+  //
+  // And one measurement caveat that belongs here rather than only in the README:
+  // npu_targets.json says outright that this repository has no attention
+  // measurement above seq 64, and a ViT has 197 positions. `attn` would be a
+  // first.
   {
     std::string listing;
     for (int i = 1; i < argc - 1; ++i)
       if (std::string(argv[i]) == "--npu-extra-ops") listing = argv[i + 1];
     const std::set<std::string> codes = parse_npu_ops(listing);
-    if (!codes.empty())
+    const std::set<std::string> dead = {
+        "softm", "attn", "conv", "mproj", "fft", "logit"};
+    std::vector<std::string> refused;
+    for (const auto &c : codes)
+      if (dead.count(c)) refused.push_back(c);
+    if (!refused.empty()) {
+      std::string seen;
+      for (const auto &c : refused) { if (!seen.empty()) seen += ", "; seen += c; }
+      std::string keep;
+      for (const auto &c : {"layn", "gelu"})
+        if (codes.count(c)) { keep += keep.empty() ? c : ", " + std::string(c); }
       throw std::runtime_error(
-          "--npu-extra-ops " + listing + ": this architecture runs LayerNorm, "
-          "GELU and softmax on the host, and its design set carries no "
-          "eltwise streams -- tools/data/npu_targets.json kinds.cls.streams "
-          "is gemm_rtp's four GEMM streams and nothing else. There is no "
-          "export that would make these codes work here, so the flag is "
-          "refused rather than accepted and ignored. Drop it.");
+          "--npu-extra-ops " + seen + ": this architecture has no such "
+          "host/array choice to make. softm is softmax inside attention, and "
+          "moving it alone would ship the whole 197x197 score matrix to the "
+          "array and back for one elementwise pass; attn is the two GEMMs that "
+          "bracket it (attn_qk/attn_av instruction streams), which kinds.cls "
+          "does not carry and which npu_targets.json records as UNMEASURED "
+          "above seq 64 -- a ViT has 197 positions. conv, mproj and fft name "
+          "Whisper's audio front end, mel bank and transform; this "
+          "architecture's front end is decode/resize/normalise/im2col and has no "
+          "convolution over a feature map. logit names the vocabulary "
+          "projection; the nearest thing here is the classification head, which "
+          "cannot run on this array at all because 1000 is not a multiple of "
+          "tile_n*cols = 192 and no legal B panel of that width exists." +
+          (keep.empty() ? std::string(" Drop it.")
+                        : " Keep --npu-extra-ops " + keep +
+                              ", which this architecture does honour."));
+    }
+    npu_ops = codes;
+  }
+
+  // One hw_context per design set: gemm_rtp always, plus one each for `layn`
+  // and `gelu`. The two eltwise designs are siblings -- separate xclbins,
+  // separate contexts -- which is the cost this check exists to make visible,
+  // because it is the only price the flag has and the flag itself prints none.
+  {
+    const int want = 1 + static_cast<int>(npu_ops.count("layn")) +
+                     static_cast<int>(npu_ops.count("gelu"));
+    if (want > 1 &&
+        !npu::require_context_budget(npu::survey_contexts(), want,
+                                     has("--allow-contention"), stderr))
+      throw std::runtime_error(
+          "NPU context budget: refusing to load " + std::to_string(want) +
+          " concurrent hw_context(s) (gemm_rtp plus one per honoured "
+          "--npu-extra-ops code) -- see the report above (close the other "
+          "process, or pass --allow-contention)");
   }
 
   const std::string model_name = fs::path(model_path).stem().string();
@@ -277,12 +335,24 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
   }
   if (!std::ifstream(art + "/gemm_rtp/design.json").good())
     throw std::runtime_error(
-        art + " has no gemm_rtp/design.json. An image classifier needs exactly "
-        "one design set -- gemm_rtp -- because its four streams ARE gemm_rtp's "
-        "(tools/data/npu_targets.json kinds.cls.streams).");
+        art + " has no gemm_rtp/design.json. An image classifier needs "
+        "gemm_rtp because its four streams ARE gemm_rtp's "
+        "(tools/data/npu_targets.json kinds.cls.streams), plus one sibling "
+        "directory per honoured --npu-extra-ops code (layernorm/, gelu/). "
+        "Export with tools/export/export_gemm_rtp.py --target " + model_name +
+        " --arch 1 --npu-extra-ops " +
+        (npu_ops.empty() ? std::string("(none)")
+                         : [&] {
+                             std::string s;
+                             for (const auto &c : npu_ops) {
+                               if (!s.empty()) s += ",";
+                               s += c;
+                             }
+                             return s;
+                           }()));
 
   const double t0 = app::now_s();
-  npue::vit::Session session(probe, model_name, art, threads);
+  npue::vit::Session session(probe, model_name, art, threads, npu_ops);
   const double t_setup = app::now_s() - t0;
   const auto &g = session.geometry();
 
@@ -331,13 +401,53 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
                  ("decode, PIL-equivalent resize to " +
                   std::to_string(g.image_size) + "px, (x/255 - mean)/std, im2col")
                      .c_str());
-    std::fprintf(stderr, "             %-26s %-5s %s\n", "layer_norm", "host",
-                 "fp32 with this container's epsilon; kinds.cls lists no "
-                 "eltwise streams");
-    std::fprintf(stderr, "             %-26s %-5s %s\n", "softmax, gelu", "host",
+    // ONE ROW PER PASS, and WHERE IT RAN is read from the SESSION rather than
+    // from the flag. That direction of error is the one that matters: a block
+    // claiming the host was doing the work when the array was doing it would
+    // send a reader to profile the wrong process, and the reverse would hide a
+    // cost the user asked for.
+    //
+    // The design's geometry comes from session.eltwise_notes() -- the width is
+    // compiled into its kernel and the epsilon is baked in, so both are worth
+    // printing next to the op.
+    //
+    // The epsilon is printed with %.6g and NOT with std::to_string, which
+    // formats a double with six DECIMAL places and turns ViT's 1e-12 into
+    // "0.000000". That is the wrong number in the exact case the value is worth
+    // printing for, and the same mistake is in whisper's eps-mismatch refusal,
+    // which both were fixed to use this.
+    char eps[32];
+    std::snprintf(eps, sizeof eps, "%.6g", g.ln_eps);
+    auto elt_row = [&](const char *name, bool on_array,
+                       const char *host_reason) {
+      std::string why = host_reason;
+      if (on_array)
+        for (const auto &note : session.eltwise_notes()) {
+          const std::string tag = note.substr(0, note.find(':'));
+          if (tag == name) {
+            why = note.substr(note.find(':') + 1) +
+                  "; bf16 in and out, fp32 accumulate -- the same two kernels "
+                  "Whisper's --npu-extra-ops layn,gelu runs";
+            break;
+          }
+        }
+      std::fprintf(stderr, "             %-26s %-5s %s\n", name,
+                   on_array ? "npu" : "host", why.c_str());
+    };
+    elt_row("layernorm", session.layernorm_on_array(),
+            ((std::string("fp32 with this container's layer_norm_eps ") + eps +
+              "; --npu-extra-ops layn moves it"))
+                .c_str());
+    elt_row("gelu", session.gelu_on_array(),
+            "exact erf, fp32; --npu-extra-ops gelu moves it");
+    std::fprintf(stderr, "             %-26s %-5s %s\n", "softmax", "host",
                  ("O(seq^2) attention on the host: " +
                   std::to_string(g.n_pos) + "x" + std::to_string(g.n_pos) +
-                  " scores x " + std::to_string(g.heads) + " heads")
+                  " scores x " + std::to_string(g.heads) +
+                  " heads; moving softmax alone would ship the whole score "
+                  "matrix to the array and back for one elementwise pass, and "
+                  "the two GEMMs that bracket it (--npu-extra-ops attn) are "
+                  "unmeasured above seq 64 in this repository")
                      .c_str());
     std::fprintf(stderr, "             %-26s %-5s %s\n", "classifier head", "host",
                  (std::to_string(g.d_model) + "x" + std::to_string(g.num_labels) +
@@ -346,9 +456,10 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
                   "that width exists for this array")
                      .c_str());
   }
-  std::fprintf(stderr, "  setup      %.2f s (device, one design set, weights "
+  std::fprintf(stderr, "  setup      %.2f s (device, %zu design set%s, weights "
                        "staged on it)\n",
-               t_setup);
+               t_setup, 1 + session.eltwise_notes().size(),
+               session.eltwise_notes().empty() ? "" : "s");
   std::fprintf(stderr,
                "  unmeasured no timing above seq 64 has been taken in this "
                "repository, and this container has %lld positions. The "

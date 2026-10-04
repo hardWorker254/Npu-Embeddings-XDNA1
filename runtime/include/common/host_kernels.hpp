@@ -59,6 +59,7 @@
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <fstream>
@@ -221,6 +222,21 @@ inline void bf16_read(float *dst, const void *src, size_t n) {
 inline double now_s() {
   return std::chrono::duration<double>(
              std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// A double that is usually tiny, for a diagnostic.
+//
+// std::to_string is the wrong function for this and was the wrong function
+// here: it formats with six DECIMAL places, so a layer_norm_eps of 1e-12 --
+// what vit-base-patch16-224's config.json actually says -- prints as
+// "0.000000". That is the wrong number in precisely the case the value is worth
+// printing for, because an epsilon-mismatch refusal quotes both sides so a
+// reader can see which one is off. %.6g prints 1e-12 as "1e-12" and 1e-05 as
+// "1e-05", and a value like 0.001 as "0.001".
+inline std::string eps_text(double eps) {
+  char buf[32];
+  std::snprintf(buf, sizeof buf, "%.6g", eps);
+  return buf;
 }
 
 // ---------------------------------------------------------------------------

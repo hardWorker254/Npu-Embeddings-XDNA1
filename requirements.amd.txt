@@ -7,13 +7,27 @@
 # what would silently change what you build, so every line is pinned by
 # sha256. bootstrap.sh refuses a wheel whose digest does not match.
 #
-# The dependency chain, verbatim from the wheels' own METADATA:
+# The dependency chain, verbatim from the wheels' own METADATA, as it was when
+# this list still carried four wheels:
 #
-#   triton-xdna 3.6.0.2026091704+6fc1352
+#   triton-xdna 3.6.0.2026091704+6fc1352        <- REMOVED, see below
 #     -> mlir-air[aie]==0.0.1.2026091604+12e6f9f.no.rtti
 #        -> mlir_aie_no_rtti==1.4.3.dev55+g10767b5
 #        -> llvm-aie
 #     -> llvm-aie==22.0.0.2026090201+a36c62b9
+#
+# triton-xdna is gone, and it was dead weight: it is the Triton-based Python DSL
+# for XDNA, and nothing in this tree imports it. Every AIE symbol the exporters
+# use -- aie.iron, aie.helpers.taplib, aie.utils, aie.iron.controlflow --
+# comes from mlir_aie_no_rtti's own `mlir_aie/python` tree via its aie.pth. The
+# one cost was 352 MB of wheel and a download on every bootstrap.
+#
+# Removing it changed NO other entry, and that is the part worth recording: the
+# chain above shows triton-xdna is what PULLS IN mlir-air, so dropping it could
+# have left mlir-air installed only as somebody else's dependency. It is not --
+# MLIR_AIR_URL below is fetched and installed in its own right, and bootstrap.sh
+# installs all three with --no-deps precisely so no wheel's absence can be
+# papered over by another one's metadata.
 #
 # `aie.iron` -- what tools/export/* actually import -- comes from
 # mlir_aie_no_rtti's `mlir_aie/python` tree, exposed through its aie.pth.
@@ -40,6 +54,7 @@ MLIR_AIR_SHA256=d88044f2add4ba8a9adf68264adacd110b2cf1ec84bf94d228077f75205bf647
 LLVM_AIE_URL=https://github.com/Xilinx/llvm-aie/releases/download/nightly/llvm_aie-22.0.0.2026090201%2Ba36c62b9-py3-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
 LLVM_AIE_SHA256=5b76445852a75310b3c5b8304b9f48a71c434452ecc6183b06c34892e6890200
 
-# sha256 / 352 MB / Name: triton-xdna 3.6.0.2026091704+6fc1352
-TRITON_XDNA_URL=https://github.com/amd/Triton-XDNA/releases/download/latest-wheels/triton_xdna-3.6.0.2026091704%2B6fc1352-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-TRITON_XDNA_SHA256=2a4278cf0a71d7041bff84449de07c23db72ae896de73bc504c02fef3d6ef73b
+# triton-xdna's URL and SHA256 were here (3.6.0.2026091704+6fc1352, 352 MB) and
+# are deliberately GONE rather than commented out: bootstrap.sh sources this file
+# and every variable in it is fetched, so a commented line would be one more
+# thing to read past. The reasoning for dropping it is in the header.

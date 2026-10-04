@@ -118,23 +118,30 @@ echo "==> fetching AMD/Xilinx wheels (sha256-verified)"
 fetch "$MLIR_AIE_NO_RTTI_URL" "$MLIR_AIE_NO_RTTI_SHA256"
 fetch "$LLVM_AIE_URL"         "$LLVM_AIE_SHA256"
 fetch "$MLIR_AIR_URL"         "$MLIR_AIR_SHA256"
-fetch "$TRITON_XDNA_URL"      "$TRITON_XDNA_SHA256"
+# triton-xdna was the fourth, and is gone: nothing in this tree imports triton,
+# and every aie.* symbol the exporters use comes from mlir_aie_no_rtti. Note that
+# it was what PULLED IN mlir-air, so mlir-air is fetched in its own right above --
+# and installing with --no-deps below means a missing wheel cannot be silently
+# covered by another one's metadata.
 
 echo "==> installing the toolchain (--no-deps: every requirement is already in the lock)"
 "$PY" -m pip install --quiet --no-deps --no-index --no-input \
     "$CACHE"/mlir_aie_no_rtti-*.whl \
     "$CACHE"/llvm_aie-*.whl \
-    "$CACHE"/mlir_air-*.whl \
-    "$CACHE"/triton_xdna-*.whl
+    "$CACHE"/mlir_air-*.whl
 
 # --- verify --------------------------------------------------------------
 echo
 "$PY" - <<'PY'
 import importlib.util as u, importlib.metadata as m, sys
+# triton is deliberately NOT in this list. It was, and it asserted a package
+# nothing imports -- which is how a 352 MB wheel stayed in the dependency set
+# after the code that wanted it was gone. The list below is what
+# tools/export/* actually does `import`.
 mods = ["numpy", "torch", "transformers", "scipy", "PIL", "openai",
-        "aie.iron", "triton", "onnx"]
+        "aie.iron", "aie.helpers.taplib", "aie.utils", "onnx"]
 bad = [n for n in mods if u.find_spec(n) is None]
-for n in ("mlir-aie-no-rtti", "mlir-air", "triton-xdna", "llvm-aie"):
+for n in ("mlir-aie-no-rtti", "mlir-air", "llvm-aie"):
     print(f"    {n:<18} {m.version(n)}")
 if bad:
     sys.exit("error: missing " + ", ".join(bad))
