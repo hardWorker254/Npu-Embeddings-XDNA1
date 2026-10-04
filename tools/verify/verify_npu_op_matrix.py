@@ -7,9 +7,14 @@
 #
 #   1. the registry's own shape -- 40 cells, five statuses, one tally, and the
 #      set of codes with no design directory equal to STREAM_ONLY;
-#   2. NPU_OPS.md and NPU_OPS.ru.md, both GENERATED from the registry, are not
-#      stale -- and all 40 reasons are translated, so a Russian reader is never
-#      left with one English cell among forty Russian ones;
+#   2. NPU_OPS.md and NPU_OPS.ru.md (architectures x codes) and NPU_MODELS.md
+#      and NPU_MODELS.ru.md (models x codes), all GENERATED from the registry
+#      and npu_targets.json, are not stale -- and all 40 reasons are translated,
+#      so a Russian reader is never left with one English cell among forty
+#      Russian ones;
+#   2b. the model tables' cells agree with the architecture tables', except for
+#      the gated FFNs, which is the ONE difference the model table exists to
+#      record -- so a difference appearing there is a bug, not news;
 #   3. the runtime's C++ table (runtime/include/common/npu_ops_flag.hpp) carries
 #      the same eight codes with the same design directory and the same long
 #      name, in the same order. This is the duplication the two files' headers
@@ -46,7 +51,8 @@ sys.path.insert(0, str(REPO / "tools" / "lib"))
 import npu_ops  # noqa: E402  -- needs the path above
 
 sys.path.insert(0, str(REPO / "tools"))
-import gen_npu_ops_doc  # noqa: E402  -- the generator NPU_OPS.md must match
+import gen_npu_ops_doc  # noqa: E402  -- the generators NPU_OPS*.md must match
+import gen_npu_models_doc  # noqa: E402  -- ... and NPU_MODELS*.md
 
 BIN = REPO / "runtime" / "build" / "npuembeddings"
 HPP = REPO / "runtime" / "include" / "common" / "npu_ops_flag.hpp"
@@ -242,6 +248,49 @@ def main() -> int:
         for line in rc.stdout.splitlines():
             print("  " + line)
 
+    # --- 2b. the model tables agree with the architecture tables -----------
+    # Every cell of a model's row must be its kind's cell, except for the gated
+    # FFNs. That is not a tautology today -- the model generator applies the
+    # gated rule itself -- it is a statement about what the model table is FOR:
+    # the gated FFN is the only reason it exists, so if a second kind of
+    # difference turns up there, it has to be a deliberate decision recorded
+    # somewhere, not a silent divergence. `gated` is spelled out rather than
+    # listed, because the check is "differs from the kind" and gated cells are
+    # exactly the ones that do.
+    gen_npu_models_doc.load()
+    unexpected, gated_cells = [], 0
+    catalogue = gen_npu_models_doc.TARGETS_MODEL
+    for model, spec in catalogue.items():
+        kind = gen_npu_models_doc.kind_of(spec)
+        row = npu_ops.registry_for(kind, model)
+        for code in npu_ops.OPS:
+            mc = gen_npu_models_doc.cell(model, code)
+            if mc == gen_npu_models_doc.GATED:
+                gated_cells += 1
+            elif mc != row[code][0]:
+                unexpected.append(f"{model}/{code}: model says {mc!r}, kind "
+                                  f"{kind!r} says {row[code][0]!r}")
+    if unexpected:
+        print(f"  FAIL  {len(unexpected)} model cell(s) differ from their kind "
+              f"without the gated-FFN reason -- {unexpected[:3]}")
+        bad += 1
+    else:
+        print(f"  ok    all {len(catalogue) * len(npu_ops.OPS)} model cells "
+              f"equal their kind's, except {gated_cells} gated-FFN cell(s)")
+
+    rc = subprocess.run([sys.executable, str(REPO / "tools" /
+                                             "gen_npu_models_doc.py"),
+                         "--check"], capture_output=True, text=True)
+    if rc.returncode != 0:
+        print("  FAIL  a generated model document is stale -- run "
+              "tools/gen_npu_models_doc.py")
+        for line in rc.stdout.splitlines()[:40]:
+            print("   " + line)
+        bad += 1
+    else:
+        for line in rc.stdout.splitlines():
+            print("  " + line)
+
     # --- 3. the runtime's C++ table says the same thing ---------------------
     cpp = cpp_table()
     mine = [(c, d, n) for c, (d, n) in npu_ops.OPS.items()]
@@ -326,8 +375,9 @@ def main() -> int:
         print(f"FAIL -- {bad} disagreement(s) between the registry, the "
               f"generated document, the C++ table and what the runtime does")
         return 1
-    print("PASS -- the registry, both generated documents, the C++ table and the "
-          "runtime all say the same thing about every cell that could be run")
+    print("PASS -- the registry, all four generated documents, the C++ table and "
+          "the runtime all say the same thing about every cell that could be "
+          "run")
     return 0
 
 

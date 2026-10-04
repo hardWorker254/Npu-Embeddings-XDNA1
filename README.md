@@ -392,6 +392,14 @@ because there is nothing for it to select), 5 are operations the model has and n
 array branch reaches, 3 cannot be moved on this board for a stated reason, and 17
 do not exist in that model at all.
 
+That table is per ARCHITECTURE. For the question you actually have — what can
+*this* model name do — there is a second generated table,
+[**NPU_MODELS.md**](NPU_MODELS.md): 16 models × 8 codes, with a column for what
+the exporter compiles for each one and the geometry it takes. It differs from the
+first in exactly two places, and both are model facts: `gemma`'s encoder, and the
+**gated FFN** of `nomic` and `gte`, which has no standalone activation pass, so
+their `gelu` is not built even though their kind honours it.
+
 `conv` is one of the five codes with no sibling design set, and that is
 deliberate: it is a speech-to-text op (Whisper's two audio convolutions) which
 runs on the encoder set's own `[rows, d, d]` stream, so there is nothing to build
