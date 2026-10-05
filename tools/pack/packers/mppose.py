@@ -999,7 +999,12 @@ def pack_mppose(det_onnx, pose_onnx, out_path, dry_run=False):
 
     config = {
         "arch": ARCH_STRING,
-        "kind": "pose",
+        # Its OWN kind and not "pose", which is arch=6's. Two architectures can
+        # both be called pose in the ordinary sense -- they are both skeletons on
+        # a frame -- and they share no flag, no threshold, no head and no input
+        # size. The kind string is what the registry's rows and the exporter's
+        # validation key on, so a shared one would merge two unrelated rows.
+        "kind": "mppose",
         "model": "mediapipe-pose",
         "det_input_size": DET_SIZE,
         "pose_input_size": POSE_SIZE,

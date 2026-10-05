@@ -178,7 +178,7 @@ STT_MODEL_KEYS = {"kind", "heads", "head_dim", "enc_layers", "dec_layers",
 # pairs. Registering the kind is what makes that cell exist and be visible; a
 # target absent from KNOWN_KINDS has no row in NPU_OPS.md at all, and a missing
 # row reads as nothing to report rather than as a blocked op.
-KNOWN_KINDS = {"gemm_rtp", "stt", "cls", "pose", "hands"}
+KNOWN_KINDS = {"gemm_rtp", "stt", "cls", "pose", "hands", "mppose"}
 
 DEFAULT_CACHE_ROOT = Path.home() / ".npu" / "cache"
 

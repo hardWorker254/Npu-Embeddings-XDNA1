@@ -5,7 +5,7 @@
      run the script, or tools/verify/verify_npu_op_matrix.py fails.
      Russian version: NPU_MODELS.ru.md -->
 
-Eight op codes, 17 models in `tools/data/npu_targets.json`, 136 cells.
+Eight op codes, 18 models in `tools/data/npu_targets.json`, 144 cells.
 
 This is the companion to [NPU_OPS.md](NPU_OPS.md), which answers "what does an ARCHITECTURE support" -- five rows, one per kind. This one answers the question you actually have when you type a model name: "what can THIS model put on the array". Russian: [NPU_MODELS.ru.md](NPU_MODELS.ru.md).
 
@@ -16,13 +16,13 @@ Why a second table rather than a column on the first: a kind's row is almost alw
 
 The second is the actual reason this file exists: `--npu-ops gelu` is **refused** for gemma, and for nomic and gte no `gelu/` design is compiled at all. From the architecture table alone a reader would conclude those three behave alike.
 
-Tally over the 136 cells:
+Tally over the 144 cells:
 
 - **81** **yes** -- runs on the array today
 - **1** already -- the work is already dispatched without a code, and the code is refused
 - **0** no code -- the model has the operation, no array branch reaches it
-- **4** blocked -- cannot be moved on this board; the reason is in NPU_OPS.md
-- **48** - -- the model has no such operation
+- **5** blocked -- cannot be moved on this board; the reason is in NPU_OPS.md
+- **55** - -- the model has no such operation
 - **2** **gated** -- this model's FFN has no standalone activation pass -- see below
 
 ## The matrix
@@ -46,6 +46,7 @@ Tally over the 136 cells:
 | `vit-base-patch16-224` | **yes** | **yes** | **yes** | already | **yes** | - | - | blocked |
 | `yolov8n-pose` | - | - | - | **yes** | - | - | - | - |
 | `mediapipe-hands` | - | - | - | blocked | - | - | - | - |
+| `mediapipe-pose` | - | - | - | blocked | - | - | - | - |
 
 ## Where these two models differ from their kind
 
@@ -90,6 +91,7 @@ Note what is **absent** from it: the five codes with no design directory of thei
 | `vit-base-patch16-224` | `cls` | `gelu`, `layn`, `softm` | 768 | 1e-12 | — |
 | `yolov8n-pose` | `pose` | _none_ | — | — | — |
 | `mediapipe-hands` | `hands` | _none_ | — | — | — |
+| `mediapipe-pose` | `mppose` | _none_ | — | — | — |
 
 ## Why seventeen rows and five kinds
 

@@ -304,6 +304,10 @@
     "mediapipe-hands": {
       "kind": "hands",
       "datapath": "bf16"
+    },
+    "mediapipe-pose": {
+      "kind": "mppose",
+      "datapath": "bf16"
     }
   },
   "kinds": {
@@ -375,6 +379,34 @@
         "conv704x128"
       ],
       "note": "arch 7, mediapipe_hands_palm_ssd_lm_heatmap. TWO graphs in one container -- a 87-node palm detector and a 58-node hand-landmark network -- and the twelve `conv{K}x{N}` entries are the union of what their dense convolutions pad to, listed so the set is named rather than implied.\n\nThe padding is gemm_rtp/geometry.py's, and the raw count is worth stating next to the padded one: the 61 dense convolutions have 31 distinct RAW (K, N) pairs, of which K up to a multiple of tile_k = 64 and N up to a multiple of tile_n*cols = 128 leaves twelve, the two graphs sharing (64,128) and (128,128). Twelve is fewer than pose's fourteen, whose set exists and was measured, so the shapes are not what stands between this model and the array.\n\nNO DESIGN SET CARRIES THIS LIST. It is written down so the claim can be checked, not so something can be dispatched on it: runtime/include/runtime/hands_mode.hpp REFUSES --npu-ops conv for this architecture by name, because there is no array timing to compare the host's against and running on the host under that flag would report host numbers as array ones. Nothing in this tree builds these twelve yet.\n\nM is ONE value for the whole set, as in pose: the dispatch chunk is the design's single top-level row count and every convolution is cut into chunks of it, because the runtime has nowhere to keep twelve different row counts. The 39 depthwise convolutions in the container are deliberately NOT in this list -- a depthwise filter reduces within one channel and has no [M, N] GEMM to dispatch, so a stream for it would be a name with nothing behind it."
+    },
+    "mppose": {
+      "exporter": "export_gemm_rtp",
+      "streams": [
+        "conv64x128",
+        "conv64x256",
+        "conv64x384",
+        "conv128x128",
+        "conv128x256",
+        "conv128x512",
+        "conv128x640",
+        "conv128x768",
+        "conv192x128",
+        "conv192x256",
+        "conv192x1152",
+        "conv256x128",
+        "conv320x128",
+        "conv384x128",
+        "conv512x128",
+        "conv576x128",
+        "conv576x256",
+        "conv704x128",
+        "conv704x256",
+        "conv768x128",
+        "conv768x256",
+        "conv1152x256"
+      ],
+      "note": "arch 8, mediapipe_pose_det_ssd_lm_regress. TWO graphs in one container -- a 93-node person detector and a 120-node pose-landmark network -- and the twenty-two `conv{K}x{N}` entries are the union of what their dense convolutions pad to, counted off the packed container rather than written by hand.\n\nThe padding is gemm_rtp/geometry.py's, and the raw count is worth stating next to the padded one: the 99 dense convolutions have 53 distinct RAW (K, N) pairs across the two graphs, of which K up to a multiple of tile_k = 64 and N up to a multiple of tile_n*cols = 128 leaves TWENTY-TWO -- fifteen from the detector and thirteen from the landmark network, which share four. That is more than pose's fourteen and more than hands' twelve, and it is the largest set in this file. It is also the only one of the three whose set has never been built by anything, which is what decides whether it is worth having.\n\nNO DESIGN SET CARRIES THIS LIST. It is written down so the claim can be checked, not so something can be dispatched on it: runtime/include/runtime/mppose_mode.hpp REFUSES --npu-ops conv for this architecture by name, because there is no array timing to compare the host's against and running on the host under that flag would report host numbers as array ones. The numbers a design set would have to beat, measured here: onnxruntime's float run of the same two graphs is 5.29 ms + 6.56 ms = 11.69 ms for one person on docs/bus.jpg at 16 threads, and this build's host fp32 walk is 49.7 ms + 70.6 ms = 120.3 ms for the same frame.\n\nM is ONE value for the whole set, as in pose and hands. TWO THINGS IN THIS CONTAINER WILL NOT MOVE WHATEVER THE SET SAYS. 62 of its 161 convolutions are DEPTHWISE -- 28 of the detector's 73 and 34 of the landmark network's 88, carrying 77.2M MAC, 12.3 % of the container -- and a depthwise filter reduces within one channel, so there is no [M, N] GEMM in it to dispatch and a stream for it would be a name with nothing behind it. And the architecture has an op that is not a GEMM at all: three DepthToSpace steps, which are pure plane copies, and which is how the detector builds its 28/14/7 pyramid out of a single 7x7 map."
     }
   }
 }

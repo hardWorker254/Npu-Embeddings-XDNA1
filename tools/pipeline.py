@@ -155,6 +155,18 @@ TOOLSET = [
     ("verify_hands", "verify/verify_hands.py",
      "the arch=7 gate: two networks against ORT, the front end against the zoo",
      ("numpy", "onnx", "onnxruntime", "pillow", "hands_models")),
+    # The arch=8 gate, and the same three questions in the same order: the packed
+    # op list against ORT, the anchor table against an independent derivation of
+    # the same pyramid, and the C++ runtime against the numbers recorded from the
+    # zoo. It needs the BUILT BINARY -- where arch=7's section 4 can re-implement
+    # the front end in numpy and compare, arch=8's third section runs the real
+    # thing, because the residual that section measures (a resampler's) is only
+    # measurable against the real resampler. So it sits in the `container` tier
+    # and its environment list says what it needs.
+    ("verify_mppose", "verify/verify_mppose.py",
+     "the arch=8 gate: two networks against ORT, the anchors, and the C++ "
+     "runtime against the zoo",
+     ("numpy", "onnx", "onnxruntime", "pillow", "mppose_models", "runtime")),
     ("verify_cli_flags", "verify/verify_cli_flags.py",
      "the CLI's flag table against the flags the runtime reads off argv",
      ()),
@@ -213,6 +225,17 @@ ARTEFACTS = [
      "hands.npue under models/mediapipe-hands/",
      "python tools/pipeline.py run pack_npue -- --hands-onnx "
      "models/mediapipe-hands --out models/mediapipe-hands/hands.npue"),
+    # arch=8's pair, and the photograph the golden was recorded on. The
+    # photograph is NOT in this list and is NOT meant to be fetched with the
+    # checkpoints: it lives in docs/, which is tracked, because it is the golden's
+    # own input and its sha256 is in the golden. Two ONNX files are here, the
+    # container is here, and the golden is tracked -- the same split arch=7 has,
+    # with the image moved because opencv_zoo does not ship raw input images at
+    # all and this one came from elsewhere.
+    ("mppose_models", "the arch=8 checkpoint pair and mppose.npue under "
+     "models/mediapipe-pose/ (the golden's image is in docs/, not here)",
+     "python tools/pipeline.py run pack_npue -- --mppose-onnx "
+     "models/mediapipe-pose --out models/mediapipe-pose/mppose.npue"),
     ("npu", "an XRT device (xrt-smi sees it)",
      "the Ryzen AI driver; without it only the host-side gates can run"),
 ]
@@ -289,7 +312,8 @@ GATE_TIERS = {
     # are host-side, and a gate that needs a device to say a convolution is
     # packed correctly cannot be run by the person who packed it.
     "container": ("verify_onnx_reader", "verify_npue", "verify_pack_parity",
-                  "verify_npue_nomic", "verify_vit", "verify_hands"),
+                  "verify_npue_nomic", "verify_vit", "verify_hands",
+                  "verify_mppose"),
     # verify_npu_op_matrix is here rather than in "cheap" for the same reason
     # verify_design_numerics is: it runs every registry cell against the BINARY,
     # so it needs the build and the device, and its other claims (the registry's
@@ -384,6 +408,31 @@ def _have(kind):
             f"reference/goldens/hands_mediapipe.json. Then "
             f"`python tools/pipeline.py run pack_npue -- "
             f"--hands-onnx models/mediapipe-hands --out models/mediapipe-hands/hands.npue`")
+    if kind == "mppose_models":
+        # The arch=8 pair, both FLOAT files, and the container. The image is NOT
+        # in this list: it is docs/bus.jpg, which is TRACKED, because it is the
+        # golden's own input rather than a fetched checkpoint, and opencv_zoo
+        # ships no raw input image at all -- 385 paths, not one of them a
+        # photograph.
+        d = REPO / "models" / "mediapipe-pose"
+        want = ["person_detection_mediapipe_2023mar.onnx",
+                "pose_estimation_mediapipe_2023mar.onnx", "mppose.npue"]
+        missing_ = [w for w in want if not (d / w).exists()]
+        img = REPO / "docs" / "bus.jpg"
+        if not img.exists():
+            missing_ = missing_ + ["../../docs/bus.jpg"]
+        return (not missing_), (
+            f"missing: {', '.join(missing_)}\n"
+            f"  fetch the two ONNX files from opencv/person_detection_mediapipe "
+            f"and opencv/pose_estimation_mediapipe (Apache-2.0); both sha256s and "
+            f"the image's are in models/mediapipe-pose/CHECKPOINT.json. The "
+            f"_int8bq variants are deliberately NOT accepted -- they are "
+            f"slower AND wrong here, measured, and CHECKPOINT.json says by how "
+            f"much. The goldens are tracked, at reference/goldens/mppose_det.json "
+            f"and mppose_pose.json, and their recorder is NOT in this repository "
+            f"so that no gate can rewrite them. Then "
+            f"`python tools/pipeline.py run pack_npue -- --mppose-onnx "
+            f"models/mediapipe-pose --out models/mediapipe-pose/mppose.npue`")
     if kind == "checkpoint":
         found = [p for p in (REPO / "models").glob("*")
                  if (p / "config.json").exists()] if (REPO / "models").is_dir() else []

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #===----------------------------------------------------------------------===//
-# Gate for the op registry: 8 codes x 5 architectures = 40 cells.
+# Gate for the op registry: 8 codes x 7 architectures = 56 cells.
 #
 # tools/lib/npu_ops.py is the registry. It is not prose and it cannot be checked
 # by reading it, so this file checks the four things that can be checked:
@@ -69,7 +69,13 @@ DOCS = (REPO / "NPU_OPS.md", REPO / "NPU_OPS.ru.md")
 # which is a behaviour change -- so this gate should have to be edited on purpose
 # rather than a number quietly moving under a document that still says 14.
 EXPECTED_COUNTS = {"honours": 19, "on_array": 1, "unimplemented": 0,
-                   "blocked": 4, "absent": 24}
+                   "blocked": 5, "absent": 31}
+# blocked went 4 -> 5 and absent 24 -> 31 when arch=8 was added, and that is the
+# whole of the change: the new row contributes exactly eight cells, seven of them
+# `absent` and one `blocked`, for the same reason arch=7's seven-and-one is --
+# there is no design set carrying its convolutions. `honours` and `on_array` did
+# not move, which is the check worth making: a new architecture that quietly
+# started claiming dispatched work would move them, and this gate is what says so.
 # Why these numbers are 19 and 0 rather than 14 and 5: five cells were flipped
 # from `unimplemented` to `honours` when the branches were written --
 # gemm_rtp/attn, cls/attn, embeddinggemma-300m/attn, cls/softm and
@@ -149,6 +155,17 @@ FIXTURES = {
                   container="models/mediapipe-hands/hands.npue",
                   artifacts="runtime/artifacts/mediapipe-hands",
                   argv=["hands"], input="image"),
+    # arch=8, for the same reason and with the same shape: a declaration of what
+    # the row IS, plus the UNRUNNABLE reason below that says why no cell of it
+    # can be reached here. Its `artifacts` is a path that does not exist and is
+    # not meant to -- mppose_mode refuses --artifacts by name, so there is no
+    # directory for it to name. The verb is `mppose` and NOT a second spelling of
+    # `pose`: two architectures can both be called pose and share no flag, no
+    # threshold and no head.
+    "mppose": dict(kind="mppose", target=None,
+                   container="models/mediapipe-pose/mppose.npue",
+                   artifacts="runtime/artifacts/mediapipe-pose",
+                   argv=["mppose"], input="image"),
 }
 # Reported as skipped, not silently absent. `hands` is the first entry and it is
 # NOT one of the two kinds of skip this file used to have: every other row has a
@@ -171,6 +188,18 @@ UNRUNNABLE: dict[str, str] = {
              "carries. Its one `blocked` cell is that same fact; had it been "
              "written `honours` there would be nothing here to run either, "
              "which is the failure the status exists to prevent.",
+    "mppose": "the same fact as hands, and for the same reason: this "
+              "architecture has no array path, so this harness cannot reach any "
+              "cell of it rather than not-on-this-machine. "
+              "runtime/include/runtime/mppose_mode.hpp REFUSES --npu-ops conv "
+              "and --artifacts by name, and its 99 dense convolutions pad down "
+              "to 22 shapes, which no design under runtime/artifacts/ carries "
+              "and which -- unlike hands' twelve and pose's fourteen -- has "
+              "never been built at all. Its one `blocked` cell is that same "
+              "fact. The row is here rather than absent for hands' reason too: "
+              "a declaration of what the row IS is not a statement about this "
+              "machine, and keeping the two apart is what lets the skip print a "
+              "true reason.",
 }
 
 # The cells the runtime must let RUN. Only `honours`: `on_array` is the case
@@ -248,9 +277,12 @@ def main() -> int:
           f"architectures = {len(npu_ops.OPS) * len(arches)} cells")
 
     # --- 1. the registry's own shape ---------------------------------------
-    if len(arches) != 6 or len(npu_ops.OPS) != 8:
+    if len(arches) != 7 or len(npu_ops.OPS) != 8:
         print(f"  FAIL  {len(npu_ops.OPS)} codes x {len(arches)} architectures "
-              f"is not the 8 x 6 the document is built around")
+              f"is not the 8 x 7 the document is built around. Adding a row here "
+              f"means adding it to npu_ops.KINDS, to the model's kind in "
+              f"tools/data/npu_targets.json and to ARCHES below, and every one "
+              f"of those is a place the row can be half-added.")
         bad += 1
     total = {}
     for label in arches:
