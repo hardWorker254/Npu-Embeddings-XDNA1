@@ -1,0 +1,37 @@
+{
+ "_doc": "The MediaPipe person detector's answer on docs/bus.jpg, recorded from the OpenCV zoo's mp_persondet.MPPersonDet._postprocess run verbatim. rows are the zoo's own return value: each row is box[4] + landmarks[8] + score[1], post-NMS, at the zoo demo's thresholds. 2254 candidates is the SSD anchor count -- the same 2254 tools/pack/packers/mppose.py generates from the graph's three DepthToSpace levels. COVERAGE IS PARTIAL AND THAT IS THE MODEL: at scoreThreshold=0.5 this frame keeps ONE person, with raw scores over all anchors of 0.854, 0.305, 0.067 and 0.065, so two people YOLOv8n-pose would find sit below the threshold the zoo chose. That is recorded in models/mediapipe-pose/CHECKPOINT.json too, and it is not a defect to be fixed by lowering the threshold here -- the golden has to be the answer the reference implementation gives. The one adapter: cv2 5.0.0 returns the two Concat outputs in the reverse order to the one _postprocess documents, so they are sorted by trailing dimension before the zoo sees them; no arithmetic is edited.",
+ "image": "docs/bus.jpg",
+ "image_sha256": "c02019c4979c191eb739ddd944445ef408dad5679acab6fd520ef9d434bfbc63",
+ "image_size": [
+  810,
+  1080
+ ],
+ "source": "opencv_zoo samples/cpp/mediapipe (or models_zoo), MPPersonDet",
+ "cv2": "5.0.0",
+ "model": "opencv/person_detection_mediapipe person_detection_mediapipe_2023mar.onnx",
+ "model_sha256": "47fd5599d6fa17608f03e0eb0ae230baa6e597d7e8a2c8199fe00abea55a701f",
+ "parameters": {
+  "nmsThreshold": 0.3,
+  "scoreThreshold": 0.5,
+  "topK": 5000
+ },
+ "n_candidates": 2254,
+ "n_kept": 1,
+ "rows": [
+  [
+   25.645062785063487,
+   358.77936039652144,
+   241.57592248703753,
+   574.6842685767583,
+   282.44333839416504,
+   283.14076828956604,
+   113.79814226286751,
+   56.33948561123441,
+   139.46174031921794,
+   494.6343403841768,
+   19.518385955265586,
+   333.07531612260004,
+   0.8537504670163154
+  ]
+ ]
+}
