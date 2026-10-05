@@ -14,6 +14,7 @@
 #include "runtime/vit_mode.hpp"
 #include "runtime/pose_mode.hpp"
 #include "runtime/hands_mode.hpp"
+#include "runtime/mppose_mode.hpp"
 #include "runtime/model.hpp"
 #include <cstdio>
 #include <cstdlib>
@@ -92,6 +93,20 @@ int Runtime::run(int argc, char **argv) {
     if (int hands_r = app::maybe_hands_mode(root_, argc, argv, model_path_);
         hands_r >= 0)
         return hands_r;
+
+    // arch=8 (MediaPipe Pose: a person detector and a pose-landmark network in ONE
+    // container, run in that order with the whole decode between them) is the
+    // sixth architecture with a pipeline of its own. It is dispatched AFTER arch=7
+    // and beside it rather than beside arch=6, because the two are not variants:
+    // arch=6 is one network over one frame, and this runs a second, separate
+    // network once per detected person on a crop ROTATED by an angle the first one
+    // predicted. Like both of them its default path opens no device, and it has no
+    // --npu-ops path at all -- refused with the reason: no design set here carries
+    // these two graphs' 99 distinct dense (K, N) pairs, so there is no array number
+    // to compare the host's against.
+    if (int mppose_r = app::maybe_mppose_mode(root_, argc, argv, model_path_);
+        mppose_r >= 0)
+        return mppose_r;
 
     RunContext ctx;
     ctx.argc = argc;

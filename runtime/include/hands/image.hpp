@@ -43,11 +43,25 @@
 #include <string>
 #include <vector>
 
+#include "common/raster.hpp"
 #include "vit/image.hpp"
 
 namespace npue::hands {
 
 using vit::Image;
+
+// THE FOUR RESAMPLERS BELOW LIVE IN common/raster.hpp AND ARE RE-EXPORTED HERE.
+//
+// arch=8 needed all four of them and they were, at the time, arch=7's own
+// definitions. A second copy of a box-average is a copy whose OUTPUT IS THE
+// MODEL'S ACCURACY, so they were moved rather than duplicated. Re-exported under
+// this namespace so that every arch=7 call site and the gates' front end are
+// untouched by the move -- which is what makes it a refactor rather than a change.
+using npue::raster::crop;
+using npue::raster::resize_area;
+using npue::raster::resize_bilinear;
+using npue::raster::to_nchw_normalised;
+using npue::raster::warp_affine;
 
 // The uniform scale and the symmetric zero padding the letterbox applied, so
 // the decode can take a detection back to the pixels the caller handed in.
@@ -78,49 +92,17 @@ struct Letterbox {
 // numbers both can produce here.
 Image letterbox(const Image &src, int64_t side, Letterbox *out);
 
-// cv2.INTER_LINEAR, no antialiasing. dst(x) reads src at (x + 0.5)*scale - 0.5.
-// Off by half a source pixel it is not, and the result looks like a bad model
-// rather than a bad resample.
-Image resize_bilinear(const Image &src, int64_t nh, int64_t nw);
+// resize_bilinear, resize_area, warp_affine and crop are DECLARED IN
+// common/raster.hpp and re-exported at the top of this file. They were arch=7's
+// own; arch=8 needed the same four and a second copy of a box-average is a copy
+// whose output is the model's accuracy, so they were moved rather than
+// duplicated. Their comments -- the coordinate transforms, why there is no
+// upscaling special case, and why the border is 0 rather than clamped -- moved
+// with them.
 
-// cv2.INTER_AREA -- an exact, separable box average.
-//
-// NO SPECIAL CASE FOR UPSCALING, and that is deliberate. When the axis grows the
-// box [i*s, (i+1)*s) is narrower than one source cell, and the same loop
-// degrades on its own into a linear blend of the two cells it straddles -- which
-// is what cv2 does and NOT the nearest-neighbour its documentation claims. A
-// branch here would be a guess about which of the two the checkpoint was
-// measured with, and the loop below does not have to guess.
-Image resize_area(const Image &src, int64_t nh, int64_t nw);
-
-// cv2.warpAffine(src, m, INTER_LINEAR, border=0). `m` is 2x3 row-major and maps
-// SOURCE to DESTINATION. The output is `src`'s size, which is what the demo
-// wants: the rotation is about the crop's centre and the caller keeps the
-// geometry it computed rather than discovering a resized canvas.
-//
-// Destination pixels sampling outside the source are ZERO, not clamped. They are
-// two different answers and the zoo's border is 0; clamping fills the corners
-// with edge pixels and the landmark network sees a frame that is not there.
-Image warp_affine(const Image &src, const double m[6]);
-
-// A copy of the half-open rectangle, clipped to the image. The clip is done by
-// the CALLER and the coordinates are integers by the time they arrive here --
-// see decode.hpp, which reproduces the truncation order the demo uses.
-Image crop(const Image &src, int64_t x0, int64_t y0, int64_t x1, int64_t y1);
-
-// HWC uint8 -> [3, H, W] float32 as (u8/255 - mean) / std, the same
-// normalisation arch=6 uses and for the same reason: the container carries the
-// mean and the std, and a front end that ignored them would be a second model.
-// For this checkpoint both are the identity (0 and 1), which is why the two
-// networks may be fed the same raster as long as nothing divides by them.
-//
-// The zero pad is normalised too, not left at zero in tensor space: the padded
-// pixel becomes (0 - mean) / std rather than 0. With mean 0 that is 0 and the
-// two readings coincide, and they stop coinciding the moment a checkpoint with
-// a non-zero mean is packed -- which is exactly when a front end that hard-codes
-// the identity quietly becomes a different model.
-std::vector<float> to_nchw_normalised(const Image &src,
-                                      const std::vector<float> &mean,
-                                      const std::vector<float> &std_dev);
+// HWC uint8 -> [3, H, W] float32 as (u8/255 - mean) / std. Declared in
+// common/raster.hpp and re-exported at the top of this file: arch=8's landmark
+// net uses exactly this, and what a checkpoint was trained with is the
+// checkpoint's own business rather than either architecture's.
 
 }  // namespace npue::hands

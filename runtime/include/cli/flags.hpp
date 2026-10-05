@@ -121,6 +121,21 @@ inline int flag_arity(const std::string &a) {
       // node-by-node diff against tools/verify/verify_hands.py. See
       // hands_mode.hpp.
       {"--hands-dump", 1},
+      // -- mppose_mode.hpp (arch=8). Same treatment as the two above and the same
+      // reasons: --mppose is the image list, arity 1, REPEATED, and --max-people
+      // caps how many detections reach the landmark network -- a COUNT, because
+      // every person is an independent ROTATED crop and the only lever on the
+      // second stage is how many of them to run. No threshold flags again: the
+      // detector's score and NMS and the landmark net's confidence all come from
+      // the container, and mppose_mode REFUSES --conf/--iou/--kpt/--max-det AND
+      // arch=6's and arch=7's by name rather than accepting and ignoring them --
+      // because two different containers called `pose` and `hands` answer to those
+      // flags with different semantics, and this mode is the third.
+      {"--mppose", 1},       {"--max-people", 1},
+      // Diagnostic: dump every graph node's output of BOTH networks, for the
+      // node-by-node diff against tools/verify/verify_mppose.py. See
+      // mppose_mode.hpp.
+      {"--mppose-dump", 1},
       {"--token", 1},
       // -- REFUSED BY NAME, not accepted. Listed so that CLI::parse() lets them
       // through to refuse_removed_op_flags / refuse_exporter_only_flags, whose

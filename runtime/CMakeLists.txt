@@ -59,6 +59,12 @@ add_executable(npuembeddings
   src/common/onnx_read.cpp
   src/npu_contention.cpp
   src/common/hub.cpp
+  # The four resamplers arch=7 and arch=8 share: cv2.INTER_LINEAR, cv2.INTER_AREA,
+  # cv2.warpAffine with border 0, and a rectangle copy, plus the normalisation and
+  # a float bilinear for the one front end that resizes AFTER normalising. They
+  # were arch=7's own definitions until arch=8 needed the same four, and a second
+  # copy of a box-average is a copy whose output is the model's accuracy.
+  src/common/raster.cpp
   # Subtask 2: tokenizer system (base interface + WordPiece + XLM-R + Gemma).
   # The old src/tokenizer*.cpp were dropped with their headers; WordPiece is
   # now npue::WordPiece in tokenizers/wordpiece.cpp.
@@ -121,6 +127,16 @@ add_executable(npuembeddings
   src/hands/decode.cpp
   src/hands/net.cpp
   src/hands/session.cpp
+  # arch=8 (MediaPipe body pose: the person detector and the pose-landmark
+  # network in ONE container). Same file order as arch=7's block above, and for
+  # the same reason each file says what it is for. src/mppose/net.cpp gets -O3 on
+  # its own: it is the same host GEMM and the same depthwise kernel as arch=7's,
+  # and its d2s is a bandwidth-bound plane copy that -O3 turns into memcpys.
+  src/mppose/geometry.cpp
+  src/mppose/image.cpp
+  src/mppose/decode.cpp
+  src/mppose/net.cpp
+  src/mppose/session.cpp
   # Subtask 7: STT extension (Whisper). The tokenizer stub lives with the
   # other tokenizers but is grouped here with the rest of the Whisper
   # placeholders.
@@ -228,5 +244,10 @@ if(NOT MSVC)
   # nested loop whose inner two axes the compiler vectorises at -O3 and does not
   # at -O2, and it is 39 of this container's 100 convolutions.
   set_source_files_properties(src/hands/net.cpp PROPERTIES
+    COMPILE_OPTIONS "-O3")
+  # arch=8 for the same reason plus its own op: 62 of its 161 convolutions are
+  # depthwise, and its three DepthToSpace steps are pure plane copies whose
+  # memcpy the compiler emits at -O3 and does not at -O2.
+  set_source_files_properties(src/mppose/net.cpp PROPERTIES
     COMPILE_OPTIONS "-O3")
 endif()

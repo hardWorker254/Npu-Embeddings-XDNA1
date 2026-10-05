@@ -111,6 +111,11 @@ bool flag_takes_value(const std::string &a) {
         // never given. That is what verify_cli_flags.py's two-tables-agree check
         // exists to catch, and it caught --audio.
         "--hands", "--max-hands", "--hands-dump",
+        // arch=8, same three and the same reason -- added with the mode, because a
+        // flag missing here is dropped silently by forward_common() and the mode
+        // then reports that it was never given. verify_cli_flags.py's two-tables-
+        // agree check is what catches that, and it caught --audio.
+        "--mppose", "--max-people", "--mppose-dump",
         // --serve is deliberately NOT here: it is arity 0 in flags.hpp (the port
         // is the next argv entry, and only if it starts with a digit), and it is
         // injected by run_serve rather than forwarded from the user's line. A
@@ -443,6 +448,61 @@ int run_hands(int argc, char **argv) {
     return launch(argv[0], root, store);
 }
 
+// arch=8. Mirrors run_pose and run_hands exactly: positionals become --mppose,
+// the model name and --root/--token are picked off the front, and everything else
+// is forwarded for forward_common's whitelist to judge.
+//
+// The verb is `mppose` rather than `pose` ON PURPOSE, and not to avoid a clash:
+// `pose` is YOLOv8n-pose and returns one set of skeletons over one frame, while
+// this runs a person detector and then a SECOND network once per detected person
+// on a rotated crop. Both are "pose" in the ordinary sense and they share no flag,
+// no threshold and no output shape, so a verb that accepted both would be a verb
+// whose flags meant one thing on one container and another on the next.
+int run_mppose(int argc, char **argv) {
+    std::string root = default_root(argv[0]);
+    std::string cli_token;
+    for (int i = 2; i < argc; ++i) {
+        if (std::string(argv[i]) == "--root") root = argv[i + 1];
+        if (std::string(argv[i]) == "--token") cli_token = argv[i + 1];
+    }
+    if (argc < 3 || argv[2][0] == '-')
+        throw std::runtime_error(
+            "`mppose` needs a model name or a path to a .npue container");
+    const std::string model_name = argv[2];
+    if (argc < 4 || argv[3][0] == '-')
+        throw std::runtime_error(
+            "`mppose` needs an image:\n"
+            "    npuembeddings mppose <model> <image.png> [more.png ...]\n"
+            "  (PNG and JPEG; anything else is refused rather than guessed at)\n"
+            "  --max-people 1    run the landmark network on at most N\n"
+            "  --text            a human summary instead of JSON\n"
+            "  --mppose-dump FILE every graph node's output, for the gate\n"
+            "  (every threshold comes from the container -- they are part of the\n"
+            "   checkpoint, so there is no flag for them, and typing one is\n"
+            "   refused rather than ignored)\n"
+            "  `serve` is not an alternative here: arch 8 has no HTTP endpoint,\n"
+            "  which mppose_mode.hpp refuses by name and says why.");
+    if (!is_container_path(model_name)) warn_if_unpinned(model_name);
+    const std::string container = resolve_container(root, model_name, cli_token);
+    std::vector<std::string> store = {"--model", container};
+    bool swallow = false;
+    for (int i = 3; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (swallow) {
+            swallow = false;
+            continue;
+        }
+        if (!a.empty() && a[0] == '-') {
+            swallow = flag_takes_value(a);
+            continue;
+        }
+        store.push_back("--mppose");
+        store.push_back(a);
+    }
+    forward_common(argv, argc, store);
+    return launch(argv[0], root, store);
+}
+
 int run_add(int argc, char **argv) {    std::string root = default_root(argv[0]);
     std::string cli_token;
     for (int i = 2; i < argc - 1; ++i) {
@@ -579,6 +639,8 @@ void register_default_subcommands(SubcommandDispatcher &dispatcher) {
     dispatcher.register_handler("classify", run_classify);
     dispatcher.register_handler("pose", run_pose);
     dispatcher.register_handler("hands", run_hands);
+    // arch=8, and NOT another spelling of `pose`: see run_mppose's comment.
+    dispatcher.register_handler("mppose", run_mppose);
 }
 
 }  // namespace app
