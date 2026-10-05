@@ -212,6 +212,12 @@ int run_serve(int argc, char **argv) {
     //   arch=5      ViT classifier     POST /v1/classify
     //   arch=6      YOLOv8-pose        POST /v1/pose
     //
+    // arch=7 (MediaPipe hands) is the ONE arch with no endpoint, and `serve` on
+    // a hands container is refused by name in hands_mode.hpp rather than being
+    // routed to a mode that has nothing to serve. That makes the list above
+    // four and not five, and it is a real gap rather than a design choice: see
+    // the refusal there for what a server/hands_backend.cpp would need.
+    //
     // The modes never meet and none of them is chosen by a flag: runtime.cpp
     // dispatches on arch before it ever looks at --serve. That is why there is no
     // `pose-server` or `classify-server` verb -- a second verb per architecture
@@ -405,7 +411,7 @@ int run_hands(int argc, char **argv) {
     const std::string model_name = argv[2];
     if (argc < 4 || argv[3][0] == '-')
         throw std::runtime_error(
-            "`hands` needs an image, or you meant `serve`:\n"
+            "`hands` needs an image:\n"
             "    npuembeddings hands <model> <image.png> [more.png ...]\n"
             "  (PNG and JPEG; anything else is refused rather than guessed at)\n"
             "  --max-hands 1     run the landmark network on at most N\n"
@@ -413,7 +419,9 @@ int run_hands(int argc, char **argv) {
             "  --hands-dump FILE every graph node's output, for the gate\n"
             "  (the score, NMS and crop thresholds come from the container --\n"
             "   they are part of the checkpoint, so there is no flag for them,\n"
-            "   and typing one is refused rather than ignored)");
+            "   and typing one is refused rather than ignored)\n"
+            "  `serve` is not an alternative here: arch 7 has no HTTP endpoint,\n"
+            "  which hands_mode.hpp refuses by name and says why.");
     if (!is_container_path(model_name)) warn_if_unpinned(model_name);
     const std::string container = resolve_container(root, model_name, cli_token);
     std::vector<std::string> store = {"--model", container};

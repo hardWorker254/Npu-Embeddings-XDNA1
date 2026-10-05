@@ -142,6 +142,38 @@ inline int maybe_hands_mode(const std::string &root, int argc, char **argv,
         "--npu-ops above), so a design set on disk would be loaded and never "
         "read. Both networks run on the host.");
 
+  // --serve is REFUSED BY NAME, and read through the SHARED reader so that
+  // `--serve 9000` and a bare `--serve` are caught the same way they are in the
+  // pose mode. Without this the flag falls through to the images check below and
+  // a server -- which has no image on its command line by definition -- gets told
+  // to say whose hands to find, which is the kind of wrong-but-plausible answer
+  // that costs more than a refusal does.
+  {
+    int serve_port = 0;
+    std::string serve_bind;
+    if (read_serve(argc, argv, serve_port, serve_bind)) {
+      throw std::runtime_error(
+          std::string("this architecture has no HTTP endpoint yet, so `serve` "
+                      "cannot be honoured for a hands container. The four that "
+                      "exist are /v1/embeddings (arch 1,2,3), "
+                      "/v1/audio/transcriptions (arch 4), /v1/classify (arch 5) "
+                      "and /v1/pose (arch 6); arch 7 is the one container whose "
+                      "arch the dispatcher routes here without an endpoint to "
+                      "land on. Not refused because a hand cannot be detected "
+                      "over HTTP -- it can -- but because a server that accepts "
+                      "the request and answers it from a DIFFERENT code path than "
+                      "`npuembeddings hands` is exactly the drift the pose "
+                      "endpoint documents as a contract. Until the endpoint "
+                      "exists, the CLI is the whole answer, and the Python "
+                      "facade (python/npue_hands.py) refuses backend=\"http\" "
+                      "with this same reason rather than falling back quietly. "
+                      "The fix is a server/hands_backend.cpp beside "
+                      "server/pose_backend.cpp: the session, the JSON emitter "
+                      "and the multipart reader are all already written, so it is "
+                      "a binding and not a network."));
+    }
+  }
+
   // pose_mode's own flags are REFUSED rather than ignored. They read as
   // "thresholds for the detection" on a mode that also has a detector, and
   // silently dropping them would produce a run whose boxes differ from the one

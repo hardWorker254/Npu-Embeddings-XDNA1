@@ -41,9 +41,23 @@ the right container answers on the right path with the right refusal, and that t
 bytes the endpoint emits are the bytes the CLI emits.
 
 Usage:
-  python tools/verify/verify_serve_dispatch.py                 # all four
+  python tools/verify/verify_serve_dispatch.py      # all four endpoints, plus the arch with none
   python tools/verify/verify_serve_dispatch.py --only pose
   python tools/verify/verify_serve_dispatch.py --skip whisper  # no design set
+
+AND THE ONE ARCHITECTURE WITH NO ENDPOINT
+-----------------------------------------
+arch 7 (MediaPipe hands) is in here as a REFUSAL, not as an endpoint, because it
+is the only arch for which both would be true at once if this were wrong: a
+container the dispatcher routes to a mode that has nothing to serve. Before the
+refusal existed, `npuembeddings serve <hands>` fell through to the images check
+and told the operator to say whose hands to find -- a wrong answer that read like
+a usage question. What is asserted here is the three parts of the fix:
+
+  * it EXITS, non-zero, rather than starting a server nobody can talk to;
+  * the message NAMES the absence, so the operator is not sent to a URL;
+  * nothing is left LISTENING on the port -- the part a message-only check would
+    miss, because a refusal printed before bind() would pass the first two.
 """
 
 from __future__ import annotations
@@ -52,6 +66,7 @@ import argparse
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -95,6 +110,20 @@ ARCHES = {
         "kind": "pose",
         "verb": "serve",
     },
+    # Not an endpoint: the one arch that must REFUSE `serve`, asserted below
+    # rather than assumed. It is in this dict with the others so that adding an
+    # endpoint for it later cannot happen without this entry changing shape --
+    # the refusal check would then fail on its own, which is the reminder needed.
+    # The container is UNTRACKED (models/** is gitignored apart from
+    # CHECKPOINT.json), so a checkout that has not packed it SKIPS, like every
+    # other missing container here.
+    "hands": {
+        "container": "models/mediapipe-hands/hands.npue",
+        "path": None,
+        "kind": "hands",
+        "verb": "serve",
+        "refuses": True,
+    },
 }
 
 # Keys the answer must carry. A 2xx with a document missing these is a 2xx for the
@@ -133,9 +162,13 @@ def note(what: str, detail: str = "") -> None:
 def fixture() -> bytes | None:
     """A JPEG to upload, or None with the reason said out loud.
 
-    bus.jpg is not in the repository, so a machine without it SKIPS the request
-    cases rather than failing them: a gate that fails for a missing photograph is a
-    gate whose result says nothing about the code.
+    bus.jpg lives in docs/ -- its sha256 is recorded in
+    models/mediapipe-pose/CHECKPOINT.json, which is how this gate knows it is
+    looking at THE photograph and not at one renamed bus.jpg -- with
+    /tmp/opencode/bus.jpg preferred because that is where the original
+    download went. A machine with neither SKIPS the request cases rather than
+    failing them: a gate that fails for a missing photograph is a gate whose
+    result says nothing about the code.
     """
     for cand in (Path("/tmp/opencode/bus.jpg"), REPO / "docs" / "bus.jpg"):
         if cand.exists():
@@ -350,13 +383,27 @@ def check_own_path(srv: Server, path: str, jpeg: bytes, wav: Path | None) -> Non
 
 
 def check_other_paths(srv: Server, path: str, jpeg: bytes) -> None:
-    print("\n  the OTHER three paths are 404s that say where to go instead")
-    for other in ARCHES.values():
-        if other["path"] == path:
+    """Every other endpoint must 404 here, and say which path does answer.
+
+    `/v1/hands` is probed too, and it is not in ARCHES as a path -- arch 7 has no
+    endpoint, so nothing answers it anywhere. Probing it on every OTHER server is
+    the assertion that stays true while that is the case: a listener that
+    answered /v1/hands would be a fifth endpoint nobody declared, and this is the
+    only check in this file that would see it. The guard keeps it out of the way
+    the day hands does get one -- on the hands server itself it is `path`, and the
+    `continue` below would drop it either way.
+    """
+    print("\n  the OTHER paths are 404s that say where to go instead")
+    others = [o["path"] for o in ARCHES.values() if o["path"] and o["path"] != path]
+    others.append("/v1/hands")
+    seen: set[str] = set()
+    for other_path in others:
+        if other_path in seen:
             continue
-        status, raw = get(srv.base + other["path"])
+        seen.add(other_path)
+        status, raw = get(srv.base + other_path)
         ok = status == 404
-        report(ok, f"GET {other['path']} is 404 here, not another endpoint's answer",
+        report(ok, f"GET {other_path} is 404 here, not another endpoint's answer",
                "" if ok else f"-> got {status}: {raw[:140]!r}")
         if not ok:
             continue
@@ -366,7 +413,7 @@ def check_other_paths(srv: Server, path: str, jpeg: bytes) -> None:
             report(False, "the 404 is the error envelope", f"-> {raw[:100]!r}")
             continue
         report(path in msg,
-               f"the 404 for {other['path']} names this model's own path {path}",
+               f"the 404 for {other_path} names this model's own path {path}",
                "" if path in msg else f"-> {msg[:150]}")
 
 
@@ -578,11 +625,73 @@ def check_cli_agreement(srv: Server, exe: Path, arch: str, jpeg: bytes,
 # -- main --------------------------------------------------------------------
 
 
+def check_serve_refusal(exe: Path, container: Path, port: int) -> dict:
+    """`serve <hands>` must refuse, and leave nothing listening behind it.
+
+    Three assertions because the first two are not enough. A refusal printed
+    after bind() would exit non-zero and say the right words while having
+    already taken the port, and an operator whose port is in use has no
+    diagnostic that points at this. So the port is probed from outside the
+    process, after it has gone.
+    """
+    print("\n  arch 7 has no endpoint: `serve` must REFUSE rather than start")
+
+    def listening() -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1.0)
+            return s.connect_ex(("127.0.0.1", port)) == 0
+
+    if listening():
+        report(False, f"port {port} was free before the test",
+               "-> something else is already bound; this gate cannot tell what")
+        return {"ok": False, "why": "port in use"}
+
+    cmd = [str(exe), "serve", str(container), "--port", str(port)]
+    env = dict(os.environ)
+    env.setdefault("PYTHONPATH", "/opt/xilinx/xrt/python")
+    try:
+        p = subprocess.run(cmd, capture_output=True, timeout=60, env=env)
+    except subprocess.TimeoutExpired:
+        report(False, "`serve <hands>` exits instead of hanging",
+               "-> it is still running after 60 s, so a server was started")
+        return {"ok": False, "why": "timeout"}
+    text = (p.stdout + p.stderr).decode("utf-8", "replace")
+
+    report(p.returncode != 0,
+           f"`serve <hands>` exits non-zero (got {p.returncode})",
+           "" if p.returncode else "-> it returned success for an endpoint that "
+                                   "does not exist")
+    report("no HTTP endpoint" in text,
+           "the refusal NAMES the absence of an endpoint",
+           "" if "no HTTP endpoint" in text
+           else f"-> first line: {text.strip().splitlines()[:1]}")
+    report("/v1/hands" not in text or "no /v1/hands" in text,
+           "the message does not send the caller to a /v1/hands URL",
+           "" if "/v1/hands" not in text or "no /v1/hands" in text
+           else "-> it points at a path nothing answers")
+    # Give a server that DID start a moment to bind before probing: a process
+    # that exited a millisecond ago could still be mid-bind otherwise, and the
+    # probe would pass for the wrong reason.
+    time.sleep(1.0)
+    port_open = listening()
+    report(not port_open,
+           f"nothing is left LISTENING on port {port}",
+           "" if not port_open
+           else "-> a port is bound, so the refusal was printed after bind()")
+
+    print(f"  note    (no endpoint, so no /health, no path and no CLI agreement "
+          f"to check; those are this gate's other four cases)")
+    result = {"ok": True, "refused": True, "port": port}
+    note("serve refused arch 7 as designed")
+    return result
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--exe", default=str(REPO / "runtime" / "build" / "npuembeddings"))
     ap.add_argument("--only", action="append", default=None,
-                    help="one arch name, repeatable (default: all four)")
+                    help="one arch name, repeatable (default: all of ARCHES -- "
+                         "the four endpoints and hands, which must refuse)")
     ap.add_argument("--skip", action="append", default=None,
                     help="one arch name, repeatable")
     ap.add_argument("--base-port", type=int, default=8450)
@@ -590,7 +699,8 @@ def main() -> int:
     args = ap.parse_args()
 
     exe = Path(args.exe)
-    print("serve: one verb, four endpoints, and each container answers for its own\n")
+    print("serve: one verb, four endpoints, each container answers for its own;\n"
+          "and arch 7, which has no endpoint, refuses instead -- both asserted\n")
     if not exe.exists():
         print(f"FAIL -- {exe} does not exist. Build it:\n"
               f"    cmake -S runtime -B runtime/build && "
@@ -614,12 +724,17 @@ def main() -> int:
         container = Path(spec["container"])
         if not container.is_absolute():
             container = REPO / container
-        print(f"\n{'=' * 74}\n  arch {name}: {spec['path']}\n{'=' * 74}")
+        print(f"\n{'=' * 74}\n  arch {name}: " +
+              (spec["path"] or "no endpoint -- must refuse") + f"\n{'=' * 74}")
         if not container.exists():
             note("SKIPPED: no container at " + str(container))
             print("        (a gate that fails for a model nobody packed says "
                   "nothing about the code)")
             results[name] = {"skipped": "no container"}
+            continue
+
+        if spec.get("refuses"):
+            results[name] = check_serve_refusal(exe, container, args.base_port + i)
             continue
 
         srv = Server(exe, str(container), args.base_port + i)
@@ -657,9 +772,10 @@ def main() -> int:
             print(f"  - {f}")
         print(f"\n        details: {out}")
         return 1
-    print(f"PASS -- {_checks} checks: `serve` answers for every architecture, "
-          f"refuses the\n        others' paths with a message that says where to go, "
-          f"and the image\n        endpoints refuse rather than fall back.\n")
+    print(f"PASS -- {_checks} checks: `serve` answers for every architecture that has "
+          f"an\n        endpoint, refuses for arch 7 which has none, and refuses the "
+          f"others'\n        paths with a message that says where to go. The image "
+          f"endpoints\n        refuse rather than fall back.\n")
     print(f"        {out}")
     return 0
 
