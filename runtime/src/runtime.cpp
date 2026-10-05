@@ -13,6 +13,7 @@
 #include "runtime/stt_mode.hpp"
 #include "runtime/vit_mode.hpp"
 #include "runtime/pose_mode.hpp"
+#include "runtime/hands_mode.hpp"
 #include "runtime/model.hpp"
 #include <cstdio>
 #include <cstdlib>
@@ -79,6 +80,18 @@ int Runtime::run(int argc, char **argv) {
     // (see runtime/include/runtime/pose_mode.hpp for the arithmetic).
     if (int pose_r = app::maybe_pose_mode(root_, argc, argv, model_path_); pose_r >= 0)
         return pose_r;
+
+    // arch=7 (MediaPipe hands: a palm detector and a hand-landmark network in
+    // ONE container, run in that order with the whole decode between them) is
+    // the fifth architecture with a pipeline of its own, dispatched here beside
+    // the other four. Like arch=6 its default path opens no device -- and unlike
+    // arch=6 it has no --npu-ops path at all, refused with the reason: there is
+    // no design set carrying these graphs' 31 distinct dense (K, N) pairs, so
+    // there is no array number to compare the host's against, and accepting the
+    // flag would print host timings under a flag that says otherwise.
+    if (int hands_r = app::maybe_hands_mode(root_, argc, argv, model_path_);
+        hands_r >= 0)
+        return hands_r;
 
     RunContext ctx;
     ctx.argc = argc;

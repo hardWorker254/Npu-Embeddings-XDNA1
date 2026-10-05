@@ -69,16 +69,28 @@ DOCS = (REPO / "NPU_OPS.md", REPO / "NPU_OPS.ru.md")
 # which is a behaviour change -- so this gate should have to be edited on purpose
 # rather than a number quietly moving under a document that still says 14.
 EXPECTED_COUNTS = {"honours": 19, "on_array": 1, "unimplemented": 0,
-                   "blocked": 3, "absent": 17}
+                   "blocked": 4, "absent": 24}
 # Why these numbers are 19 and 0 rather than 14 and 5: five cells were flipped
 # from `unimplemented` to `honours` when the branches were written --
 # gemm_rtp/attn, cls/attn, embeddinggemma-300m/attn, cls/softm and
 # embeddinggemma-300m/softm. Each was verified against the host before it was
-# counted (see NPU_OPS.md's per-cell reason), and section 4 below then runs all
-# 40 cells against the binary, so a cell that says `honours` and does not
-# dispatch fails this same gate. The pin is edited ON PURPOSE, with the cells
-# named, because the alternative -- a number moving under a document that still
-# says 14 -- is the failure the comment above describes.
+# counted (see NPU_OPS.md's per-cell reason), and section 4 below then runs
+# every cell of every row this harness CAN reach, so a cell that says `honours`
+# and does not dispatch fails this same gate. It cannot reach all 48: the
+# `hands` row is in UNRUNNABLE with the reason, and rows without a container or
+# a design set on this machine are skipped and counted separately rather than
+# quietly passed. The pin is edited ON PURPOSE, with the cells named, because
+# the alternative -- a number moving under a document that still says 14 -- is
+# the failure the comment above describes.
+#
+# The move from 40 cells to 48 is arch=7 joining as a KIND, which is eight new
+# cells and nothing else: honours is UNCHANGED at 19, so no row that claimed to
+# work stopped working. The eight are one `blocked` (hands/conv -- the
+# convolutions are GEMM-shaped and there is no design set built for them, which
+# is a missing artefact rather than missing code) and seven `absent` (no audio
+# front end, no vocabulary, no normalisation, no attention, and the activation
+# is ReLU/ReLU6/PReLU fused into the convolution's epilogue rather than a GELU
+# pass). Each of the seven names why, and the reason is the claim.
 
 # One container per architecture row, and the command line that reaches it.
 # `kind` is npu_targets.json's word; the row in the registry is looked up by it,
@@ -127,15 +139,39 @@ FIXTURES = {
                  container="models/yolov8n-pose.npue",
                  artifacts="runtime/artifacts/yolov8n-pose",
                  argv=["pose"], input="image"),
+    # arch=7. Present even though section 4 skips it, because a fixture is a
+    # declaration of what the row IS and a skip is a statement about this
+    # machine -- keeping them apart is what lets the skip print a true reason
+    # instead of "no container wired up for this row yet". Its `artifacts` is a
+    # path that does not exist and is not meant to: hands_mode refuses
+    # --artifacts by name, so there is no directory for it to name.
+    "hands": dict(kind="hands", target=None,
+                  container="models/mediapipe-hands/hands.npue",
+                  artifacts="runtime/artifacts/mediapipe-hands",
+                  argv=["hands"], input="image"),
 }
-# Reported as skipped, not silently absent. EMPTY, and that is the point: every
-# architecture row in the registry now has a fixture, so a row that skips from
-# here on skips because something is genuinely absent from the machine and says
-# which thing. It used to hold `pose` with the reason "no pose container in this
-# checkout (models/ has none)" -- a claim that stopped being true the moment the
-# container was packed, and which nothing checked, because the gate only ever
-# prints these strings.
-UNRUNNABLE: dict[str, str] = {}
+# Reported as skipped, not silently absent. `hands` is the first entry and it is
+# NOT one of the two kinds of skip this file used to have: every other row has a
+# container, a design set and a fixture on disk and skips only when the machine
+# lacks one of them, whereas this row has no array path to be lacking. The
+# distinction matters because the reader is left with one number either way.
+#
+# The comment that used to sit here claimed this dict was EMPTY and that was the
+# point -- it had held `pose` with the reason "no pose container in this checkout
+# (models/ has none)", a claim that stopped being true the moment the container
+# was packed and which nothing checked, because the gate only ever prints these
+# strings. It is not empty now, and the reason is written where it can be read
+# rather than asserted here.
+UNRUNNABLE: dict[str, str] = {
+    "hands": "this architecture has no array path at all, so this harness "
+             "cannot reach it anywhere rather than not-on-this-machine. "
+             "runtime/include/runtime/hands_mode.hpp REFUSES --npu-ops conv "
+             "and --artifacts by name, and both of its 61 dense convolutions "
+             "pad down to 12 shapes that no design under runtime/artifacts/ "
+             "carries. Its one `blocked` cell is that same fact; had it been "
+             "written `honours` there would be nothing here to run either, "
+             "which is the failure the status exists to prevent.",
+}
 
 # The cells the runtime must let RUN. Only `honours`: `on_array` is the case
 # this file's author got wrong first and the reason is worth keeping --
@@ -212,9 +248,9 @@ def main() -> int:
           f"architectures = {len(npu_ops.OPS) * len(arches)} cells")
 
     # --- 1. the registry's own shape ---------------------------------------
-    if len(arches) != 5 or len(npu_ops.OPS) != 8:
+    if len(arches) != 6 or len(npu_ops.OPS) != 8:
         print(f"  FAIL  {len(npu_ops.OPS)} codes x {len(arches)} architectures "
-              f"is not the 8 x 5 the document is built around")
+              f"is not the 8 x 6 the document is built around")
         bad += 1
     total = {}
     for label in arches:

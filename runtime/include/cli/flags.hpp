@@ -107,6 +107,20 @@ inline int flag_arity(const std::string &a) {
       // Diagnostic: dump every graph node's output for a node-by-node diff
       // against tools/verify/verify_pose.py. See pose_mode.hpp.
       {"--pose-dump", 1},
+      // -- hands_mode.hpp (arch=7). --hands is the image list, arity 1, and it
+      // REPEATS -- run_hands() rewrites positionals into it and hands_mode
+      // accumulates every occurrence, the same treatment --classify and --pose
+      // get. --max-hands caps how many detections reach the landmark network;
+      // it is a COUNT and not a threshold, because every hand is an independent
+      // crop and the only lever on the second stage is how many of them to run.
+      // This mode's score, NMS and crop thresholds are NOT here on purpose:
+      // they come from the container, and hands_mode REFUSES --conf/--iou/--kpt/
+      // --max-det by name rather than accepting and ignoring them.
+      {"--hands", 1},       {"--max-hands", 1},
+      // Diagnostic: dump every graph node's output of BOTH networks, for the
+      // node-by-node diff against tools/verify/verify_hands.py. See
+      // hands_mode.hpp.
+      {"--hands-dump", 1},
       {"--token", 1},
       // -- REFUSED BY NAME, not accepted. Listed so that CLI::parse() lets them
       // through to refuse_removed_op_flags / refuse_exporter_only_flags, whose

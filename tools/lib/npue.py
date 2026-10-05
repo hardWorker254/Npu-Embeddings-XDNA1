@@ -196,6 +196,24 @@ ARCH_VIT_PATCH16_PRELN = 5
 # than embedded -- the difference the `pose` mode exists to express.
 ARCH_YOLOV8_POSE_C2F_SILU_DFL = 6
 
+# MediaPipe Hands (palm_detection + handpose_estimation, both float): the FIRST
+# container in this format that holds TWO networks. Not a convenience -- the
+# landmark network consumes a cropped, rotated palm ROI and has no way to find a
+# hand in a frame, so a container with only it would answer "no hand here" to
+# every image while looking completely healthy.
+#
+# The `kind` string is "hands". It rides the SAME gemm_rtp directory as every
+# other array-backed architecture, exactly as "pose" does; what it adds is a
+# second stream set, because MediaPipe's two pyramids ask for five conv shapes
+# YOLOv8 never produces (see geometry.py's HANDS_CONV_SHAPES).
+#
+# Its convolution vocabulary is MobileNet's, not YOLOv8's: PReLU (per-channel)
+# and relu6 instead of SiLU, depthwise convolutions instead of dense 3x3, a
+# channel-axis Pad, and a bilinear Resize in the FPN neck. Depthwise is the one
+# that cannot go to the array -- see ARCH_STRING's packer for why it is a host
+# op and not a refusal.
+ARCH_MEDIAPIPE_HANDS_PALM_SSD_LM_HEATMAP = 7
+
 FLAG_PRETILED = 1 << 0
 
 HEADER_FORMAT = "<4sIII QQQQ 16s"      # see SPEC CORRECTION above

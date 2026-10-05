@@ -5,24 +5,24 @@
      run the script, or tools/verify/verify_npu_op_matrix.py fails.
      Russian version: NPU_MODELS.ru.md -->
 
-Eight op codes, 16 models in `tools/data/npu_targets.json`, 128 cells.
+Eight op codes, 17 models in `tools/data/npu_targets.json`, 136 cells.
 
 This is the companion to [NPU_OPS.md](NPU_OPS.md), which answers "what does an ARCHITECTURE support" -- five rows, one per kind. This one answers the question you actually have when you type a model name: "what can THIS model put on the array". Russian: [NPU_MODELS.ru.md](NPU_MODELS.ru.md).
 
-Why a second table rather than a column on the first: a kind's row is almost always the answer, so most of this file repeats the architecture document sixteen times. The repetition is still worth printing, because two models do NOT answer with their kind's row:
+Why a second table rather than a column on the first: a kind's row is almost always the answer, so most of this file repeats the architecture document seventeen times. The repetition is still worth printing, because two models do NOT answer with their kind's row:
 
 - **gemma** -- its ENCODER differs from its kind's (RMSNorm, GeGLU, and `GemmaNpuEncoder` reads no per-op flag at all). It is the only one.
 - **nomic and gte** -- they have a **gated FFN**, whose activation is part of the gated path between `ffn_up` and `ffn_down` rather than a standalone pass. Their kind says `honours` for `gelu`, and for these two models that is not true.
 
 The second is the actual reason this file exists: `--npu-ops gelu` is **refused** for gemma, and for nomic and gte no `gelu/` design is compiled at all. From the architecture table alone a reader would conclude those three behave alike.
 
-Tally over the 128 cells:
+Tally over the 136 cells:
 
 - **81** **yes** -- runs on the array today
 - **1** already -- the work is already dispatched without a code, and the code is refused
 - **0** no code -- the model has the operation, no array branch reaches it
-- **3** blocked -- cannot be moved on this board; the reason is in NPU_OPS.md
-- **41** - -- the model has no such operation
+- **4** blocked -- cannot be moved on this board; the reason is in NPU_OPS.md
+- **48** - -- the model has no such operation
 - **2** **gated** -- this model's FFN has no standalone activation pass -- see below
 
 ## The matrix
@@ -45,12 +45,13 @@ Tally over the 128 cells:
 | `whisper-large-v3-turbo` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
 | `vit-base-patch16-224` | **yes** | **yes** | **yes** | already | **yes** | - | - | blocked |
 | `yolov8n-pose` | - | - | - | **yes** | - | - | - | - |
+| `mediapipe-hands` | - | - | - | blocked | - | - | - | - |
 
 ## Where these two models differ from their kind
 
 ### gemma -- the only model whose ENCODER differs
 
-The other fifteen take their kind's row wholesale. gemma does not: its row lives in `MODEL_REGISTRY`, because `GemmaNpuEncoder` reads no per-op flag at all. That is a property of one encoder and not of a family, and making it a fifth kind would claim a family that does not exist.
+The other sixteen take their kind's row wholesale. gemma does not: its row lives in `MODEL_REGISTRY`, because `GemmaNpuEncoder` reads no per-op flag at all. That is a property of one encoder and not of a family, and making it another kind would claim a family that does not exist.
 
 The price of that decision is visible in the matrix: gemma's `layn` is **blocked** -- it needs RMSNorm, and `kernels/layernorm.cc` is parameterised only by `-DLN_COLS/-DLN_EPS/-DLN_ROWS`, so this is a different kernel body and a **ninth** code. Deliberately not done: the code set would grow and lose its uniformity. The full argument is the `embeddinggemma-300m/layn` cell in NPU_OPS.md.
 
@@ -88,12 +89,13 @@ Note what is **absent** from it: the five codes with no design directory of thei
 | `whisper-large-v3-turbo` | `stt` | `gelu`, `layn`, `softm` | 1280 | 1e-05 | 51866 |
 | `vit-base-patch16-224` | `cls` | `gelu`, `layn`, `softm` | 768 | 1e-12 | — |
 | `yolov8n-pose` | `pose` | _none_ | — | — | — |
+| `mediapipe-hands` | `hands` | _none_ | — | — | — |
 
-## Why sixteen rows and four kinds
+## Why seventeen rows and five kinds
 
-`npu_targets.json` knows four kinds (`gemm_rtp`, `stt`, `cls`, `pose`) and sixteen models, so the model table is four times the length of the kind table. That is deliberate: a kind is what can be shared, and the reader wants the answer for the name they typed.
+`npu_targets.json` knows five kinds (`gemm_rtp`, `stt`, `cls`, `pose`, `hands`) and seventeen models, so the model table is a little under four times the length of the kind table. That is deliberate: a kind is what can be shared, and the reader wants the answer for the name they typed.
 
-The split: 7 text embedders with no `kind` of their own (so `gemm_rtp`, and the `kind` column says so rather than leaving a blank), 6 whisper (`stt`), one ViT (`cls`), one YOLO-pose (`pose`).
+The split: 7 text embedders with no `kind` of their own (so `gemm_rtp`, and the `kind` column says so rather than leaving a blank), 6 whisper (`stt`), one ViT (`cls`), one YOLO-pose (`pose`), one MediaPipe hands (`mediapipe-hands`).
 
 No row here is typed by hand. The model list is read from `tools/data/npu_targets.json`, so a model added to the catalogue lands in this table by itself -- which is the point of generating it.
 

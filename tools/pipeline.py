@@ -147,6 +147,14 @@ TOOLSET = [
     # No requirements at all: it reads the runtime's own sources and the CLI's
     # own table, which is the point of putting it in this tier -- it is the one
     # check that can say the refusal in cli.cpp is wrong before anything is built.
+    # The arch=7 host gate. No NPU, no design set, no binary: it reads the
+    # container and the two checkpoints and runs the whole two-network pipeline
+    # in numpy, against onnxruntime and against the geometry numbers recorded
+    # from the OpenCV zoo. `--inject` breaks the code fourteen ways and checks
+    # that every break fails it.
+    ("verify_hands", "verify/verify_hands.py",
+     "the arch=7 gate: two networks against ORT, the front end against the zoo",
+     ("numpy", "onnx", "onnxruntime", "pillow", "hands_models")),
     ("verify_cli_flags", "verify/verify_cli_flags.py",
      "the CLI's flag table against the flags the runtime reads off argv",
      ()),
@@ -175,6 +183,11 @@ ENVIRONMENTS = [
      "pip install torch --index-url https://download.pytorch.org/whl/cpu"),
     ("transformers", "the Whisper gates and the tokenizer references",
      "pip install transformers"),
+    ("onnxruntime", "verify_hands.py -- the reference both networks are "
+     "checked against; the gate's own arithmetic is numpy",
+     "pip install onnxruntime"),
+    ("pillow", "verify_hands.py and verify_vit_image.py -- the image decoders",
+     "pip install pillow"),
     ("openai", "verify_endpoint.py only -- the official client, imported",
      "pip install openai"),
     ("aie.iron", "the exporters: MLIR-AIE, dot-source its env script first",
@@ -196,6 +209,10 @@ ARTEFACTS = [
      "python tools/pipeline.py run export_gemm_rtp --target <model> --arch 1"),
     ("runtime", "the npuembeddings executable",
      "cmake -S runtime -B runtime/build && cmake --build runtime/build"),
+    ("hands_models", "the arch=7 checkpoint pair, the test photograph and "
+     "hands.npue under models/mediapipe-hands/",
+     "python tools/pipeline.py run pack_npue -- --hands-onnx "
+     "models/mediapipe-hands --out models/mediapipe-hands/hands.npue"),
     ("npu", "an XRT device (xrt-smi sees it)",
      "the Ryzen AI driver; without it only the host-side gates can run"),
 ]
@@ -267,8 +284,12 @@ GATE_TIERS = {
     # here rather than in "cheap" because both of its claims need one: the
     # per-model read needs an ONNX file, and the golden that proves the reader
     # returns the RIGHT tensor needs the model directory beside it.
+    # verify_hands is here rather than in "npu" because it needs none of that:
+    # the claim it makes is about the CONTAINER and the front end, both of which
+    # are host-side, and a gate that needs a device to say a convolution is
+    # packed correctly cannot be run by the person who packed it.
     "container": ("verify_onnx_reader", "verify_npue", "verify_pack_parity",
-                  "verify_npue_nomic", "verify_vit"),
+                  "verify_npue_nomic", "verify_vit", "verify_hands"),
     # verify_npu_op_matrix is here rather than in "cheap" for the same reason
     # verify_design_numerics is: it runs every registry cell against the BINARY,
     # so it needs the build and the device, and its other claims (the registry's
@@ -326,6 +347,16 @@ def _have(kind):
         return _module_present("torch"), "pip install torch"
     if kind == "transformers":
         return _module_present("transformers"), "pip install transformers"
+    # These three were listed as needs by gates that use them before this file
+    # knew how to ask. An unknown kind falls through to "present", so the check
+    # said yes to an interpreter that then died on the import -- which is the
+    # one thing `check` exists to prevent.
+    if kind == "onnx":
+        return _module_present("onnx"), "pip install onnx"
+    if kind == "onnxruntime":
+        return _module_present("onnxruntime"), "pip install onnxruntime"
+    if kind == "pillow":
+        return _module_present("PIL"), "pip install pillow"
     if kind == "openai":
         return _module_present("openai"), "pip install openai"
     if kind == "iron":
@@ -335,6 +366,24 @@ def _have(kind):
     if kind == "g++":
         return any(shutil.which(c) for c in ("g++", "clang++", "cl")), \
             "install a C++17 compiler"
+    if kind == "hands_models":
+        # The arch=7 pair, both float files, and the photograph the gate's
+        # geometry numbers were recorded on. Named separately from "container"
+        # because a container can exist with the checkpoints gone, and the gate
+        # then cannot say whether it is holding this model or an empty shell.
+        d = REPO / "models" / "mediapipe-hands"
+        want = ["palm_detection_mediapipe_2023feb.onnx",
+                "handpose_estimation_mediapipe_2023feb.onnx",
+                "hand_plain.png", "hands.npue"]
+        missing_ = [w for w in want if not (d / w).exists()]
+        return (not missing_), (
+            f"missing in models/mediapipe-hands/: {', '.join(missing_)}\n"
+            f"  fetch the two ONNX files from opencv/palm_detection_mediapipe and "
+            f"opencv/handpose_estimation_mediapipe (Apache-2.0) and hand_plain.png "
+            f"from opencv_zoo. The golden is NOT in that list: it is tracked, at "
+            f"reference/goldens/hands_mediapipe.json. Then "
+            f"`python tools/pipeline.py run pack_npue -- "
+            f"--hands-onnx models/mediapipe-hands --out models/mediapipe-hands/hands.npue`")
     if kind == "checkpoint":
         found = [p for p in (REPO / "models").glob("*")
                  if (p / "config.json").exists()] if (REPO / "models").is_dir() else []

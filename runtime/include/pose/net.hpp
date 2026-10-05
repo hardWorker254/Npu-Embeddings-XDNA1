@@ -48,27 +48,17 @@
 #include <string>
 #include <vector>
 
+#include "common/conv_host.hpp"   // npue::hostconv::Nchw, gemm_nt, im2col
 #include "pose/geometry.hpp"
 #include "runtime/pool.hpp"
 
 namespace npue::pose {
 
-// NCHW, the checkpoint's own layout, because both backends want it: the host
-// kernel indexes it per element and the array's A panel is built from it by the
-// same im2col. A channels-last buffer would be a faster host kernel and a second
-// set of bugs, and the stride maths for the array's DMA wants rows contiguous
-// over K, which NCHW's im2col produces.
-struct Tensor {
-  int64_t c = 0, h = 0, w = 0;
-  std::vector<float> d;
-
-  Tensor() = default;
-  Tensor(int64_t C, int64_t H, int64_t W) : c(C), h(H), w(W), d(static_cast<size_t>(C * H * W), 0.f) {}
-  bool empty() const { return c <= 0 || h <= 0 || w <= 0; }
-  size_t plane() const { return static_cast<size_t>(h) * static_cast<size_t>(w); }
-  float *chw(int64_t ci) { return d.data() + static_cast<size_t>(ci) * plane(); }
-  const float *chw(int64_t ci) const { return d.data() + static_cast<size_t>(ci) * plane(); }
-};
+// NCHW, defined once in runtime/include/common/conv_host.hpp because arch=7
+// runs the same host convolution through the same im2col and the same blocked
+// GEMM -- a second copy would be 300 lines that drift, and the drift would show
+// up as the two architectures disagreeing about what the host convolution costs.
+using Tensor = npue::hostconv::Nchw;
 
 // Which ops the array is asked to run. An EMPTY placement is the default and
 // means every op is on the host; that is the normal case, and it is why

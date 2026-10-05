@@ -24,8 +24,10 @@
 #   ... --tile-n 32 --out models\minilm_n32.npue
 
 import argparse
+import glob
 import json
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -1824,6 +1826,20 @@ def main():
                          "by convention -- --model-dir with a directory that "
                          "happens to contain a .onnx is the shape of the mistake "
                          "the --out-derived default above was written to stop.")
+    ap.add_argument("--hands-onnx", metavar="DIR", default=None,
+                    help="pack a MediaPipe Hands checkpoint pair (arch=7) from "
+                         "DIR, which must contain "
+                         "palm_detection_mediapipe_*.onnx and "
+                         "handpose_estimation_mediapipe_*.onnx. TWO networks "
+                         "in one container, by necessity rather than by taste: "
+                         "the landmark net consumes a cropped, rotated palm ROI "
+                         "and cannot find a hand in a frame by itself, so a "
+                         "container holding only it answers 'no hand here' to "
+                         "every image. It is --hands-onnx DIR rather than two "
+                         "--*-onnx FILE flags because the pair is one model "
+                         "here: giving it one of the two is the mistake worth "
+                         "refusing, and the message can only name the pair if "
+                         "there is one flag to name.")
     ap.add_argument("--npu", action="store_true",
                     help="arch=6 only: also stage the pre-tiled bf16 B panel "
                          "for every convolution, and record the array stream "
@@ -1996,6 +2012,48 @@ def main():
                          # and this default is POSE_I4_GROUP_DEFAULT's business,
                          # not something it should be told to ignore on f32.
                          int4_group=grp if dtype == "i4" else None)
+
+    # arch=7 branch: a MediaPipe Hands checkpoint PAIR. Routed before the
+    # --model-dir resolution below for the same reason the pose branch is: its
+    # input is two ONNX files in one directory, and there is no config.json to
+    # read a model_type out of.
+    if args.hands_onnx:
+        # f32 is FORCED, and this is the one packer in the file that ignores the
+        # --dtype default rather than following it. The int8 graphs that ship
+        # alongside these float ones are not a smaller option, they are a broken
+        # one: measured on hand_plain.png, the int8 palm detector peaks at 0.022
+        # score where float reaches 0.894 (and cv2.dnn aborts inside its int8
+        # pooling layer outright), and the int8 landmark net puts the wrist
+        # 35 px off (197.7 against 232.5). ORT's int8 kernels are also SLOWER
+        # than float on this host -- 11.62 ms against 5.18 ms for the palm net,
+        # 4.45 ms against 0.94 ms for the landmark net -- so "smaller file" here
+        # would be worse on both counts at once. Refusing by name is better than
+        # accepting a flag and quietly producing the bad one.
+        if typed:
+            raise SystemExit(
+                "--dtype is not accepted for arch=7. These two networks are "
+                "float only: their int8 variants are not a smaller version of "
+                "the same model, they are a different and much worse one -- on "
+                "hand_plain.png the int8 palm detector peaks at 0.022 score "
+                "against 0.894, and the int8 landmark net puts the wrist 35 px "
+                "off. See models/mediapipe-hands/CHECKPOINT.json.")
+        d = args.hands_onnx
+        palm = sorted(glob.glob(os.path.join(d, "palm_detection_mediapipe_*.onnx")))
+        lms = sorted(glob.glob(os.path.join(d, "handpose_estimation_mediapipe_*.onnx")))
+        palm = [p for p in palm if "_int8" not in os.path.basename(p)]
+        lms = [q for q in lms if "_int8" not in os.path.basename(q)]
+        if len(palm) != 1 or len(lms) != 1:
+            raise SystemExit(
+                f"--hands-onnx {d} needs exactly one float palm detector and one "
+                f"float landmark net, and found "
+                f"{[os.path.basename(x) for x in palm]} and "
+                f"{[os.path.basename(x) for x in lms]}. The _int8 files are "
+                f"ignored on purpose -- see above. Point this at "
+                f"models/mediapipe-hands/.")
+        print("  dtype f32 -- forced, not defaulted: see the note above about "
+              "the int8 pair.")
+        from packers.hands import pack_hands  # noqa: E402
+        return pack_hands(palm[0], lms[0], args.out, dry_run=args.dry_run)
 
     # Resolved ONCE PER LAYOUT DTYPE, here, and printed by every branch: a
     # container whose B order is a guess is a container nobody can debug later.

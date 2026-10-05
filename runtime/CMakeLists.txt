@@ -110,6 +110,17 @@ add_executable(npuembeddings
   src/pose/session.cpp
   src/pose/result_json.cpp
   src/embed_models/pose_model.cpp
+  # arch=7 (MediaPipe hands: the palm detector and the hand-landmark network in
+  # ONE container). Added in the same order the file is read: the geometry, then
+  # the image front end, then the graph walk, the heads, the decode and the
+  # session. src/hands/net.cpp gets -O3 on its own for the reason
+  # src/pose/net.cpp does -- it is the same host GEMM, now in
+  # include/common/conv_host.hpp, plus a depthwise convolution.
+  src/hands/geometry.cpp
+  src/hands/image.cpp
+  src/hands/decode.cpp
+  src/hands/net.cpp
+  src/hands/session.cpp
   # Subtask 7: STT extension (Whisper). The tokenizer stub lives with the
   # other tokenizers but is grouped here with the rest of the Whisper
   # placeholders.
@@ -212,5 +223,10 @@ endif()
 # where -O3 buys nothing measurable and costs compile time and binary size.
 if(NOT MSVC)
   set_source_files_properties(src/pose/net.cpp PROPERTIES
+    COMPILE_OPTIONS "-O3")
+  # arch=7 for the same reason and one more: its depthwise kernel is a plain
+  # nested loop whose inner two axes the compiler vectorises at -O3 and does not
+  # at -O2, and it is 39 of this container's 100 convolutions.
+  set_source_files_properties(src/hands/net.cpp PROPERTIES
     COMPILE_OPTIONS "-O3")
 endif()

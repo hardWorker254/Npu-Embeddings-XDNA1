@@ -22,7 +22,7 @@ it takes no op flag at all -- `--npu-ops`, `--npu-extra-ops` and
 `--npu-eltwise` are refused by name there, each with its own message. The
 table below is what it reads.
 
-There are 8 codes and 5 architectures: 40 cells. Of those, 19 run on the array today, 1 is already there without a code, 0 are operations the model has and no array branch reaches, 3 cannot be moved on this board for a stated reason, and 17 do not exist in that model at all.
+There are 8 codes and 6 architectures: 48 cells. Of those, 19 run on the array today, 1 is already there without a code, 0 are operations the model has and no array branch reaches, 4 cannot be moved on this board for a stated reason, and 24 do not exist in that model at all.
 
 ## The eight codes
 
@@ -67,6 +67,7 @@ new code, or does not tile.
 | `stt` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
 | `cls` | **yes** | **yes** | **yes** | already | **yes** | - | - | blocked |
 | `pose` | - | - | - | **yes** | - | - | - | - |
+| `hands` | - | - | - | blocked | - | - | - | - |
 | `embeddinggemma-300m` | blocked | blocked | **yes** | - | **yes** | - | - | - |
 
 `already` means the cell is empty because the work is done without a code,
@@ -252,9 +253,51 @@ a 400-point transform is part of an an audio front end, and this architecture ha
 
 no vocabulary: the head is a 1x1 convolution producing one class score and a DFL grid, not a projection into a token space.
 
+## `hands` -- Hand landmarks
+
+MediaPipe hands: a palm detector and a hand-landmark network in ONE container, run in that order with the whole decode between them. Seven of this row's eight cells are `absent` and one is `blocked`, and neither is an oversight.
+
+### `gelu` -- GELU: **absent**
+
+the activations are ReLU, ReLU6 and PReLU, and each is FUSED into its convolution's epilogue: packers/hands.py attaches `act` to a Conv, a dwconv or an Add and there is no standalone pass for any of the three. There is nothing for a gelu/ design to take over.
+
+### `layn` -- LayerNorm: **absent**
+
+no normalisation op anywhere in either graph. packers/hands.py's op inventory is {Conv, Add, MaxPool, Pad, Resize} for the palm detector and {Conv, Add, MaxPool} for the landmark network, and there is no BatchNormalization or InstanceNormalization to refuse by name -- MediaPipe's checkpoints carry none, which is why the depthwise layers are plain convolutions and not depthwise-separable normalisation blocks.
+
+### `softm` -- softmax: **absent**
+
+no attention and no softmax. The nearest thing is the palm head's score, and that is a SIGMOID folded into the decode (runtime/src/hands/decode.cpp applies it to the logit after the graph), not a softmax over a score matrix between two GEMMs.
+
+### `conv` -- conv1d (Whisper's audio front end): **blocked**
+
+not missing code and not the wrong operation -- this architecture is 100 convolutions of which 61 are dense and GEMM-shaped, carrying 232.0M MACs in the palm detector and 123.9M in the landmark network, which is exactly a GEMM array's arithmetic. What is missing is a DESIGN SET, and only that.
+
+The 61 dense convolutions have 31 distinct raw (K, N) pairs, which sounds worse than it is: padded the way gemm_rtp/geometry.py pads pose's -- K up to a multiple of tile_k = 64, N up to a multiple of tile_n*cols = 128 -- they collapse to TWELVE, and the two graphs share two of those, so the union is 12. That is fewer than pose's 14, and pose's set exists and was measured, so nothing about the shapes is the obstacle.
+
+What is missing is that nobody has BUILT those 12 on this machine, so there is no array timing to compare the host's against, and runtime/include/runtime/hands_mode.hpp REFUSES --npu-ops conv by name rather than running on the host under a flag that says otherwise. The numbers a design set would have to beat, measured here: onnxruntime's float run of the same two graphs is 5.18 ms + 0.94 ms = 6.1 ms a frame on 16 threads, and this build's host fp32 walk is 42 ms (palm) + 29 ms (landmark) on the 520x512 test frame. The int8 variants of both checkpoints were measured too and are SLOWER here -- 11.62 ms and 4.45 ms -- so the container is float, and the reason is written in tools/pack/packers/hands.py.
+
+One number a future design set should not expect to move: 39 of the container's 100 convolutions are DEPTHWISE, and a depthwise filter reduces within one channel, so there is no [M, N] GEMM in it to dispatch. They stay on the host whatever a design set turns out to say.
+
+### `attn` -- attention, as two GEMMs: **absent**
+
+no attention in either graph: the landmark net's argmax over its 63 heatmap channels is folded into the graph as a reshape, and runtime/src/hands/net.cpp walks conv, add, maxpool, pad and resize and nothing else weighted.
+
+### `mproj` -- Whisper's mel filter bank, as a GEMM: **absent**
+
+a mel filter bank is part of an an audio front end, and this architecture has none.
+
+### `fft` -- Whisper's 400-point transform, as a GEMM: **absent**
+
+a 400-point transform is part of an an audio front end, and this architecture has none.
+
+### `logit` -- the vocabulary projection, as a GEMM: **absent**
+
+no vocabulary: the landmark head emits 21 screen points, a presence and a handedness, and the palm head emits boxes and scores. Nothing anywhere in this architecture projects into a token space.
+
 ## `embeddinggemma-300m` -- Gemma
 
-The one model whose ENCODER differs from its kind, so it gets a row of its own rather than a fifth kind.
+The one model whose ENCODER differs from its kind, so it gets a row of its own rather than another kind.
 
 ### `gelu` -- GELU: **blocked**
 

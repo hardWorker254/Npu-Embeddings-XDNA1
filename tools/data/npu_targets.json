@@ -300,6 +300,10 @@
     "yolov8n-pose": {
       "kind": "pose",
       "datapath": "bfp16"
+    },
+    "mediapipe-hands": {
+      "kind": "hands",
+      "datapath": "bf16"
     }
   },
   "kinds": {
@@ -353,6 +357,24 @@
         "conv2304x128"
       ],
       "note": "arch 6, yolov8_pose_c2f_silu_dfl.\n\nThe FIRST stream set in this file whose streams are not operation names. The fourteen `conv{K}x{N}` entries are the network's own padded convolution shapes, in the order gemm_rtp/geometry.py's POSE_CONV_SHAPES gives them, and this list is written out rather than derived because the targets schema requires `streams` to be a list -- which makes the two independent spellings of one list, and tools/verify/verify_pose_streamset.py is what holds them together: it checks this file against geometry.py, against the design set's design.json, and against the packed container's npu_streams, all four ways.\n\nM is ONE value for the whole set, not one per stride, and that is why no stream name carries an M. The runtime reads its row count once from the design's top-level M (runtime/src/pose/session.cpp) and cuts every convolution into chunks of it (runtime/src/pose/net.cpp), so a set with a stream per (K, N, M) would have twenty-one streams of which four are dispatched and the rest unreachable."
+    },
+    "hands": {
+      "exporter": "export_gemm_rtp",
+      "streams": [
+        "conv64x128",
+        "conv64x256",
+        "conv64x384",
+        "conv128x128",
+        "conv128x256",
+        "conv128x768",
+        "conv192x128",
+        "conv256x128",
+        "conv256x256",
+        "conv320x128",
+        "conv384x128",
+        "conv704x128"
+      ],
+      "note": "arch 7, mediapipe_hands_palm_ssd_lm_heatmap. TWO graphs in one container -- a 87-node palm detector and a 58-node hand-landmark network -- and the twelve `conv{K}x{N}` entries are the union of what their dense convolutions pad to, listed so the set is named rather than implied.\n\nThe padding is gemm_rtp/geometry.py's, and the raw count is worth stating next to the padded one: the 61 dense convolutions have 31 distinct RAW (K, N) pairs, of which K up to a multiple of tile_k = 64 and N up to a multiple of tile_n*cols = 128 leaves twelve, the two graphs sharing (64,128) and (128,128). Twelve is fewer than pose's fourteen, whose set exists and was measured, so the shapes are not what stands between this model and the array.\n\nNO DESIGN SET CARRIES THIS LIST. It is written down so the claim can be checked, not so something can be dispatched on it: runtime/include/runtime/hands_mode.hpp REFUSES --npu-ops conv for this architecture by name, because there is no array timing to compare the host's against and running on the host under that flag would report host numbers as array ones. Nothing in this tree builds these twelve yet.\n\nM is ONE value for the whole set, as in pose: the dispatch chunk is the design's single top-level row count and every convolution is cut into chunks of it, because the runtime has nowhere to keep twelve different row counts. The 39 depthwise convolutions in the container are deliberately NOT in this list -- a depthwise filter reduces within one channel and has no [M, N] GEMM to dispatch, so a stream for it would be a name with nothing behind it."
     }
   }
 }

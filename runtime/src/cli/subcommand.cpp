@@ -101,6 +101,16 @@ bool flag_takes_value(const std::string &a) {
         // two-tables-agree check.
         "--audio",
         "--conf", "--iou", "--kpt", "--max-det", "--pose-dump",
+        // arch=7. --hands is the image list (run_hands() rewrites positionals
+        // into it, and it REPEATS, so it is accumulated by the loop in
+        // hands_mode.hpp rather than read last-wins -- the same treatment
+        // --classify and --pose get). --max-hands and --hands-dump are this
+        // mode's own and were added to this table in the same commit that added
+        // the mode, because a flag missing here is not a parse error: forward
+        // _common drops it silently and hands_mode then reports that it was
+        // never given. That is what verify_cli_flags.py's two-tables-agree check
+        // exists to catch, and it caught --audio.
+        "--hands", "--max-hands", "--hands-dump",
         // --serve is deliberately NOT here: it is arity 0 in flags.hpp (the port
         // is the next argv entry, and only if it starts with a digit), and it is
         // injected by run_serve rather than forwarded from the user's line. A
@@ -379,6 +389,52 @@ int run_pose(int argc, char **argv) {
     return launch(argv[0], root, store);
 }
 
+// arch=7. Mirrors run_pose: positionals become --hands, the model name and
+// --root/--token are picked off the front, and everything else is forwarded for
+// forward_common's whitelist to judge.
+int run_hands(int argc, char **argv) {
+    std::string root = default_root(argv[0]);
+    std::string cli_token;
+    for (int i = 2; i < argc; ++i) {
+        if (std::string(argv[i]) == "--root") root = argv[i + 1];
+        if (std::string(argv[i]) == "--token") cli_token = argv[i + 1];
+    }
+    if (argc < 3 || argv[2][0] == '-')
+        throw std::runtime_error(
+            "`hands` needs a model name or a path to a .npue container");
+    const std::string model_name = argv[2];
+    if (argc < 4 || argv[3][0] == '-')
+        throw std::runtime_error(
+            "`hands` needs an image, or you meant `serve`:\n"
+            "    npuembeddings hands <model> <image.png> [more.png ...]\n"
+            "  (PNG and JPEG; anything else is refused rather than guessed at)\n"
+            "  --max-hands 1     run the landmark network on at most N\n"
+            "  --text            a human summary instead of JSON\n"
+            "  --hands-dump FILE every graph node's output, for the gate\n"
+            "  (the score, NMS and crop thresholds come from the container --\n"
+            "   they are part of the checkpoint, so there is no flag for them,\n"
+            "   and typing one is refused rather than ignored)");
+    if (!is_container_path(model_name)) warn_if_unpinned(model_name);
+    const std::string container = resolve_container(root, model_name, cli_token);
+    std::vector<std::string> store = {"--model", container};
+    bool swallow = false;
+    for (int i = 3; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (swallow) {
+            swallow = false;
+            continue;
+        }
+        if (!a.empty() && a[0] == '-') {
+            swallow = flag_takes_value(a);
+            continue;
+        }
+        store.push_back("--hands");
+        store.push_back(a);
+    }
+    forward_common(argv, argc, store);
+    return launch(argv[0], root, store);
+}
+
 int run_add(int argc, char **argv) {    std::string root = default_root(argv[0]);
     std::string cli_token;
     for (int i = 2; i < argc - 1; ++i) {
@@ -514,6 +570,7 @@ void register_default_subcommands(SubcommandDispatcher &dispatcher) {
     dispatcher.register_handler("transcribe", run_transcribe);
     dispatcher.register_handler("classify", run_classify);
     dispatcher.register_handler("pose", run_pose);
+    dispatcher.register_handler("hands", run_hands);
 }
 
 }  // namespace app

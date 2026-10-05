@@ -56,6 +56,14 @@ struct Image {
   const uint8_t *at(int64_t y, int64_t x) const {
     return rgb.data() + (y * width + x) * 3;
   }
+  // The writable twin of the accessor above. Added for arch=7, whose resamplers
+  // write into a freshly allocated raster; without it every output pixel had to
+  // be written as `rgb[(y*width + x)*3 + k] = ...`, which loses the bounds
+  // relationship the two indices already have and is how a height/width swap
+  // survives to runtime instead of failing to compile.
+  uint8_t *at(int64_t y, int64_t x) {
+    return rgb.data() + (y * width + x) * 3;
+  }
 };
 
 // Decode a PNG or a JPEG into RGB.

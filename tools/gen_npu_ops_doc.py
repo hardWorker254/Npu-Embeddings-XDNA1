@@ -2,7 +2,7 @@
 #===----------------------------------------------------------------------===//
 # Regenerate NPU_OPS.md and NPU_OPS.ru.md from tools/lib/npu_ops.py.
 #
-# The 40 cells (5 architectures x 8 codes) live in the registry as Python because
+# The 48 cells (6 architectures x 8 codes) live in the registry as Python because
 # the exporter reads them to decide what to compile. A hand-written Markdown copy
 # of the same table would be a third copy of the truth and would drift the first
 # time somebody added a code, so both documents are GENERATED and
@@ -27,7 +27,7 @@
 # The consequence is that the two files can drift from EACH OTHER -- a reason
 # edited in the registry and not translated here leaves NPU_OPS.ru.md stale in a
 # way `--check` cannot see, because it only knows the generated text is stable.
-# So translation completeness IS checked instead: every one of the 40 cells must
+# So translation completeness IS checked instead: every one of the 48 cells must
 # have a Russian reason or the generator raises, and a stale translation is caught
 # by the same gate that catches a stale document.
 #===----------------------------------------------------------------------===//
@@ -66,11 +66,20 @@ ARCHES = [
      "row is `absent`, and that is the answer.",
      "YOLO pose. Ни трансформера, ни нормализации, ни внимания — большая часть "
      "этой строки `absent`, и это и есть ответ."),
+    ("hands", "Hand landmarks", "Ключевые точки кисти",
+     "MediaPipe hands: a palm detector and a hand-landmark network in ONE "
+     "container, run in that order with the whole decode between them. Seven of "
+     "this row's eight cells are `absent` and one is `blocked`, and neither is "
+     "an oversight.",
+     "MediaPipe hands: детектор ладони и сеть ключевых точек в ОДНОМ контейнере, "
+     "прогоняемые именно в этом порядке, со всем декодом между ними. Семь ячеек "
+     "из восьми в этой строке `absent` и одна `blocked`, и ни то ни другое не "
+     "недосмотр."),
     ("embeddinggemma-300m", "Gemma", "Gemma",
      "The one model whose ENCODER differs from its kind, so it gets a row of its "
-     "own rather than a fifth kind.",
+     "own rather than another kind.",
      "Единственная модель, чей КОДЕР отличается от своего `kind`, поэтому у неё "
-     "своя строка, а не пятый kind."),
+     "своя строка, а не ещё один kind."),
 ]
 
 # Status -> the one word that goes in the matrix. Short because a table cell has
@@ -130,10 +139,10 @@ NO_DESIGN_RU = {
              "отдельный каталог",
 }
 
-# (architecture, code) -> the Russian reason. Every one of the 40 cells must be
+# (architecture, code) -> the Russian reason. Every one of the 48 cells must be
 # here; doc() raises on a missing one rather than falling back to English, because
-# a Russian reader who hits one English cell among forty has no way to tell that it
-# is a bug rather than an oversight in the translation.
+# a Russian reader who hits one English cell among forty-eight has no way to tell
+# that it is a bug rather than an oversight in the translation.
 REASONS_RU = {
 ("gemm_rtp", "gelu"):
     "активация негейтед FFN — отдельный проход, поэтому его забирает дизайн "
@@ -333,6 +342,61 @@ REASONS_RU = {
 ("pose", "logit"):
     "словаря нет: голова — это свёртка 1×1, дающая один class score и сетку DFL, а "
     "не проекция в пространство токенов.",
+("hands", "conv"):
+    "не отсутствующий код и не неподходящая операция: в этой архитектуре 100 "
+    "свёрток, из них 61 плотная, GEMM-образная, несущая 232.0M MAC в детекторе "
+    "ладони и 123.9M в сети ключевых точек, — а это ровно та арифметика, для "
+    "которой нужен GEMM-массив. Не хватает только НАБОРА ДИЗАЙНОВ, и только "
+    "его.\n\n"
+    "У 61 плотной свёртки 31 РАЗНАЯ «сырая» пара (K, N), но выглядит это хуже, "
+    "чем есть: если паддить так, как `gemm_rtp/geometry.py` паддит позу — K до "
+    "кратного `tile_k = 64`, N до кратного `tile_n*cols = 128`, — они "
+    "схлопываются в ДВЕНАДЦАТЬ, и два из них у графов общие, так что в объединении "
+    "тоже 12. Это меньше, чем позы с её 14, а набор позы существует и был "
+    "замерен, так что преграда не в формах.\n\n"
+    "Не хватает того, что эти 12 на этой машине никто не СОБРАЛ, поэтому нет "
+    "тайминга массива, с которым можно сравнить хостовский, и "
+    "`hands_mode.hpp` ОТКАЗЫВАЕТ `--npu-ops conv` ПОИМЕННО, а не выполняет "
+    "проход на хосте под флагом, который говорит обратное. Числа, которые "
+    "набору дизайнов пришлось бы обойти, замерены здесь: float-прогон тех же двух "
+    "графов в onnxruntime — 5.18 мс + 0.94 мс = 6.1 мс на кадр на 16 потоках, а "
+    "хостовый fp32-обход этой сборки — 42 мс (ладонь) + 29 мс (ключевые точки) на "
+    "пробном кадре 520×512. int8-варианты обоих чекпойнтов тоже замерены и "
+    "ЗДЕСЬ МЕДЛЕННЕЕ — 11.62 мс и 4.45 мс — поэтому контейнер float, и причина "
+    "записана в `tools/pack/packers/hands.py`.\n\n"
+    "Одно число, которого будущему набору дизайнов не стоит ждать движения: 39 из "
+    "100 свёрток контейнера — ГЛУБИННЫЕ (depthwise), а фильтр depthwise сводит "
+    "внутри одного канала, то есть `[M, N]`-GEMM в нём нет и диспатчить нечего. "
+    "Они останутся на хосте, что бы набор ни оказался.",
+("hands", "gelu"):
+    "активации здесь ReLU, ReLU6 и PReLU, и каждая ВФЬЮЖЕНА в эпилог своей "
+    "свёртки: `packers/hands.py` вешает `act` на Conv, dwconv или Add, и "
+    "отдельного прохода нет ни у одной из трёх. Дизайну `gelu/` нечего "
+    "забирать.",
+("hands", "layn"):
+    "операции нормализации нет ни в одном из двух графов. Инвентарь операций в "
+    "`packers/hands.py` — `{Conv, Add, MaxPool, Pad, Resize}` для детектора "
+    "ладони и `{Conv, Add, MaxPool}` для сети ключевых точек, и ни "
+    "BatchNormalization, ни InstanceNormalization там нет, что было бы отвергнуто "
+    "ПОИМЕННО, — чекпойнты MediaPipe не несут ни одного, и потому depthwise-слои "
+    "это просто свёртки, а не separable-нормализация.",
+("hands", "softm"):
+    "нет ни внимания, ни softmax. Ближайшее к этому — score детектора ладони, и "
+    "это СИГМОИДА, свёрнутая в декод (`runtime/src/hands/decode.cpp` применяет "
+    "её к логиту после графа), а не softmax над матрицей оценок между двумя "
+    "GEMM.",
+("hands", "attn"):
+    "нет внимания ни в одном графе: argmax по 63 каналам тепловой карты у сети "
+    "ключевых точек свёрнут в граф как reshape, а `runtime/src/hands/net.cpp` "
+    "обходит conv, add, maxpool, pad и resize и больше ничего взвешенного.",
+("hands", "mproj"):
+    "банк mel-фильтров — часть аудио-фронтенда, а этой архитектуры нет.",
+("hands", "fft"):
+    "трансформация 400 точек — часть аудио-фронтенда, а этой архитектуры нет.",
+("hands", "logit"):
+    "словаря нет: голова ключевых точек выдаёт 21 экранную точку, presence и "
+    "handedness, а голова ладони — боксы и score. Нигде в этой архитектуре "
+    "проекции в пространство токенов.",
 ("embeddinggemma-300m", "gelu"):
     "GeGLU считает активацию ВНУТРИ гейтед-пути, между `ffn_up` и `ffn_down`, "
     "так что отдельного прохода, который мог бы забрать `hw_context`, нет, и "

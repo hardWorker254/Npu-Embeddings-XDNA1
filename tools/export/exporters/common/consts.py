@@ -171,7 +171,14 @@ STT_MODEL_KEYS = {"kind", "heads", "head_dim", "enc_layers", "dec_layers",
 # one that stops a new architecture from being silently treated as an
 # embedder -- which is what would happen if a pose entry arrived as a kind with
 # no entry here.
-KNOWN_KINDS = {"gemm_rtp", "stt", "cls", "pose"}
+#
+# "hands" (arch 7) is in here for the same reason and NOT for its own sake: it
+# is a real target with its own packer, and its `conv` cell is `blocked` rather
+# than `honours` precisely because no design set carries its 31 dense (K, N)
+# pairs. Registering the kind is what makes that cell exist and be visible; a
+# target absent from KNOWN_KINDS has no row in NPU_OPS.md at all, and a missing
+# row reads as nothing to report rather than as a blocked op.
+KNOWN_KINDS = {"gemm_rtp", "stt", "cls", "pose", "hands"}
 
 DEFAULT_CACHE_ROOT = Path.home() / ".npu" / "cache"
 

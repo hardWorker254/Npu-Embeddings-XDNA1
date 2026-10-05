@@ -15,7 +15,7 @@
 # WHY A SECOND TABLE AND NOT A COLUMN ON THE FIRST
 # ----------------------------------------------
 # A kind's row is almost always the answer, so most of this document is the
-# architecture document repeated sixteen times. The repetition is still worth
+# architecture document repeated seventeen times. The repetition is still worth
 # printing, for two reasons, and both are model facts the kind table cannot hold:
 #
 #   * a model whose ENCODER differs from its kind's -- gemma, and only gemma;
@@ -82,7 +82,7 @@ def models(t):
 def kind_of(spec):
     """A text embedder's kind is the default, and saying so is the point.
 
-    `kind: null` is seven of the sixteen rows, and it means "gemm_rtp". Printed as
+    `kind: null` is seven of the seventeen rows, and it means "gemm_rtp". Printed as
     an empty cell a reader cannot tell a missing field from a missing kind, so it
     is printed as the default it is.
     """
@@ -157,7 +157,7 @@ def ln_columns(spec, defaults, model):
 def fmt_eps(v, from_model):
     """epsilon, marked when it is the fallback rather than the model's own.
 
-    Seven of the sixteen models carry no `layer_norm_eps`, and the exporter then
+    Seven of the seventeen models carry no `layer_norm_eps`, and the exporter then
     uses FALLBACK_LN_EPS. Printing one number in both cases would make the
     fallback look like a per-model fact.
     """
@@ -411,7 +411,7 @@ def doc(ru=False):
     a("")
     a("Why a second table rather than a column on the first: a kind's row is "
       "almost always the answer, so most of this file repeats the architecture "
-      "document sixteen times. The repetition is still worth printing, because "
+      "document seventeen times. The repetition is still worth printing, because "
       "two models do NOT answer with their kind's row:")
     a("")
     a("- **gemma** -- its ENCODER differs from its kind's (RMSNorm, GeGLU, and "
@@ -445,7 +445,7 @@ def doc(ru=False):
     a("")
     L.extend(built_table())
     a("")
-    a("## Why sixteen rows and four kinds")
+    a("## Why seventeen rows and five kinds")
     a("")
     L.extend(EN_WHY_BODY)
     a("")
@@ -459,10 +459,10 @@ def doc(ru=False):
 EN_GATED_BODY = [
     "### gemma -- the only model whose ENCODER differs",
     "",
-    "The other fifteen take their kind's row wholesale. gemma does not: its row "
+    "The other sixteen take their kind's row wholesale. gemma does not: its row "
     "lives in `MODEL_REGISTRY`, because `GemmaNpuEncoder` reads no per-op flag "
     "at all. That is a property of one encoder and not of a family, and making "
-    "it a fifth kind would claim a family that does not exist.",
+    "it another kind would claim a family that does not exist.",
     "",
     "The price of that decision is visible in the matrix: gemma's `layn` is "
     "**blocked** -- it needs RMSNorm, and `kernels/layernorm.cc` is "
@@ -510,14 +510,15 @@ EN_BUILT_NOTE = [
 ]
 
 EN_WHY_BODY = [
-    "`npu_targets.json` knows four kinds (`gemm_rtp`, `stt`, `cls`, `pose`) and "
-    "sixteen models, so the model table is four times the length of the kind "
-    "table. That is deliberate: a kind is what can be shared, and the reader "
-    "wants the answer for the name they typed.",
+    "`npu_targets.json` knows five kinds (`gemm_rtp`, `stt`, `cls`, `pose`, "
+    "`hands`) and seventeen models, so the model table is a little under four "
+    "times the length of the kind table. That is deliberate: a kind is what can "
+    "be shared, and the reader wants the answer for the name they typed.",
     "",
     "The split: 7 text embedders with no `kind` of their own (so `gemm_rtp`, and "
     "the `kind` column says so rather than leaving a blank), 6 whisper (`stt`), "
-    "one ViT (`cls`), one YOLO-pose (`pose`).",
+    "one ViT (`cls`), one YOLO-pose (`pose`), one MediaPipe hands "
+    "(`mediapipe-hands`).",
     "",
     "No row here is typed by hand. The model list is read from "
     "`tools/data/npu_targets.json`, so a model added to the catalogue lands in "

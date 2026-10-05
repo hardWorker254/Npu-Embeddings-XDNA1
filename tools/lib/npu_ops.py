@@ -515,6 +515,77 @@ KIND_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
                   "class score and a DFL grid, not a projection into a token "
                   "space."),
     },
+    # arch=7. Two graphs in one container -- a 87-node palm detector and a
+    # 58-node hand-landmark network -- which is why this row is the only one
+    # whose `conv` cell is blocked rather than honoured: see it.
+    "hands": {
+        "conv": (BLOCKED,
+                 "not missing code and not the wrong operation -- this "
+                 "architecture is 100 convolutions of which 61 are dense and "
+                 "GEMM-shaped, carrying 232.0M MACs in the palm detector and "
+                 "123.9M in the landmark network, which is exactly a GEMM "
+                 "array's arithmetic. What is missing is a DESIGN SET, and "
+                 "only that.\n\n"
+                 "The 61 dense convolutions have 31 distinct raw (K, N) pairs, "
+                 "which sounds worse than it is: padded the way "
+                 "gemm_rtp/geometry.py pads pose's -- K up to a multiple of "
+                 "tile_k = 64, N up to a multiple of tile_n*cols = 128 -- they "
+                 "collapse to TWELVE, and the two graphs share two of those, so "
+                 "the union is 12. That is fewer than pose's 14, and pose's set "
+                 "exists and was measured, so nothing about the shapes is the "
+                 "obstacle.\n\n"
+                 "What is missing is that nobody has BUILT those 12 on this "
+                 "machine, so there is no array timing to compare the host's "
+                 "against, and runtime/include/runtime/hands_mode.hpp REFUSES "
+                 "--npu-ops conv by name rather than running on the host under "
+                 "a flag that says otherwise. The numbers a design set would "
+                 "have to beat, measured here: onnxruntime's float run of the "
+                 "same two graphs is 5.18 ms + 0.94 ms = 6.1 ms a frame on 16 "
+                 "threads, and this build's host fp32 walk is 42 ms (palm) + "
+                 "29 ms (landmark) on the 520x512 test frame. The int8 "
+                 "variants of both checkpoints were measured too and are "
+                 "SLOWER here -- 11.62 ms and 4.45 ms -- so the container is "
+                 "float, and the reason is written in "
+                 "tools/pack/packers/hands.py.\n\n"
+                 "One number a future design set should not expect to move: "
+                 "39 of the container's 100 convolutions are DEPTHWISE, and a "
+                 "depthwise filter reduces within one channel, so there is no "
+                 "[M, N] GEMM in it to dispatch. They stay on the host "
+                 "whatever a design set turns out to say."),
+        "gelu": (ABSENT,
+                 "the activations are ReLU, ReLU6 and PReLU, and each is FUSED "
+                 "into its convolution's epilogue: packers/hands.py attaches "
+                 "`act` to a Conv, a dwconv or an Add and there is no standalone "
+                 "pass for any of the three. There is nothing for a gelu/ "
+                 "design to take over."),
+        "layn": (ABSENT,
+                 "no normalisation op anywhere in either graph. "
+                 "packers/hands.py's op inventory is {Conv, Add, MaxPool, Pad, "
+                 "Resize} for the palm detector and {Conv, Add, MaxPool} for "
+                 "the landmark network, and there is no "
+                 "BatchNormalization or InstanceNormalization to refuse by name "
+                 "-- MediaPipe's checkpoints carry none, which is why the "
+                 "depthwise layers are plain convolutions and not "
+                 "depthwise-separable normalisation blocks."),
+        "softm": (ABSENT,
+                  "no attention and no softmax. The nearest thing is the palm "
+                  "head's score, and that is a SIGMOID folded into the decode "
+                  "(runtime/src/hands/decode.cpp applies it to the logit after "
+                  "the graph), not a softmax over a score matrix between two "
+                  "GEMMs."),
+        "attn": (ABSENT,
+                 "no attention in either graph: the landmark net's argmax over "
+                 "its 63 heatmap channels is folded into the graph as a "
+                 "reshape, and runtime/src/hands/net.cpp walks conv, add, "
+                 "maxpool, pad and resize and nothing else weighted."),
+        "mproj": (ABSENT, "a mel filter bank is part of an " + _NO_AUDIO + "."),
+        "fft": (ABSENT, "a 400-point transform is part of an " + _NO_AUDIO + "."),
+        "logit": (ABSENT,
+                  "no vocabulary: the landmark head emits 21 screen points, a "
+                  "presence and a handedness, and the palm head emits boxes and "
+                  "scores. Nothing anywhere in this architecture projects into "
+                  "a token space."),
+    },
 }
 
 # Models whose ENCODER differs from its kind's row. gemma is here and not as a
