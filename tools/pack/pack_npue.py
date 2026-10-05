@@ -1840,6 +1840,21 @@ def main():
                          "here: giving it one of the two is the mistake worth "
                          "refusing, and the message can only name the pair if "
                          "there is one flag to name.")
+    ap.add_argument("--mppose-onnx", metavar="DIR", default=None,
+                    help="pack a MediaPipe Pose checkpoint pair (arch=8) from "
+                         "DIR, which must contain "
+                         "person_detection_mediapipe_*.onnx and "
+                         "pose_estimation_mediapipe_*.onnx. TWO networks, and "
+                         "for the reason --hands-onnx gives: the landmark net "
+                         "is handed a person's region of interest and cannot "
+                         "find a person in a frame, while the detector cannot "
+                         "put a coordinate on anything. What is new in this "
+                         "pair is that the answer also carries a 256x256 "
+                         "segmentation mask, un-rotated by the same angle as "
+                         "the landmarks on the way out. It is a DIR rather "
+                         "than two FILE flags for the same reason: the pair is "
+                         "one model, and one flag is what lets the error "
+                         "message name the pair.")
     ap.add_argument("--npu", action="store_true",
                     help="arch=6 only: also stage the pre-tiled bf16 B panel "
                          "for every convolution, and record the array stream "
@@ -2054,6 +2069,46 @@ def main():
               "the int8 pair.")
         from packers.hands import pack_hands  # noqa: E402
         return pack_hands(palm[0], lms[0], args.out, dry_run=args.dry_run)
+
+    if args.mppose_onnx:
+        # f32 is FORCED for the same class of reason --hands-onnx forces it, and
+        # the numbers below are THIS pair's own rather than hands' borrowed ones.
+        # Both repositories ship an ..._int8bq.onnx next to each float file, and
+        # taking it on docs/bus.jpg puts the 33 keypoints a mean 64.0 px apart
+        # from float with a worst case of 108.5 px, and the depth axis -- which
+        # is in PIXELS relative to the mid-hip -- off by as much as 291.9 px. It
+        # is also SLOWER end to end: 29.1 ms against 28.2 ms for the float pair.
+        # models/mediapipe-pose/CHECKPOINT.json records those measurements and
+        # the sha256 of both files actually taken, so this refusal names
+        # something that was measured rather than something inherited.
+        if typed:
+            raise SystemExit(
+                "--dtype is not accepted for arch=8. These two networks are "
+                "float only: the int8 pair is not a smaller version of the same "
+                "model, it is a worse and slower one -- on docs/bus.jpg it puts "
+                "the 33 keypoints a mean 64.0 px apart from float (worst 108.5 "
+                "px) and z off by as much as 291.9 px, while taking 29.1 ms "
+                "instead of 28.2 ms. See "
+                "models/mediapipe-pose/CHECKPOINT.json.")
+        d = args.mppose_onnx
+        det = sorted(glob.glob(
+            os.path.join(d, "person_detection_mediapipe_*.onnx")))
+        pose = sorted(glob.glob(
+            os.path.join(d, "pose_estimation_mediapipe_*.onnx")))
+        det = [p for p in det if "_int8" not in os.path.basename(p)]
+        pose = [q for q in pose if "_int8" not in os.path.basename(q)]
+        if len(det) != 1 or len(pose) != 1:
+            raise SystemExit(
+                f"--mppose-onnx {d} needs exactly one float person detector and "
+                f"one float pose landmark net, and found "
+                f"{[os.path.basename(x) for x in det]} and "
+                f"{[os.path.basename(x) for x in pose]}. The _int8bq files are "
+                f"ignored on purpose -- see above. Point this at "
+                f"models/mediapipe-pose/.")
+        print("  dtype f32 -- forced, not defaulted: see the note above about "
+              "the int8 pair.")
+        from packers.mppose import pack_mppose  # noqa: E402
+        return pack_mppose(det[0], pose[0], args.out, dry_run=args.dry_run)
 
     # Resolved ONCE PER LAYOUT DTYPE, here, and printed by every branch: a
     # container whose B order is a guess is a container nobody can debug later.

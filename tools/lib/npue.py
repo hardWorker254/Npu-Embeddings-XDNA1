@@ -214,6 +214,31 @@ ARCH_YOLOV8_POSE_C2F_SILU_DFL = 6
 # op and not a refusal.
 ARCH_MEDIAPIPE_HANDS_PALM_SSD_LM_HEATMAP = 7
 
+# The third MediaPipe family, and the first with a segmentation mask.
+#
+# Two networks again, for the reason that stops being true if you shorten it:
+# the pose landmark net is handed a person's RoI and cannot find a person in a
+# frame, so a container with only it answers "no person here" to every image,
+# and a container with only the detector stops at a box. What differs from
+# hands is WHAT the second network does with its input. MediaPipe Hands crops a
+# palm and rotates it by the two points its own detector regresses. MediaPipe
+# Pose crops a person and rotates it by `mid_hip -> full_body`, two of the four
+# points its detector regresses, then un-rotates every landmark AND a 256x256
+# mask on the way out. The rotation is therefore not an implementation detail
+# of the crop; it is part of the answer, and getting it backwards produces
+# plausible skeletons mirrored about the hip rather than an error.
+#
+# Its convolution vocabulary is the same MobileNet one hands uses -- relu6,
+# depthwise, bilinear Resize -- with THREE additions hands never needed:
+# plain `Relu` (which the Act enum already names, so it is a fusion and not a
+# new op), a SPATIAL Pad (hands' pad_c appends channels and net.cpp refuses
+# any pad that changes the spatial extent), and DepthToSpace, which is genuinely
+# new. The spatial Pads do not become ops at all: ONNX Conv pads are zeros, so
+# a zero Pad in front of a Conv is folded into that Conv's own `pad` field and
+# the arithmetic is identical rather than approximately so. DepthToSpace has no
+# such reformulation and is emitted as its own node.
+ARCH_MEDIAPIPE_POSE_DET_SSD_LM_REGRESS = 8
+
 FLAG_PRETILED = 1 << 0
 
 HEADER_FORMAT = "<4sIII QQQQ 16s"      # see SPEC CORRECTION above

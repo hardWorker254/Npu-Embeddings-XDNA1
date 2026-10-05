@@ -1,0 +1,18 @@
+{
+  "repo_id": [
+    "opencv/pose_estimation_mediapipe",
+    "opencv/person_detection_mediapipe"
+  ],
+  "file": [
+    "pose_estimation_mediapipe_2023mar.onnx",
+    "person_detection_mediapipe_2023mar.onnx"
+  ],
+  "sha256": [
+    "9d89c599319a18fb7d2e28451a883476164543182bafca5f09eb2cf767ed2f3f",
+    "47fd5599d6fa17608f03e0eb0ae230baa6e597d7e8a2c8199fe00abea55a701f"
+  ],
+  "license": "Apache-2.0",
+  "image": "../../docs/bus.jpg",
+  "image_sha256": "c02019c4979c191eb739ddd944445ef408dad5679acab6fd520ef9d434bfbc63",
+  "note": "TWO checkpoints in one container, for the same reason as mediapipe-hands: the pose landmark network is given a person's RoI by the caller and cannot find a person in a frame by itself, so shipping only it would answer 'no person here' to every image. The FLOAT variants are taken deliberately. MEASURED on docs/bus.jpg, 810x1080, cv2 5.0.0, zoo code run verbatim: int8bq against float puts the 33 keypoints a mean 64.0 px apart with a worst case of 108.5 px, and the z coordinate -- which is in PIXELS relative to the mid-hip -- off by as much as 291.9 px. The detector is not rescued by it either: int8bq runs 15.9 ms against float's 13.9 ms and the landmark net 13.2 against 14.3, so the int8 pair is slower end to end (29.1 ms against 28.2 ms) while being wrong by more than a frame width. Same conclusion as the palm detector, arrived at separately rather than copied from it. The 2254 SSD anchors are NOT shipped: tools/pack/packers/mppose.py generates them as cell centres over three levels -- 784 cells of 28x28 at 2 each, 196 of 14x14 at 2 each, 49 of 7x7 at 6 each, 1568+392+294=2254 -- which reproduces the OpenCV zoo's literal table EXACTLY, max deviation 0.000e+00 (mediapipe-hands' equivalent residue was 7.5e-9, the zoo's own 8-decimal truncation; this table has none, so the match is bit for bit). The three levels are the graph's three DepthToSpace nodes rather than an assumption: blocksize=2, one per level. DETECTOR COVERAGE IS PARTIAL ON THIS FRAME AND THAT IS THE MODEL, NOT A BUG: at the zoo's own default score_threshold=0.5 it returns ONE person where YOLOv8n-pose finds three; the raw scores over all 2254 anchors are 0.854, 0.305, 0.067, 0.065, so the other two people are below the threshold the zoo chose, and lowering it to 0.3 recovers the second (0.305) but not the third. cv2 5.0.0 RETURNS THE TWO DETECTOR OUTPUTS IN THE ORDER (score, box) while the zoo's _postprocess documents (box, score); the harness reorders them by declared shape -- [1,2254,12] against [1,2254,1] -- which is unambiguous and changes no arithmetic. The image bus.jpg is NOT in opencv_zoo: that repository ships 385 paths and not one raw input image, only example_outputs/ with the answer already drawn on it. It lives in docs/ because models/** is gitignored except this file, and a golden's image beside a container would exist only where it was recorded. Its sha256 is above so a substitute cannot be used silently."
+}
