@@ -70,6 +70,7 @@
 #include <vector>
 
 #include "common/conv_host.hpp"
+#include "conv/array.hpp"
 #include "mppose/geometry.hpp"
 #include "runtime/pool.hpp"
 
@@ -99,12 +100,37 @@ inline float act1(Act a, float v, float slope) {
 }
 
 // Which ops the array is asked to run. An EMPTY placement is the default and
-// means everything is on the host; that is also the only honest placement today,
-// because --npu-ops conv needs a design set whose streams this container does not
-// carry. See Session.
+// means everything is on the host, which is also what a run gets when the
+// container was packed without --npu.
 struct Placement {
   bool conv_on_array = false;
   std::string design_dir;
+  // WHERE THIS NETWORK'S CONVOLUTIONS LAND in the array backend's panel table.
+  //
+  // This container packs TWO graphs with SEPARATE convolution index spaces, and
+  // the table is ONE, so every dense convolution gets a slot number assigned
+  // across both graphs in one run. The mapping is NOT `slot = base + conv`,
+  // because slot numbers are handed out over the DENSE convolutions only and
+  // depthwise ones are interleaved throughout both graphs -- the detector's conv
+  // 0, 2, 3, 6, 8 are dense and 1, 4, 5, 7 are not, so conv 8 is not slot 8.
+  //
+  // That arithmetic was WRONG here first, as `slot_base + conv`, and the
+  // backend's own check caught it on the first run with:
+  //
+  //     the design's padded shape 64x256 is smaller than the convolution's own
+  //     144x24, so the panel would be truncated
+  //
+  // which is the check doing the only thing it can: a slot that is another
+  // convolution's is a panel of the RIGHT SHAPE in the common case, so most of
+  // the run succeeds and one layer disagrees. Had the widths happened to line up
+  // it would have produced confident wrong landmarks instead.
+  //
+  // So the table is passed rather than computed. The session builds it once, from
+  // the same vector it hands the backend, and a -1 in it means "this
+  // convolution has no panel", which is what a depthwise convolution gets.
+  const std::vector<int64_t> *slots = nullptr;
+  // For error messages: "det" or "pose".
+  std::string group = "det";
 };
 
 // What one run cost. Same fields as arch=7's Cost, and for the same reason: the
@@ -124,6 +150,12 @@ struct Cost {
   double t_im2col = 0.0;
   double t_gemm = 0.0;
   double t_transpose = 0.0;
+  // The array path's own three spans, kept apart for arch=6's reason: none of
+  // them is the device's work, and a line printing only t_array would read as
+  // though the host shuffle around the dispatch were free.
+  double t_array_gemm = 0.0;
+  double t_array_repack = 0.0;
+  double t_array_transpose = 0.0;
   double t_elementwise = 0.0;   // add, maxpool, resize
   void reset() { *this = Cost{}; }
 };
@@ -156,7 +188,13 @@ struct PoseOuts {
 // container the geometry's ConvW pointers point into.
 class Network {
 public:
-  Network(const Geometry &g, const Placement &place, app::Pool &pool);
+  // `array` is borrowed and may be null, which is the default and the only thing
+  // a container packed without --npu can use. Passing one while the container
+  // carries no panels fails at the FIRST CONVOLUTION rather than at load, so the
+  // session builds the backend only when it has already confirmed the panels are
+  // there.
+  Network(const Geometry &g, const Placement &place, app::Pool &pool,
+          conv::Convs *array = nullptr);
 
   // One image in NCHW [3, S, S], returning every node's output.
   //
@@ -220,9 +258,33 @@ public:
   const Cost &cost() const { return cost_; }
   void reset_cost() { cost_.reset(); }
 
+  // Whether the dense convolutions went to the array, and the array's own
+  // numbers if they did. The status block asks THIS rather than reading the
+  // command line, because a line that reported "npu" because --npu-ops conv was
+  // on argv would also report it for a run where the design set was missing and
+  // everything fell back -- which is the one thing a status block must not do.
+  bool on_array() const { return array_ != nullptr; }
+  int64_t array_dispatches() const {
+    return array_ ? array_->dispatches() : 0;
+  }
+  double array_seconds() const {
+    // The DEVICE's time, deliberately not including the host-side repack and
+    // transpose: neither is the array's work, and adding them in would make a
+    // number that is mostly host shuffling look like array cost.
+    return array_ ? array_->t_array() : 0.0;
+  }
+  size_t array_staged_bytes() const {
+    return array_ ? array_->staged_bytes() : 0;
+  }
+
 private:
   Tensor conv(const Tensor &in, const Layer &l, const ConvW &w,
               const float *wkn, const float *slope, const std::string &label);
+  // The array half of the same convolution. Writes into `out` (already shaped)
+  // and returns it, so the caller allocates the tensor once either way.
+  Tensor conv_array(const Tensor &in, Tensor &out, const Layer &l,
+                    const ConvW &w, int64_t M, int64_t K, int64_t N,
+                    const float *slope, double t0, const std::string &label);
   Tensor dwconv(const Tensor &in, const Layer &l, const ConvW &w,
                 const float *slope, const std::string &label);
   Tensor add(const Tensor &a, const Tensor &b, const Layer &l,
@@ -235,8 +297,18 @@ private:
   const Placement place_;
   app::Pool &pool_;
   Cost cost_;
+  // Borrowed, and null unless Placement::conv_on_array is set. The type names no
+  // XRT class, which is what lets this header -- and every build without a
+  // design set -- link with the device code absent.
+  conv::Convs *array_ = nullptr;
   std::vector<float> a_;       // the im2col buffer, reused across convolutions
   std::vector<float> c_;       // the [M,N] GEMM output, reused
+  // The array path's own buffers, and they are separate from a_/c_ rather than
+  // reused: the repack reads a_ and the device writes apad_, and a chunk that
+  // overwrote its own input would be a plausible wrong network. Sized on first
+  // use, so a host-only run allocates neither.
+  std::vector<float> apad_;
+  std::vector<float> cpad_;
   std::vector<Tensor> body_;   // every node's output; index 0 is the image
   // The [K,N] weight tables. Storage first, then the pointers into it, so that
   // the pointers stay valid when the outer vectors are moved or resized.

@@ -21,15 +21,32 @@
 // and then a separate landmark network once per detected person, and the crop
 // between them is rotated by an angle the first network predicted.
 //
-// WHY THERE IS NO ARRAY PATH HERE
-// -------------------------------
-// Same argument as arch=7 and for the same measured reason: the work is real --
-// 550.5M dense MACs across the two graphs is exactly a GEMM array's arithmetic --
-// but no design set in this tree carries the 99 distinct dense (K, N) pairs these
-// graphs use, so there is no array number to report. 62 of the container's 161
-// convolutions are depthwise and would stay on the host either way. Accepting
-// --npu-ops conv and running on the host would print host numbers under a flag
-// that says otherwise, so the flag is refused with the reason spelled out.
+// THE ARRAY PATH, AND WHY IT WAS REFUSED AND IS NOT NOW
+// ------------------------------------------------------
+// This mode used to refuse --npu-ops conv and --artifacts with one reason: no
+// design set in this tree carries arch=8's dense (K, N) pairs, so there is no
+// array number to report and accepting the flag would print host numbers under a
+// flag that says otherwise. That reasoning was sound and it has expired --
+// geometry.py now carries MPPOSE_CONV_SHAPES, a design set was built from it, and
+// the flag dispatches.
+//
+// --npu-ops conv moves the 99 DENSE convolutions. The other 62 are depthwise and
+// do not move: their reduction is within one channel -- K is kh*kw and N is 1 --
+// so there is no [M, N] GEMM in them to dispatch, and they carry 12.3 % of this
+// container's MACs on their own. That is a property of the arithmetic, not of the
+// design set.
+//
+// TWO GRAPHS, TWO SLOT RANGES
+// ---------------------------
+// The container holds a person detector AND a landmark network, and their
+// convolution indices are SEPARATE spaces -- both start at zero, both have a conv
+// 0 -- while the array backend has one panel table. So the two networks own
+// disjoint slot ranges, assigned in one vector in mppose/session.cpp and read by
+// both networks from Placement::slot_base. Keying panels by the bare index puts
+// the landmark network's conv 0 on the detector's, and the failure is invisible
+// by construction: both are the stem of a similarly-wide network, so the panel is
+// the right shape, the layout_hash matches, every load succeeds, and the boxes
+// come out of a pose network's weights.
 //
 // TWO STAGES, TWO COSTS
 // ----------------------
@@ -66,7 +83,9 @@
 #include "cli/flags.hpp"
 #include "common/host_kernels.hpp"
 #include "common/npu_ops_flag.hpp"   // parse_npu_ops, refuse_removed_op_flags
+#include "common/design_selection.hpp"   // artifacts_candidates
 #include "mppose/session.hpp"
+#include "runtime/device.hpp"             // require_context_budget, survey_contexts
 
 namespace app {
 
@@ -100,39 +119,48 @@ inline int maybe_mppose_mode(const std::string &root, int argc, char **argv,
     return false;
   };
 
-  // --npu-ops: REFUSED, every code, with the reason. See the header.
+  // --npu-ops: `conv` MOVES THE 99 DENSE CONVOLUTIONS, the 62 depthwise ones
+  // stay on the host whatever it says, and any OTHER code is refused by name
+  // because there is no operation by that name in either graph.
+  //
+  // What changed, and when: this used to refuse every code with the reason that
+  // no design set carried arch=8's dense (K, N) pairs. That was true when it was
+  // written and stopped being true when
+  // tools/export/exporters/gemm_rtp/geometry.py gained MPPOSE_CONV_SHAPES and a
+  // design set was built from it -- 22 streams, one final.xclbin, verified
+  // against the packed container in both directions by
+  // tools/verify/verify_pose_streamset.py. A refusal whose reason has expired is
+  // worse than no refusal: it is a claim about the state of this tree, and a
+  // reader who has just built the design set would be told there is none.
   {
     std::string listing;
     for (int i = 1; i < argc - 1; ++i)
       if (std::string(argv[i]) == "--npu-ops") listing = argv[i + 1];
     const std::set<std::string> codes = parse_npu_ops(listing);
-    if (!codes.empty()) {
-      const bool empty_code = listing == "none" || listing == "";
-      if (empty_code) {
-        // `--npu-ops none` asks for nothing to move, which is already what this
-        // architecture does. Refusing it would be pedantry about a flag whose
-        // meaning is the behaviour.
-      } else {
-        throw std::runtime_error(
-            "--npu-ops " + listing +
-            ": this architecture has no array path, so there is nothing for the "
-            "flag to move. Not because there is no work -- 550.5M dense MACs "
-            "across the two graphs are exactly a GEMM array's arithmetic -- but "
-            "because no design set in this tree carries the 99 distinct dense "
-            "(K, N) pairs they use, so there is no array timing to compare the "
-            "host's against. Accepting the flag and running on the host would "
-            "print host numbers under a flag that says otherwise. 62 of the "
-            "container's 161 convolutions are depthwise and would stay on the host "
-            "either way. What this costs: the host split, measured per run below.");
-      }
+    const bool empty_code = listing == "none" || listing == "";
+    if (!codes.empty() && !empty_code) {
+      const std::set<std::string> here = {"conv"};
+      for (const std::string &c : codes)
+        if (!here.count(c))
+          throw std::runtime_error(
+              "--npu-ops " + c + ": this architecture has no operation named '" +
+              c + "'. Its two graphs are {Conv, DwConv, Add, MaxPool, Resize, "
+              "DepthToSpace} and the graph already FUSES the activations into the "
+              "convolutions' epilogues, so 'gelu' has nothing to take over and "
+              "'layn' has nothing to normalise -- there is no BatchNormalization "
+              "or InstanceNormalization in either graph to name. Only 'conv' "
+              "moves anything: the 99 dense convolutions, onto a design set built "
+              "for their 22 padded (K, N) pairs.");
     }
   }
-  if (!flag("--artifacts").empty())
-    throw std::runtime_error(
-        "--artifacts " + flag("--artifacts") +
-        ": not used by this architecture. There is no array path (see --npu-ops "
-        "above), so a design set on disk would be loaded and never read. Both "
-        "networks run on the host.");
+  // --artifacts is now READ, not refused: it names the design set the array path
+  // dispatches into, and a directory that is silently ignored while a flag says
+  // --npu-ops conv would report host numbers as array ones.
+  //
+  // What it needs is a container PACKED WITH --npu, and that is checked where
+  // the session is built rather than here: a container without the pre-tiled
+  // panels has nothing to stage, and the refusal it gets names the packing
+  // command, which is the useful one.
 
   // --serve is REFUSED BY NAME, and read through the SHARED reader so that
   // `--serve 9000` and a bare `--serve` are caught the same way they are in the
@@ -219,8 +247,75 @@ inline int maybe_mppose_mode(const std::string &root, int argc, char **argv,
       std::max(1, std::atoi(flag("--threads").empty() ? "16"
                                                      : flag("--threads").c_str()));
 
+  // -- the artifacts. EMPTY BY DEFAULT, and that is the point: the host session
+  // needs no device, no design and no directory, so `mppose` runs on a machine
+  // with no /dev/accel0. Only --npu-ops conv (or an explicit --artifacts) opens
+  // one.
+  //
+  // STRUCTURED LIKE arch=6's AND NOT LIKE IT, in one respect: arch=6 counts the
+  // design's streams out of the container's `npu_streams` and prints that count
+  // in its refusal, and its count is wrong -- the packer measures 14 padded
+  // (K, N) designs on that checkpoint against the "21" the message used to claim.
+  // So no number is written here at all for arch=8; both facts are read out of the
+  // container and the design when they exist, and where they do not, the message
+  // says which one is missing. A refusal that states a wrong count is worse than
+  // one that states none: an operator who checks it finds the tool lying about the
+  // very thing it is refusing over.
+  std::string art;
+  const bool conv_on_array =
+      parse_npu_ops(flag("--npu-ops")).count("conv") != 0;
+  if (conv_on_array || !flag("--artifacts").empty()) {
+    const std::string named = flag("--artifacts");
+    std::string streams;
+    try {
+      streams = probe.config_string("npu_streams");
+    } catch (const std::exception &) {
+    }
+    if (streams.empty())
+      throw std::runtime_error(
+          "--npu-ops conv needs the array panels, and this container does not "
+          "carry any: it was packed without --npu. Repack with "
+          "`--mppose-onnx models/mediapipe-pose --npu --device npu1`, which "
+          "stages a pre-tiled bf16 B panel for every DENSE convolution of BOTH "
+          "graphs. (A design set is the SECOND requirement, and a separate one.)");
+    if (named.empty()) {
+      size_t n = 0;
+      for (size_t i = 0; i < streams.size(); ++i)
+        if (streams[i] == '{') ++n;
+      throw std::runtime_error(
+          "--npu-ops conv needs a design set on disk: pass --artifacts <dir> "
+          "naming one, or build it with `python tools/export/export_gemm_rtp.py "
+          "--target mediapipe-pose --arch 1 -n 32`. The flag has no default to "
+          "fall back on, because this container's " + std::to_string(n) +
+          " padded (K, N) designs are its own. If you built one, name it: the "
+          "runtime will not go looking for a directory that has no default, "
+          "because picking one silently is how a run reports array numbers from "
+          "a design set belonging to another model.");
+    }
+    const std::vector<std::string> cands = artifacts_candidates(root, named);
+    auto usable = [](const std::string &c) {
+      return std::ifstream(c + "/gemm_rtp/design.json").good();
+    };
+    art = select_set_for_layout(cands, usable, "");
+    if (art.empty()) {
+      std::string looked;
+      for (size_t i = 0; i < cands.size(); ++i)
+        looked += (i ? ", " : "") + cands[i];
+      throw std::runtime_error(
+          "no mppose design set found for --artifacts '" + named +
+          "'; looked for gemm_rtp/design.json under " + looked +
+          ". Export one with: python tools/export/export_gemm_rtp.py --target "
+          "mediapipe-pose --arch 1 -n 32");
+    }
+    if (!npu::require_context_budget(npu::survey_contexts(), 1,
+                                     has("--allow-contention"), stderr))
+      throw std::runtime_error(
+          "NPU context budget: refusing to load 1 hw_context -- see the report "
+          "above (close the other process, or pass --allow-contention)");
+  }
+
   const double t0 = app::now_s();
-  npue::mppose::Session session(probe, model_name, "", threads, max_people);
+  npue::mppose::Session session(probe, model_name, art, threads, max_people);
   const double t_setup = app::now_s() - t0;
   const auto &g = session.geometry();
 
@@ -259,19 +354,33 @@ inline int maybe_mppose_mode(const std::string &root, int argc, char **argv,
   int64_t det_dense = 0, det_dw = 0, pose_dense = 0, pose_dw = 0;
   for (const auto &c : g.det_convs) (c.depthwise() ? det_dw : det_dense)++;
   for (const auto &c : g.pose_convs) (c.depthwise() ? pose_dw : pose_dense)++;
+  // Whether the dense convolutions actually went to the array, read from the
+  // SESSION rather than from the flag. A line that printed "npu" because
+  // --npu-ops conv was on the command line would say so for a run where the
+  // design set was missing and everything fell back -- which is precisely what a
+  // status block exists to prevent, and why this asks the object that did the
+  // work.
+  const bool on_array = session.array_placement();
   std::fprintf(stderr, "  ops        (npu = dispatched, host = this process)\n");
   std::fprintf(stderr, "             %-26s %-5s %s\n",
                ((std::to_string(det_dense) + " x conv + " +
                  std::to_string(det_dw) + " x dwconv")
                     .c_str()),
-               "host",
-               "person detector, 93 nodes; dwconv has no [M,N] GEMM to dispatch, "
-               "so it would not move even with a design set");
+               on_array ? "npu" : "host",
+               on_array
+                   ? "person detector, 93 nodes, on the array's 22 padded "
+                     "(K, N) slots; dwconv has no [M,N] GEMM to dispatch, so it "
+                     "stays here"
+                   : "person detector, 93 nodes; dwconv has no [M,N] GEMM to "
+                     "dispatch, so it would not move even with a design set");
   std::fprintf(stderr, "             %-26s %-5s %s\n",
                ((std::to_string(pose_dense) + " x conv + " +
                  std::to_string(pose_dw) + " x dwconv")
                     .c_str()),
-               "host", "landmark network, 120 nodes, once per person");
+               on_array ? "npu" : "host",
+               on_array ? "landmark network, 120 nodes, once per person, on the "
+                          "same 22 slots under a disjoint range"
+                        : "landmark network, 120 nodes, once per person");
   std::fprintf(stderr, "             %-26s %-5s %s\n",
                "add, maxpool, resize", "host",
                "elementwise and memory passes");
@@ -290,6 +399,17 @@ inline int maybe_mppose_mode(const std::string &root, int argc, char **argv,
   std::fprintf(stderr,
                "  setup      %.3f s (both graphs read, weights transposed once)\n",
                t_setup);
+  // THREE SPANS AND NOT ONE, because one number would invite the wrong
+  // conclusion in either direction. The device's own time is one of them; the two
+  // host spans are what it COSTS to feed the device and to read back, and they
+  // are the honest answer to "is the array worth it" -- a line printing only the
+  // device time would make a convolution look free, and one printing only the
+  // total would make the array look like it was the host shuffling. Per-image
+  // numbers are printed with the frame; this is the one-off staging cost.
+  if (session.array_placement())
+    std::fprintf(stderr, "  array      %.1f MB of bf16 panels staged, once, at "
+                         "load\n",
+                 session.array_staged_bytes() / (1024.0 * 1024.0));
 
   // -- the dump ----------------------------------------------------------------
   //
@@ -360,6 +480,19 @@ inline int maybe_mppose_mode(const std::string &root, int argc, char **argv,
                  r.people.size() == 1 ? "" : "s", r.total_s * 1e3,
                  r.front_end_s * 1e3, r.det_s * 1e3, r.nms_s * 1e3,
                  r.crop_s * 1e3, r.pose_s * 1e3, r.post_s * 1e3);
+    // THE ARRAY LINE IS PER IMAGE AND NOT IN THE HEADER, because every number in
+    // it is a property of a run and the header is printed before there has been
+    // one. It read "0 dispatches, 0.0 ms on the device" there, which is true and
+    // useless -- and a status line that reports zero work for work that has been
+    // done is worse than one that omits the row.
+    if (session.array_placement())
+      std::fprintf(stderr,
+                   "             array: %lld dispatches, %.1f ms on the device, "
+                   "%.1f ms repacking A and %.1f ms transposing C on the host\n",
+                   static_cast<long long>(session.array_dispatches()),
+                   1000.0 * session.array_seconds(),
+                   1000.0 * session.array_repack_seconds(),
+                   1000.0 * session.array_transpose_seconds());
     if (text) {
       if (r.people.empty()) {
         std::printf("%s: no person\n", path.c_str());

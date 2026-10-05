@@ -111,15 +111,65 @@ public:
   static std::vector<float> preprocess_file(const std::string &path,
                                             const Geometry &g, DetLetterbox &lb);
 
+// Did the dense convolutions actually go to the array? Read from the SESSION,
+  // which built the backend, rather than from the flag -- see the status block.
+  bool array_placement() const { return det_net_ && det_net_->on_array(); }
+  // ONE backend, TWO networks, and its counters are the BACKEND's -- the device
+  // work is the device work and neither network owns it. Adding the two
+  // networks' readings counted every dispatch twice and reported 894 for a frame
+  // that makes 447, which is the kind of number that looks plausible until you
+  // divide it by the chunk arithmetic and get exactly two.
+  int64_t array_dispatches() const {
+    return det_net_ ? det_net_->array_dispatches() : 0;
+  }
+  double array_seconds() const {
+    return det_net_ ? det_net_->array_seconds() : 0.0;
+  }
+  size_t array_staged_bytes() const {
+    return det_net_ ? det_net_->array_staged_bytes() : 0;
+  }
+  // The host-side spans AROUND each dispatch, which are not the array's work and
+  // are reported separately for exactly that reason -- but these ARE per network,
+  // because they are host-side and each network has its own buffers. So they are
+  // the one pair that is summed.
+  double array_repack_seconds() const {
+    double t = 0.0;
+    if (det_net_) t += det_net_->cost().t_array_repack;
+    if (pose_net_) t += pose_net_->cost().t_array_repack;
+    return t;
+  }
+  double array_transpose_seconds() const {
+    double t = 0.0;
+    if (det_net_) t += det_net_->cost().t_array_transpose;
+    if (pose_net_) t += pose_net_->cost().t_array_transpose;
+    return t;
+  }
+
 private:
+  // The design stream the graph node calling convolution `conv` names, or "".
+  // Searches the graph rather than indexing it -- see the definition for why a
+  // wrong answer there is a wrong panel rather than an error.
+  std::string stream_of(const std::vector<Layer> &layers, int64_t conv);
+
   npue::File &model_;
   Geometry geom_;
   std::string art_, name_;
   int64_t max_people_;
 
-  // Declaration order is construction order and it matters: each network holds a
-  // REFERENCE to a Pool, so it has to exist first.
+  // Declaration order is construction order and it matters twice over: each
+  // network holds a REFERENCE to a Pool, so it has to exist first, and both hold
+  // a reference to the array backend, so that does too.
   std::unique_ptr<app::Pool> pool_;
+  std::unique_ptr<conv::Convs> array_;
+  // The slot range each network owns in array_'s panel table. Both zero on the
+  // host path, where there is no table; the pose one is non-zero only when the
+  // array is in use, and its value is the number of DENSE detector convolutions.
+  int64_t det_base_ = 0, pose_base_ = 0;
+  // conv index -> array slot, per network, -1 for a depthwise convolution. Both
+  // EMPTY on the host path. They are members and not locals because the Networks
+  // hold POINTERS to them and outlive this constructor -- a local would be a
+  // dangling reference on the first frame.
+  std::vector<int64_t> det_slots_, pose_slots_;
   std::unique_ptr<Network> det_net_, pose_net_;
   // The two networks' input tensors, kept between calls so the front end writes
   // into memory that is already faulted in. The pose one is reused across the

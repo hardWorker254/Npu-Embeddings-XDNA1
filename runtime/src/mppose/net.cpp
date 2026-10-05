@@ -97,8 +97,9 @@ inline float sigmoid1(float v) {
 
 }  // namespace
 
-Network::Network(const Geometry &g, const Placement &place, app::Pool &pool)
-    : g_(g), place_(place), pool_(pool) {
+Network::Network(const Geometry &g, const Placement &place, app::Pool &pool,
+                 conv::Convs *array)
+    : g_(g), place_(place), pool_(pool), array_(array) {
   // THE WEIGHT TRANSPOSE HAPPENS HERE, ONCE, AND NOT PER CALL.
   //
   // gemm_nt's B is [K, N] -- one row per reduction step, N output columns
@@ -140,6 +141,105 @@ Network::Network(const Geometry &g, const Placement &place, app::Pool &pool)
 
 // -- dense convolution -------------------------------------------------------
 
+// The array half of one dense convolution, and arch=6's second implementation of
+// the same idea. It is written out rather than shared because the two
+// architectures disagree about something structural: arch=6 has one graph and
+// addresses panels by its own convolution index, arch=8 has TWO and must offset
+// that index into the slot range its network owns (Placement::slot_base). A
+// shared body would take a slot number as a parameter, and the parameter would
+// then be computed twice -- once here and once by the caller -- which is the same
+// two-spellings-of-one-mapping this file already got wrong once.
+//
+// EVERY WIDTH BELOW IS THE DESIGN'S, NOT THE CONVOLUTION'S, and that is the whole
+// difference between the two backends:
+//
+//   * K pads up to a multiple of tile_k. The design reads `rows * k` columns of A
+//     as ONE contiguous run, so A must be REPACKED at the padded stride and its
+//     tail zeroed. Left at the real stride, row r's tail columns read row r+1's
+//     data -- a network that is well shaped and confidently wrong.
+//   * N pads up to a multiple of tile_n * cols. The design writes `rows * n`
+//     columns of C whatever N was asked for, and the host narrows back to the
+//     real N on the way out.
+//   * The bias is read for all n columns, which is why the backend holds a
+//     zero-padded copy rather than this convolution's own.
+//
+// The repack is per CHUNK, not per convolution: rows*pk is 256 KiB at this
+// geometry while the whole convolution's A can be tens of megabytes, and the
+// array never needs more than one dispatch window at a time.
+Tensor Network::conv_array(const Tensor &in, Tensor &out, const Layer &l,
+                           const ConvW &w, int64_t M, int64_t K, int64_t N,
+                           const float *slope, double t0,
+                           const std::string &label) {
+  // THE SLOT COMES FROM A TABLE, NEVER FROM ARITHMETIC ON THE CONVOLUTION INDEX.
+  // See Placement::slots: the two disagree because slot numbers are handed out
+  // over the dense convolutions only, and depthwise ones are interleaved through
+  // both graphs. `-1` means there is no panel, which is the depthwise case and
+  // which conv() never reaches -- dwconv has its own path -- so it is refused
+  // rather than dispatched against whatever occupies that row.
+  if (!place_.slots || w.index < 0 ||
+      static_cast<size_t>(w.index) >= place_.slots->size())
+    throw std::runtime_error(label + ": conv " + std::to_string(w.index) +
+                             " is outside this network's slot table, which has " +
+                             std::to_string(place_.slots ? place_.slots->size() : 0) +
+                             " entries");
+  const int64_t slot = (*place_.slots)[static_cast<size_t>(w.index)];
+  if (slot < 0)
+    throw std::runtime_error(
+        label + ": conv " + std::to_string(w.index) +
+        " has no array panel (slot -1). Only the DENSE convolutions are staged: "
+        "a depthwise filter reduces within one channel, so it has no [M, N] "
+        "GEMM to dispatch. This layer reached the dense path, so the graph and "
+        "the weight table disagree about whether it is depthwise.");
+  const int64_t rows = array_->rows_per_dispatch();
+  const int64_t pk = array_->padded_k(slot);
+  const int64_t pn = array_->padded_n(slot);
+  if (pk < K || pn < N)
+    throw std::runtime_error(
+        label + ": the design's padded shape " + std::to_string(pk) + "x" +
+        std::to_string(pn) + " is smaller than the convolution's own " +
+        std::to_string(K) + "x" + std::to_string(N) +
+        ", so the panel would be truncated");
+  const size_t a_need = static_cast<size_t>(rows) * static_cast<size_t>(pk);
+  if (apad_.size() < a_need) apad_.resize(a_need);
+  const size_t c_need = static_cast<size_t>(rows) * static_cast<size_t>(pn);
+  if (cpad_.size() < c_need) cpad_.resize(c_need);
+
+  int64_t done = 0;
+  while (done < M) {
+    const int64_t chunk = std::min<int64_t>(rows, M - done);
+    // Zero FIRST, copy second. The padded columns are not written by the memcpy
+    // and must not hold the previous dispatch's activations -- that is a stale
+    // value in a column the device multiplies by, so it is a wrong number rather
+    // than a wrong shape, which makes it harder to see.
+    std::memset(apad_.data(), 0,
+                static_cast<size_t>(chunk) * static_cast<size_t>(pk) *
+                    sizeof(float));
+    pool_.run([&](int w2, int n2) {
+      for (int64_t r = w2; r < chunk; r += n2)
+        std::memcpy(apad_.data() + static_cast<size_t>(r) * pk,
+                    a_.data() + static_cast<size_t>(done + r) * K,
+                    static_cast<size_t>(K) * sizeof(float));
+    });
+    const double tr = app::now_s();
+    array_->gemm(slot, apad_.data(), chunk, pk, pn, w.b, cpad_.data());
+    const double tg = app::now_s();
+    cost_.t_array_gemm += tg - tr;
+    transpose_mn_to_nchw(cpad_.data(), chunk, N, out.d.data() + done, pool_,
+                         pn, M, host_act(l.act, slope));
+    // AFTER the gemm. A span that started before array_->gemm would carry the
+    // device's own multiply and print most of the device time as host shuffling,
+    // which inverts the conclusion the number invites.
+    cost_.t_array_transpose += app::now_s() - tg;
+    cost_.t_array_repack += tr - t0;
+    done += chunk;
+    cost_.dispatches++;
+    t0 = app::now_s();
+  }
+  cost_.convs_array++;
+  cost_.t_array += app::now_s() - t0;
+  return out;
+}
+
 Tensor Network::conv(const Tensor &in, const Layer &l, const ConvW &w,
                      const float *wkn, const float *slope,
                      const std::string &label) {
@@ -170,6 +270,8 @@ Tensor Network::conv(const Tensor &in, const Layer &l, const ConvW &w,
          l.pad[2], l.pad[3]);
   const int64_t M = l.out_h * l.out_w, K = w.cin * w.kh * w.kw, N = w.cout;
   cost_.t_im2col += app::now_s() - t0;
+
+  if (array_) return conv_array(in, out, l, w, M, K, N, slope, t0, label);
 
   static const std::vector<float> kZero;
   const double t1 = app::now_s();

@@ -189,6 +189,13 @@ GraphRead read_one_graph(npue::File &f, const std::string &pfx,
       max_conv = std::max<int64_t>(max_conv, l.conv);
       jpad4(o, nl, l.pad);
       jpair(o, "stride", nl, &l.stride_h, &l.stride_w);
+      // The design stream this convolution runs on, read from the graph the
+      // packer wrote. Absent on a container packed WITHOUT --npu, which is the
+      // default and is not an error here: the host path has no use for it, and
+      // the array path refuses later with the reason that names the packing
+      // command. Reading it and dropping it would have been the same code minus
+      // the field.
+      l.stream = jopt_str(o, "stream", "");
     } else if (l.op == Op::MaxPool) {
       jpair(o, "kernel", nl, &l.kernel_h, &l.kernel_w);
       jpair(o, "stride", nl, &l.stride_h, &l.stride_w);

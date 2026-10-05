@@ -11,18 +11,25 @@ kernel benchmark and it says so: "this container holds these two checkpoints in
 this arrangement, and the C++ front end answers the recorded OpenCV zoo's
 question."
 
-THREE SECTIONS, AND THE SPLIT IS THE USEFUL PART
-------------------------------------------------
+FOUR SECTIONS, AND THE SPLIT IS THE USEFUL PART
+-----------------------------------------------
   1. the packed op list, against onnxruntime. ORT executes the same ONNX file the
      container was packed from, so a disagreement here is the PACKER's and not a
      difference of front ends. All seven graph outputs of both networks.
   2. the anchor table, against an independent derivation from the container's own
      pyramid levels.
   3. the C++ runtime, against the numbers recorded from the OpenCV zoo.
+  4. the array path, against the host path, on the same frame.
 
 Section 1 passing and section 3 failing is a FRONT END fault and nothing else.
-That separation is the reason the gate is three sections and not one: end to
+That separation is the reason the gate is split and not one pass: end to
 end, a wrong letterbox and a wrong last convolution are the same sentence.
+
+Section 4 exists because `--npu-ops conv` dispatches, is 2.4x SLOWER than the
+host, and its landmarks sit up to 44 px from the host's -- three facts that are
+invisible to sections 1 to 3, all of which run the host. It needs a design set
+and a container packed with --npu; the design set needs MLIR-AIE, which is in
+.venv/ and not on the system PATH, and section 4's refusal says so.
 
 WHY THE REFERENCE FOR SECTION 3 IS THE ZOO AND NOT ORT
 -------------------------------------------------------
@@ -104,6 +111,12 @@ MODEL_DIR = os.path.join(REPO, "models", "mediapipe-pose")
 DET_ONNX = os.path.join(MODEL_DIR, "person_detection_mediapipe_2023mar.onnx")
 POSE_ONNX = os.path.join(MODEL_DIR, "pose_estimation_mediapipe_2023mar.onnx")
 CONTAINER = os.path.join(MODEL_DIR, "mppose.npue")
+# The SAME container with the pre-tiled bf16 B panels staged, which is what the
+# array path dispatches against. It is a separate file on purpose: staging the
+# panels takes it from 18.3 MB to 29.9 MB, and reusing one path for both would
+# mean the container section 3 checked against the golden is not the container
+# section 4 ran the array on.
+NPU_CONTAINER = os.path.join(MODEL_DIR, "mppose-npu.npue")
 IMAGE = os.path.join(REPO, "docs", "bus.jpg")
 GOLDEN_DET = os.path.join(REPO, "reference", "goldens", "mppose_det.json")
 GOLDEN_POSE = os.path.join(REPO, "reference", "goldens", "mppose_pose.json")
@@ -574,6 +587,121 @@ def _run_runtime(container):
                    f"{p.stderr[-400:]}")
 
 
+def _run_array(container):
+    """The same run with the dense convolutions on the array.
+
+    Read from the STATUS BLOCK and not from stdout, because the block is the
+    runtime's own account of where the work went -- a number printed next to a
+    flag the caller supplied would be printed whether or not anything moved.
+    """
+    design = os.path.join(REPO, "runtime", "artifacts", "mediapipe-pose",
+                          "artifacts_npu1")
+    cmd = [BINARY, "mppose", container, IMAGE, "--npu-ops", "conv",
+           "--artifacts", design]
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    check(p.returncode == 0,
+          f"`{' '.join(cmd)}` exited {p.returncode}\n{p.stderr[-800:]}")
+    line = [l for l in p.stderr.splitlines() if "array:" in l]
+    check(line, "the status block printed no array line, so nothing was "
+                 "dispatched and this section would be comparing two host runs")
+    return json.loads(p.stdout), line[0].strip()
+
+
+def section_4(reader, verbose):
+    """The array path against the host path, on the same frame.
+
+    WHY A WHOLE SECTION FOR A FLAG WHOSE DEFAULT IS THE HOST. Because the two
+    answers are NOT the same and the difference is not visible anywhere else:
+    `--npu-ops conv` dispatches, it is 2.4x slower, and its landmarks sit up to
+    44 px from the host's. A gate that only checked the host path would pass with
+    the array path returning anything at all, and a reader of the registry row
+    would have no way to tell how far apart the two are.
+
+    WHAT IS ASSERTED, AND WHAT IS ONLY MEASURED. Asserted: the array path runs,
+    it dispatches a plausible number of times, and the DETECTOR agrees with the
+    host to bf16 precision -- which is the part that is supposed to be true, and
+    the reason the pose difference below is not a bug in the array network.
+    Measured and reported: the pose difference, which is a property of this
+    architecture's geometry rather than of the array, and which has no tolerance
+    here because any tolerance would be a claim that the two paths are
+    interchangeable. They are not, and this file says so with numbers instead.
+    """
+    print("  4. the array path against the host path, same frame")
+    art = os.path.join(REPO, "runtime", "artifacts", "mediapipe-pose",
+                       "artifacts_npu1", "gemm_rtp", "design.json")
+    if not os.path.exists(art):
+        raise Fail(
+            f"{art} is not there, so there is no array path to compare the host "
+            f"against. Build it with\n"
+            f"  source /opt/xilinx/xrt/setup.sh\n"
+            f"  .venv/bin/python tools/export/export_gemm_rtp.py --target "
+            f"mediapipe-pose --arch 1 --cols 4 -n 32\n"
+            f"which needs MLIR-AIE -- and that is in .venv/, not on the system "
+            f"PATH, which is the whole reason this gate says so rather than "
+            f"reporting a missing directory and leaving it at that.")
+    # A SEPARATE CONTAINER, and not a flag on the golden's one. The array needs
+    # the pre-tiled bf16 panels staged, which makes it 29.9 MB against the
+    # host-only 18.3 MB -- so reusing one path for both would mean the container
+    # the golden was recorded against is not the container section 3 checked.
+    if not os.path.exists(NPU_CONTAINER):
+        raise Fail(
+            f"{NPU_CONTAINER} is not there, so the array path has no panels to "
+            f"dispatch into. Pack it with\n"
+            f"  python tools/pack/pack_npue.py --mppose-onnx models/mediapipe-pose "
+            f"--out {NPU_CONTAINER} --npu --device npu1\n"
+            f"and note that --npu needs --device: N pads to tile_n*cols and cols "
+            f"is a property of the array, so a panel built without one is not a "
+            f"panel the design can read.")
+    host, _ = _run_runtime(CONTAINER)
+    arr, line = _run_array(NPU_CONTAINER)
+
+    hd, ad = host["detections"][0], arr["detections"][0]
+    check(len(host["detections"]) == len(arr["detections"]) == 1,
+          f"the host found {len(host['detections'])} people and the array "
+          f"{len(arr['detections'])}; the two paths must agree on the COUNT for "
+          f"the rest of this section to mean anything")
+    ds = abs(hd["score"] - ad["score"])
+    check(ds <= 3e-3,
+          f"detector score differs by {ds:.3e}. The panels are bf16, so this is "
+          f"the expected order of magnitude; a larger one means the array is "
+          f"running something other than this network.")
+    dk = max(abs(hd["keypoints"][i][j] - ad["keypoints"][i][j])
+             for i in range(4) for j in range(2))
+    check(dk <= 3.0,
+          f"the detector's keypoints differ by {dk:.3f} px, outside the 3 px "
+          f"bf16 budget. These four points decide the landmark network's crop "
+          f"AND its rotation angle, so this number is what the pose difference "
+          f"below is made of.")
+    if verbose:
+        print(f"     detector  score within {ds:.1e}, keypoints within {dk:.2f} "
+              f"px -- bf16 panel precision")
+
+    ph, pa = host["poses"][0], arr["poses"][0]
+    lh = np.asarray(ph["landmarks"], np.float64)
+    la = np.asarray(pa["landmarks"], np.float64)
+    xy = np.abs(lh[:, :2] - la[:, :2]).max(axis=1)
+    dc = abs(ph["pose_confidence"] - pa["pose_confidence"])
+    print(f"     pose      landmarks mean {xy.mean():.1f} / median "
+          f"{np.median(xy):.1f} / max {xy.max():.1f} px, pose confidence "
+          f"{ph['pose_confidence']:.4f} against {pa['pose_confidence']:.4f}")
+    print(f"     {line}")
+    th = host["timings_ms"]["total"]
+    ta = arr["timings_ms"]["total"]
+    print(f"     frame     {ta:.0f} ms on the array against {th:.0f} ms on the "
+          f"host -- {ta / th:.2f}x")
+    check(ta > 0 and th > 0, "a frame time of zero would make the ratio a "
+                              "division by nothing")
+    # The registry cell says `honours` and says 2.4x slower. If a future design
+    # set makes the array WINNER, this fails and the cell has to be rewritten --
+    # which is the point of asserting a direction rather than a range.
+    check(ta > th,
+          f"the array path is now {th / ta:.2f}x FASTER than the host "
+          f"({ta:.0f} ms against {th:.0f} ms). That is a real result and a good "
+          f"one, and the registry cell, NPU_OPS.md and NPU_MODELS.md all say the "
+          f"array is slower here -- so this gate failing is the signal to "
+          f"re-measure and rewrite them, not a regression.")
+
+
 def section_3(reader, verbose):
     print("  3. the C++ runtime, against the numbers recorded from the OpenCV zoo")
     with open(GOLDEN_DET) as f:
@@ -882,11 +1010,14 @@ def main():
           f" + "
           f"{sum(1 for o in json.loads(reader.config['pose_graph']) if o['op'] == 'd2s')}"
           f" d2s")
-    for fn in (section_1, section_2, section_3):
+    for fn in (section_1, section_2, section_3, section_4):
         fn(reader, args.verbose)
     print("OK: the container holds these two checkpoints in this arrangement, "
           "the anchor table is the one the packer verified against the zoo's "
-          "literal one, and the C++ runtime reproduces the recorded answer.")
+          "literal one, the C++ runtime reproduces the recorded answer, and the "
+          "array path dispatches against a design set checked in both "
+          "directions -- slower than the host and a different answer, both "
+          "measured and both in the registry cell.")
 
 
 if __name__ == "__main__":

@@ -137,6 +137,15 @@ add_executable(npuembeddings
   src/mppose/decode.cpp
   src/mppose/net.cpp
   src/mppose/session.cpp
+  # The array side of a CONVOLUTION, shared by arch=6 and arch=8. Listed once and
+  # used twice rather than kept per architecture, because the dangerous parts are
+  # the ones with a plausible wrong answer -- the padded-K repack, the widened
+  # bias, and "one panel per convolution, never per stream name" -- and two copies
+  # of those are free to drift on exactly the details that fail silently.
+  # conv/array.cpp is XRT-dependent (it names npu::Device and NpuGemm) while the
+  # two sessions above are not, which is why the split is at this line and not
+  # inside the backend.
+  src/conv/array.cpp
   # Subtask 7: STT extension (Whisper). The tokenizer stub lives with the
   # other tokenizers but is grouped here with the rest of the Whisper
   # placeholders.

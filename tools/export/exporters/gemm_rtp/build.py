@@ -18,7 +18,8 @@ import numpy as np
 
 import npu_ops
 from ..common.cache import find_cache, purge, xclbin_identical_mod_uuid
-from ..common.consts import AIE_ROWS, ARCH_DEVICES, mac_for_arch
+from ..common.consts import (AIE_ROWS, ARCH_DEVICES, CONV_ONLY_KINDS,
+                            mac_for_arch)
 from ..common.paths import cache_dir_for
 from ..common.validate import validate_tiers_and_seq
 from .geometry import datapath_from_args, markers_for, shapes_for_stream_set
@@ -26,7 +27,7 @@ from .geometry import datapath_from_args, markers_for, shapes_for_stream_set
 # --stream-set -> the directory name the runtime looks the set up by. The
 # encoder's set keeps the historical name so every shipping artifact path and
 # every documented command is unchanged.
-STREAM_SET_DIRS = {
+STREAM_SET_DIRS: dict[str, str] = {
     "gemm_rtp": "gemm_rtp",
     "stt": "gemm_rtp_dec",
     # A pose set writes to `gemm_rtp` too, and deliberately NOT to a directory
@@ -35,7 +36,33 @@ STREAM_SET_DIRS = {
     # refusal message names, so a `gemm_rtp_pose` directory would make the two
     # disagree about where the set lives.
     "pose": "gemm_rtp",
+    # hands and mppose write to `gemm_rtp` for the same reason and the same
+    # runtime lookup: runtime/src/mppose/ and runtime/src/hands/ look for
+    # `<artifacts>/gemm_rtp/design.json`, so a directory of their own would make
+    # the exporter and the runtime disagree about where the set lives.
+    #
+    # THIS WAS THE THIRD WAY THE SAME CLASS OF BUG GOT IN. The stream_set
+    # dispatch in geometry.py and resolve.py was widened to the conv-only kinds
+    # and the --stream-set choices were widened with it, and the export still
+    # died -- here, one layer further on, at the directory-name table:
+    #
+    #     unknown --stream-set 'mppose'
+    #
+    # One table per concern, each with its own idea of which sets exist, and a
+    # fix that only widens some of them fails at the next one down. The list is
+    # now built from CONV_ONLY_KINDS rather than repeated, so a fourth conv-only
+    # kind cannot be added to geometry.py without also being exported.
+    "hands": "gemm_rtp",
+    "mppose": "gemm_rtp",
 }
+# Every conv-only kind exports to `gemm_rtp`, and the pair of tables above and in
+# geometry.py cannot disagree about WHICH kinds exist.
+assert set(CONV_ONLY_KINDS) <= set(STREAM_SET_DIRS), (
+    f"consts.CONV_ONLY_KINDS is {sorted(CONV_ONLY_KINDS)} and "
+    f"build.STREAM_SET_DIRS has no entry for "
+    f"{sorted(set(CONV_ONLY_KINDS) - set(STREAM_SET_DIRS))}. A kind the exporter "
+    f"can build a set for but cannot name a directory for dies at import, not "
+    f"after a compile.")
 from .validate import validate_geometry
 
 def extra_markers_for_arch(

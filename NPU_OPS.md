@@ -22,7 +22,7 @@ it takes no op flag at all -- `--npu-ops`, `--npu-extra-ops` and
 `--npu-eltwise` are refused by name there, each with its own message. The
 table below is what it reads.
 
-There are 8 codes and 7 architectures: 56 cells. Of those, 19 run on the array today, 1 is already there without a code, 0 are operations the model has and no array branch reaches, 5 cannot be moved on this board for a stated reason, and 31 do not exist in that model at all.
+There are 8 codes and 7 architectures: 56 cells. Of those, 20 run on the array today, 1 is already there without a code, 0 are operations the model has and no array branch reaches, 4 cannot be moved on this board for a stated reason, and 31 do not exist in that model at all.
 
 ## The eight codes
 
@@ -68,7 +68,7 @@ new code, or does not tile.
 | `cls` | **yes** | **yes** | **yes** | already | **yes** | - | - | blocked |
 | `pose` | - | - | - | **yes** | - | - | - | - |
 | `hands` | - | - | - | blocked | - | - | - | - |
-| `mppose` | - | - | - | blocked | - | - | - | - |
+| `mppose` | - | - | - | **yes** | - | - | - | - |
 | `embeddinggemma-300m` | blocked | blocked | **yes** | - | **yes** | - | - | - |
 
 `already` means the cell is empty because the work is done without a code,
@@ -312,19 +312,21 @@ no normalisation op anywhere in either graph. The op inventories are {Conv, DwCo
 
 no attention and no softmax. The nearest thing is the detector's score, and that is a SIGMOID the GRAPH carries -- unlike hands, where the palm head's sigmoid is folded into the decode and applied to the logit in runtime/src/hands/decode.cpp -- because in this container the packer records `sigmoid` on the landmark head's confidence output and the runtime applies it there. Neither is a softmax over a score matrix between two GEMMs.
 
-### `conv` -- conv1d (Whisper's audio front end): **blocked**
+### `conv` -- conv1d (Whisper's audio front end): **honours**
 
-not missing code and not the wrong operation -- this architecture is 161 convolutions of which 99 are dense and GEMM-shaped, carrying 393.9M MAC in the person detector and 156.6M in the landmark network, which is exactly a GEMM array's arithmetic. What is missing is a DESIGN SET, and only that.
+It dispatches, and it is 2.4x SLOWER here, and it does NOT agree with the host path to within a pixel. All three are measured and all three belong in the same cell.
 
-The 99 dense convolutions have 53 distinct raw (K, N) pairs across the two graphs. Padded the way gemm_rtp/geometry.py pads pose's -- K up to a multiple of tile_k = 64, N up to a multiple of tile_n*cols = 128 -- they collapse to TWENTY-TWO. That is more than pose's fourteen and more than hands' twelve, and unlike those two the set does not exist and has never been built on this machine, so there is no array timing to compare the host's against.
+The 99 dense convolutions across the two graphs have 53 distinct raw (K, N) pairs, which pad the way gemm_rtp/geometry.py pads pose's -- K to a multiple of tile_k = 64, N to tile_n*cols = 128 -- down to TWENTY-TWO. That is the largest stream set in this file, and runtime/artifacts/mediapipe-pose/artifacts_npu1/gemm_rtp/ now carries it: one design, 22 streams, M = 1024, and tools/verify/verify_pose_streamset.py checks it against geometry.py, npu_targets.json and the packed container in both directions. --npu-ops conv sends those 99 convolutions to the array in 447 dispatches; the other 62 stay on the host.
 
-runtime/include/runtime/mppose_mode.hpp REFUSES --npu-ops conv BY NAME for exactly that reason rather than running on the host under a flag that says otherwise. The numbers a design set would have to beat, measured here: onnxruntime's float run of the same two graphs is 5.29 ms (detector) + 6.56 ms (landmark) = 11.69 ms for one person on docs/bus.jpg at 16 threads, and this build's host fp32 walk is 49.7 ms + 70.6 ms = 120.3 ms for the same frame.
+MEASURED on docs/bus.jpg, one person, best of several runs: the array takes 327 ms against the host's 137 ms for the same frame. Of the array's own 327 ms, 134 ms is the device's GEMM, 56 ms is repacking A into the design's padded stride and 24 ms is transposing C back -- so the device is 41 % of it and the host shuffling around the dispatch is 80 ms, which is the honest reason the array loses here rather than the device being slow. The three structural reasons are arch=6's, and they apply more strongly: N must be a multiple of 128 so most of these channel counts pad (the useful 550.5M dense MACs become far more dispatched work), the detector's stem alone is 12544 output pixels cut into 13 chunks of 1024, and the landmark network's 256x256 output is 64 chunks for every one of its 54 convolutions.
 
-TWO NUMBERS A FUTURE DESIGN SET SHOULD NOT EXPECT TO MOVE.
+AND THE TWO PATHS DO NOT AGREE. The array's panels are bf16, so the detector differs from the host's by 7.7e-04 in score, 0.48 px in the box and 1.37 px in the keypoints -- ordinary bf16 noise, and arch=6's array path agrees with its host to 1.1 px. Here it is AMPLIFIED, and by the geometry rather than by the network: the crop is a square rotated by an angle the DETECTOR's two body keypoints decide, so 1.37 px of keypoint noise is a different rotation of a 565 px crop, and the landmarks that resample worst come out 44 px from the host's with a median of 5.1 px and a mean of 8.4. The pose confidence moves with it, 0.9422 -> 0.9832.
 
-62 of the container's 161 convolutions are DEPTHWISE, and a depthwise filter reduces within one channel, so there is no [M, N] GEMM in it to dispatch. They are 28 of the detector's 73 and 34 of the landmark network's 88, they carry 77.2M MAC -- 12.3 % of this container's total -- and they stay on the host whatever a design set turns out to say.
+That amplification is NOT the array network being wrong, and the way that was established is worth stating because it is the only evidence in this cell that separates the two: the OpenCV zoo -- an independent implementation -- was fed the ARRAY path's detection row and answered conf 0.9809 with bbox [148.2, 333.3, 392.7, 885.2], against the array runtime's 0.9832 and [144.1, 334.1, 401.5, 890.2], and answered 0.9449 with the HOST's detection row, against the host runtime's 0.9422. So the detector's bf16 noise accounts for the whole difference, and anyone comparing the two paths on this architecture is comparing two crops rather than two networks.
 
-And this architecture has an op that is not a GEMM at all and will never be one: three DepthToSpace steps, which are pure plane copies. That is why 161 convolutions is not the whole story of this row.
+TWO THINGS A DESIGN SET WILL NOT MOVE. 62 of the container's 161 convolutions are DEPTHWISE and carry 77.2M MAC, 12.3 % of it, and a depthwise filter reduces within one channel so there is no [M, N] GEMM in it -- those stay on the host whatever a design set says. And this architecture has an op that is not a GEMM at all and will never be one: three DepthToSpace steps, pure plane copies, which build the detector's 28/14/7 pyramid out of one 7x7 map.
+
+Design directory: none -- it runs on the stream gemm_rtp already exports, so there is nothing to compile. See `STREAM_ONLY` in `tools/lib/npu_ops.py`.
 
 ### `attn` -- attention, as two GEMMs: **absent**
 

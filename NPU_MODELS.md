@@ -18,10 +18,10 @@ The second is the actual reason this file exists: `--npu-ops gelu` is **refused*
 
 Tally over the 144 cells:
 
-- **81** **yes** -- runs on the array today
+- **82** **yes** -- runs on the array today
 - **1** already -- the work is already dispatched without a code, and the code is refused
 - **0** no code -- the model has the operation, no array branch reaches it
-- **5** blocked -- cannot be moved on this board; the reason is in NPU_OPS.md
+- **4** blocked -- cannot be moved on this board; the reason is in NPU_OPS.md
 - **55** - -- the model has no such operation
 - **2** **gated** -- this model's FFN has no standalone activation pass -- see below
 
@@ -46,7 +46,7 @@ Tally over the 144 cells:
 | `vit-base-patch16-224` | **yes** | **yes** | **yes** | already | **yes** | - | - | blocked |
 | `yolov8n-pose` | - | - | - | **yes** | - | - | - | - |
 | `mediapipe-hands` | - | - | - | blocked | - | - | - | - |
-| `mediapipe-pose` | - | - | - | blocked | - | - | - | - |
+| `mediapipe-pose` | - | - | - | **yes** | - | - | - | - |
 
 ## Where these two models differ from their kind
 

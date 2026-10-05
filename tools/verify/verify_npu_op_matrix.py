@@ -68,14 +68,21 @@ DOCS = (REPO / "NPU_OPS.md", REPO / "NPU_OPS.ru.md")
 # cell's reason in the registry). Changing one means a cell's status changed,
 # which is a behaviour change -- so this gate should have to be edited on purpose
 # rather than a number quietly moving under a document that still says 14.
-EXPECTED_COUNTS = {"honours": 19, "on_array": 1, "unimplemented": 0,
-                   "blocked": 5, "absent": 31}
-# blocked went 4 -> 5 and absent 24 -> 31 when arch=8 was added, and that is the
-# whole of the change: the new row contributes exactly eight cells, seven of them
-# `absent` and one `blocked`, for the same reason arch=7's seven-and-one is --
-# there is no design set carrying its convolutions. `honours` and `on_array` did
-# not move, which is the check worth making: a new architecture that quietly
-# started claiming dispatched work would move them, and this gate is what says so.
+EXPECTED_COUNTS = {"honours": 20, "on_array": 1, "unimplemented": 0,
+                   "blocked": 4, "absent": 31}
+# honours went 19 -> 20 when arch=8's conv cell stopped being `blocked` and became
+# `honours`: a design set was built for its twenty-two padded (K, N) shapes and
+# `--npu-ops conv` now dispatches its 99 dense convolutions. `blocked` went 5 -> 4
+# for the same single cell and `absent` did not move, so the change is exactly one
+# cell in one direction.
+#
+# `honours` IS NOT A SPEED CLAIM, and this row is the clearest case in the file:
+# the array path is 2.4x SLOWER than the host here (327 ms against 137 ms on
+# docs/bus.jpg) and its answer differs from the host's by up to 44 px. `honours`
+# says the flag MOVES the work to the array, which it does -- what that costs and
+# how far the two paths then disagree is in the cell's own prose, and it is
+# measured. Writing `blocked` instead would have been the other available lie:
+# there IS an array path, and it runs.
 # Why these numbers are 19 and 0 rather than 14 and 5: five cells were flipped
 # from `unimplemented` to `honours` when the branches were written --
 # gemm_rtp/attn, cls/attn, embeddinggemma-300m/attn, cls/softm and
@@ -188,18 +195,20 @@ UNRUNNABLE: dict[str, str] = {
              "carries. Its one `blocked` cell is that same fact; had it been "
              "written `honours` there would be nothing here to run either, "
              "which is the failure the status exists to prevent.",
-    "mppose": "the same fact as hands, and for the same reason: this "
-              "architecture has no array path, so this harness cannot reach any "
-              "cell of it rather than not-on-this-machine. "
-              "runtime/include/runtime/mppose_mode.hpp REFUSES --npu-ops conv "
-              "and --artifacts by name, and its 99 dense convolutions pad down "
-              "to 22 shapes, which no design under runtime/artifacts/ carries "
-              "and which -- unlike hands' twelve and pose's fourteen -- has "
-              "never been built at all. Its one `blocked` cell is that same "
-              "fact. The row is here rather than absent for hands' reason too: "
-              "a declaration of what the row IS is not a statement about this "
-              "machine, and keeping the two apart is what lets the skip print a "
-              "true reason.",
+    "mppose": "NO LONGER TRUE for this row and kept here deliberately. arch=8's "
+              "conv cell used to be `blocked` and this entry said why: no design "
+              "set carried its twenty-two padded (K, N) shapes. One now does -- "
+              "runtime/artifacts/mediapipe-pose/artifacts_npu1/gemm_rtp/, checked "
+              "against the packed container in both directions by "
+              "tools/verify/verify_pose_streamset.py -- so the cell is `honours` "
+              "and the array path is reachable, and this harness runs it like any "
+              "other.\n\n"
+              "The other seven cells stay unrunnable for hands' reason: there is "
+              "no `gelu`, no `layn`, no `softm`, no `attn`, no `mproj`, no `fft` "
+              "and no `logit` operation in either graph to name. The row is here "
+              "rather than absent because a declaration of what a row IS is not a "
+              "statement about this machine, and keeping the two apart is what "
+              "lets a skip print something true.",
 }
 
 # The cells the runtime must let RUN. Only `honours`: `on_array` is the case
