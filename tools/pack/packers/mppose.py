@@ -829,10 +829,17 @@ def _pose_head(t, emitted, producer):
             _die(f"pose head: the graph output {vi.name!r} is produced by "
                  f"nothing")
         # walk back through the absorbed plumbing to the body node
-        cur, hops = n, 0
+        cur, hops, sigmoid = n, 0, False
         while cur is not None and cur.op_type in ("Reshape", "Transpose",
                                                   "Sigmoid"):
             hops += 1
+            # Recorded rather than assumed from the output's NAME. `conf` is the
+            # one output this front end squashes and the other four are not, and
+            # a reader that took it from the name would be hard-coding what the
+            # graph states -- so a re-export that dropped the Sigmoid would
+            # report a confidence of -9.7 and be believed.
+            if cur.op_type == "Sigmoid":
+                sigmoid = True
             cur = t.by_out.get(cur.input[0])
         if cur is None or cur.op_type != "Conv":
             _die(f"pose head: the output {vi.name!r} is produced by "
@@ -872,7 +879,17 @@ def _pose_head(t, emitted, producer):
         found[key] = {"node": vi.name, "op": int(emitted[cur.name]),
                       "conv": cur.name, "decl": [int(x) for x in decl],
                       "conv_out": [int(x) for x in conv_out],
-                      "transposed": transposed, "hops": hops}
+                      "transposed": transposed, "sigmoid": sigmoid,
+                      "hops": hops}
+    # The one output whose CONSUMER needs to know its range: the threshold and
+    # the reported number both assume a probability, and a raw logit compared
+    # against 0.5 accepts a person the model rejects.
+    if not found.get("conf", {}).get("sigmoid", False):
+        _die(f"pose head: {found.get('conf', {}).get('node', 'the confidence')} "
+             f"has no Sigmoid between it and its convolution. The zoo's "
+             f"_postprocess compares this number against "
+             f"confThreshold={POSE_CONF_THR:g} and returns it, and both assume "
+             f"a probability rather than a logit.")
     missing = set(want) - set(found)
     if missing:
         _die(f"pose head: the graph does not produce {sorted(missing)}; it "
@@ -1003,11 +1020,32 @@ def pack_mppose(det_onnx, pose_onnx, out_path, dry_run=False):
         "nms_threshold": NMS_THR,
         "top_k": TOP_K,
         "pose_conf_threshold": POSE_CONF_THR,
-        # Identity normalisation, WRITTEN rather than assumed: both front ends
-        # divide the resized crop by 255 and stop, and the detector's is the
-        # same. The container says so rather than a reader guessing.
-        "image_mean": [0.0, 0.0, 0.0],
-        "image_std": [1.0, 1.0, 1.0],
+        # TWO NORMALISATIONS, AND THEY ARE NOT THE SAME. This is the one place
+        # where mppose and mediapipe-hands differ in more than geometry, and
+        # writing a single image_mean/image_std pair -- which is what the hands
+        # packer can do -- would be a silently wrong detector.
+        #
+        #   detector  (mp_persondet._preprocess)   (u8/255 - 0.5) * 2  -> [-1, 1]
+        #   landmark  (mp_pose._preprocess)        u8/255              -> [ 0, 1]
+        #
+        # It follows from the zoo code and was verified against it, not inferred:
+        # hands' palm detector really is u8/255, which is why one pair served
+        # both of its networks and one does not here.
+        #
+        # IT ALSO SAYS WHERE THE ZERO PAD IS APPLIED, because that is a tensor
+        # value and not a raster one. The detector divides by 255 and rescales
+        # FIRST and pads with 0 in the [-1,1] tensor afterwards, so its border
+        # is 0.0 -- the middle of the range, not the bottom of it. A reader that
+        # letterboxes a uint8 raster with 0 and normalises afterwards puts -1.0
+        # in that border, which is the one pixel value that means "saturated
+        # black" to this stem. The landmark net pads in the uint8 raster BEFORE
+        # the rotation and the resize and divides by 255 at the end, so its
+        # border is 0.0 in the same way -- but for the opposite reason, and the
+        # two are not interchangeable.
+        "det_image_mean": [0.5, 0.5, 0.5],
+        "det_image_std": [0.5, 0.5, 0.5],
+        "pose_image_mean": [0.0, 0.0, 0.0],
+        "pose_image_std": [1.0, 1.0, 1.0],
         "det_num_convs": len(conv_d),
         "pose_num_convs": len(conv_p),
         "array_mac": int(a_d + a_p),
