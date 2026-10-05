@@ -73,6 +73,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -175,6 +176,36 @@ def resolve_container(name: str) -> str:
     if candidate.is_file():
         return str(candidate)
     return name
+
+
+def find_binary() -> str:
+    """The runtime executable, resolved beside this repository.
+
+    PATH first, because a built-and-installed runtime is the more useful thing
+    to run and preferring a stale in-tree build over it would be the opposite.
+    The in-tree build is the fallback and the message says which one it found,
+    so a demo running against a binary nobody rebuilt is visible rather than
+    silent.
+    """
+    from shutil import which
+    env = os.environ.get("NPUEMBEDDINGS_BINARY")
+    if env:
+        return env
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for name in ("npuembeddings", "npuembeddings.exe"):
+        found = which(name)
+        if found:
+            return found
+        for build in ("build", "build-relwithdebinfo", "build-release"):
+            cand = os.path.join(here, "runtime", build, name)
+            if os.path.exists(cand):
+                return cand
+    raise SystemExit(
+        "error: cannot find the npuembeddings binary.\n"
+        "  Build it with `cmake -S runtime -B runtime/build && cmake --build "
+        "runtime/build`, or point NPUEMBEDDINGS_BINARY at one.\n"
+        "  --task mppose calls it directly -- there is no arch=8 Python facade "
+        "yet -- and the other two tasks need it too.")
 
 
 def frame_ms(result) -> float:
@@ -389,6 +420,199 @@ def draw_hands(img: np.ndarray, result, thickness: int = 2,
     return img
 
 
+# ============================================================================
+# --task mppose (arch=8, MediaPipe Pose)
+#
+# WHY THIS TASK IS NOT A THIRD FACADE
+# ------------------------------------
+# The pose path goes through python/npue_pose.py and the hands path through
+# python/npue_hands.py. arch=8 has no facade, and writing one is a separate
+# deliverable; this demo therefore calls the binary directly, which is the same
+# thing npue_hands' `backend="cli"` does and for the same stated reason: one
+# process per frame, so it is the SLOWEST of the three paths and the frame time
+# printed below includes the process start.
+#
+# The consequence worth naming: this path is a demonstration of the runtime's
+# output shape and of MediaPipe's topology, not a benchmark. Every number drawn is
+# the runtime's.
+# ============================================================================
+
+# MediaPipe Pose's 33-landmark topology, taken verbatim from the OpenCV zoo demo
+# (opencv_zoo samples, mediapipe, demo.py's `_draw_lines`), which is where the
+# golden for this architecture was recorded from as well.
+#
+# IT IS NOT COCO-17 AND NOT THE 21-POINT HAND SKELETON. COCO-17's 17 joints are a
+# different numbering of a different skeleton; drawing this model's landmarks with
+# COCO's edges produces a figure with the right joints in the wrong places --
+# which is the same class of mistake as reading one container's flag as another's.
+MPP_EDGES = (
+    # face
+    (0, 1), (1, 2), (2, 3), (3, 7), (0, 4), (4, 5), (5, 6), (6, 8),
+    # shoulders
+    (9, 10),
+    # right arm
+    (12, 14), (14, 16), (16, 22), (16, 18), (16, 20), (18, 20),
+    # left arm
+    (11, 13), (13, 15), (15, 21), (15, 19), (15, 17), (17, 19),
+    # torso
+    (11, 12), (11, 23), (23, 24), (24, 12),
+    # right leg
+    (24, 26), (26, 28), (28, 30), (28, 32), (30, 32),
+    # left leg
+    (23, 25), (25, 27), (27, 31), (27, 29), (29, 31),
+)
+
+
+def draw_mppose(img: np.ndarray, result, thickness: int = 2,
+                show_boxes: bool = True) -> np.ndarray:
+    """Draw one arch=8 result onto a BGR frame, in place, and return it.
+
+    The landmarks arrive in PIXELS here -- this path reads the runtime's own JSON
+    rather than going through a facade that normalises them -- so they are used
+    as they are, and no width or height is multiplied in. That is a difference
+    from the other two draws and it is not an inconsistency: the two facades
+    normalise and this one does not, because the two facades exist and this path
+    does not.
+
+    The visibility/presence fade is the same one the pose render uses, and it has
+    a sharper meaning here: MediaPipe's five columns are
+    [x, y, z, visibility, presence] and the visibility of a foot behind the other
+    leg is exactly the case where drawing it at full strength is a lie.
+    """
+    h, w = img.shape[:2]
+    for i, pose in enumerate(getattr(result, "poses", ())):
+        color = PALETTE[i % len(PALETTE)]
+        lm = pose["landmarks"]
+        pts = [(int(p[0]), int(p[1])) for p in lm]
+        vis = [float(p[3]) for p in lm]
+        for a, b in MPP_EDGES:
+            if a >= len(pts) or b >= len(pts):
+                continue
+            # A bone fades by its two joints' mean visibility, and a joint that
+            # missed is greyed rather than drawn: an occluded ankle reported at
+            # full strength is a claim the network did not make.
+            c = tuple(int(BONE_COLOR[k] + (color[k] - BONE_COLOR[k]) *
+                          min(1.0, 0.5 * (vis[a] + vis[b]))) for k in range(3))
+            cv2.line(img, pts[a], pts[b], c, thickness, cv2.LINE_AA)
+        for k, p in enumerate(pts):
+            v = min(1.0, max(0.0, vis[k]))
+            c = tuple(int(BONE_COLOR[j] + (color[j] - BONE_COLOR[j]) * v)
+                      for j in range(3))
+            cv2.circle(img, p, thickness, c, -1, cv2.LINE_AA)
+        if show_boxes:
+            bb = [int(round(v)) for v in pose["bbox"]]
+            cv2.rectangle(img, (bb[0], bb[1]), (bb[2], bb[3]), color, 1)
+            cv2.putText(img, f"{pose['pose_confidence']:.3f}",
+                        (bb[0], max(12, bb[1] - 4)), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.45, color, 1, cv2.LINE_AA)
+    t = result.timings_ms or {}
+    det = f"det {t.get('detector', 0.0):.0f} " if "detector" in t else ""
+    pose_t = f"pose {t.get('landmarks', 0.0):.0f}" if "landmarks" in t else ""
+    _put(img, f"{len(getattr(result, 'poses', ()))} pose(s)  "
+              f"{frame_ms(result):.0f} ms  host only  {det}{pose_t}".rstrip(),
+         (8, h - 10), 0.5, (255, 255, 255), 1, bar=True)
+    return img
+
+
+class MpposeCli:
+    """One arch=8 answer, from one `npuembeddings mppose` process.
+
+    Shaped like the two facades -- a context manager with `detect_for_video` --
+    so the loop below does not need a third branch. The frame is written to a
+    temporary JPEG because that is what the runtime's image reader takes, and it
+    is written AS CV2 GAVE IT (BGR, untouched): `cv2.imencode` files the first
+    channel as Blue, and a swap here moves the swap to the wrong side of the
+    encoder. That mistake was made once already, in this file, and it moved the
+    pose joints by up to 110.8 px while every drawn joint still looked like a
+    joint.
+    """
+
+    def __init__(self, container: str, binary: str, extra: list[str] | None = None):
+        self.container = container
+        self.binary = binary
+        self.extra = list(extra or [])
+        self._tmp = None
+        self._tmpdir = None
+
+    def __enter__(self):
+        import tempfile
+        self._tmpdir = tempfile.TemporaryDirectory(prefix="npue-mppose-")
+        self._tmp = os.path.join(self._tmpdir.name, "frame.jpg")
+        return self
+
+    def __exit__(self, *exc):
+        self._tmpdir.cleanup()
+        return False
+
+    def detect_for_video(self, frame, timestamp_ms: int = 0):
+        """`frame` is the ENCODED image, which is what the loop hands every
+        facade: the demo JPEG-encodes once, at --jpeg-quality, and both Python
+        facades take the bytes. Encoding again here would be a second lossy pass
+        on every frame for no reason, so the bytes are written to disk untouched.
+
+        An ndarray is accepted too, because that is what a caller holding a
+        frame rather than a loop would have -- and it is encoded BGR-untouched,
+        which is the rule the loop's own comment above spends a paragraph on.
+        """
+        import subprocess
+        del timestamp_ms   # per-frame and stateless: there is no tracker here
+        if isinstance(frame, np.ndarray):
+            ok, enc = cv2.imencode(".jpg", frame)
+            if not ok:
+                raise RuntimeError("cv2.imencode failed on the frame")
+            payload = enc.tobytes()
+        else:
+            payload = bytes(frame)
+        with open(self._tmp, "wb") as f:
+            f.write(payload)
+        cmd = [self.binary, "mppose", self.container, self._tmp] + self.extra
+        p = subprocess.run(cmd, capture_output=True, text=True)
+        if p.returncode != 0:
+            raise RuntimeError(
+                f"`{' '.join(cmd)}` exited {p.returncode}:\n{p.stderr[-400:]}")
+        try:
+            doc = json.loads(p.stdout)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"the runtime printed non-JSON ({e})")
+        return _MpposeResult(doc)
+
+    detect = detect_for_video
+
+
+class _MpposeResult:
+    """The runtime's JSON, with the attribute names the loop already uses."""
+
+    def __init__(self, doc: dict):
+        self._doc = doc
+        self.poses = doc.get("poses", ())
+        self.detections = doc.get("detections", ())
+        self.timings_ms = doc.get("timings_ms", {})
+        self.width = doc.get("width", 0)
+        self.height = doc.get("height", 0)
+        self.backend = "cli"
+        self.dispatches = 0
+        # The letterbox as a STRING, because the block above prints it that way
+        # and the runtime's JSON carries it as three numbers. Reassembled here so
+        # that the two architectures' first-frame lines read the same and a
+        # caller can print `result.letterbox` without knowing which it has.
+        lb = doc.get("letterbox") or {}
+        self.letterbox = (f"scale {lb.get('scale', 1.0):.4f}, "
+                          f"pad {lb.get('pad_x', 0)},{lb.get('pad_y', 0)}")
+        self.input_size = 224
+
+    # The loop below reads one of these two counts and does not know which
+    # architecture it is drawing, so both are here and both are honest: this
+    # architecture reports people, and the second-stage run may be fewer of them
+    # than the detector found, which is the number that matters.
+    @property
+    def num_poses(self) -> int:
+        return len(self.poses)
+
+    @property
+    def num_hands(self) -> int:
+        return len(self.poses)
+
+
 def main(argv: list[str] | None = None) -> int:
     # A literal description rather than a slice of this file's comment header:
     # the header above is all `#` comments, so __doc__ is None here, and reading
@@ -400,13 +624,15 @@ def main(argv: list[str] | None = None) -> int:
                "-/+ line thickness. Requires opencv-python (see "
                "requirements.txt) and a built runtime binary.",
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--task", choices=("pose", "hands"), default="pose",
+    ap.add_argument("--task", choices=("pose", "hands", "mppose"), default="pose",
                     help="which architecture to draw: %(default)s (COCO-17, over "
-                         "python/npue_pose.py) or hands (MediaPipe's 21, over "
-                         "python/npue_hands.py). The two differ in more than the "
-                         "picture -- the hands path has no thresholds to set and "
-                         "no HTTP endpoint, so several flags below are refused "
-                         "rather than ignored under --task hands")
+                         "python/npue_pose.py), hands (MediaPipe's 21, over "
+                         "python/npue_hands.py) or mppose (MediaPipe's 33, "
+                         "called straight into the binary). The three differ in "
+                         "more than the picture -- the last two have no "
+                         "thresholds to set and no HTTP endpoint, so several "
+                         "flags below are refused rather than ignored under "
+                         "--task hands and --task mppose")
     # The default is a NAME with no ".npue" suffix, and that omission is the whole
     # trick. runtime/include/common/model_catalog.hpp:200 treats any argument
     # ending in ".npue" -- or containing a separator -- as a PATH and uses it
@@ -507,14 +733,17 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     hands = args.task == "hands"
+    mp = args.task == "mppose"
     # The hands default is a PATH, not a catalogue name, and it has to be: the
     # hands container is packed to models/mediapipe-hands/hands.npue because it
     # ships beside the two ONNX files it was built from, while the catalogue's
     # name form only ever means models/<name>.npue. It is also untracked --
     # models/** is gitignored apart from CHECKPOINT.json -- so a checkout without
     # it has to be told to pack it rather than to wait for a download.
-    model = args.model or ("models/mediapipe-hands/hands.npue" if hands
-                           else "yolov8n-pose")
+    model = args.model or (
+        "models/mediapipe-hands/hands.npue" if hands else
+        "models/mediapipe-pose/mppose.npue" if mp else
+        "yolov8n-pose")
     resolved = resolve_container(model)
     if resolved != model:
         print(f"model: {resolved}   (found relative to the repo root)")
@@ -565,6 +794,47 @@ def main(argv: list[str] | None = None) -> int:
                 f"error: --arch {args.arch} is not a flag of --task hands. It "
                 "names a design set, and arch 7 has no array path (see --array "
                 "above).")
+    elif mp:
+        # The SAME refusals as hands, and for the same reasons, with two that are
+        # this architecture's own rather than inherited: arch 8 has a person
+        # DETECTOR with a score threshold in its container (so --conf is not a
+        # free parameter here either), and it has a SEPARATE confidence gate for
+        # the landmark net -- pose_conf_threshold -- which is a different number
+        # from the detector's and has no flag either. Saying "use --max-det" would
+        # also be wrong here in a way it is not for hands: this model DOES have
+        # person detections to cap.
+        refused = [
+            ("--conf", args.conf is not None,
+             "the detector's score threshold is read from the container as "
+             "score_threshold, and the landmark net's confidence gate is a "
+             "separate container key, pose_conf_threshold. Both are part of how "
+             "this checkpoint was trained, and the OpenCV zoo demo whose answer "
+             "is the golden used the container's values, not a command line's"),
+            ("--kpt", args.kpt is not None,
+             "this architecture has no per-joint gate either: visibility and "
+             "presence are reported per landmark and the front end draws them, "
+             "but nothing selects on them"),
+            ("--max-det", args.max_det is not None,
+             "this model does have person detections, so use --max-hands to cap "
+             "how many of them reach the landmark network"),
+            ("--array", args.array,
+             "arch 8 has no array path, so there is nothing for the flag to "
+             "move: both networks run on the host"),
+            ("--artifacts", bool(args.artifacts),
+             "with no array path a design set would be loaded and never read"),
+        ]
+        for name, typed, why in refused:
+            if not typed:
+                continue
+            raise SystemExit(
+                f"error: {name} is not a flag of --task mppose. {why}.\n"
+                "  Every number this demo draws would still be the runtime's; "
+                "the point of refusing is that the run you asked for and the run "
+                "you would get are not the same run.")
+        if args.arch != 1:
+            raise SystemExit(
+                f"error: --arch {args.arch} is not a flag of --task mppose. It "
+                "names a design set, and arch 8 has no array path.")
 
     # --array with no --artifacts could not work at all: the runtime refuses
     # --npu-ops conv by name unless a design set is named, and its message says
@@ -611,6 +881,20 @@ def main(argv: list[str] | None = None) -> int:
         window = "npue hands"
         stem = "hands"
         noun = "hand"
+    elif mp:
+        # No facade: this path runs the binary once per frame, which is what
+        # npue_hands' `backend="cli"` does and for the same reason. The frame time
+        # it prints therefore includes a process start, and that is stated here
+        # rather than discovered.
+        extra = []
+        if args.max_hands:
+            extra += ["--max-hands", str(args.max_hands)]
+        opts = MpposeCli(resolved, find_binary(), extra)
+        draw_fn = draw_mppose
+        make_lm = lambda o: o          # MpposeCli is already a context manager
+        window = "npue mppose"
+        stem = "mppose"
+        noun = "pose"
     else:
         opts = PoseLandmarkerOptions(
             container=model,
@@ -775,6 +1059,17 @@ def main(argv: list[str] | None = None) -> int:
                               f"palm {t.get('palm', 0.0):.0f} ms, landmarks "
                               f"{t.get('landmarks', 0.0):.0f} ms, crop "
                               f"{t.get('crop', 0.0):.0f} ms")
+                    elif mp:
+                        t = result.timings_ms or {}
+                        print(f"detector 224px + landmarks 256px, letterbox "
+                              f"{result.letterbox}, host only; detector "
+                              f"{t.get('detector', 0.0):.0f} ms, landmarks "
+                              f"{t.get('landmarks', 0.0):.0f} ms, crop "
+                              f"{t.get('crop', 0.0):.0f} ms")
+                        print(f"one `npuembeddings mppose` process per frame, "
+                              f"so the frame time above includes its start -- "
+                              f"this is the slowest of the three paths and it is "
+                              f"a demonstration, not a benchmark")
                     else:
                         print(f"input {result.input_size}px, letterbox "
                               f"{result.letterbox}, backend {result.backend}, "
