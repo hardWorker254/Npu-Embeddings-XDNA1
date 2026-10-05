@@ -236,13 +236,16 @@ def main() -> int:
     )
     ap.add_argument(
         "--stream-set",
-        choices=["gemm_rtp", "stt"],
+        choices=["gemm_rtp", "stt", "pose", "hands", "mppose"],
         default=None,
         help=(
             "Which operand set to build. 'gemm_rtp' is the four-stream encoder "
             "shape every embedder uses; 'stt' is Whisper's seven-stream "
-            "decoder, whose cross-attention splits Q from K|V. --target sets "
-            "this per model and the manual flags must not contradict it."
+            "decoder, whose cross-attention splits Q from K|V. 'pose', 'hands' "
+            "and 'mppose' are the conv-only sets -- one padded conv{K}x{N} slot "
+            "per distinct convolution shape, at a single dispatch M, named after "
+            "the kind. --target sets this per model and the manual flags must "
+            "not contradict it."
         ),
     )
 

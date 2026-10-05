@@ -13,6 +13,7 @@ from ..common.consts import (
     AIE_ROWS,
     ARCH_DEVICES,
     ARCHES,
+    CONV_ONLY_KINDS,
     DEFAULT_SEQ,
     FALLBACK_BATCH,
     FALLBACK_COLS,
@@ -443,9 +444,15 @@ def resolve_args(args: argparse.Namespace) -> list[ResolvedArch]:
         # it takes the same branch as STT for the same underlying reason. The
         # difference is which M the validator computes, and that is decided by
         # `kind` here rather than by a flag the caller passes.
-        ns.pose_tiers = model_spec.get("kind") == "pose"
+        ns.pose_tiers = model_spec.get("kind") in CONV_ONLY_KINDS
         if ns.pose_tiers:
-            ns.stream_set = "pose"
+            # The set is named after the KIND, which is why "hands" and "mppose"
+            # reach it too and not only "pose". The kind is also the set's name:
+            # a design set is written to artifacts/<model>/artifacts_npu<N>/
+            # gemm_rtp for every kind in this repository, so the DIRECTORY does
+            # not distinguish them -- the streams inside it do, and pointing the
+            # wrong kind at the encoder's four is how that happens silently.
+            ns.stream_set = model_spec["kind"]
             ns.set_name = "gemm_rtp"
             ns.batch = 1
             # A pose target declares no hidden or intermediate width (see

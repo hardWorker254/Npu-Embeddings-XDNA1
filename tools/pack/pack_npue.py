@@ -1856,7 +1856,7 @@ def main():
                          "one model, and one flag is what lets the error "
                          "message name the pair.")
     ap.add_argument("--npu", action="store_true",
-                    help="arch=6 only: also stage the pre-tiled bf16 B panel "
+                    help="arch=6 and arch=8 only: also stage the pre-tiled bf16 B panel "
                          "for every convolution, and record the array stream "
                          "each one runs on. The container runs on the CPU "
                          "either way -- this is the array path's half-written, "
@@ -1940,14 +1940,23 @@ def main():
             f"--int4-group {args.int4_group}: rows per group must be >= 0, "
             f"where 0 means one group spanning the whole K (per-channel)")
 
-    # --npu stages array panels, and only the pose packer in this file has one.
-    # Refused by name elsewhere rather than ignored, because the flag reads as
-    # "make this run on the NPU" and a BERT pack that took it would still produce
-    # a host-only container with no mention of it.
-    if args.npu and not args.pose_onnx:
+    # --npu stages array panels, and only the two conv-only packers in this file
+    # have one. Refused by name elsewhere rather than ignored, because the flag
+    # reads as "make this run on the NPU" and a BERT pack that took it would
+    # still produce a host-only container with no mention of it.
+    #
+    # arch=8 is on the accepting list as of the mppose work, and the difference
+    # from arch=6 is that this one has NO measured array run behind it: there is
+    # no design set for its twenty-two streams and none can be built on this
+    # machine (no aie.iron, so no peano and no xchesscc). So it stages panels
+    # whose shape the exporter can build a design from -- checked by
+    # tools/verify/verify_pose_streamset.py against the container in both
+    # directions -- and the runtime keeps refusing --npu-ops for it by name.
+    if args.npu and not (args.pose_onnx or args.mppose_onnx):
         raise SystemExit(
-            "--npu stages the pre-tiled array panels, and only the pose packer "
-            "writes them (--pose-onnx FILE). Every other architecture here "
+            "--npu stages the pre-tiled array panels, and only the pose and "
+            "mppose packers write them (--pose-onnx FILE, --mppose-onnx DIR). "
+            "Every other architecture here "
             "targets the array by construction -- its containers carry no host "
             "path at all -- so on those this flag would be a no-op that looks "
             "like an opt-in.")
@@ -2108,7 +2117,15 @@ def main():
         print("  dtype f32 -- forced, not defaulted: see the note above about "
               "the int8 pair.")
         from packers.mppose import pack_mppose  # noqa: E402
-        return pack_mppose(det[0], pose[0], args.out, dry_run=args.dry_run)
+        # --device IS THREADED RATHER THAN LEFT TO THE PACKER'S OWN DEFAULT, and
+        # it is this file's --device, whose default is MAC_DEFAULT_DEVICE -- the
+        # generation the shipped containers were packed for. So the panels come
+        # out npu1-tiled without the caller having to say so, which is right for
+        # a container nobody has named a device for, and the packer still refuses
+        # a --npu with no device at all (reached by calling pack_mppose
+        # directly, which is how its own --help documents it).
+        return pack_mppose(det[0], pose[0], args.out, dry_run=args.dry_run,
+                           device=args.device, npu=args.npu)
 
     # Resolved ONCE PER LAYOUT DTYPE, here, and printed by every branch: a
     # container whose B order is a guess is a container nobody can debug later.

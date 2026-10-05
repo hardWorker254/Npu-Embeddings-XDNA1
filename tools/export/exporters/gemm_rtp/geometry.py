@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import numpy as np
 from ml_dtypes import bfloat16
 
-from ..common.consts import DEFAULT_SEQ
+from ..common.consts import CONV_ONLY_KINDS, DEFAULT_SEQ
 
 # The order the four GEMM streams are emitted in, and therefore the order the
 # runtime's instruction-stream slots are filled in.
@@ -223,6 +223,98 @@ def pose_shapes_for(m: int = POSE_DISPATCH_M) -> dict[str, dict[str, int]]:
     }
 
 
+# -- the arch=7 and arch=8 stream sets -----------------------------------------
+#
+# SAME ARGUMENT AS POSE, TWO MORE TIMES, AND THE GENERALISATION IS THE POINT.
+#
+# A convolution on the array is its im2col matrix as a GEMM, so every conv-only
+# architecture needs the same thing: a slot per padded (K, N), one dispatch M,
+# and no batch axis. The three sets differ only in WHICH padded (K, N) pairs their
+# checkpoints happen to need, so they are three lists over one idea -- which is
+# why they are three tuples of the same shape here rather than three copies of
+# the plumbing around it.
+#
+# THE SAME DISPATCH M FOR ALL THREE, 1024. That is a real constraint and not a
+# default: NpuConvBackend reads ONE row count from the design's top-level `M`
+# (runtime/src/pose/session.cpp) and cuts every convolution into chunks of it, so
+# a set cannot have a per-convolution M. It is also why the row counts differ from
+# what these networks would ideally want -- arch=8's detector stem produces
+# 224*224 = 50176 output pixels at stride 1, cut into 49 dispatches of 1024 rows,
+# the last one 512 rows of padding.
+#
+# WHY THE LISTS ARE WRITTEN OUT AND NOT DERIVED FROM THE CHECKPOINT. The padded
+# (K, N) of a conv-only network are its own channel counts rounded up to tile_k
+# and to tile_n*cols, and there is no formula: they are whatever the checkpoint's
+# widths happen to be. The derivation lives where the checkpoint is, in the
+# packer, and tools/verify/verify_conv_streamset.py compares this list against the
+# packed container in both directions -- a name in one and not the other is a slot
+# that resolves to nothing at dispatch time.
+#
+CONV_ONLY_DISPATCH_M = POSE_DISPATCH_M
+
+# arch=7, mediapipe_hands_palm_ssd_lm_heatmap: twelve distinct padded pairs
+# across the palm detector's and the landmark network's 61 dense convolutions.
+HANDS_CONV_SHAPES: tuple[tuple[int, int], ...] = (
+    (64, 128), (64, 256), (64, 384), (128, 128), (128, 256), (128, 768),
+    (192, 128), (256, 128), (256, 256), (320, 128), (384, 128), (704, 128),
+)
+
+# arch=8, mediapipe_pose_det_ssd_lm_regress: TWENTY-TWO, which is the largest set
+# in this file and the reason this architecture is further from an array path than
+# arch=7's twelve. Fifteen come from the person detector and thirteen from the
+# landmark network, and they share four. The numbers were counted off the packed
+# container -- 99 dense convolutions, 53 distinct raw (K, N) pairs, 22 after
+# padding -- not written down from the architecture.
+MPPOSE_CONV_SHAPES: tuple[tuple[int, int], ...] = (
+    (64, 128), (64, 256), (64, 384),
+    (128, 128), (128, 256), (128, 512), (128, 640), (128, 768),
+    (192, 128), (192, 256), (192, 1152),
+    (256, 128),
+    (320, 128),
+    (384, 128),
+    (512, 128),
+    (576, 128), (576, 256),
+    (704, 128), (704, 256),
+    (768, 128), (768, 256),
+    (1152, 256),
+)
+
+# One table so the three lists cannot be consulted in one place and missed in
+# another. Keyed by the `kind` in npu_targets.json, because that is the spelling
+# the caller uses, and it is what common/consts.CONV_ONLY_KINDS must equal.
+CONV_ONLY_SHAPES: dict[str, tuple[tuple[int, int], ...]] = {
+    "pose": POSE_CONV_SHAPES,
+    "hands": HANDS_CONV_SHAPES,
+    "mppose": MPPOSE_CONV_SHAPES,
+}
+
+
+def conv_stream_order(kind: str) -> list[str]:
+    """Stream names for one conv-only kind, in slot order.
+
+    `conv{K}x{N}` -- no M, for pose's reason: the M is the design's single
+    dispatch chunk and not a property of the convolution.
+    """
+    try:
+        shapes = CONV_ONLY_SHAPES[kind]
+    except KeyError:
+        raise SystemExit(
+            f"{kind!r} is not a conv-only kind. This file has stream sets for "
+            f"{sorted(CONV_ONLY_SHAPES)}; anything else is an embedder, an STT "
+            f"decoder or a classifier and uses the four-stream or seven-stream "
+            f"set. Guessing here would build a design set whose slots no "
+            f"convolution names.") from None
+    return [f"conv{k}x{n}" for k, n in shapes]
+
+
+def conv_shapes_for(kind: str,
+                    m: int = CONV_ONLY_DISPATCH_M) -> dict[str, dict[str, int]]:
+    """M/K/N for one conv-only kind, keyed by conv_stream_order()'s names."""
+    return {n: {"M": m, "K": k, "N": nn}
+            for k, nn in CONV_ONLY_SHAPES[kind]
+            for n in (f"conv{k}x{nn}",)}
+
+
 def mel_proj_shapes(M: int, n_bins: int, n_mels: int,
                     tile_k: int = 64, tile_n: int = 32,
                     n_aie_cols: int = 4) -> dict[str, dict[str, int]]:
@@ -368,11 +460,21 @@ def shapes_for_stream_set(
     if stream_set == "stt":
         order, shapes = list(STT_STREAM_ORDER), stt_shapes_for(
             batch, hidden, intermediate, seq)
-    elif stream_set == "pose":
-        # A pose set's M is the dispatch chunk, not b*seq, so `batch` and `seq`
-        # are read here ONLY to be ignored -- which is why they are not
-        # parameters of pose_shapes_for().
-        order, shapes = pose_stream_order(), pose_shapes_for()
+    elif stream_set in CONV_ONLY_SHAPES:
+        # A conv-only set's M is the dispatch chunk, not b*seq, so `batch` and
+        # `seq` are read here ONLY to be ignored -- which is why they are not
+        # parameters of conv_shapes_for().
+        #
+        # `in CONV_ONLY_SHAPES`, not `== "pose"`. The single-kind spelling sent
+        # `hands` and `mppose` down the `else` branch, so those two targets
+        # silently built the ENCODER's four qkv/attn_out/ffn_up/ffn_down set: a
+        # design that builds, exports, and carries a slot for no convolution in
+        # either network, against which every conv would resolve to nothing at
+        # dispatch time. It was silent because nothing downstream noticed -- the
+        # exporter has no way to ask "does any of this network's convolutions
+        # name one of these slots", and the refusal that would have said so lives
+        # in the runtime, after the export.
+        order, shapes = conv_stream_order(stream_set), conv_shapes_for(stream_set)
     else:
         order, shapes = list(STREAM_ORDER), shapes_for(
             batch, hidden, intermediate, gated, qkv_n, seq)

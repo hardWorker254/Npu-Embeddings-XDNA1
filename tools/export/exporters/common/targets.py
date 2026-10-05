@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 from .consts import (
+    CONV_ONLY_KINDS,
     KNOWN_DATAPATHS,
     KNOWN_DEFAULT_KEYS,
     KNOWN_KINDS,
@@ -135,16 +136,28 @@ def load_targets(path: str | Path) -> dict:
                 raise SystemExit(
                     f"{ctx}: heads*head_dim = {spec['heads'] * spec['head_dim']}"
                     f" is not hidden = {spec['hidden']}")
-        # A POSE target has no hidden width and no FFN. Its streams are twenty-one
-        # convolutions, so there is nothing for `hidden` or `intermediate` to
+        # A CONV-ONLY target has no hidden width and no FFN. Its streams are
+        # convolutions -- twenty-one for pose, twelve for hands, twenty-two for
+        # mppose -- so there is nothing for `hidden` or `intermediate` to
         # describe, and requiring them here would mean writing a number that
-        # nothing reads -- the pose export path builds no eltwise design and no
+        # nothing reads: these export paths build no eltwise design and no
         # LayerNorm, so the only consumer of `hidden` (export_eltwise, reached
-        # only when --npu-ops asks for an op) never runs for it. A required
-        # field whose value is fiction is worse than an absent one, so this is
-        # the one kind that does not carry them, and the check below is what
-        # says so rather than letting a missing key read as 0.
-        if kind != "pose":
+        # only when --npu-ops asks for an op) never runs for them. A required
+        # field whose value is fiction is worse than an absent one.
+        #
+        # THE SET IS CONSTS.CONV_ONLY_KINDS, AND IT IS WRITTEN OUT RATHER THAN
+        # SPELLED `kind != "pose"`. The single-kind spelling was correct for one
+        # architecture and silently wrong for the next two, and because this
+        # function validates the ENTIRE targets file before the caller selects a
+        # target, the blast radius was every export in the repository: from the
+        # hands commit onward, `--target yolov8n-pose` failed with
+        #
+        #     npu_targets.json: models['mediapipe-hands']: missing 'hidden'
+        #
+        # naming a model the caller never asked about. Nothing about that message
+        # points at the row that caused it or at the validation being too narrow,
+        # which is what made it worth finding rather than working around.
+        if kind not in CONV_ONLY_KINDS:
             _require_int(spec, "hidden", ctx)
             _require_int(spec, "intermediate", ctx)
         if not isinstance(spec.get("gated_ffn", False), bool):
@@ -154,7 +167,10 @@ def load_targets(path: str | Path) -> dict:
                 f"{ctx}: gated_ffn is true. Whisper's FFN is a plain GELU MLP; "
                 f"a gated entry here would export a 2*intermediate ffn_up the "
                 f"model does not have.")
-        if kind != "pose":
+        # Same set as above and for the same reason: a fused qkv operand is a
+        # transformer concept, and there is no qkv to fuse in a stack of
+        # convolutions.
+        if kind not in CONV_ONLY_KINDS:
             _require_int(spec, "qkv_n", ctx, allow_none=True)
         if kind == "cls":
             # The attention scale is compiled into Q's weight, and it is

@@ -924,6 +924,77 @@ def _pose_key(decl, conv_out):
          f"heatmap/{NUM_LANDMARKS} channels")
 
 
+def npu_panels(t, pfx, ops, conv_of, weights, device):
+    """Pre-tiled bf16 B panels for the array backend, one per DENSE convolution.
+
+    Returns (panels, streams, (tile_k, tile_n)) where panels maps a convolution
+    INDEX (the `conv` field an op carries) to (ndarray, layout, pk, pn) and
+    streams is the sorted list of distinct padded (K, N) shapes, which is the set
+    tools/export/exporters/gemm_rtp/geometry.py builds a design from.
+
+    WHY ONLY THE DENSE ONES, AND IT IS NOT A SUBCASE
+    -------------------------------------------------
+    62 of this container's 161 convolutions are depthwise, and a depthwise filter
+    reduces within ONE channel: its K is kh*kw and its N is 1, so there is no
+    [M, N] GEMM in it to dispatch and a stream named for it would be a name with
+    nothing behind it. They are counted, not converted, and the runtime keeps
+    them on the host whatever a design set says. That share -- 77.2M MAC, 12.3 %
+    of the container -- is one of the two numbers in the arch=8 registry row.
+
+    EVERYTHING ELSE HERE IS arch=6's npu_panels(), AND IT IS COPIED RATHER THAN
+    REUSED ON PURPOSE. pose.py's takes a traced graph and a conv-name map; this
+    container stores two graphs under two PREFIXES in one file, so the signature
+    cannot match without the prefix threaded through a shared helper that
+    arch=6's caller does not have. The arithmetic that decides a panel -- pad K
+    up to tile_k, pad N up to tile_n*COLS, and TRANSPOSE the weight -- is the
+    part that must be identical, and it is the part transcribed. The transpose
+    in particular is not a detail: a reshape here has the right SIZE, the right
+    tileability and a matching layout_hash, and produces a transposed weight, so
+    the array returns a network that finds hundreds of people in a photograph
+    with three. pose.py's comment on it is the reason this paragraph exists.
+    """
+    from npue import (cols_for_device, gemm_b_layout, mac_for_device,  # noqa: E402
+                      tile_b)
+
+    TILE_K, TILE_N = 64, 32
+    mac_s, mac_t = mac_for_device(device, "BF16")
+    # N pads to tile_n * COLS. On npu1 that is 32*4 = 128, and this network's
+    # output channel counts are not all multiples of it -- 384, 640 and 1152
+    # appear and pad up, while 256 is already a multiple. Padding to tile_n alone
+    # would store a 32-wide panel for a design that reads 128, and the columns
+    # past the end are whatever follows in the container's data region.
+    N_MULT = TILE_N * cols_for_device(device)
+    layout = gemm_b_layout(TILE_K, TILE_N, mac_s, mac_t)
+    panels, streams = {}, set()
+    # DENSE ONLY, AND THE FILTER IS `op == "conv"` RATHER THAN `group == 1` BECAUSE
+    # THE FIRST VERSION OF THIS FUNCTION DID NOT FILTER AT ALL, and the container
+    # it produced carried TWENTY-SIX streams where the design has TWENTY-TWO. The
+    # four extras -- conv64x512, conv64x640, conv64x768, conv64x1152 -- are every
+    # depthwise convolution in the landmark network: their Cin is 1 (per group),
+    # so K pads from 3x3=9 up to 64, and N is their channel count. A depthwise
+    # filter has no [M, N] GEMM in it, so those four slots were names with
+    # nothing behind them, built by indexing `conv_of` when the caller had
+    # already said which ops were dense.
+    #
+    # It was caught by tools/verify/verify_pose_streamset.py comparing the
+    # container's npu_streams against geometry.py's list, in both directions --
+    # which is that tool's whole reason for existing, applied to the container
+    # rather than to a design set.
+    dense = {o["conv"] for o in ops if o["op"] == "conv"}
+    for idx in sorted(dense):
+        w = weights[f"{pfx}.conv.{idx}.w"]
+        cout, cin, kh, kw = w.shape
+        K, N = cin * kh * kw, cout
+        pk = ((K + TILE_K - 1) // TILE_K) * TILE_K
+        pn = ((N + N_MULT - 1) // N_MULT) * N_MULT
+        b = np.zeros((pk, pn), dtype=np.float32)
+        b[:K, :N] = w.reshape(N, K).T
+        panels[idx] = (tile_b(b, TILE_K, TILE_N, s=mac_s, t=mac_t), layout,
+                       pk, pn)
+        streams.add((pk, pn))
+    return panels, sorted(streams), (TILE_K, TILE_N)
+
+
 def mac_split(t, conv_of):
     """MACs the array could take (dense) and MACs it cannot (depthwise)."""
     dense = dw = 0
@@ -950,7 +1021,8 @@ def mac_split(t, conv_of):
     return dense, dw, shapes
 
 
-def pack_mppose(det_onnx, pose_onnx, out_path, dry_run=False):
+def pack_mppose(det_onnx, pose_onnx, out_path, dry_run=False, device=None,
+                npu=False):
     td = trace("det", onnx.load(str(det_onnx)))
     tp = trace("pose", onnx.load(str(pose_onnx)))
 
@@ -1073,10 +1145,64 @@ def pack_mppose(det_onnx, pose_onnx, out_path, dry_run=False):
               "conv" if ".conv." in name else "prelu", list(arr.shape))
     w.add("det_anchors", anchors.astype(np.float32), "F32", "anchors",
           list(anchors.shape))
+
+    if npu:
+        # A device is REQUIRED and not defaulted. `cols_for_device(None)` returns
+        # a column count for a device nobody named, and N pads to
+        # tile_n * cols -- so a container built that way stores panels narrower
+        # than the design that will read them, the layout_hash still matches
+        # because both sides derive it from the same constants, and the array
+        # multiplies whatever follows in the data region. Refused here rather
+        # than guessed, for the same reason arch=6's --npu path is.
+        if device is None:
+            _die("--npu needs a device: pass --device npu1 (or npu2). N pads to "
+                 "tile_n*cols and cols is a property of the array, so a panel "
+                 "built without one is not a panel the design can read.")
+        from npue import to_bf16_bits  # noqa: E402
+        # BOTH graphs' panels, because both graphs' dense convolutions dispatch.
+        # A stream set for one network and not the other is a design whose slots
+        # half match, which resolves for the detector and not for the landmarks.
+        pd, sd, tile = npu_panels(td, "det", ops_d, conv_d, w_d, device)
+        pp, sp, tile2 = npu_panels(tp, "pose", ops_p, conv_p, w_p, device)
+        if tile != tile2:
+            _die(f"the two networks were tiled differently ({tile} and {tile2}), "
+                 f"so one container would carry two panel layouts under one "
+                 f"design's layout_hash")
+        allstreams = sorted(set(sd) | set(sp))
+        name_of = {k: f"conv{k[0]}x{k[1]}" for k in allstreams}
+        for pfx, ops, panels in (("det", ops_d, pd), ("pose", ops_p, pp)):
+            for o in ops:
+                if o["op"] != "conv":
+                    continue
+                i = o["conv"]
+                panel, layout, pk, pn = panels[i]
+                w.add(f"{pfx}.conv.{i}.btile", to_bf16_bits(panel), "BF16",
+                      "gemm_b", [pk, pn], layout=layout,
+                      padded_shape=[pk, pn])
+                o["stream"] = name_of[(pk, pn)]
+        # Into w.config and NOT into the local `config` dict: Writer.__init__ took
+        # a copy of `config` when it was constructed above, so a key set on the
+        # local dict now is a dict the file never sees. That mistake is written
+        # down at length in tools/pack/packers/pose.py, where every --npu
+        # container was once shipped with no npu_streams at all.
+        w.config["npu_streams"] = json.dumps(
+            [{"op": name_of[k], "k": k[0], "n": k[1], "tile_k": tile[0],
+              "tile_n": tile[1]} for k in allstreams],
+            separators=(",", ":"))
+        # Re-serialised because the stream names above went into `ops` AFTER the
+        # config dict was built, so the strings the writer already holds do not
+        # have them.
+        w.config["det_graph"] = json.dumps(ops_d, separators=(",", ":"))
+        w.config["pose_graph"] = json.dumps(ops_p, separators=(",", ":"))
+
     w.write(out_path)
     size = os.path.getsize(out_path)
     print(f"wrote {out_path}  ({size / 1e6:.1f} MB, arch={ARCH_STRING})")
     print(f"  {len(both)} weight tensors, {anchors.shape[0]} anchors")
+    if npu:
+        print(f"  npu        {len(pd) + len(pp)} pre-tiled bf16 panels over "
+              f"{len(allstreams)} padded (K, N) shapes, tile {tile[0]}x{tile[1]}, "
+              f"device {device}")
 
 
 def main():
@@ -1085,8 +1211,19 @@ def main():
     ap.add_argument("pose_onnx")
     ap.add_argument("out")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--npu", action="store_true",
+                    help="add the pre-tiled bf16 B panels and the stream table, "
+                         "so `--npu-ops conv` has slots to dispatch into. OFF by "
+                         "default because there is no design set for arch=8 on "
+                         "this machine, and a container with panels and nothing "
+                         "to dispatch into is 5x the size for no path.")
+    ap.add_argument("--device", default=None,
+                    help="which array the panels are tiled for (npu1, npu2). "
+                         "Required with --npu, because N pads to tile_n*cols and "
+                         "cols is a property of the array.")
     a = ap.parse_args()
-    pack_mppose(a.det_onnx, a.pose_onnx, a.out, dry_run=a.dry_run)
+    pack_mppose(a.det_onnx, a.pose_onnx, a.out, dry_run=a.dry_run,
+                device=a.device, npu=a.npu)
 
 
 if __name__ == "__main__":

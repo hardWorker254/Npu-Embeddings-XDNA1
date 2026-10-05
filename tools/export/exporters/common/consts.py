@@ -180,5 +180,28 @@ STT_MODEL_KEYS = {"kind", "heads", "head_dim", "enc_layers", "dec_layers",
 # row reads as nothing to report rather than as a blocked op.
 KNOWN_KINDS = {"gemm_rtp", "stt", "cls", "pose", "hands", "mppose"}
 
+# The kinds whose streams are GEMM PAIRS OF CONVOLUTIONS and which therefore have
+# no hidden width, no FFN and no fused qkv operand. Three of the six kinds are in
+# this set, and getting the list wrong is not a cosmetic slip:
+#
+#   * Get it too SHORT -- which is what happened, and it is the bug this comment
+#     exists to prevent -- and a conv-only entry is asked for a `hidden` it does
+#     not have. That is not one bad model, it is EVERY export failing:
+#     export_gemm_rtp.py validates the whole targets file before it looks at
+#     --target, so a single `mediapipe-hands` row with no `hidden` made
+#     `--target yolov8n-pose`, `--target vit-base-patch16-224` and every other
+#     row exit non-zero with a message naming a model the caller did not ask
+#     about. It did so for every target from the hands commit onward.
+#
+#   * Get it too LONG -- exempt an embedder -- and a transformer target silently
+#     exports with no hidden width, which is a design set that builds and runs
+#     and is wrong.
+#
+# So the test is asked rather than assumed: a kind is here iff its rows are
+# convolutions. The membership is checked against the stream sets that
+# geometry.py actually has, by verify_pose_streamset.py, so this list and that
+# one cannot drift apart silently.
+CONV_ONLY_KINDS = {"pose", "hands", "mppose"}
+
 DEFAULT_CACHE_ROOT = Path.home() / ".npu" / "cache"
 
