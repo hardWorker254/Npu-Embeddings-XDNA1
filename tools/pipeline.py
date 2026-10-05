@@ -135,6 +135,20 @@ TOOLSET = [
     ("verify_npue_nomic", "verify/verify_npue_nomic.py",
      "the arch=2 gate for the nomic container",
      ("numpy", "container", "reference")),
+    # The four-spelling check for the conv-only stream sets, and the gate that
+    # caught the encoder-set bug: it compares geometry.py, npu_targets.json, the
+    # design set and the packed container, in both directions, for pose, hands
+    # and mppose. It is in the `container` tier rather than `cheap` because one of
+    # the four is a container and the whole claim is that all four agree.
+    #
+    # It takes a design directory and a container as arguments, so unlike every
+    # other gate here it cannot be run without naming both. That is stated rather
+    # than defaulted: a design set this machine cannot build is not a thing to
+    # synthesise, and the toolchain that builds one is not installed here.
+    ("verify_conv_streamset", "verify/verify_pose_streamset.py",
+     "the conv-only stream sets against the targets file, a design set and the "
+     "packed container, for pose, hands and mppose",
+     ("numpy", "container", "designs")),
     ("verify_vit", "verify/verify_vit.py",
      "the arch=5 gate: pool + attention + pre-LN + head, both schemes",
      ("numpy", "torch", "transformers", "container", "checkpoint")),
@@ -313,7 +327,7 @@ GATE_TIERS = {
     # packed correctly cannot be run by the person who packed it.
     "container": ("verify_onnx_reader", "verify_npue", "verify_pack_parity",
                   "verify_npue_nomic", "verify_vit", "verify_hands",
-                  "verify_mppose"),
+                  "verify_mppose", "verify_conv_streamset"),
     # verify_npu_op_matrix is here rather than in "cheap" for the same reason
     # verify_design_numerics is: it runs every registry cell against the BINARY,
     # so it needs the build and the device, and its other claims (the registry's
