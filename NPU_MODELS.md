@@ -21,32 +21,32 @@ Tally over the 144 cells:
 - **82** **yes** -- runs on the array today
 - **1** already -- the work is already dispatched without a code, and the code is refused
 - **0** no code -- the model has the operation, no array branch reaches it
-- **4** blocked -- cannot be moved on this board; the reason is in NPU_OPS.md
-- **55** - -- the model has no such operation
+- **4** impossible -- cannot be moved on this board; the reason is in NPU_OPS.md
+- **55** no -- the model has no such operation
 - **2** **gated** -- this model's FFN has no standalone activation pass -- see below
 
 ## The matrix
 
 | model | `gelu` | `layn` | `softm` | `conv` | `attn` | `mproj` | `fft` | `logit` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `all-MiniLM-L6-v2` | **yes** | **yes** | **yes** | - | **yes** | - | - | - |
-| `bge-small-en-v1.5` | **yes** | **yes** | **yes** | - | **yes** | - | - | - |
-| `bge-micro-v2` | **yes** | **yes** | **yes** | - | **yes** | - | - | - |
-| `bge-base-en-v1.5` | **yes** | **yes** | **yes** | - | **yes** | - | - | - |
-| `bge-large-en-v1.5` | **yes** | **yes** | **yes** | - | **yes** | - | - | - |
-| `nomic-embed-text-v1.5` | **gated** | **yes** | **yes** | - | **yes** | - | - | - |
-| `embeddinggemma-300m` | blocked | blocked | **yes** | - | **yes** | - | - | - |
-| `gte-multilingual-base` | **gated** | **yes** | **yes** | - | **yes** | - | - | - |
+| `all-MiniLM-L6-v2` | **yes** | **yes** | **yes** | no | **yes** | no | no | no |
+| `bge-small-en-v1.5` | **yes** | **yes** | **yes** | no | **yes** | no | no | no |
+| `bge-micro-v2` | **yes** | **yes** | **yes** | no | **yes** | no | no | no |
+| `bge-base-en-v1.5` | **yes** | **yes** | **yes** | no | **yes** | no | no | no |
+| `bge-large-en-v1.5` | **yes** | **yes** | **yes** | no | **yes** | no | no | no |
+| `nomic-embed-text-v1.5` | **gated** | **yes** | **yes** | no | **yes** | no | no | no |
+| `embeddinggemma-300m` | impossible | impossible | **yes** | no | **yes** | no | no | no |
+| `gte-multilingual-base` | **gated** | **yes** | **yes** | no | **yes** | no | no | no |
 | `whisper-tiny` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
 | `whisper-base` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
 | `whisper-small` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
 | `whisper-medium` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
 | `whisper-large-v3` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
 | `whisper-large-v3-turbo` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
-| `vit-base-patch16-224` | **yes** | **yes** | **yes** | already | **yes** | - | - | blocked |
-| `yolov8n-pose` | - | - | - | **yes** | - | - | - | - |
-| `mediapipe-hands` | - | - | - | blocked | - | - | - | - |
-| `mediapipe-pose` | - | - | - | **yes** | - | - | - | - |
+| `vit-base-patch16-224` | **yes** | **yes** | **yes** | already | **yes** | no | no | impossible |
+| `yolov8n-pose` | no | no | no | **yes** | no | no | no | no |
+| `mediapipe-hands` | no | no | no | impossible | no | no | no | no |
+| `mediapipe-pose` | no | no | no | **yes** | no | no | no | no |
 
 ## Where these two models differ from their kind
 

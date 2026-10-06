@@ -62,12 +62,27 @@ GATED = "gated"
 
 # Kind -> (status, mark en, mark ru). The first four come from the registry and
 # their words are fixed there; GATED's two words are this file's.
+#
+# THE THREE WORDS A CELL CAN CARRY, AND WHY `ABSENT` IS NOW A WORD AND NOT A DASH.
+# The table answers one question -- "может ли эта модель отправить эту операцию на
+# массив" -- and a reader who has to map "-" onto "нет" is doing a step the table
+# could have done for them. A dash in a table also reads as "empty" or "not
+# applicable", and `absent` means neither: it means the model HAS no such
+# operation, which is a fact about the checkpoint rather than a gap in the table.
+# `есть` and `нет` are the two halves of that fact and they are both now said.
+#
+# `ON_ARRAY` KEPT ITS OWN WORD, and this is the one cell where a three-value
+# scheme would have to lie. `on_array` means the work is ALREADY dispatched with no
+# code, so `--npu-ops conv` for that model is REFUSED BY NAME -- calling the cell
+# `есть` would invite exactly the command that fails, and calling it `невозможно`
+# would say the board cannot do it when it is doing it. One cell out of 144 keeps
+# a fourth word, and that is cheaper than 143 correct cells plus one misleading.
 MARKS = {
-    npu_ops.HONOURS: ("**yes**", "**да**"),
-    npu_ops.ON_ARRAY: ("already", "уже"),
-    npu_ops.UNIMPLEMENTED: ("no code", "нет кода"),
-    npu_ops.BLOCKED: ("blocked", "невозможно"),
-    npu_ops.ABSENT: ("-", "—"),
+    npu_ops.HONOURS: ("**yes**", "**есть**"),
+    npu_ops.ON_ARRAY: ("already", "**уже**"),
+    npu_ops.UNIMPLEMENTED: ("no code", "**нет**"),
+    npu_ops.BLOCKED: ("impossible", "**невозможно**"),
+    npu_ops.ABSENT: ("no", "нет"),
     GATED: ("**gated**", "**гейт**"),
 }
 
