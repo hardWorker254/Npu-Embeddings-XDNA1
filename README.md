@@ -132,7 +132,11 @@ runtime/build/npuembeddings serve all-MiniLM-L6-v2
 runtime/build/npuembeddings embed all-MiniLM-L6-v2 texts.txt out.f32
 ```
 
-`serve` downloads and verifies the weights on first use. Test it:
+`serve` downloads and verifies the model's config and tokenizer on first use.
+**It does not download the ONNX graph** — you place that yourself, and
+[`models/DOWNLOADS.md`](models/DOWNLOADS.md) says where each of them comes from,
+which eight of the eighteen can be fetched as a ready export and which ten have
+none upstream at all. Test it:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/v1/embeddings \

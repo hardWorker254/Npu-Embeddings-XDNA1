@@ -110,7 +110,15 @@ REPO = os.path.abspath(os.path.join(_HERE, "..", ".."))
 MODEL_DIR = os.path.join(REPO, "models", "mediapipe-pose")
 DET_ONNX = os.path.join(MODEL_DIR, "person_detection_mediapipe_2023mar.onnx")
 POSE_ONNX = os.path.join(MODEL_DIR, "pose_estimation_mediapipe_2023mar.onnx")
-CONTAINER = os.path.join(MODEL_DIR, "mppose.npue")
+
+# THE INSTALLED CONTAINER, AT THE FLAT PATH EVERY OTHER MODEL USES -- and the
+# reason is written out at length in tools/verify/verify_hands.py, where the same
+# move happened for arch=7. Short version: it used to be MODEL_DIR/mppose.npue,
+# i.e. inside models/mediapipe-pose/, while every table in this binary globs
+# models/*.npue, so the container existed and no table could see it.
+CONTAINER_DEFAULT = os.path.join(REPO, "models", "mediapipe-pose.npue")
+
+CONTAINER = CONTAINER_DEFAULT
 # The SAME container with the pre-tiled bf16 B panels staged, which is what the
 # array path dispatches against. It is a separate file on purpose: staging the
 # panels takes it from 18.3 MB to 29.9 MB, and reusing one path for both would
@@ -942,8 +950,7 @@ def main():
         description="verify an arch=8 MediaPipe Pose container and the C++ "
                     "runtime built from it")
     ap.add_argument("--container", default=None,
-                    help="the .npue to check (default: models/mediapipe-pose/"
-                         "mppose.npue)")
+                    help="the .npue to check (default: models/mediapipe-pose.npue)")
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--inject", action="store_true",
                     help="break this file's reader six ways and check that "

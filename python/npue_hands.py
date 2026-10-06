@@ -85,7 +85,7 @@ a binding and not a network.
     from npue_hands import HandLandmarker, HandLandmarkerOptions
 
     with HandLandmarker.create_from_options(HandLandmarkerOptions(
-            container="models/mediapipe-hands/hands.npue")) as hl:
+            container="models/mediapipe-hands.npue")) as hl:
         for hand in hl.detect("hand.jpg").landmarks:
             print(hand[0].x, hand[0].y, hand[0].z)   # wrist, z==0.0 by definition
 """

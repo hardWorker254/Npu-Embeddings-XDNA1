@@ -184,6 +184,9 @@ TOOLSET = [
     ("verify_cli_flags", "verify/verify_cli_flags.py",
      "the CLI's flag table against the flags the runtime reads off argv",
      ()),
+    ("verify_downloads_doc", "verify/verify_downloads_doc.py",
+     "models/DOWNLOADS*.md against its data file AND every CHECKPOINT.json",
+     ("git",)),
     ("parity_exporters", "verify/parity_exporters.py",
      "the split exporters against the monoliths in git",
      ("git",)),
@@ -236,9 +239,9 @@ ARTEFACTS = [
     ("runtime", "the npuembeddings executable",
      "cmake -S runtime -B runtime/build && cmake --build runtime/build"),
     ("hands_models", "the arch=7 checkpoint pair, the test photograph and "
-     "hands.npue under models/mediapipe-hands/",
+     "mediapipe-hands.npue,"
      "python tools/pipeline.py run pack_npue -- --hands-onnx "
-     "models/mediapipe-hands --out models/mediapipe-hands/hands.npue"),
+     "models/mediapipe-hands --out models/mediapipe-hands.npue"),
     # arch=8's pair, and the photograph the golden was recorded on. The
     # photograph is NOT in this list and is NOT meant to be fetched with the
     # checkpoints: it lives in docs/, which is tracked, because it is the golden's
@@ -246,10 +249,10 @@ ARTEFACTS = [
     # container is here, and the golden is tracked -- the same split arch=7 has,
     # with the image moved because opencv_zoo does not ship raw input images at
     # all and this one came from elsewhere.
-    ("mppose_models", "the arch=8 checkpoint pair and mppose.npue under "
+    ("mppose_models", "the arch=8 checkpoint pair and mediapipe-pose.npue, "
      "models/mediapipe-pose/ (the golden's image is in docs/, not here)",
      "python tools/pipeline.py run pack_npue -- --mppose-onnx "
-     "models/mediapipe-pose --out models/mediapipe-pose/mppose.npue"),
+     "models/mediapipe-pose --out models/mediapipe-pose.npue"),
     ("npu", "an XRT device (xrt-smi sees it)",
      "the Ryzen AI driver; without it only the host-side gates can run"),
 ]
@@ -316,7 +319,15 @@ GATE_TIERS = {
               # is a command that fails on a flag it spelled correctly -- which
               # is how it broke 21 of them, including the one verify_pack_parity
               # passes and the one tools/release_benchmark.ps1 passes.
-              "verify_cli_flags"),
+              "verify_cli_flags",
+              # Reads no container and needs no device: it compares the two
+              # generated models/DOWNLOADS*.md against tools/data/model_sources.json
+              # AND against every models/<name>/CHECKPOINT.json, so a download
+              # index cannot name a repository, a file or a digest that the
+              # pins contradict. It is here because the whole point is to run
+              # before anything is built or packed -- a reader who wants to know
+              # where the files come from should not have to have a container.
+              "verify_downloads_doc"),
     # "container" reads checkpoints and containers. verify_onnx_reader belongs
     # here rather than in "cheap" because both of its claims need one: the
     # per-model read needs an ONNX file, and the golden that proves the reader
@@ -412,7 +423,7 @@ def _have(kind):
         d = REPO / "models" / "mediapipe-hands"
         want = ["palm_detection_mediapipe_2023feb.onnx",
                 "handpose_estimation_mediapipe_2023feb.onnx",
-                "hand_plain.png", "hands.npue"]
+                "hand_plain.png", "mediapipe-hands.npue"]
         missing_ = [w for w in want if not (d / w).exists()]
         return (not missing_), (
             f"missing in models/mediapipe-hands/: {', '.join(missing_)}\n"
@@ -421,7 +432,7 @@ def _have(kind):
             f"from opencv_zoo. The golden is NOT in that list: it is tracked, at "
             f"reference/goldens/hands_mediapipe.json. Then "
             f"`python tools/pipeline.py run pack_npue -- "
-            f"--hands-onnx models/mediapipe-hands --out models/mediapipe-hands/hands.npue`")
+            f"--hands-onnx models/mediapipe-hands --out models/mediapipe-hands.npue`")
     if kind == "mppose_models":
         # The arch=8 pair, both FLOAT files, and the container. The image is NOT
         # in this list: it is docs/bus.jpg, which is TRACKED, because it is the
@@ -430,7 +441,7 @@ def _have(kind):
         # photograph.
         d = REPO / "models" / "mediapipe-pose"
         want = ["person_detection_mediapipe_2023mar.onnx",
-                "pose_estimation_mediapipe_2023mar.onnx", "mppose.npue"]
+                "pose_estimation_mediapipe_2023mar.onnx", "mediapipe-pose.npue"]
         missing_ = [w for w in want if not (d / w).exists()]
         img = REPO / "docs" / "bus.jpg"
         if not img.exists():
@@ -446,7 +457,7 @@ def _have(kind):
             f"and mppose_pose.json, and their recorder is NOT in this repository "
             f"so that no gate can rewrite them. Then "
             f"`python tools/pipeline.py run pack_npue -- --mppose-onnx "
-            f"models/mediapipe-pose --out models/mediapipe-pose/mppose.npue`")
+            f"models/mediapipe-pose --out models/mediapipe-pose.npue`")
     if kind == "checkpoint":
         found = [p for p in (REPO / "models").glob("*")
                  if (p / "config.json").exists()] if (REPO / "models").is_dir() else []

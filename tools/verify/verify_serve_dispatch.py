@@ -118,7 +118,7 @@ ARCHES = {
     # CHECKPOINT.json), so a checkout that has not packed it SKIPS, like every
     # other missing container here.
     "hands": {
-        "container": "models/mediapipe-hands/hands.npue",
+        "container": "models/mediapipe-hands.npue",
         "path": None,
         "kind": "hands",
         "verb": "serve",

@@ -174,7 +174,7 @@ FIXTURES = {
     # path that does not exist and is not meant to: hands_mode refuses
     # --artifacts by name, so there is no directory for it to name.
     "hands": dict(kind="hands", target=None,
-                  container="models/mediapipe-hands/hands.npue",
+                  container="models/mediapipe-hands.npue",
                   artifacts="runtime/artifacts/mediapipe-hands",
                   argv=["hands"], input="image"),
     # arch=8, for the same reason and with the same shape: a declaration of what
@@ -185,7 +185,7 @@ FIXTURES = {
     # `pose`: two architectures can both be called pose and share no flag, no
     # threshold and no head.
     "mppose": dict(kind="mppose", target=None,
-                   container="models/mediapipe-pose/mppose.npue",
+                   container="models/mediapipe-pose.npue",
                    artifacts="runtime/artifacts/mediapipe-pose",
                    argv=["mppose"], input="image"),
 }

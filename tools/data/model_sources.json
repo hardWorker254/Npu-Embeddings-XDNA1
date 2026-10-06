@@ -1,0 +1,311 @@
+{
+  "_comment": [
+    "Where each model's files come from, and -- the part that matters -- WHICH",
+    "OF THEM CAN ACTUALLY BE DOWNLOADED AS AN ONNX EXPORT.",
+    "",
+    "READ models/DOWNLOADS.md for the generated document; this file is its only",
+    "source, so the document cannot drift from this. tools/gen_downloads_doc.py",
+    "reads this AND models/<name>/CHECKPOINT.json, and REFUSES to write the",
+    "document if the two disagree about a digest, a repo or a file list.",
+    "",
+    "THE CENTRAL FACT, AND THE ONE NOBODY HAD WRITTEN DOWN. SEVENTEEN of these",
+    "eighteen models have a checkpoint on HuggingFace; yolov8n-pose does not.",
+    "EIGHT of them ALSO publish an ONNX export you can download directly. THE",
+    "OTHER TEN DO NOT -- there is no onnx/ directory in the repository at all, and",
+    "asking for one returns 404.",
+    "That is the real reason BUILD.md 2.2 says 'weights are not fetched, you",
+    "place them': for ten of the eighteen there is nothing to fetch, because the",
+    "graph has to be produced by exporting the checkpoint. MEASURED on",
+    "verified_on by listing each repository's files; the `verified` field below",
+    "records what was actually DOWNLOADED AND HASHED, which is a stronger check",
+    "than a listing, because a listing proves a name exists and not that the bytes",
+    "behind it are the bytes this tree was built against.",
+    "",
+    "THE COUNTS ABOVE ARE NOT TRUSTED: gen_downloads_doc.py recomputes both from",
+    "the rows below and prints them, so if a row is added or removed the prose",
+    "",
+    "digest_kind says which of two DIFFERENT conventions that model's",
+    "CHECKPOINT.json uses, because they are not interchangeable:",
+    "  model_digest -- tools/lib/onnx_weights.py model_digest(): sha256 over",
+    "                 (basename, NUL, sha256-of-file, LF) for each ONNX source",
+    "                 file, combined in a fixed order. NOT the sha256 of any one",
+    "                 file. This is what the single-string `sha256` in every",
+    "                 transformer CHECKPOINT.json holds.",
+    "  file_sha256  -- a LIST of plain per-file sha256s, one per entry in `file`.",
+    "                 Only the two MediaPipe models write this shape.",
+    "Reading one as the other is a silent verification bypass: `1fd2e85d...` (what",
+    "bge-small-en-v1.5 records) is NOT the sha256 of its model.onnx, whose actual",
+    "hash is `828e1496...` -- both were measured here.",
+    "",
+    "`onnx` is null when no ONNX export exists upstream. `export_note` then says",
+    "what a reader has to do instead, and it is deliberately NOT a command this",
+    "tree can run: no exporter for these nine lives here, and writing one is a",
+    "separate piece of work from listing where the files are."
+  ],
+  "verified_on": "2026-10-06",
+  "models": {
+    "all-MiniLM-L6-v2": {
+      "repo": "sentence-transformers/all-MiniLM-L6-v2",
+      "license": "apache-2.0",
+      "license_source": "huggingface license: tag",
+      "digest_kind": "model_digest",
+      "onnx": [
+        {
+          "repo": "sentence-transformers/all-MiniLM-L6-v2",
+          "file": "onnx/model.onnx",
+          "bytes": 90405214
+        }
+      ],
+      "verified": "downloaded 90,405,214 bytes and hashed: byte-identical to models/all-MiniLM-L6-v2/onnx/model.onnx",
+      "sha256_file": "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452"
+    },
+    "bge-small-en-v1.5": {
+      "repo": "BAAI/bge-small-en-v1.5",
+      "license": "mit",
+      "license_source": "huggingface license: tag",
+      "digest_kind": "model_digest",
+      "onnx": [
+        {
+          "repo": "BAAI/bge-small-en-v1.5",
+          "file": "onnx/model.onnx",
+          "bytes": 133093490
+        }
+      ],
+      "verified": "downloaded 133,093,490 bytes and hashed: byte-identical to models/bge-small-en-v1.5/onnx/model.onnx",
+      "sha256_file": "828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35"
+    },
+    "bge-micro-v2": {
+      "repo": "TaylorAI/bge-micro-v2",
+      "license": "mit",
+      "license_source": "huggingface license: tag",
+      "digest_kind": "model_digest",
+      "onnx": [
+        {
+          "repo": "TaylorAI/bge-micro-v2",
+          "file": "onnx/model.onnx",
+          "bytes": 69035106
+        }
+      ],
+      "verified": "downloaded 69,035,106 bytes and hashed: byte-identical to models/bge-micro-v2/onnx/model.onnx",
+      "sha256_file": "9f705befe60d00ca3d8d14c9dd61a3ecfca9f1920a39fbc4a5b056c0ccd977d4"
+    },
+    "bge-base-en-v1.5": {
+      "repo": "BAAI/bge-base-en-v1.5",
+      "license": "mit",
+      "license_source": "huggingface license: tag",
+      "digest_kind": "model_digest",
+      "onnx": [
+        {
+          "repo": "BAAI/bge-base-en-v1.5",
+          "file": "onnx/model.onnx",
+          "bytes": 435811539
+        }
+      ],
+      "verified": "downloaded 435,811,539 bytes and hashed: byte-identical to models/bge-base-en-v1.5/onnx/model.onnx",
+      "sha256_file": "9bc579acdba21c253c62a9bf866891355a63ffa3442b52c8a37d75b2ccb91848"
+    },
+    "bge-large-en-v1.5": {
+      "repo": "BAAI/bge-large-en-v1.5",
+      "license": "mit",
+      "license_source": "huggingface license: tag",
+      "digest_kind": "model_digest",
+      "onnx": [
+        {
+          "repo": "BAAI/bge-large-en-v1.5",
+          "file": "onnx/model.onnx",
+          "bytes": 1336854281
+        }
+      ],
+      "verified": "downloaded 1,336,854,281 bytes (1.34 GB) and hashed: byte-identical to models/bge-large-en-v1.5/onnx/model.onnx. This was the last of the eight left unproven, and it is the largest file in the table -- which is why it was last rather than first.",
+      "sha256_file": "69ed3f810d3b6d13f70dff9ca89966f39c0a0e877fb88211be7bcc070df2a2ce"
+    },
+    "embeddinggemma-300m": {
+      "repo": "google/embeddinggemma-300m",
+      "license": "gemma",
+      "license_source": "huggingface license: tag; Google's own repository",
+      "digest_kind": "model_digest",
+      "onnx": null,
+      "onnx_checked": [
+        "google/embeddinggemma-300m",
+        "unsloth/embeddinggemma-300m"
+      ],
+      "export_note": "Neither repository has an onnx/ directory -- checked by listing both. Google publishes three weight files and no export.",
+      "gated": true,
+      "repo_disagreement": {
+        "what": "models/embeddinggemma-300m/CHECKPOINT.json records `unsloth/embeddinggemma-300m`, while runtime/src/common/hub.cpp's catalogue fetches `google/embeddinggemma-300m`. The container's `source_repo` says `unsloth/...`.",
+        "why_it_matters": "The two are NOT interchangeable. Google's repository is GATED -- it needs HF_TOKEN and a licence accepted -- and hub.cpp fails closed rather than falling back to a mirror (see CatalogEntry::gated). The unsloth repository is an ungated copy of the same weights, so a reader who follows CHECKPOINT.json and a reader who runs `serve` fetch from different places, and only one of them needs a token.",
+        "which_is_cited_here": "google/embeddinggemma-300m, because that is what the executable fetches and what the licence belongs to. The ungated mirror is named in the row too, because a reader without a token needs it and should be told that is what it is."
+      }
+    },
+    "gte-multilingual-base": {
+      "repo": "Alibaba-NLP/gte-multilingual-base",
+      "license": "apache-2.0",
+      "license_source": "huggingface license: tag",
+      "digest_kind": "model_digest",
+      "onnx": null,
+      "onnx_checked": [
+        "Alibaba-NLP/gte-multilingual-base"
+      ],
+      "export_note": "No onnx/ directory -- the repository has one weight file and no export.",
+      "pin_lives_in": "models/gte-multilingual-base/CHECKPOINT.json has `sha256: null`, and the pin is not absent: models/gte-multilingual-base.npue carries `source_sha256` = c703273702a2127620ddbd0a4ec22402c8c7ab3c... , which is model_digest() of the local export. NOT verified against HuggingFace, because there is no export up there to verify against -- the bytes are pinned to this machine's copy and to nothing else."
+    },
+    "nomic-embed-text-v1.5": {
+      "repo": "nomic-ai/nomic-embed-text-v1.5",
+      "license": "apache-2.0",
+      "license_source": "huggingface license: tag",
+      "digest_kind": "model_digest",
+      "onnx": [
+        {
+          "repo": "nomic-ai/nomic-embed-text-v1.5",
+          "file": "onnx/model.onnx",
+          "bytes": 547310275
+        }
+      ],
+      "verified": "downloaded 547,310,275 bytes and hashed: byte-identical to models/nomic-embed-text-v1.5/onnx/model.onnx",
+      "sha256_file": "147d5aa88c2101237358e17796cf3a227cead1ec304ec34b465bb08e9d952965",
+      "pin_lives_in": "models/nomic-embed-text-v1.5/CHECKPOINT.json has `sha256: null`, but the pin is NOT absent: models/nomic-embed-text-v1.5.npue carries `source_sha256` = 12ce232f57cfbc0ab9258835dec6e5a105b88c7405dcefeec70facf3a3549b29, which is model_digest() of models/nomic-embed-text-v1.5/onnx/model.onnx -- and the downloaded export hashed byte for byte against that local file. So this model is pinned twice over, in two files, by two different mechanisms."
+    },
+    "whisper-tiny": {
+      "repo": "openai/whisper-tiny",
+      "license": "apache-2.0",
+      "license_source": "huggingface license: tag",
+      "digest_kind": "model_digest",
+      "onnx": null,
+      "onnx_checked": [
+        "openai/whisper-tiny"
+      ],
+      "export_note": "No onnx/ directory. CHECKPOINT.json's `file` list says `onnx/encoder_model.onnx` and `onnx/decoder_model.onnx`, and BOTH RETURN 404 upstream -- the list records what THIS repository's export was called, not where to fetch it. Read the two `file` entries as local paths to create, not as URLs."
+    },
+    "whisper-base": {
+      "repo": "openai/whisper-base",
+      "license": "apache-2.0",
+      "license_source": "huggingface license: tag",
+      "digest_kind": "model_digest",
+      "onnx": null,
+      "onnx_checked": [
+        "openai/whisper-base"
+      ],
+      "export_note": "No onnx/ directory; the `file` entries 404 upstream. See whisper-tiny."
+    },
+    "whisper-small": {
+      "repo": "openai/whisper-small",
+      "license": "apache-2.0",
+      "license_source": "huggingface license: tag",
+      "digest_kind": "model_digest",
+      "onnx": null,
+      "onnx_checked": [
+        "openai/whisper-small"
+      ],
+      "export_note": "No onnx/ directory; the `file` entries 404 upstream. See whisper-tiny.",
+      "no_pin": "models/whisper-small/CHECKPOINT.json has `file: []` and `sha256: null`."
+    },
+    "whisper-medium": {
+      "repo": "openai/whisper-medium",
+      "license": "apache-2.0",
+      "license_source": "huggingface license: tag",
+      "digest_kind": "model_digest",
+      "onnx": null,
+      "onnx_checked": [
+        "openai/whisper-medium"
+      ],
+      "export_note": "No onnx/ directory. See whisper-tiny.",
+      "no_checkpoint_json": "models/whisper-medium/ is the ONLY model directory in this table with no CHECKPOINT.json at all, so it has no repo record, no file list and no digest. The ONNX pair is on disk (onnx/encoder_model.onnx and onnx/decoder_model.onnx) and models/whisper-medium.npue is packed from it, so the model works here and is undocumented -- which is the one gap in this table that no download link can close, because what is missing is the local record."
+    },
+    "whisper-large-v3": {
+      "repo": "openai/whisper-large-v3",
+      "license": "apache-2.0",
+      "license_source": "huggingface license: tag",
+      "digest_kind": "model_digest",
+      "onnx": null,
+      "onnx_checked": [
+        "openai/whisper-large-v3"
+      ],
+      "export_note": "No onnx/ directory; the `file` entries 404 upstream. See whisper-tiny."
+    },
+    "whisper-large-v3-turbo": {
+      "repo": "openai/whisper-large-v3-turbo",
+      "license": "mit",
+      "license_source": "huggingface license: tag",
+      "digest_kind": "model_digest",
+      "onnx": null,
+      "onnx_checked": [
+        "openai/whisper-large-v3-turbo"
+      ],
+      "export_note": "No onnx/ directory; the `file` entries 404 upstream. See whisper-tiny.",
+      "license_note": "MIT, not Apache-2.0 like the other five Whisper sizes -- the tag was read from the repository, and a table that copied the Whisper row's licence would be wrong here."
+    },
+    "vit-base-patch16-224": {
+      "repo": "google/vit-base-patch16-224",
+      "license": "apache-2.0",
+      "license_source": "huggingface license: tag",
+      "digest_kind": "model_digest",
+      "onnx": null,
+      "onnx_checked": [
+        "google/vit-base-patch16-224"
+      ],
+      "export_note": "No onnx/ directory; the `file` entry 404s upstream. See whisper-tiny for why the `file` list is a local path and not a URL."
+    },
+    "yolov8n-pose": {
+      "repo": null,
+      "license": null,
+      "license_source": "not established -- no CHECKPOINT.json and the upstream repository is not recorded anywhere in this tree",
+      "digest_kind": null,
+      "onnx": null,
+      "export_note": "The only model here that is NOT a HuggingFace repository, and the only one with no CHECKPOINT.json besides whisper-medium. models/yolov8n-pose.npue is packed from a yolov8n-pose.onnx that the user supplies (README.md shows `--pose-onnx yolov8n-pose.onnx`), and this tree records nothing about where that file came from. Stated as unknown rather than filled with the obvious guess: Ultralytics publishes several yolov8n-pose exports and this tree has never said which one it used."
+    },
+    "mediapipe-hands": {
+      "repo": [
+        "opencv/palm_detection_mediapipe",
+        "opencv/handpose_estimation_mediapipe"
+      ],
+      "license": "Apache-2.0",
+      "license_source": "models/mediapipe-hands/CHECKPOINT.json -- NOT the repository, which carries no license: tag at all",
+      "digest_kind": "file_sha256",
+      "onnx": [
+        {
+          "repo": "opencv/palm_detection_mediapipe",
+          "file": "palm_detection_mediapipe_2023feb.onnx",
+          "bytes": 3905734
+        },
+        {
+          "repo": "opencv/handpose_estimation_mediapipe",
+          "file": "handpose_estimation_mediapipe_2023feb.onnx",
+          "bytes": 4099621
+        }
+      ],
+      "verified": "BOTH downloaded and hashed. Every value in CHECKPOINT.json -- the two sha256s and both sizes -- matches the bytes HuggingFace serves today, and they match the local files.",
+      "sha256_file": {
+        "palm_detection_mediapipe_2023feb.onnx": "78ff51c38496b7fc8b8ebdb6cc8c1abb02fa6c38427c6848254cdaba57fcce7c",
+        "handpose_estimation_mediapipe_2023feb.onnx": "db0898ae717b76b075d9bf563af315b29562e11f8df5027a1ef07b02bef6d81c"
+      },
+      "two_files_note": "TWO checkpoints in one container, and they are not interchangeable: the landmark network is given a hand's RoI by the palm detector and cannot find a hand in a frame by itself, so shipping only it answers 'no hand here' to every image. Both files are 2023feb; the 2023feb_int8 and 2023feb_int8bq variants are in the same repositories and are DELIBERATELY NOT used -- see CHECKPOINT.json, which measures what they do to the output."
+    },
+    "mediapipe-pose": {
+      "repo": [
+        "opencv/person_detection_mediapipe",
+        "opencv/pose_estimation_mediapipe"
+      ],
+      "license": "Apache-2.0",
+      "license_source": "models/mediapipe-pose/CHECKPOINT.json -- NOT the repository, which carries no license: tag at all",
+      "digest_kind": "file_sha256",
+      "onnx": [
+        {
+          "repo": "opencv/person_detection_mediapipe",
+          "file": "person_detection_mediapipe_2023mar.onnx",
+          "bytes": 11990159
+        },
+        {
+          "repo": "opencv/pose_estimation_mediapipe",
+          "file": "pose_estimation_mediapipe_2023mar.onnx",
+          "bytes": 5557238
+        }
+      ],
+      "verified": "BOTH downloaded and hashed. Every value in CHECKPOINT.json -- the two sha256s and both sizes -- matches the bytes HuggingFace serves today, and they match the local files.",
+      "sha256_file": {
+        "person_detection_mediapipe_2023mar.onnx": "47fd5599d6fa17608f03e0eb0ae230baa6e597d7e8a2c8199fe00abea55a701f",
+        "pose_estimation_mediapipe_2023mar.onnx": "9d89c599319a18fb7d2e28451a883476164543182bafca5f09eb2cf767ed2f3f"
+      },
+      "two_files_note": "TWO checkpoints, same reason as mediapipe-hands: the pose regressor needs a person's box from the detector. The 2023mar_int8bq variants exist upstream and are NOT used -- CHECKPOINT.json measures them putting the 33 keypoints a mean 64.0 px apart."
+    }
+  }
+}

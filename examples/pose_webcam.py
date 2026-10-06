@@ -164,9 +164,13 @@ def resolve_container(name: str) -> str:
     only move the message somewhere less honest.
 
     This matters more for the hands task than for pose, because the pose default
-    is a catalogue name and the hands default is a real path -- hands.npue is
-    packed into models/mediapipe-hands/ rather than models/, since it ships beside
-    the two ONNX files it was built from.
+    is a catalogue name and the hands default is a real path. It USED to be the
+    other way round as well: the hands container was packed into
+    models/mediapipe-hands/hands.npue, beside the two ONNX files it was built
+    from, while every table in the binary globs models/*.npue -- so `list` could
+    not see it and `npuembeddings hands mediapipe-hands` could not name it. It
+    lives at models/mediapipe-hands.npue now, and the model directory keeps the
+    weights and the panel variant.
     """
     if not (name.endswith(".npue") or os.sep in name):
         return name                      # a catalogue name, not our problem
@@ -654,7 +658,7 @@ def main(argv: list[str] | None = None) -> int:
                          "given, and retried relative to the repo root if that "
                          "is not where you are running from. Default: "
                          "yolov8n-pose for --task pose (a name), "
-                         "models/mediapipe-hands/hands.npue for --task hands (a "
+                         "models/mediapipe-hands.npue for --task hands (a "
                          "path, because that container ships beside the ONNX "
                          "files it was packed from and is untracked)")
     ap.add_argument("--camera", type=int, default=0,
@@ -735,14 +739,14 @@ def main(argv: list[str] | None = None) -> int:
     hands = args.task == "hands"
     mp = args.task == "mppose"
     # The hands default is a PATH, not a catalogue name, and it has to be: the
-    # hands container is packed to models/mediapipe-hands/hands.npue because it
+    # hands container is packed to models/mediapipe-hands.npue because it
     # ships beside the two ONNX files it was built from, while the catalogue's
     # name form only ever means models/<name>.npue. It is also untracked --
     # models/** is gitignored apart from CHECKPOINT.json -- so a checkout without
     # it has to be told to pack it rather than to wait for a download.
     model = args.model or (
-        "models/mediapipe-hands/hands.npue" if hands else
-        "models/mediapipe-pose/mppose.npue" if mp else
+        "models/mediapipe-hands.npue" if hands else
+        "models/mediapipe-pose.npue" if mp else
         "yolov8n-pose")
     resolved = resolve_container(model)
     if resolved != model:

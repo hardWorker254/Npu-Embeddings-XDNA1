@@ -445,8 +445,29 @@ inline void print_catalog(const std::string &root) {
             std::snprintf(layers, sizeof layers, "%lld", (long long)m.layers);
             std::snprintf(hidden, sizeof hidden, "%lld", (long long)m.hidden);
         }
+        // The last column, assembled ONCE and read here. `pixel_command_note`
+        // answers empty for anything that is not one of the three pixel kinds, so
+        // the two branches below are a pixel detector's command and everyone
+        // else's repo -- and there is no fourth case to remember, because the
+        // function is what decides what a pixel kind is.
+        const std::string note = pixel_command_note(m.kind);
         std::printf("  %-20s %-9s %6s %6s %8s %6.0f MB  %s\n", m.name.c_str(),
                     !encoder_implemented(m.arch)              ? "no encoder"
+                    // These three columns say WHICH COMMAND RUNS THE FILE, and
+                    // they read it from the container's own `kind` rather than
+                    // from the architecture. The two used to be the same thing
+                    // because there was one detector; there are THREE now
+                    // (arch=6 pose, arch=7 hands, arch=8 mppose) and they are
+                    // three verbs, so a state column derived from the arch could
+                    // only ever name one of them -- it would have labelled a
+                    // MediaPipe Hands container `pose` and sent the user to a
+                    // command that dispatches by arch and answers "not a pose
+                    // container" on a file that finds hands perfectly well.
+                    //
+                    // `kind` is the container's own claim and the packer writes
+                    // it, so this cannot drift from the file the way a list in
+                    // this header would.
+                    : subcommand_for_kind(m.kind)           ? m.kind.c_str()
                     : is_stt_arch(m.arch)                    ? "stt"
                     // A locally packed arch=5 container: `classify`, not
                     // `embed`. The column says which command runs it, because
@@ -460,13 +481,17 @@ inline void print_catalog(const std::string &root) {
                         ? "no design" : "ready",
                     layers, hidden, m.pooling.c_str(),
                     m.mb,
-                    // The last column is the command for these three and the
+                    // The last column is the command for a non-embedder and the
                     // source repo for the rest, because for an embedder the repo
                     // is the thing worth checking and for a locally packed
                     // detector the repo is "n/a" -- the file came from a local
                     // ONNX and there is nothing to name.
-                    is_pose_arch(m.arch) ? "npuembeddings pose <name> <image>; "
-                                            "CPU only unless packed with --npu"
+                    //
+                    // Built from `kind` rather than from the arch, for the reason
+                    // the state column above is: the command is a property of the
+                    // file. `note` was assembled before this printf, so the state
+                    // column and this one cannot name different subcommands.
+                    !note.empty()            ? note.c_str()
                         : is_vit_arch(m.arch) ? "npuembeddings classify <name> "
                                                "<image>"
                         : is_stt_arch(m.arch) ? "npuembeddings transcribe <name> "

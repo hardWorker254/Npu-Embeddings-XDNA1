@@ -715,6 +715,21 @@ MODEL_DIR = os.path.join(REPO, "models", "mediapipe-hands")
 PALM_ONNX = os.path.join(MODEL_DIR, "palm_detection_mediapipe_2023feb.onnx")
 LM_ONNX = os.path.join(MODEL_DIR, "handpose_estimation_mediapipe_2023feb.onnx")
 IMAGE = os.path.join(MODEL_DIR, "hand_plain.png")
+
+# THE INSTALLED CONTAINER, AT THE FLAT PATH EVERY OTHER MODEL USES. It used to be
+# MODEL_DIR/hands.npue -- inside models/mediapipe-hands/, which is where the ONNX
+# pair and CHECKPOINT.json live -- and that put it somewhere NO table in this
+# binary looks. `list` globs models/*.npue, `discover_models` globs models/*.npue,
+# `--list-models` prints models/*.npue: three places, one convention, and the
+# subdirectory was not it. So both MediaPipe models were invisible to `list`,
+# could not be named on the command line, and the reason nothing had ever named
+# them is that no table had ever had a row to print.
+#
+# models/mediapipe-hands/ keeps the weights and the PANEL variant, which is
+# exactly what every other models/<name>/ holds: facts about the model that are
+# not the installed container.
+CONTAINER_DEFAULT = os.path.join(REPO, "models", "mediapipe-hands.npue")
+
 # The SAME container with the pre-tiled bf16 B panels staged, which is what the
 # array path dispatches against. A separate file on purpose: staging takes it from
 # 8.9 MB to 13.1 MB, and one path for both would mean the container section 4
@@ -1519,7 +1534,7 @@ def main():
                          "container except to read its anchor table.")
     args = ap.parse_args()
 
-    container = args.container or os.path.join(MODEL_DIR, "hands.npue")
+    container = args.container or CONTAINER_DEFAULT
     CONTAINER[0] = container
     _need(container, "the packed container")
     reader = Reader(container)

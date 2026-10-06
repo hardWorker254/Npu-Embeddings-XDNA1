@@ -86,7 +86,16 @@ inline std::vector<ModelEntry> discover_models(const std::string &root) {
       } catch (const std::exception &) {
       }
       if (m.kind.empty())
-        m.kind = (m.arch == "yolov8_pose_c2f_silu_dfl") ? "pose"
+        // No `kind` key means a container packed before the key existed, which
+        // is arch=0 and arch=1 only for the transformer families. The three
+        // pixel architectures are INFERRED from the arch instead, because their
+        // fallback used to be `embed` -- and `embed` on a container with no
+        // `num_layers` is a row of zeros claiming a malformed BERT. Each of the
+        // three maps to its own verb, because the arch string says which model
+        // it is and the verb is not "pose" for all of them.
+        m.kind = (m.arch == "yolov8_pose_c2f_silu_dfl")      ? "pose"
+                : (m.arch == "mediapipe_hands_palm_ssd_lm_heatmap")  ? "hands"
+                : (m.arch == "mediapipe_pose_det_ssd_lm_regress")    ? "mppose"
                 : (m.arch == "whisper_encoder_decoder" ||
                    m.arch == "whisper_decoder")            ? "stt"
                                                           : "embed";
@@ -178,10 +187,24 @@ inline void print_model_table(const std::vector<ModelEntry> &v) {
   // about the wrong mode.
   for (const auto &m : v) {
     if (!m.error.empty() || m.kind == "embed") continue;
-    const char *how = m.kind == "pose"  ? "npuembeddings pose"
-                      : m.kind == "cls"  ? "npuembeddings classify"
-                      : m.kind == "stt"  ? "npuembeddings transcribe"
-                                         : nullptr;
+    // The verb comes from the container's own `kind`, through the SAME
+    // `subcommand_for_kind` predicate the other table's state column reads -- so
+    // a kind that exists cannot be printable here and invisible there. That is
+    // exactly what happened to `hands` and `mppose`: they were in neither list of
+    // verbs AND both containers sat in subdirectories, so no table had ever had
+    // to name them.
+    //
+    // FOR A PIXEL KIND THE VERB IS THE KIND -- `npuembeddings hands`,
+    // `npuembeddings mppose`, `npuembeddings pose` -- so a table of literals
+    // would be three rows differing in one word, which is a place to forget one.
+    // Assembling the string removes the duplication instead of documenting it.
+    const std::string verb =
+        !subcommand_for_kind(m.kind)  ? std::string()
+        : is_pixel_kind(m.kind)      ? "npuembeddings " + m.kind
+        : m.kind == "cls"            ? "npuembeddings classify"
+        : m.kind == "stt"            ? "npuembeddings transcribe"
+                                     : std::string();
+    const char *how = verb.empty() ? nullptr : verb.c_str();
     if (how)
       std::printf("  %-24s   a %s container: `%s <name> <input>` is how it "
                   "runs; `embed` is not.\n",

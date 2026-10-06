@@ -211,7 +211,25 @@ inline bool encoder_implemented(const std::string &arch) {
          // the host and the array path is optional (`--npu-ops conv`). So
          // such a container is runnable the moment the file exists, where a
          // whisper or a ViT is not runnable until it has been exported.
-         arch == "yolov8_pose_c2f_silu_dfl";
+         arch == "yolov8_pose_c2f_silu_dfl" ||
+         // arch=7, MediaPipe Hands (palm detector + landmark network), and arch=8,
+         // MediaPipe Pose (person detector + pose regressor). The same answer as
+         // arch=6 for the first reason -- neither is an embedder, each takes
+         // pixels and returns landmarks -- and the same second reason: every
+         // convolution runs on the host, so the container runs as it stands and
+         // the array is an opt-in (`--npu-ops conv`), not a prerequisite.
+         //
+         // THESE TWO WERE MISSING, AND THE WHITELIST'S OWN COMMENT SAYS EXACTLY
+         // WHAT THAT PRINTED: "a table that prints `no encoder` for a container
+         // that classifies perfectly well is a lie of exactly the shape this
+         // whitelist exists to prevent." Both have a mode, a verb and a gate --
+         // `npuembeddings hands`, `npuembeddings mppose`, verify_hands,
+         // verify_mppose. They were absent because nothing had ever printed
+         // their rows: their containers sat in models/mediapipe-hands/ and
+         // models/mediapipe-pose/, while every table here globs models/*.npue, so
+         // one fact hid the other and the missing rows hid the missing entries.
+         arch == "mediapipe_hands_palm_ssd_lm_heatmap" ||
+         arch == "mediapipe_pose_det_ssd_lm_regress";
 }
 
 // True for a container this build runs through a mode of its own rather than
@@ -243,8 +261,62 @@ inline bool is_vit_arch(const std::string &arch) {
 // decoder that generates text, a head that does not, a 17-keypoint detector, a
 // vector) and a predicate that merged them would have to branch again at the
 // first use that cares which is which.
+//
+// THE THREE PIXEL DETECTORS, NOT ONE. This predicate exists for two things, and
+// BOTH of them are statements about pixels rather than about YOLO:
+//
+//   * the dashes in the layers/hidden columns -- a `0 layers` row reads as a
+//     claim about a malformed container, and for a detector 0 means the
+//     architecture has no such concept;
+//   * the note that says which subcommand runs the container.
+//
+// Both apply identically to arch=6, 7 and 8, and arch=7/arch=8 were MISSING, so
+// a MediaPipe row would have printed a `0 layers` claim about a container that
+// detects hands perfectly well. What is NOT identical is the subcommand -- pose,
+// hands and mppose are three verbs -- and that is read from the container's own
+// `kind` field, which is what `kind` is for.
 inline bool is_pose_arch(const std::string &arch) {
-  return arch == "yolov8_pose_c2f_silu_dfl";
+  return arch == "yolov8_pose_c2f_silu_dfl" ||
+         arch == "mediapipe_hands_palm_ssd_lm_heatmap" ||
+         arch == "mediapipe_pose_det_ssd_lm_regress";
+}
+
+// The SUBCOMMAND for a non-embedder container, from the `kind` the container
+// itself states: "pose" | "hands" | "mppose" | "cls" | "stt". Empty for an
+// embedder, and empty for a kind this build has no verb for -- an empty answer
+// here is a refusal to print a command that does not exist, which is the
+// difference between "this model runs" and "this model runs the way you would
+// have to guess".
+// The three pixel KINDS, as opposed to the three pixel ARCHES. The distinction is
+// real and both tables need it: the architectures answer "does this build run the
+// architecture", the kinds answer "which verb". A future fourth detector would
+// come with a new arch AND a new kind, and the two lists are kept apart so that
+// neither can be extended by accident.
+inline bool is_pixel_kind(const std::string &kind) {
+  return kind == "pose" || kind == "hands" || kind == "mppose";
+}
+
+// True for a kind this build has a SUBCOMMAND for. An empty answer is a refusal
+// to print a command that does not exist, which is the difference between "this
+// model runs" and "this model runs the way you would have to guess".
+inline bool subcommand_for_kind(const std::string &kind) {
+  return is_pixel_kind(kind) || kind == "cls" || kind == "stt";
+}
+
+// The last column for a pixel detector: the command, plus the one thing about
+// the array that is true for all three and false of everything else in the
+// table. RETURNED AS A std::string, not a const char*, because it is assembled
+// rather than chosen from a table of literals -- and it is assembled ONCE per
+// row and read in two places below, so the state column and this note cannot come
+// to name different subcommands.
+//
+// "CPU only unless packed with --npu" is stated for all three, and it is TRUE for
+// all three: a container packed without `--npu` carries no panels, so
+// `--npu-ops conv` refuses with the packing command rather than falling back.
+inline std::string pixel_command_note(const std::string &kind) {
+  if (!is_pixel_kind(kind)) return std::string();
+  return "npuembeddings " + kind + " <name> <image>; CPU only unless packed "
+                                      "with --npu";
 }
 
 inline bool config_flag(const npue::File &f, const char *key, bool fallback) {

@@ -126,6 +126,17 @@ models/all-MiniLM-L6-v2/onnx/model.onnx          # the graph
 models/all-MiniLM-L6-v2/onnx/model.onnx_data      # only if the graph names one
 ```
 
+**Where those bytes come from is [`models/DOWNLOADS.md`](models/DOWNLOADS.md)
+([`.ru`](models/DOWNLOADS.ru.md))** — every model, its repository, a direct link
+for the eight that publish an ONNX export, and the reason the other ten do not
+have one. Read before you `curl` anything, because `CHECKPOINT.json`'s `file`
+list is *not* a download list: for the six Whisper sizes both of its entries
+return 404 upstream, because they name what this repository's own export is
+called rather than where to get one. The two are different digests too —
+`sha256` there is `model_digest()` for a transformer model and a list of
+per-file hashes for the two MediaPipe pairs, and comparing against the wrong one
+fails on a correct file.
+
 An export that keeps its weights in a side file names it in `external_data`;
 place that file beside the graph under exactly that basename, and never rename
 or patch the graph to suit a layout. `CHECKPOINT.json` says which bytes are
