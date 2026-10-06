@@ -370,8 +370,16 @@ def matrix_table(ru=False):
     suffix = {npu_ops.BLOCKED: "невозможно" if ru else "impossible",
               npu_ops.ON_ARRAY: "уже" if ru else "already",
               GATED: "гейт" if ru else "gated"}
-    head = ("| модель | что уходит на массив |" if ru else
-            "| model | what goes to the array |")
+    # The header says "дополнительно" on purpose. The eight codes are the
+    # operations a caller can move ON TOP OF the architecture's own stream set,
+    # and for a transformer architecture that set is four GEMM streams
+    # (qkv/attn_out/ffn_up/ffn_down) which dispatch by DEFAULT and which NO code
+    # in the vocabulary names. Without the word, an embedder's row -- four codes,
+    # no `conv` -- reads as "this model never touches the array", which is the
+    # opposite of what it does: bge-micro-v2 makes 12 dispatches unprompted, three
+    # layers x four streams.
+    head = ("| модель | что можно дополнительно отправить на массив |" if ru else
+            "| model | what can additionally go to the array |")
     lines = [head, "| --- | --- |"]
     for model, spec in models(TARGETS_DATA):
         items = []
@@ -434,12 +442,36 @@ def doc(ru=False):
         a("")
         a("## Что каждая модель может отправить на массив")
         a("")
-        a("Не сетка моделей на операции, а список на модель: в сетке из "
+        a("ЧИТАТЬ ТАБЛИЦУ ТАК, ИНАЧЕ ОНА ВРЁТ НЕ ПО СТРОКАМ, А ПО ЗАГОЛОВКУ. "
+          "Восемь кодов — это то, что можно отправить на массив СВЕРХ того, что "
+          "архитектура и так отправляет сама. У трансформерной архитектуры этот "
+          "«свой» набор — четыре GEMM-потока `qkv`, `attn_out`, `ffn_up`, "
+          "`ffn_down`; они уходят на массив ПО УМОЛЧАНИЮ, и ни один код из "
+          "восьми их не называет. Проверено на `bge-micro-v2` без единого флага: "
+          "`designs  ONE xclbin, 12 streams`, `dispatches  12` — три слоя на "
+          "четыре потока, при этом `gelu`, `layn`, `softm` и `attn` написаны "
+          "`on the HOST (fp32)`.")
+        a("")
+        a("Поэтому строка эмбеддинга, где перечислено четыре кода и нет `conv`, "
+          "НЕ означает «эта модель не трогает массив». Отсутствие `conv` у "
+          "эмбеддинга — это «у неё нет операции свёртки», а не «у неё нет "
+          "массива». У `pose` и `mppose` наоборот: там свёртки и есть тот самый "
+          "«свой» набор, поэтому их строка состоит из одного кода, и это "
+          "честно — им нечего добавлять.")
+        a("")
+        a("И по умолчанию все восемь на хосте, и это измерение, а не "
+          "осторожность. Те же два текста на `bge-micro-v2`, по пять прогонов: "
+          "168 мс без флагов против 265 / 260 / 252 мс с `--npu-ops gelu`, "
+          "`layn`, `softm` по отдельности и 330 мс со всеми тремя. Ожидание "
+          "диспатчей растёт 6.0 -> 22.5 / 23.3 / 24.1 / 59.2 мс. Элементарная "
+          "операция на массиве здесь в полтора-два раза дороже, чем на хосте.")
+        a("")
+        a("Список на модель, а не сетка моделей на операции: в сетке из "
           f"{n_cells} ячеек {counts[npu_ops.ABSENT]} говорили бы одно и то же "
           "отсутствие, и читать ответ пришлось бы выбиранием пустых ячеек по "
           "всей строке. Выборка и есть ответ, поэтому в таблице ни одной пустой "
-          "ячейки нет, а отсутствие несёт заголовок: код, которого в списке не "
-          "нет, — такой операции у модели нет.")
+          "ячейки нет, Отсутствие несёт заголовок: кода, которого в списке нет, у "
+          "модели нет и подавно.")
         a("")
         L.extend(matrix_table(ru=True))
         a("")
@@ -502,6 +534,28 @@ def doc(ru=False):
         a(f"- **{counts[s]}** {MARKS[s][0]} -- {STATUS_GLOSS[s][0]}")
     a("")
     a("## What each model can send to the array")
+    a("")
+    a("READ THIS TABLE BY ITS HEADER OR IT LIES, AND NOT ABOUT THE ROWS -- ABOUT "
+      "THE HEADER. The eight codes are what can be sent to the array ON TOP OF "
+      "what the architecture already sends by itself. For a transformer that own "
+      "set is four GEMM streams -- qkv, attn_out, ffn_up, ffn_down -- which "
+      "dispatch BY DEFAULT and which no code in the eight names. Measured on "
+      "bge-micro-v2 with no flag at all: `designs  ONE xclbin, 12 streams`, "
+      "`dispatches  12`, three layers by four streams, while gelu, layn, softm "
+      "and attn all read `on the HOST (fp32)`.")
+    a("")
+    a("So an embedder's row, four codes and no `conv`, does NOT mean this model "
+      "never touches the array. The missing `conv` says it has no convolution "
+      "operation; it does not say it has no array. `pose` and `mppose` are the "
+      "other way round: their convolutions ARE that own set, which is why their "
+      "rows are one code long and why there is nothing for them to add.")
+    a("")
+    a("And all eight are on the host by default, which is a measurement rather "
+      "than caution. Same two texts on bge-micro-v2, five runs each: 168 ms with "
+      "no flags against 265 / 260 / 252 ms with --npu-ops gelu, layn and softm "
+      "one at a time, and 330 ms with all three. Dispatch wait grows 6.0 -> 22.5 "
+      "/ 23.3 / 24.1 / 59.2 ms. An elementwise operation on the array is one and a "
+      "half to two times what it costs on the host here.")
     a("")
     a("A list per model, not a grid of models against operations. In a "
       f"{n_cells}-cell grid, {counts[npu_ops.ABSENT]} of the cells would say "

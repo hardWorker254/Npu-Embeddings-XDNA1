@@ -63,7 +63,7 @@ new code, or does not tile.
 
 A list per architecture, not a grid of architectures against codes: of 56 cells 31 repeated one absence, and the answer to what can this dispatch came from filtering the empty cells out of a row. There are no empty cells here: one column, and every entry in it names its own status -- `conv` (already) reads without a heading three columns to the left. A code that is not listed is not one this architecture has.
 
-| architecture | what goes to the array |
+| architecture | what can additionally go to the array |
 | --- | --- |
 | `gemm_rtp` | `gelu`, `layn`, `softm`, `attn` |
 | `stt` | `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |

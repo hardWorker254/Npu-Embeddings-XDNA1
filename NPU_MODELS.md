@@ -27,9 +27,15 @@ Tally over the 144 cells:
 
 ## What each model can send to the array
 
+READ THIS TABLE BY ITS HEADER OR IT LIES, AND NOT ABOUT THE ROWS -- ABOUT THE HEADER. The eight codes are what can be sent to the array ON TOP OF what the architecture already sends by itself. For a transformer that own set is four GEMM streams -- qkv, attn_out, ffn_up, ffn_down -- which dispatch BY DEFAULT and which no code in the eight names. Measured on bge-micro-v2 with no flag at all: `designs  ONE xclbin, 12 streams`, `dispatches  12`, three layers by four streams, while gelu, layn, softm and attn all read `on the HOST (fp32)`.
+
+So an embedder's row, four codes and no `conv`, does NOT mean this model never touches the array. The missing `conv` says it has no convolution operation; it does not say it has no array. `pose` and `mppose` are the other way round: their convolutions ARE that own set, which is why their rows are one code long and why there is nothing for them to add.
+
+And all eight are on the host by default, which is a measurement rather than caution. Same two texts on bge-micro-v2, five runs each: 168 ms with no flags against 265 / 260 / 252 ms with --npu-ops gelu, layn and softm one at a time, and 330 ms with all three. Dispatch wait grows 6.0 -> 22.5 / 23.3 / 24.1 / 59.2 ms. An elementwise operation on the array is one and a half to two times what it costs on the host here.
+
 A list per model, not a grid of models against operations. In a 144-cell grid, 55 of the cells would say the same absence in the same position, and reading the answer meant filtering the empty ones out of every row -- and the filtering IS the answer. There are no empty cells here at all: one column, and every entry in it names its own status, so `gelu` (gated) reads without a heading to its left. The header carries the absence: a code that is not listed is not an operation this model has.
 
-| model | what goes to the array |
+| model | what can additionally go to the array |
 | --- | --- |
 | `all-MiniLM-L6-v2` | `gelu`, `layn`, `softm`, `attn` |
 | `bge-small-en-v1.5` | `gelu`, `layn`, `softm`, `attn` |

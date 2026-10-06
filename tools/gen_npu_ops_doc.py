@@ -617,8 +617,16 @@ def matrix_table(ru=False):
     suffix = {npu_ops.BLOCKED: "невозможно" if ru else "impossible",
               npu_ops.ON_ARRAY: "уже" if ru else "already",
               npu_ops.UNIMPLEMENTED: ("нет кода" if ru else "no code")}
-    head = ("| архитектура | что уходит на массив |" if ru else
-            "| architecture | what goes to the array |")
+    # "дополнительно" for the reason in gen_npu_models_doc.py's copy of this
+    # header: the eight codes name what a caller can move ON TOP OF an
+    # architecture's own stream set. For a transformer that set is four GEMM
+    # streams which dispatch by default and which no code names, so a row listing
+    # four extras and no `conv` is not a row that never touches the array -- it is
+    # a row that touches it twelve times before anybody types a flag. For `pose`
+    # and `mppose` the convolutions ARE that set, which is why their `conv` reads
+    # `есть` and their rows are one code long.
+    head = ("| архитектура | что можно дополнительно отправить на массив |" if ru
+            else "| architecture | what can additionally go to the array |")
     lines = [head, "| --- | --- |"]
     for entry in ARCHES:
         label = entry[0]
