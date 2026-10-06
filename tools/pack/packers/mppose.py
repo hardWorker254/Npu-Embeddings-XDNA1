@@ -924,7 +924,7 @@ def _pose_key(decl, conv_out):
          f"heatmap/{NUM_LANDMARKS} channels")
 
 
-def npu_panels(t, pfx, ops, conv_of, weights, device):
+def npu_panels(pfx, ops, weights, device):
     """Pre-tiled bf16 B panels for the array backend, one per DENSE convolution.
 
     Returns (panels, streams, (tile_k, tile_n)) where panels maps a convolution
@@ -932,67 +932,34 @@ def npu_panels(t, pfx, ops, conv_of, weights, device):
     streams is the sorted list of distinct padded (K, N) shapes, which is the set
     tools/export/exporters/gemm_rtp/geometry.py builds a design from.
 
-    WHY ONLY THE DENSE ONES, AND IT IS NOT A SUBCASE
-    -------------------------------------------------
-    62 of this container's 161 convolutions are depthwise, and a depthwise filter
-    reduces within ONE channel: its K is kh*kw and its N is 1, so there is no
-    [M, N] GEMM in it to dispatch and a stream named for it would be a name with
-    nothing behind it. They are counted, not converted, and the runtime keeps
-    them on the host whatever a design set says. That share -- 77.2M MAC, 12.3 %
-    of the container -- is one of the two numbers in the arch=8 registry row.
+    ONLY THE DENSE ONES, AND THE FILTER IS `op == "conv"` RATHER THAN
+    `group == 1` BECAUSE THE FIRST VERSION OF THIS FUNCTION DID NOT FILTER AT
+    ALL, and the container it produced carried TWENTY-SIX streams where the design
+    has TWENTY-TWO. The four extras -- conv64x512, conv64x640, conv64x768,
+    conv64x1152 -- are every depthwise convolution in the landmark network: their
+    Cin is 1 (per group), so K pads from 3x3=9 up to 64, and N is their channel
+    count. A depthwise filter has no [M, N] GEMM in it, so those four slots were
+    names with nothing behind them, built by indexing the whole convolution table
+    when the caller had already said which ops were dense.
 
-    EVERYTHING ELSE HERE IS arch=6's npu_panels(), AND IT IS COPIED RATHER THAN
-    REUSED ON PURPOSE. pose.py's takes a traced graph and a conv-name map; this
-    container stores two graphs under two PREFIXES in one file, so the signature
-    cannot match without the prefix threaded through a shared helper that
-    arch=6's caller does not have. The arithmetic that decides a panel -- pad K
-    up to tile_k, pad N up to tile_n*COLS, and TRANSPOSE the weight -- is the
-    part that must be identical, and it is the part transcribed. The transpose
-    in particular is not a detail: a reshape here has the right SIZE, the right
-    tileability and a matching layout_hash, and produces a transposed weight, so
-    the array returns a network that finds hundreds of people in a photograph
-    with three. pose.py's comment on it is the reason this paragraph exists.
+    It was caught by tools/verify/verify_pose_streamset.py comparing the
+    container's npu_streams against geometry.py's list, in both directions.
+
+    The panel arithmetic itself is npue.conv_panel, shared with arch=6 and arch=7;
+    see its docstring for why a third copy of the transpose was not written here.
     """
-    from npue import (cols_for_device, gemm_b_layout, mac_for_device,  # noqa: E402
-                      tile_b)
+    from npue import CONV_PANEL_TILE, conv_panel  # noqa: E402
 
-    TILE_K, TILE_N = 64, 32
-    mac_s, mac_t = mac_for_device(device, "BF16")
-    # N pads to tile_n * COLS. On npu1 that is 32*4 = 128, and this network's
-    # output channel counts are not all multiples of it -- 384, 640 and 1152
-    # appear and pad up, while 256 is already a multiple. Padding to tile_n alone
-    # would store a 32-wide panel for a design that reads 128, and the columns
-    # past the end are whatever follows in the container's data region.
-    N_MULT = TILE_N * cols_for_device(device)
-    layout = gemm_b_layout(TILE_K, TILE_N, mac_s, mac_t)
     panels, streams = {}, set()
-    # DENSE ONLY, AND THE FILTER IS `op == "conv"` RATHER THAN `group == 1` BECAUSE
-    # THE FIRST VERSION OF THIS FUNCTION DID NOT FILTER AT ALL, and the container
-    # it produced carried TWENTY-SIX streams where the design has TWENTY-TWO. The
-    # four extras -- conv64x512, conv64x640, conv64x768, conv64x1152 -- are every
-    # depthwise convolution in the landmark network: their Cin is 1 (per group),
-    # so K pads from 3x3=9 up to 64, and N is their channel count. A depthwise
-    # filter has no [M, N] GEMM in it, so those four slots were names with
-    # nothing behind them, built by indexing `conv_of` when the caller had
-    # already said which ops were dense.
-    #
-    # It was caught by tools/verify/verify_pose_streamset.py comparing the
-    # container's npu_streams against geometry.py's list, in both directions --
-    # which is that tool's whole reason for existing, applied to the container
-    # rather than to a design set.
-    dense = {o["conv"] for o in ops if o["op"] == "conv"}
-    for idx in sorted(dense):
-        w = weights[f"{pfx}.conv.{idx}.w"]
-        cout, cin, kh, kw = w.shape
-        K, N = cin * kh * kw, cout
-        pk = ((K + TILE_K - 1) // TILE_K) * TILE_K
-        pn = ((N + N_MULT - 1) // N_MULT) * N_MULT
-        b = np.zeros((pk, pn), dtype=np.float32)
-        b[:K, :N] = w.reshape(N, K).T
-        panels[idx] = (tile_b(b, TILE_K, TILE_N, s=mac_s, t=mac_t), layout,
-                       pk, pn)
+    for o in ops:
+        if o["op"] != "conv":
+            continue
+        idx = o["conv"]
+        panel, layout, pk, pn = conv_panel(weights[f"{pfx}.conv.{idx}.w"],
+                                           device)
+        panels[idx] = (panel, layout, pk, pn)
         streams.add((pk, pn))
-    return panels, sorted(streams), (TILE_K, TILE_N)
+    return panels, sorted(streams), CONV_PANEL_TILE
 
 
 def mac_split(t, conv_of):
@@ -1162,8 +1129,8 @@ def pack_mppose(det_onnx, pose_onnx, out_path, dry_run=False, device=None,
         # BOTH graphs' panels, because both graphs' dense convolutions dispatch.
         # A stream set for one network and not the other is a design whose slots
         # half match, which resolves for the detector and not for the landmarks.
-        pd, sd, tile = npu_panels(td, "det", ops_d, conv_d, w_d, device)
-        pp, sp, tile2 = npu_panels(tp, "pose", ops_p, conv_p, w_p, device)
+        pd, sd, tile = npu_panels("det", ops_d, w_d, device)
+        pp, sp, tile2 = npu_panels("pose", ops_p, w_p, device)
         if tile != tile2:
             _die(f"the two networks were tiled differently ({tile} and {tile2}), "
                  f"so one container would carry two panel layouts under one "

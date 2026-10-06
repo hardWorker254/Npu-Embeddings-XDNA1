@@ -76,8 +76,9 @@ npue::hostconv::Act host_act(Act a, const float *slope) {
 
 }  // namespace
 
-Network::Network(const Geometry &g, const Placement &place, app::Pool &pool)
-    : g_(g), place_(place), pool_(pool) {
+Network::Network(const Geometry &g, const Placement &place, app::Pool &pool,
+                 conv::Convs *array)
+    : g_(g), place_(place), pool_(pool), array_(array) {
   // THE WEIGHT TRANSPOSE HAPPENS HERE, ONCE, AND NOT PER CALL.
   //
   // gemm_nt's B is [K, N] -- one row per reduction step, N output columns
@@ -156,6 +157,31 @@ Tensor Network::conv(const Tensor &in, const Layer &l, const ConvW &w,
          l.pad[2], l.pad[3]);
   const int64_t M = l.out_h * l.out_w, K = w.cin * w.kh * w.kw, N = w.cout;
   cost_.t_im2col += app::now_s() - t0;
+
+  if (array_) {
+    if (!place_.slots || w.index < 0 ||
+        static_cast<size_t>(w.index) >= place_.slots->size())
+      throw std::runtime_error(
+          label + ": conv " + std::to_string(w.index) +
+          " is outside this network's slot table, which has " +
+          std::to_string(place_.slots ? place_.slots->size() : 0) + " entries");
+    const int64_t slot = (*place_.slots)[static_cast<size_t>(w.index)];
+    if (slot < 0)
+      throw std::runtime_error(
+          label + ": conv " + std::to_string(w.index) +
+          " has no array panel (slot -1). Only the DENSE convolutions are "
+          "staged: a depthwise filter reduces within one channel, so it has no "
+          "[M, N] GEMM to dispatch. This layer reached the dense path, so the "
+          "graph and the weight table disagree about whether it is depthwise.");
+    conv::conv_array_dispatch(*array_, slot, a_.data(), M, K, N, out.d.data(),
+                              out.plane(), host_act(l.act, slope), slope, pool_,
+                              apad_, cpad_, &cost_.t_array_repack,
+                              &cost_.t_array_gemm, &cost_.t_array_transpose,
+                              &cost_.dispatches);
+    cost_.convs_array++;
+    cost_.t_array += app::now_s() - t0;
+    return out;
+  }
 
   // `wkn` is the filter as [K, N], transposed once in the constructor from the
   // container's [N, K]. t_wmat stays at zero rather than carrying a cost that

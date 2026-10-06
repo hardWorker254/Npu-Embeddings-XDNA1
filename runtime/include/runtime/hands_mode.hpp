@@ -62,9 +62,11 @@
 #include <vector>
 
 #include "cli/flags.hpp"
+#include "common/design_selection.hpp"   // artifacts_candidates
 #include "common/host_kernels.hpp"
 #include "common/npu_ops_flag.hpp"   // parse_npu_ops, refuse_removed_op_flags
 #include "hands/session.hpp"
+#include "runtime/device.hpp"   // require_context_budget, survey_contexts
 
 namespace app {
 
@@ -102,45 +104,46 @@ inline int maybe_hands_mode(const std::string &root, int argc, char **argv,
     return false;
   };
 
-  // --npu-ops: REFUSED, every code, with the reason. See the header.
+  // --npu-ops: `conv` MOVES THE 61 DENSE CONVOLUTIONS onto the design set at
+  // --artifacts; the 39 depthwise ones stay on the host whatever it says, and
+  // any OTHER code is refused by name because there is no operation by that name
+  // in either graph.
+  //
+  // What changed, and when: this used to refuse every code with the reason that
+  // no design set carried arch=7's dense (K, N) pairs. That was true when it was
+  // written and stopped being true when geometry.py gained HANDS_CONV_SHAPES and
+  // runtime/artifacts/mediapipe-hands/artifacts_npu1/gemm_rtp/ was built from it
+  // -- twelve streams, checked against the packed container in both directions by
+  // tools/verify/verify_pose_streamset.py. A refusal whose reason has expired is
+  // worse than no refusal: it is a claim about the state of this tree, and a
+  // reader who had just built the design set would be told there is none.
   {
     std::string listing;
     for (int i = 1; i < argc - 1; ++i)
       if (std::string(argv[i]) == "--npu-ops") listing = argv[i + 1];
     const std::set<std::string> codes = parse_npu_ops(listing);
-    if (!codes.empty()) {
-      const bool empty_code = listing == "none" || listing == "";
-      if (empty_code) {
-        // `--npu-ops none` is not a request to move anything, so it is accepted
-        // and ignored rather than refused. Refusing it would be pedantry about
-        // a flag whose meaning -- "no op goes on the array" -- is already what
-        // this architecture does.
-      } else {
-        throw std::runtime_error(
-            "--npu-ops " + listing +
-            ": this architecture has no array path, so there is nothing for "
-            "the flag to move. Not because there is no work -- the palm "
-            "detector's 232.0M dense MACs and the landmark network's 123.9M are "
-            "exactly a GEMM array's arithmetic -- but because no design set in "
-            "this tree carries the 31 distinct dense (K, N) pairs these two "
-            "graphs use, so there is no array timing to compare the host's "
-            "against. Accepting the flag and running on the host would print "
-            "host numbers under a flag that says otherwise, which is the one "
-            "outcome worth refusing. 39 of the container's 100 convolutions are "
-            "depthwise and would stay on the host either way. What this costs: "
-            "the host split, measured per run below.");
-      }
+    const bool empty_code = listing == "none" || listing == "";
+    if (!codes.empty() && !empty_code) {
+      const std::set<std::string> here = {"conv"};
+      for (const std::string &c : codes)
+        if (!here.count(c))
+          throw std::runtime_error(
+              "--npu-ops " + c + ": this architecture has no operation named '" +
+              c + "'. Its two graphs are {Conv, DwConv, Add, MaxPool, Pad, "
+              "Resize} and the graph already FUSES the activations into the "
+              "convolutions' epilogues, so 'gelu' has nothing to take over and "
+              "'layn' has nothing to normalise -- there is no "
+              "BatchNormalization or InstanceNormalization in either graph to "
+              "name. Only 'conv' moves anything: the 61 dense convolutions, "
+              "onto a design set built for their twelve padded (K, N) pairs.");
     }
   }
-  // --artifacts is refused for the same reason and named separately, because a
-  // user who typed it was told about a design set somewhere and is asking
-  // whether one is needed -- the answer is that it would not be used.
-  if (!flag("--artifacts").empty())
-    throw std::runtime_error(
-        "--artifacts " + flag("--artifacts") +
-        ": not used by this architecture. There is no array path (see "
-        "--npu-ops above), so a design set on disk would be loaded and never "
-        "read. Both networks run on the host.");
+  // --artifacts is now READ, not refused: it names the design set the array path
+  // dispatches into, and a directory silently ignored while --npu-ops conv says
+  // otherwise would report host numbers as array ones. What the container must
+  // ALSO carry is the pre-tiled panels, and that is checked where the session is
+  // built rather than here -- a container without them has nothing to stage, and
+  // the refusal it gets names the packing command, which is the useful one.
 
   // --serve is REFUSED BY NAME, and read through the SHARED reader so that
   // `--serve 9000` and a bare `--serve` are caught the same way they are in the
@@ -236,7 +239,67 @@ inline int maybe_hands_mode(const std::string &root, int argc, char **argv,
                                                      : flag("--threads").c_str()));
 
   const double t0 = app::now_s();
-  npue::hands::Session session(probe, model_name, "", threads, max_hands);
+  // -- the artifacts. EMPTY BY DEFAULT, and that is the point: the host session
+  // needs no device, no design and no directory, so `hands` runs on a machine with
+  // no /dev/accel0. Only --npu-ops conv (or an explicit --artifacts) opens one.
+  //
+  // Structured like arch=6's and arch=8's, and deliberately WITHOUT a number in
+  // the refusal: arch=6's says "14 distinct designs" and its packer measures 21,
+  // and a refusal that states a wrong count is worse than one that states none --
+  // an operator who checks it finds the tool lying about the very thing it is
+  // refusing over. So both facts are read out of the container and the design, and
+  // where one is missing the message says which.
+  std::string art;
+  const bool conv_on_array =
+      parse_npu_ops(flag("--npu-ops")).count("conv") != 0;
+  if (conv_on_array || !flag("--artifacts").empty()) {
+    const std::string named = flag("--artifacts");
+    std::string streams;
+    try {
+      streams = probe.config_string("npu_streams");
+    } catch (const std::exception &) {
+    }
+    if (streams.empty())
+      throw std::runtime_error(
+          "--npu-ops conv needs the array panels, and this container does not "
+          "carry any: it was packed without --npu. Repack with "
+          "`--hands-onnx models/mediapipe-hands --npu --device npu1`, which "
+          "stages a pre-tiled bf16 B panel for every DENSE convolution of BOTH "
+          "graphs. (A design set is the SECOND requirement, and a separate one.)");
+    if (named.empty()) {
+      size_t n = 0;
+      for (size_t i = 0; i < streams.size(); ++i)
+        if (streams[i] == '{') ++n;
+      throw std::runtime_error(
+          "--npu-ops conv needs a design set on disk: pass --artifacts <dir> "
+          "naming one, or build it with `python tools/export/export_gemm_rtp.py "
+          "--target mediapipe-hands --arch 1 -n 32`. The flag has no default to "
+          "fall back on, because this container's " + std::to_string(n) +
+          " padded (K, N) designs are its own.");
+    }
+    const std::vector<std::string> cands = artifacts_candidates(root, named);
+    auto usable = [](const std::string &c) {
+      return std::ifstream(c + "/gemm_rtp/design.json").good();
+    };
+    art = select_set_for_layout(cands, usable, "");
+    if (art.empty()) {
+      std::string looked;
+      for (size_t i = 0; i < cands.size(); ++i)
+        looked += (i ? ", " : "") + cands[i];
+      throw std::runtime_error(
+          "no hands design set found for --artifacts '" + named +
+          "'; looked for gemm_rtp/design.json under " + looked +
+          ". Export one with: python tools/export/export_gemm_rtp.py --target "
+          "mediapipe-hands --arch 1 -n 32");
+    }
+    if (!npu::require_context_budget(npu::survey_contexts(), 1,
+                                     has("--allow-contention"), stderr))
+      throw std::runtime_error(
+          "NPU context budget: refusing to load 1 hw_context -- see the report "
+          "above (close the other process, or pass --allow-contention)");
+  }
+
+  npue::hands::Session session(probe, model_name, art, threads, max_hands);
   const double t_setup = app::now_s() - t0;
   const auto &g = session.geometry();
 
@@ -266,20 +329,33 @@ inline int maybe_hands_mode(const std::string &root, int argc, char **argv,
     (c.depthwise() ? palm_dw : palm_dense)++;
   for (const auto &c : g.lm_convs)
     (c.depthwise() ? lm_dw : lm_dense)++;
+  // Whether the dense convolutions went to the array, read from the SESSION
+  // rather than from the flag. A line that printed "npu" because --npu-ops conv
+  // was on the command line would say so for a run where the design set was
+  // missing and everything fell back, which is the one thing a status block must
+  // not do.
+  const bool on_array = session.array_placement();
   std::fprintf(stderr,
                "  ops        (npu = dispatched, host = this process)\n");
   std::fprintf(stderr, "             %-26s %-5s %s\n",
                ((std::to_string(palm_dense) + " x conv + " +
                  std::to_string(palm_dw) + " x dwconv")
                     .c_str()),
-               "host",
-               "palm detector, 87 nodes; dwconv has no [M,N] GEMM to dispatch, "
-               "so it would not move even with a design set");
+               on_array ? "npu" : "host",
+               on_array
+                   ? "palm detector, 87 nodes, on the array's twelve padded "
+                     "(K, N) slots; dwconv has no [M,N] GEMM to dispatch, so it "
+                     "stays here"
+                   : "palm detector, 87 nodes; dwconv has no [M,N] GEMM to "
+                     "dispatch, so it would not move even with a design set");
   std::fprintf(stderr, "             %-26s %-5s %s\n",
                ((std::to_string(lm_dense) + " x conv + " + std::to_string(lm_dw) +
                  " x dwconv")
                     .c_str()),
-               "host", "landmark network, 58 nodes, once per hand");
+               on_array ? "npu" : "host",
+               on_array ? "landmark network, 58 nodes, once per hand, on the "
+                          "same twelve slots under a disjoint range"
+                        : "landmark network, 58 nodes, once per hand");
   std::fprintf(stderr, "             %-26s %-5s %s\n", "add, maxpool, pad_c, resize",
                "host", "elementwise and memory passes");
   std::fprintf(stderr, "             %-26s %-5s %s\n", "image front end", "host",
@@ -294,6 +370,10 @@ inline int maybe_hands_mode(const std::string &root, int argc, char **argv,
                "host-side by construction: a list of survivors, not a tensor");
   std::fprintf(stderr, "  setup      %.3f s (both graphs read, weights transposed once)\n",
                t_setup);
+  if (session.array_placement())
+    std::fprintf(stderr,
+                 "  array      %.1f MB of bf16 panels staged, once, at load\n",
+                 session.array_staged_bytes() / (1024.0 * 1024.0));
 
   // -- the dump ----------------------------------------------------------------
   //
@@ -378,6 +458,18 @@ inline int maybe_hands_mode(const std::string &root, int argc, char **argv,
                  r.hands.size() == 1 ? "" : "s", r.total_s * 1e3,
                  r.front_end_s * 1e3, r.palm_s * 1e3, r.nms_s * 1e3,
                  r.crop_s * 1e3, r.lm_s * 1e3, r.post_s * 1e3);
+    // THE ARRAY LINE IS PER IMAGE AND NOT IN THE HEADER, because every number in
+    // it is a property of a run and the header is printed before there has been
+    // one. It read "0 dispatches, 0.0 ms" in the header, which is true and
+    // useless.
+    if (session.array_placement())
+      std::fprintf(stderr,
+                   "             array: %lld dispatches, %.1f ms on the device, "
+                   "%.1f ms repacking A and %.1f ms transposing C on the host\n",
+                   static_cast<long long>(session.array_dispatches()),
+                   1000.0 * session.array_seconds(),
+                   1000.0 * session.array_repack_seconds(),
+                   1000.0 * session.array_transpose_seconds());
     if (text) {
       if (r.hands.empty()) {
         std::printf("%s: no hands\n", path.c_str());

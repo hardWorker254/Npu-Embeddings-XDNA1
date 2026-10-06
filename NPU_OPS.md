@@ -22,7 +22,7 @@ it takes no op flag at all -- `--npu-ops`, `--npu-extra-ops` and
 `--npu-eltwise` are refused by name there, each with its own message. The
 table below is what it reads.
 
-There are 8 codes and 7 architectures: 56 cells. Of those, 20 run on the array today, 1 is already there without a code, 0 are operations the model has and no array branch reaches, 4 cannot be moved on this board for a stated reason, and 31 do not exist in that model at all.
+There are 8 codes and 7 architectures: 56 cells. Of those, 21 run on the array today, 1 is already there without a code, 0 are operations the model has and no array branch reaches, 3 cannot be moved on this board for a stated reason, and 31 do not exist in that model at all.
 
 ## The eight codes
 
@@ -69,7 +69,7 @@ A list per architecture, not a grid of architectures against codes: of 56 cells 
 | `stt` | `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
 | `cls` | `gelu`, `layn`, `softm`, `conv` (already), `attn`, `logit` (impossible) |
 | `pose` | `conv` |
-| `hands` | `conv` (impossible) |
+| `hands` | `conv` |
 | `mppose` | `conv` |
 | `embeddinggemma-300m` | `gelu` (impossible), `layn` (impossible), `softm`, `attn` |
 
@@ -272,15 +272,19 @@ no normalisation op anywhere in either graph. packers/hands.py's op inventory is
 
 no attention and no softmax. The nearest thing is the palm head's score, and that is a SIGMOID folded into the decode (runtime/src/hands/decode.cpp applies it to the logit after the graph), not a softmax over a score matrix between two GEMMs.
 
-### `conv` -- conv1d (Whisper's audio front end): **blocked**
+### `conv` -- conv1d (Whisper's audio front end): **honours**
 
-not missing code and not the wrong operation -- this architecture is 100 convolutions of which 61 are dense and GEMM-shaped, carrying 232.0M MACs in the palm detector and 123.9M in the landmark network, which is exactly a GEMM array's arithmetic. What is missing is a DESIGN SET, and only that.
+It dispatches, and it is 1.8x SLOWER here. Both are measured, and both belong in the same cell.
 
-The 61 dense convolutions have 31 distinct raw (K, N) pairs, which sounds worse than it is: padded the way gemm_rtp/geometry.py pads pose's -- K up to a multiple of tile_k = 64, N up to a multiple of tile_n*cols = 128 -- they collapse to TWELVE, and the two graphs share two of those, so the union is 12. That is fewer than pose's 14, and pose's set exists and was measured, so nothing about the shapes is the obstacle.
+What changed, and when: this cell used to be `blocked` with the reason that no design set carried arch=7's dense (K, N) pairs. That was true when it was written and stopped being true when tools/export/exporters/gemm_rtp/geometry.py gained HANDS_CONV_SHAPES and runtime/artifacts/mediapipe-hands/artifacts_npu1/gemm_rtp/ was built from it: twelve streams, one xclbin, checked against the packed container in both directions by tools/verify/verify_pose_streamset.py. --npu-ops conv sends the 61 dense convolutions there in 149 dispatches; the other 39 stay on the host.
 
-What is missing is that nobody has BUILT those 12 on this machine, so there is no array timing to compare the host's against, and runtime/include/runtime/hands_mode.hpp REFUSES --npu-ops conv by name rather than running on the host under a flag that says otherwise. The numbers a design set would have to beat, measured here: onnxruntime's float run of the same two graphs is 5.18 ms + 0.94 ms = 6.1 ms a frame on 16 threads, and this build's host fp32 walk is 42 ms (palm) + 29 ms (landmark) on the 520x512 test frame. The int8 variants of both checkpoints were measured too and are SLOWER here -- 11.62 ms and 4.45 ms -- so the container is float, and the reason is written in tools/pack/packers/hands.py.
+MEASURED on hand_plain.png, one hand, five runs each: the array takes 155 ms against the host's 85 ms. Of the array's own time, 47 ms is the device's GEMM, 4.5 ms is repacking A into the design's padded stride and 3.6 ms is transposing C back -- so here the DEVICE is most of it and the host shuffling is small, which makes this the clearest case in the file of an array that loses on the device rather than on the data movement around it. N pads to tile_n*cols = 128 and this network's channel counts are 16, 24, 32, 48, 64, 96, 128, 192 and 256, so most pad, and the useful 356M dense MACs become far more dispatched work.
 
-One number a future design set should not expect to move: 39 of the container's 100 convolutions are DEPTHWISE, and a depthwise filter reduces within one channel, so there is no [M, N] GEMM in it to dispatch. They stay on the host whatever a design set turns out to say.
+AND THE TWO PATHS DISAGREE BY ABOUT A PIXEL AND A HALF. The panels are bf16, so the detector's score moves 1.1e-02 and its box 1.08 px, and the landmark network's 21 points land a mean 1.63 px and at worst 4.71 px from the host's (median 1.72, p90 2.45), with depth 0.41 px mean and 2.17 px worst, presence within 3.4e-04 and the world points within 0.0023 m. That is the same order as arch=6's array path, which agrees with its host to 1.1 px, and it is BETTER than arch=8's, where the detector's noise is amplified by a rotated crop into 44 px -- arch=7's crop is not rotated by an angle the detector predicts, so nothing here multiplies the error.
+
+39 of the container's 100 convolutions are DEPTHWISE and carry 77.9M MAC, and a depthwise filter reduces within one channel so there is no [M, N] GEMM in it: they stay on the host whatever a design set says.
+
+Design directory: none -- it runs on the stream gemm_rtp already exports, so there is nothing to compile. See `STREAM_ONLY` in `tools/lib/npu_ops.py`.
 
 ### `attn` -- attention, as two GEMMs: **absent**
 

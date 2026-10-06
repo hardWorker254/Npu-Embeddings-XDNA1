@@ -684,6 +684,70 @@ def gemm_b_layout_for_device(device, tile_k, tile_n, dtype="BF16",
     return gemm_b_layout(tile_k, tile_n, s, t, dtype)
 
 
+# tile_k and tile_n for the pre-tiled B panels, as of the three conv-only
+# packers. ONE pair of constants for all of them, and they were three pairs: pose
+# chose 32 because 48 divides none of its channel counts usefully, and mppose and
+# hands then copied that 32 rather than deriving it, so a change to one would have
+# left the other two writing panels their design could not read.
+#
+# What actually decides tile_n is `cols`: N pads to tile_n * cols, so the width
+# has to divide the widest padded N of the set. For pose (14 shapes, N up to 2304)
+# and for mppose (22, N up to 1152) 48 does divide nothing useful and 32 divides
+# most. hands' widest padded N is 768, which 48 divides -- but 32 divides it too
+# and is what the design set it shipped against was built at, so the choice here is
+# "what the existing sets and containers agree on", not a fresh optimisation.
+CONV_PANEL_TILE = (64, 32)
+
+
+def conv_panel(w, device, dtype="BF16", tile=None):
+    """One dense convolution's pre-tiled bf16 B panel.
+
+    Returns (tiled_panel, layout, padded_k, padded_n) for a filter of shape
+    [Cout, Cin, kh, kw].
+
+    WHY THIS IS IN npue.py AND NOT IN EACH PACKER
+    ----------------------------------------------
+    Three conv-only packers write these panels -- pose.py, mppose.py, hands.py --
+    and the arithmetic here has a wrong answer that is a PLAUSIBLE one. The
+    weight is [Cout, Cin, kh, kw] = [N, K] and the panel is [K, N], so
+    `w.reshape(K, N)` has the right SIZE, tiles, and matches layout_hash (both
+    sides derive that hash from constants, not from the data), and the array then
+    multiplies a TRANSPOSED filter: the output has the right shape, every channel
+    is a plausible mixture of the right ones, and nothing reports it. pose.py's
+    copy said so in a long comment; mppose.py's copy transcribed the comment and
+    the arithmetic; hands.py would have been a third, and a third is how the two
+    before it drift.
+
+    So the transpose, the K padding to tile_k and the N padding to tile_n*COLS
+    live here once. What stays in each packer is the ITERATION -- which
+    convolutions are dense, and what their names are -- because that genuinely
+    differs per packer: pose has one graph, mppose and hands have two with
+    separate index spaces.
+
+    The N padding is to tile_n * cols, NOT to tile_n, and it needs a device for
+    that reason alone. `cols_for_device(None)` answers for a device nobody named,
+    and a panel built at the wrong width is not a panel the design can read: the
+    bytes past the end are whatever follows in the container's data region, and
+    every check upstream of the multiply still passes.
+    """
+    tile_k, tile_n = tile or CONV_PANEL_TILE
+    n_mult = tile_n * cols_for_device(device)
+    mac_s, mac_t = mac_for_device(device, dtype)
+    layout = gemm_b_layout(tile_k, tile_n, mac_s, mac_t, dtype)
+    cout, cin, kh, kw = w.shape
+    k, n = cin * kh * kw, cout
+    pk = ((k + tile_k - 1) // tile_k) * tile_k
+    pn = ((n + n_mult - 1) // n_mult) * n_mult
+    # Zero padding, which is EXACT and not an approximation: a padded K column is
+    # multiplied by nothing and a padded N column is a channel the runtime never
+    # reads back. tile_b refuses a shape that does not tile, so the pad happens here.
+    b = np.zeros((pk, pn), dtype=np.float32)
+    # A TRANSPOSE, not a reshape. See this function's docstring for what a
+    # reshape costs.
+    b[:k, :n] = w.reshape(n, k).T
+    return tile_b(b, tile_k, tile_n, s=mac_s, t=mac_t), layout, pk, pn
+
+
 def layout_hash(layout):
     """Stable hash of everything that changes how bytes are laid out.
 

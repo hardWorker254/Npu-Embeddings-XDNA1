@@ -68,8 +68,23 @@ DOCS = (REPO / "NPU_OPS.md", REPO / "NPU_OPS.ru.md")
 # cell's reason in the registry). Changing one means a cell's status changed,
 # which is a behaviour change -- so this gate should have to be edited on purpose
 # rather than a number quietly moving under a document that still says 14.
-EXPECTED_COUNTS = {"honours": 20, "on_array": 1, "unimplemented": 0,
-                   "blocked": 4, "absent": 31}
+EXPECTED_COUNTS = {"honours": 21, "on_array": 1, "unimplemented": 0,
+                   "blocked": 3, "absent": 31}
+# honours went 20 -> 21 and blocked 4 -> 3 when arch=7's conv cell stopped being
+# `blocked`, for the reason its own cell now gives: a design set was built for its
+# twelve padded (K, N) shapes and --npu-ops conv dispatches its 61 dense
+# convolutions. `absent` did not move, so the change is exactly one cell again.
+#
+# WHAT THE THREE REMAINING `blocked` CELLS ARE, because they are not the same kind
+# of blocked and the word does not say so:
+#   embeddinggemma-300m/layn   needs RMSNorm, which is a NINTH code -- a different
+#                               kernel body, not a flag
+#   embeddinggemma-300m/gelu   needs GeGLU taken out of a gated path, which has no
+#                               standalone pass to hand a hw_context
+#   vit-base-patch16-224/logit needs a vocabulary projection, a TENTH code
+# So all three are "this is a new operation", which is a different piece of work
+# from "this is the existing operation and there is nowhere to put it" -- and the
+# difference is the whole reason they are still blocked rather than dishonoured.
 # honours went 19 -> 20 when arch=8's conv cell stopped being `blocked` and became
 # `honours`: a design set was built for its twenty-two padded (K, N) shapes and
 # `--npu-ops conv` now dispatches its 99 dense convolutions. `blocked` went 5 -> 4
@@ -187,14 +202,7 @@ FIXTURES = {
 # strings. It is not empty now, and the reason is written where it can be read
 # rather than asserted here.
 UNRUNNABLE: dict[str, str] = {
-    "hands": "this architecture has no array path at all, so this harness "
-             "cannot reach it anywhere rather than not-on-this-machine. "
-             "runtime/include/runtime/hands_mode.hpp REFUSES --npu-ops conv "
-             "and --artifacts by name, and both of its 61 dense convolutions "
-             "pad down to 12 shapes that no design under runtime/artifacts/ "
-             "carries. Its one `blocked` cell is that same fact; had it been "
-             "written `honours` there would be nothing here to run either, "
-             "which is the failure the status exists to prevent.",
+    "hands": "NO LONGER TRUE for this row, kept deliberately. arch=7's conv cell used to be `blocked` and this entry said why: no design set carried its twelve padded (K, N) shapes. One now does -- runtime/artifacts/mediapipe-hands/artifacts_npu1/gemm_rtp/, checked against the packed container in both directions by tools/verify/verify_pose_streamset.py -- so the cell is `honours` and the array path is reachable.\n\nThe other seven cells stay unrunnable for the conv-only reason: there is no `gelu`, no `layn`, no `softm`, no `attn`, no `mproj`, no `fft` and no `logit` operation in either graph to name. The row is here rather than absent because a declaration of what a row IS is not a statement about this machine, and keeping the two apart is what lets a skip print something true.",
     "mppose": "NO LONGER TRUE for this row and kept here deliberately. arch=8's "
               "conv cell used to be `blocked` and this entry said why: no design "
               "set carried its twenty-two padded (K, N) shapes. One now does -- "

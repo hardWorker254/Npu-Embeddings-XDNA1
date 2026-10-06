@@ -32,19 +32,74 @@ Session::Session(npue::File &model, const std::string &model_name,
                  const std::string &artifacts, int threads, int64_t max_hands)
     : model_(model), art_(artifacts), name_(model_name), max_hands_(max_hands) {
   geom_ = read_geometry(model_, name_);
-  if (!art_.empty())
-    throw std::runtime_error(
-        name_ + ": this session was handed the design set at " + art_ +
-        ", but arch=7 has no array path. There is no design set carrying the "
-        "31 distinct dense (K, N) pairs these two graphs use, so the array "
-        "path cannot be measured here, and a session that accepted the "
-        "directory and then ran every convolution on the host would report "
-        "timings under a flag that says the opposite. Run it on the host: "
-        "--npu-ops conv is not accepted for `hands`.");
   pool_ = std::make_unique<app::Pool>(threads);
-  Placement place;   // the default, and the only honest one here
-  palm_net_ = std::make_unique<Network>(geom_, place, *pool_);
-  lm_net_ = std::make_unique<Network>(geom_, place, *pool_);
+  Placement place;   // the default: everything on the host
+  if (!art_.empty()) {
+    // THE SLOT RANGES, ASSIGNED HERE AND FROM ONE VECTOR. This container holds
+    // the palm detector AND the landmark network, with SEPARATE convolution
+    // index spaces that both start at zero, while the array backend has ONE
+    // panel table. So the two networks get disjoint slot ranges and each
+    // translates its own conv index through a TABLE -- see Placement::slots for
+    // why that is not `base + conv`, which is a bug this architecture inherited
+    // from arch=8's first version.
+    place.conv_on_array = true;
+    place.design_dir = art_;
+    std::vector<conv::ConvSlot> slots;
+    palm_slots_.assign(geom_.palm_convs.size(), -1);
+    for (size_t i = 0; i < geom_.palm_convs.size(); ++i) {
+      const ConvW &cw = geom_.palm_convs[i];
+      if (cw.depthwise()) continue;
+      palm_slots_[i] = static_cast<int64_t>(slots.size());
+      slots.push_back(conv::ConvSlot{static_cast<int64_t>(slots.size()), "palm",
+                                     "palm.", static_cast<int64_t>(i),
+                                     stream_of(geom_.palm_graph, i), cw.cin,
+                                     cw.cout, cw.kh, cw.kw, cw.b});
+    }
+    lm_slots_.assign(geom_.lm_convs.size(), -1);
+    for (size_t i = 0; i < geom_.lm_convs.size(); ++i) {
+      const ConvW &cw = geom_.lm_convs[i];
+      if (cw.depthwise()) continue;
+      lm_slots_[i] = static_cast<int64_t>(slots.size());
+      slots.push_back(conv::ConvSlot{static_cast<int64_t>(slots.size()), "lm",
+                                     "lm.", static_cast<int64_t>(i),
+                                     stream_of(geom_.lm_graph, i), cw.cin,
+                                     cw.cout, cw.kh, cw.kw, cw.b});
+    }
+    if (slots.empty())
+      throw std::runtime_error(
+          name_ + ": --npu-ops conv was asked for and neither graph has a dense "
+          "convolution. A design set with no slots behind it is not a design set.");
+    array_ = conv::make_array_backend(model_, slots, name_, art_, *pool_);
+  }
+  Placement palm_place = place, lm_place = place;
+  palm_place.group = "palm";
+  palm_place.slots = &palm_slots_;
+  lm_place.group = "lm";
+  lm_place.slots = &lm_slots_;
+  palm_net_ = std::make_unique<Network>(geom_, palm_place, *pool_,
+                                       array_ ? array_.get() : nullptr);
+  lm_net_ = std::make_unique<Network>(geom_, lm_place, *pool_,
+                                      array_ ? array_.get() : nullptr);
+}
+
+// The design stream the graph node calling convolution `conv` names, or "".
+//
+// The graph is SEARCHED rather than indexed by convolution order: the two are
+// equal in every container here, and if that stops being true the wrong answer is
+// a panel staged for another layer -- right shape, wrong weights, no error.
+std::string Session::stream_of(const std::vector<Layer> &layers, int64_t conv) {
+  const Layer *found = nullptr;
+  for (const Layer &l : layers)
+    if (l.conv == conv && (l.op == Op::Conv || l.op == Op::DwConv)) {
+      if (found)
+        throw std::runtime_error(
+            name_ + ": convolution " + std::to_string(conv) +
+            " is called by two graph nodes. The array path keys panels by which "
+            "node calls a convolution, and two nodes sharing one would stage one "
+            "panel for two different layers.");
+      found = &l;
+    }
+  return found ? found->stream : std::string();
 }
 
 Session::~Session() = default;

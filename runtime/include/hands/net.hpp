@@ -62,6 +62,7 @@
 #include <vector>
 
 #include "common/conv_host.hpp"
+#include "conv/array.hpp"
 #include "hands/geometry.hpp"
 #include "runtime/pool.hpp"
 
@@ -97,6 +98,17 @@ inline float act1(Act a, float v, float slope) {
 struct Placement {
   bool conv_on_array = false;
   std::string design_dir;
+  // conv index -> array slot, -1 for a depthwise convolution, EMPTY on the host
+  // path. It is a TABLE and not `base + conv` for arch=7's reason, which is
+  // arch=8's: this container packs the palm detector AND the landmark network,
+  // their convolution indices are separate spaces that both start at zero, and
+  // slot numbers are handed out over the DENSE convolutions only -- so the
+  // landmark network's conv 3 is not slot 3. Keyed on the bare index it would
+  // dispatch against the palm detector's panel: the right SHAPE in most cases and
+  // the wrong weights in all of them, and the landmark network's hand would come
+  // out somewhere confident.
+  const std::vector<int64_t> *slots = nullptr;
+  std::string group = "palm";
 };
 
 // What one run cost. Same fields as arch=6's Cost, and for the same reason: the
@@ -116,6 +128,12 @@ struct Cost {
   double t_im2col = 0.0;
   double t_gemm = 0.0;
   double t_transpose = 0.0;
+  // The array path's own three spans, kept apart for arch=8's reason: none of
+  // them is the device's work, and a line printing only t_array would read as
+  // though the host shuffle around the dispatch were free.
+  double t_array_gemm = 0.0;
+  double t_array_repack = 0.0;
+  double t_array_transpose = 0.0;
   double t_elementwise = 0.0;   // add, pad_c, resize, maxpool
   double t_pool = 0.0;          // the landmark network's global average
   void reset() { *this = Cost{}; }
@@ -138,7 +156,10 @@ struct LmOut {
 // the container the geometry's ConvW pointers point into.
 class Network {
 public:
-  Network(const Geometry &g, const Placement &place, app::Pool &pool);
+  // `array` is borrowed and may be null, which is the default and the only thing
+  // a container packed without --npu can use.
+  Network(const Geometry &g, const Placement &place, app::Pool &pool,
+           conv::Convs *array = nullptr);
 
   // One image, NCHW [3, S, S] in. Returns a vector of every node's output.
   //
@@ -214,6 +235,18 @@ public:
   // an accounting bug.
   void reset_cost() { cost_.reset(); }
 
+  // Whether the dense convolutions went to the array, and the array's own
+  // numbers if they did. The status block asks THIS rather than reading the
+  // command line, because a line that reported "npu" because --npu-ops conv was
+  // on argv would also report it for a run where the design set was missing and
+  // everything fell back to the host.
+  bool on_array() const { return array_ != nullptr; }
+  int64_t array_dispatches() const { return array_ ? array_->dispatches() : 0; }
+  double array_seconds() const { return array_ ? array_->t_array() : 0.0; }
+  size_t array_staged_bytes() const {
+    return array_ ? array_->staged_bytes() : 0;
+  }
+
 private:
   Tensor conv(const Tensor &in, const Layer &l, const ConvW &w,
                const float *wkn, const float *slope, const std::string &label);
@@ -228,9 +261,17 @@ private:
   const Geometry &g_;
   const Placement place_;
   app::Pool &pool_;
+  // Borrowed, null unless Placement::conv_on_array is set. The type names no XRT
+  // class, which is what lets a build with no design set link without the device.
+  conv::Convs *array_ = nullptr;
   Cost cost_;
   std::vector<float> a_;       // the im2col buffer, reused across convolutions
   std::vector<float> c_;       // the [M,N] GEMM output, reused
+  // The array path's own buffers, and they are separate from a_/c_ rather than
+  // reused: the repack READS a_ and the device WRITES apad_, and a chunk that
+  // overwrote its own input would be a plausible wrong network. Sized on first
+  // use, so a host-only run allocates neither.
+  std::vector<float> apad_, cpad_;
   std::vector<Tensor> body_;   // every node's output; index 0 is the image
   // The [K,N] weight tables. Storage first, then the pointers into it, so that
   // the pointers stay valid when the outer vectors are moved or resized.

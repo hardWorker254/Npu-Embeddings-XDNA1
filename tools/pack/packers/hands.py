@@ -844,7 +844,40 @@ def mac_split(t, conv_of):
     return dense, dw, shapes
 
 
-def pack_hands(palm_onnx, lm_onnx, out_path, dry_run=False):
+def npu_panels(pfx, ops, weights, device):
+    """Pre-tiled bf16 B panels for the array backend, one per DENSE convolution.
+
+    Returns (panels, streams, (tile_k, tile_n)), panels keyed by a convolution
+    INDEX -- the `conv` field an op carries -- and streams the sorted distinct
+    padded (K, N) shapes, which is the twelve-entry set
+    tools/export/exporters/gemm_rtp/geometry.py builds a design from.
+
+    The panel arithmetic is npue.conv_panel, shared with arch=6 and arch=8. See
+    its docstring for why the transpose is not retyped here: a reshape instead of a
+    transpose has the right size, tiles, matches layout_hash and yields a
+    TRANSPOSED weight, which is a network with the right shape and every channel a
+    plausible mixture of the wrong ones.
+
+    Depthwise convolutions get no panel and no slot. A depthwise filter reduces
+    within one channel -- K is kh*kw and N is 1 -- so there is no [M, N] GEMM in
+    it, and 39 of arch=7's 100 convolutions are it.
+    """
+    from npue import CONV_PANEL_TILE, conv_panel  # noqa: E402
+
+    panels, streams = {}, set()
+    for o in ops:
+        if o["op"] != "conv":
+            continue
+        idx = o["conv"]
+        panel, layout, pk, pn = conv_panel(weights[f"{pfx}.conv.{idx}.w"],
+                                           device)
+        panels[idx] = (panel, layout, pk, pn)
+        streams.add((pk, pn))
+    return panels, sorted(streams), CONV_PANEL_TILE
+
+
+def pack_hands(palm_onnx, lm_onnx, out_path, dry_run=False,
+                device=None, npu=False):
     models = {}
     tp = trace("palm", onnx.load(str(palm_onnx)))
     tl = trace("landmark", onnx.load(str(lm_onnx)))
@@ -933,12 +966,59 @@ def pack_hands(palm_onnx, lm_onnx, out_path, dry_run=False):
               "conv" if ".conv." in name else "prelu", list(arr.shape))
     w.add("palm_anchors", anchors.astype(np.float32), "F32", "anchors",
           list(anchors.shape))
+
+    if npu:
+        # A device is REQUIRED, and the reason is in npue.conv_panel: N pads to
+        # tile_n * cols and cols is a property of the array, so a panel built
+        # without one is not a panel the design can read and every check upstream
+        # of the multiply still passes.
+        if device is None:
+            _die("--npu needs a device: pass --device npu1 (or npu2). N pads to "
+                 "tile_n*cols and cols is a property of the array.")
+        from npue import to_bf16_bits  # noqa: E402
+        # BOTH graphs' panels. The palm detector and the landmark network dispatch
+        # independently, and a stream set for one and not the other is a design
+        # whose slots half resolve.
+        pp, sp, tile = npu_panels("palm", ops_p, w_p, device)
+        pl, sl, tile2 = npu_panels("lm", ops_l, w_l, device)
+        if tile != tile2:
+            _die(f"the two networks were tiled differently ({tile} and {tile2}), "
+                 f"so one container would carry two panel layouts under one "
+                 f"design's layout_hash")
+        allstreams = sorted(set(sp) | set(sl))
+        name_of = {k: f"conv{k[0]}x{k[1]}" for k in allstreams}
+        for pfx, ops, panels in (("palm", ops_p, pp), ("lm", ops_l, pl)):
+            for o in ops:
+                if o["op"] != "conv":
+                    continue
+                i = o["conv"]
+                panel, layout, pk, pn = panels[i]
+                w.add(f"{pfx}.conv.{i}.btile", to_bf16_bits(panel), "BF16",
+                      "gemm_b", [pk, pn], layout=layout,
+                      padded_shape=[pk, pn])
+                o["stream"] = name_of[(pk, pn)]
+        # Into w.config, NOT the local `config`: Writer.__init__ took a copy when
+        # it was constructed above, so a key set on the local dict now is a dict
+        # the file never sees. That mistake is written down at length in
+        # tools/pack/packers/pose.py, where every --npu container was once
+        # shipped with no npu_streams at all.
+        w.config["npu_streams"] = json.dumps(
+            [{"op": name_of[k], "k": k[0], "n": k[1], "tile_k": tile[0],
+              "tile_n": tile[1]} for k in allstreams],
+            separators=(",", ":"))
+        w.config["palm_graph"] = json.dumps(ops_p, separators=(",", ":"))
+        w.config["lm_graph"] = json.dumps(ops_l, separators=(",", ":"))
+
     w.write(out_path)
     size = os.path.getsize(out_path)
     print(f"wrote {out_path}  ({size / 1e6:.1f} MB, arch={ARCH_STRING})")
     print(f"  {len({**w_p, **w_l})} weight tensors, "
           f"{len({**prelu_p, **prelu_l})} slopes, "
           f"{anchors.shape[0]} anchors")
+    if npu:
+        print(f"  npu        {len(pp) + len(pl)} pre-tiled bf16 panels over "
+              f"{len(allstreams)} padded (K, N) shapes, tile {tile[0]}x{tile[1]}, "
+              f"device {device}")
 
 
 def main():
@@ -947,8 +1027,18 @@ def main():
     ap.add_argument("lm_onnx")
     ap.add_argument("out")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--npu", action="store_true",
+                    help="add the pre-tiled bf16 B panels and the stream table, "
+                         "so --npu-ops conv has slots to dispatch into. OFF by "
+                         "default: the panels are 12 MB on top of an 18 MB "
+                         "container, and the array path is slower than the host.")
+    ap.add_argument("--device", default=None,
+                    help="which array the panels are tiled for (npu1, npu2). "
+                         "Required with --npu, because N pads to tile_n*cols and "
+                         "cols is a property of the array.")
     a = ap.parse_args()
-    pack_hands(a.palm_onnx, a.lm_onnx, a.out, dry_run=a.dry_run)
+    pack_hands(a.palm_onnx, a.lm_onnx, a.out, dry_run=a.dry_run,
+               device=a.device, npu=a.npu)
 
 
 if __name__ == "__main__":

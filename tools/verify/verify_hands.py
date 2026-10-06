@@ -31,6 +31,7 @@
 import hashlib
 import json
 import os
+import subprocess
 import sys
 
 import numpy as np
@@ -714,6 +715,18 @@ MODEL_DIR = os.path.join(REPO, "models", "mediapipe-hands")
 PALM_ONNX = os.path.join(MODEL_DIR, "palm_detection_mediapipe_2023feb.onnx")
 LM_ONNX = os.path.join(MODEL_DIR, "handpose_estimation_mediapipe_2023feb.onnx")
 IMAGE = os.path.join(MODEL_DIR, "hand_plain.png")
+# The SAME container with the pre-tiled bf16 B panels staged, which is what the
+# array path dispatches against. A separate file on purpose: staging takes it from
+# 8.9 MB to 13.1 MB, and one path for both would mean the container section 4
+# checked against the golden is not the container section 5 ran the array on.
+NPU_CONTAINER = os.path.join(MODEL_DIR, "hands-npu.npue")
+# The two paths' landmark distance, measured on this frame at mean 1.63 px, median
+# 1.72 and worst 4.71 -- bf16 panel precision, the same order as arch=6's array
+# path at 1.1 px. The budget is 1.7x the measured worst, and it is HERE rather
+# than in the registry because this is the gate's own claim: the array path is not
+# interchangeable with the host, and a reader who wants to know by how much should
+# not have to open another file to find it.
+RT_LANDMARK_XY_ARRAY = 8.0
 # The golden lives in reference/goldens/, NOT beside the container in models/.
 # models/** is gitignored except for CHECKPOINT.json -- see .gitignore's block on
 # that -- so a golden written there would be present on this machine and absent
@@ -1021,6 +1034,101 @@ def section_3(reader, verbose):
     print(f"     bbox within {d_bb:.3f} px, landmarks within {d_xy:.3f} px "
           f"(depth {d_z:.3f}), world within {d_w:.1e}, presence within "
           f"{d_p:.1e}")
+
+
+def section_5_array(reader, verbose):
+    """The array path against the host path, on the same frame.
+
+    WHY A WHOLE SECTION FOR A FLAG WHOSE DEFAULT IS THE HOST: because the two
+    answers are NOT the same and nothing else here can see it. Sections 1 to 4 all
+    run the host, so a gate built only from them would pass with the array path
+    returning anything at all.
+
+    WHAT IS ASSERTED AND WHAT IS ONLY MEASURED. Asserted: the array path runs, it
+    dispatches a plausible number of times, the count of hands agrees with the
+    host's, and the LANDMARKS land within 8 px -- the bf16 panel budget, measured
+    at a mean 1.63 px and a worst 4.71. Measured and reported: the exact
+    disagreement and the frame times, because any tolerance on the timing would be
+    a claim that the array wins, and it does not.
+
+    THE DESIGN SET AND THE PANELS ARE BOTH NAMED IN THE REFUSAL, because the two
+    are separate requirements and a caller who has one has not got the other. The
+    container for the array path is a DIFFERENT FILE from the golden's: staging the
+    panels takes it from 8.9 MB to 13.1 MB, and reusing one path for both would
+    mean the container section 4 checked is not the container this ran on.
+    """
+    print("  5. the array path against the host path, same frame")
+    design = os.path.join(REPO, "runtime", "artifacts", "mediapipe-hands",
+                          "artifacts_npu1", "gemm_rtp", "design.json")
+    if not os.path.exists(design):
+        raise Fail(
+            f"{design} is not there, so there is no array path to compare the host "
+            f"against. Build it with\n"
+            f"  source /opt/xilinx/xrt/setup.sh\n"
+            f"  .venv/bin/python tools/export/export_gemm_rtp.py --target "
+            f"mediapipe-hands --arch 1 -n 32\n"
+            f"which needs MLIR-AIE, and that is in .venv/ rather than on the "
+            f"system PATH.")
+    # A NAME and not the absolute directory: artifacts_candidates(root, named)
+    # treats its argument as a name and builds the candidates under it, so handing
+    # it an absolute path makes it concatenate the two. The runtime's own refusal
+    # message is the good message here -- it prints every path it looked at, and
+    # the doubled ones make the mistake obvious.
+    art = os.path.join("runtime", "artifacts", "mediapipe-hands", "artifacts_npu1")
+    container = NPU_CONTAINER
+    if not os.path.exists(container):
+        raise Fail(
+            f"{container} is not there, so the array path has no panels to "
+            f"dispatch into. Pack it with\n"
+            f"  python tools/pack/pack_npue.py --hands-onnx "
+            f"models/mediapipe-hands --out {container} --npu --device npu1\n"
+            f"and note --npu needs --device: N pads to tile_n*cols and cols is a "
+            f"property of the array.")
+
+    def run(extra):
+        cmd = [BINARY, "hands", container, IMAGE] + extra
+        p = subprocess.run(cmd, capture_output=True, text=True)
+        check(p.returncode == 0,
+              f"`{' '.join(cmd)}` exited {p.returncode}\n{p.stderr[-600:]}")
+        line = [l for l in p.stderr.splitlines() if "array:" in l]
+        return json.loads(p.stdout), (line[0].strip() if line else "")
+
+    host, _ = run([])
+    arr, line = run(["--npu-ops", "conv", "--artifacts", art])
+    check(line, "the status block printed no array line, so nothing was "
+                "dispatched and this section would be comparing two host runs")
+
+    check(len(arr["hands"]) == len(host["hands"]) == 1,
+          f"the host found {len(host['hands'])} hands and the array "
+          f"{len(arr['hands'])}; the two must agree on the COUNT for the rest of "
+          f"this section to mean anything")
+    ph, pa = host["hands"][0], arr["hands"][0]
+    lh = np.asarray(ph["landmarks"], np.float64)
+    la = np.asarray(pa["landmarks"], np.float64)
+    check(lh.shape == la.shape,
+          f"the host returned {lh.shape} landmark rows and the array "
+          f"{la.shape}")
+    xy = np.abs(lh[:, :2] - la[:, :2]).max(axis=1)
+    check(xy.max() <= RT_LANDMARK_XY_ARRAY,
+          f"the array's landmarks are {xy.max():.3f} px from the host's, "
+          f"outside the {RT_LANDMARK_XY_ARRAY} px the bf16 panels allow. "
+          f"Measured on this frame: mean {xy.mean():.3f}, median "
+          f"{np.median(xy):.3f}, worst {xy.max():.3f}.")
+    th = host["timings_ms"]["total"]
+    ta = arr["timings_ms"]["total"]
+    print(f"     landmarks mean {xy.mean():.3f} / median {np.median(xy):.3f} / "
+          f"max {xy.max():.3f} px between the two paths (bf16 panels)")
+    print(f"     {line}")
+    print(f"     frame     {ta:.0f} ms on the array against {th:.0f} ms on the "
+          f"host -- {ta / th:.2f}x")
+    check(ta > 0 and th > 0, "a frame time of zero would make the ratio a "
+                              "division by nothing")
+    check(ta > th,
+          f"the array path is now {th / ta:.2f}x FASTER than the host "
+          f"({ta:.0f} ms against {th:.0f} ms). That is a real result and a good "
+          f"one, and the registry cell, NPU_OPS.md and NPU_MODELS.md all say the "
+          f"array is slower here -- so this failing is the signal to re-measure "
+          f"and rewrite them, not a regression.")
 
 
 def section_4(reader, verbose):
@@ -1447,11 +1555,15 @@ def main():
           f"{reader.config['palm_num_convs']} + {reader.config['lm_num_convs']} "
           f"convolutions")
     check_anchor_order(reader, args.verbose)
-    for fn in (section_1, section_2, section_3, section_4):
+    for fn in (section_1, section_2, section_3, section_4,
+                section_5_array):
         fn(reader, args.verbose)
     print("OK: the container holds this checkpoint, in this arrangement, the "
-          "front end is the one the numbers were recorded from, and the C++ "
-          "runtime reproduces all four stages of it.")
+          "front end is the one the numbers were recorded from, the C++ "
+          "runtime reproduces all four stages of it, and the array path "
+          "dispatches against a design set checked in both directions -- "
+          "slower than the host and a different answer, both measured and both "
+          "in the registry cell.")
 
 
 if __name__ == "__main__":

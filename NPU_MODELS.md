@@ -18,10 +18,10 @@ The second is the actual reason this file exists: `--npu-ops gelu` is **refused*
 
 Tally over the 144 cells:
 
-- **82** **yes** -- runs on the array today
+- **83** **yes** -- runs on the array today
 - **1** already -- the work is already dispatched without a code, and the code is refused
 - **0** no code -- the model has the operation, no array branch reaches it
-- **4** impossible -- cannot be moved on this board; the reason is in NPU_OPS.md
+- **3** impossible -- cannot be moved on this board; the reason is in NPU_OPS.md
 - **55** no -- the model has no such operation
 - **2** **gated** -- this model's FFN has no standalone activation pass -- see below
 
@@ -53,7 +53,7 @@ A list per model, not a grid of models against operations. In a 144-cell grid, 5
 | `whisper-large-v3-turbo` | `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
 | `vit-base-patch16-224` | `gelu`, `layn`, `softm`, `conv` (already), `attn`, `logit` (impossible) |
 | `yolov8n-pose` | `conv` |
-| `mediapipe-hands` | `conv` (impossible) |
+| `mediapipe-hands` | `conv` |
 | `mediapipe-pose` | `conv` |
 
 ## Where these two models differ from their kind

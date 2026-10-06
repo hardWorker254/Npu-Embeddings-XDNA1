@@ -47,6 +47,12 @@ import json
 import sys
 from pathlib import Path
 
+class Fail(Exception):
+    """One reason to stop, and the gate's own type rather
+    than SystemExit, so a caller that catches SystemExit to read an exit code
+    does not swallow a failure by accident."""
+
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools" / "export"))
 sys.path.insert(0, str(ROOT / "tools" / "lib"))
@@ -239,9 +245,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"              --container <file packed with --npu> --kind {kind}")
         return _verdict(fails)
     r = Reader(args.container)
-    graphs = [g for g in ("det_graph", "pose_graph") if g in r.config]
+    # EVERY graph key the container has, discovered rather than listed. The three
+    # conv-only packers name them differently -- arch=6 writes `graph`, arch=8
+    # `det_graph`/`pose_graph`, arch=7 `palm_graph`/`lm_graph` -- so a fixed list
+    # silently checked one architecture and skipped the other two, and the
+    # fallback to `graph` raised KeyError on a two-graph container rather than
+    # saying which key it wanted.
+    graphs = sorted(k for k, v in r.config.items()
+                    if (k == "graph" or k.endswith("_graph")) and
+                    isinstance(v, str) and v[:1] == "[")
     if not graphs:
-        graphs = ["graph"]
+        raise Fail(
+            f"{args.container} has no graph key this file recognises: none of its "
+            f"config keys end in _graph with a JSON array value. The three "
+            f"conv-only packers write `graph`, `det_graph`/`pose_graph` and "
+            f"`palm_graph`/`lm_graph`; a fourth spelling needs this file taught "
+            f"it rather than the check quietly covering nothing.")
     if "npu_streams" not in r.config:
         fails.append(f"{args.container} carries no npu_streams, so it was packed "
                      f"WITHOUT --npu and has no array panels at all. Repack it "

@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "common/conv_host.hpp"
 #include "runtime/model.hpp"
 #include "runtime/pool.hpp"
 
@@ -78,6 +79,34 @@ public:
   // panel would otherwise print the same name dozens of times.
   virtual std::vector<std::string> stream_ops() const = 0;
 };
+
+// One dense convolution, dispatched. SHARED BY arch=6, arch=7 and arch=8, and
+// for the same reason the panel builder is shared: the three details that make
+// this wrong do not announce it.
+//
+//   * A must be REPACKED at the design's padded K. The compiled core reads
+//     `rows * k` columns as ONE contiguous run, so row r's padded tail would
+//     otherwise be row r+1's activations.
+//   * C comes back `padded_n` wide and the host narrows it to the real N.
+//   * The repack is per CHUNK, not per convolution: rows*pk is 256 KiB here while
+//     the whole convolution's A can be tens of megabytes, and the array never
+//     needs more than one dispatch window.
+//
+// `slot` is a number from ConvSlot, NOT the architecture's own convolution index:
+// arch=7 and arch=8 each pack TWO graphs whose index spaces both start at zero.
+//
+// `dst_ch` is the destination tensor's OWN pixel count, which is what
+// transpose_mn_to_nchw needs to address the right plane -- and it is the channel
+// plane count, so `dst + done` is correct only because a chunk never straddles a
+// plane boundary, which it cannot when the tensor is [C, H, W] and the chunk runs
+// along H*W.
+void conv_array_dispatch(Convs &array, int64_t slot, const float *a_im2col,
+                         int64_t M, int64_t K, int64_t N, float *dst,
+                         int64_t dst_ch, hostconv::Act act, const float *slope,
+                         app::Pool &pool, std::vector<float> &apad,
+                         std::vector<float> &cpad, double *t_repack,
+                         double *t_gemm, double *t_transpose,
+                         int64_t *dispatches);
 
 // One convolution the backend must be able to run, flattened.
 //

@@ -1952,10 +1952,12 @@ def main():
     # whose shape the exporter can build a design from -- checked by
     # tools/verify/verify_pose_streamset.py against the container in both
     # directions -- and the runtime keeps refusing --npu-ops for it by name.
-    if args.npu and not (args.pose_onnx or args.mppose_onnx):
+    if args.npu and not (args.pose_onnx or args.mppose_onnx or
+                         args.hands_onnx):
         raise SystemExit(
-            "--npu stages the pre-tiled array panels, and only the pose and "
-            "mppose packers write them (--pose-onnx FILE, --mppose-onnx DIR). "
+            "--npu stages the pre-tiled array panels, and only the pose, mppose "
+            "and hands packers write them (--pose-onnx FILE, --mppose-onnx DIR, "
+            "--hands-onnx DIR). "
             "Every other architecture here "
             "targets the array by construction -- its containers carry no host "
             "path at all -- so on those this flag would be a no-op that looks "
@@ -2077,7 +2079,8 @@ def main():
         print("  dtype f32 -- forced, not defaulted: see the note above about "
               "the int8 pair.")
         from packers.hands import pack_hands  # noqa: E402
-        return pack_hands(palm[0], lms[0], args.out, dry_run=args.dry_run)
+        return pack_hands(palm[0], lms[0], args.out, dry_run=args.dry_run,
+                          device=args.device, npu=args.npu)
 
     if args.mppose_onnx:
         # f32 is FORCED for the same class of reason --hands-onnx forces it, and

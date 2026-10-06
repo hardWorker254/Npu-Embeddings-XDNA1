@@ -116,7 +116,33 @@ public:
   static std::vector<float> preprocess_file(const std::string &path,
                                             const Geometry &g, Letterbox &lb);
 
+public:
+  // Did the dense convolutions actually go to the array? Read from the SESSION,
+  // which built the backend, rather than from the flag -- see the status block.
+  bool array_placement() const { return palm_net_ && palm_net_->on_array(); }
+  int64_t array_dispatches() const {
+    return palm_net_ ? palm_net_->array_dispatches() : 0;
+  }
+  // The BACKEND's counters, read ONCE. Both networks share one backend, so adding
+  // their readings counts every dispatch twice.
+  double array_seconds() const {
+    return palm_net_ ? palm_net_->array_seconds() : 0.0;
+  }
+  size_t array_staged_bytes() const {
+    return palm_net_ ? palm_net_->array_staged_bytes() : 0;
+  }
+  // The host-side spans, which ARE per network and so are the one pair summed.
+  double array_repack_seconds() const {
+    return palm_net_ ? palm_net_->cost().t_array_repack : 0.0;
+  }
+  double array_transpose_seconds() const {
+    return palm_net_ ? palm_net_->cost().t_array_transpose : 0.0;
+  }
+
 private:
+  // The design stream the graph node calling convolution `conv` names, or "".
+  // Searches the graph rather than indexing it -- see the definition.
+  std::string stream_of(const std::vector<Layer> &layers, int64_t conv);
   npue::File &model_;
   Geometry geom_;
   std::string art_, name_;
@@ -125,6 +151,12 @@ private:
   // Declaration order is construction order and it matters: each network holds
   // REFERENCES to a Pool, so it has to exist first.
   std::unique_ptr<app::Pool> pool_;
+  // Declaration order is construction order and it matters twice: each Network
+  // holds a REFERENCE to the Pool and to the array backend, so both must exist
+  // first. The slot tables are members and not locals for the same reason --
+  // Placement holds a pointer to them and the Networks outlive this constructor.
+  std::unique_ptr<conv::Convs> array_;
+  std::vector<int64_t> palm_slots_, lm_slots_;
   std::unique_ptr<Network> palm_net_, lm_net_;
   // The two networks' input tensors, kept between calls so the front end writes
   // into memory that is already faulted in -- the same measured reason arch=6's

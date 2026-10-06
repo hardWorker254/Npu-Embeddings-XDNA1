@@ -250,6 +250,68 @@ private:
 
 }  // namespace
 
+void conv_array_dispatch(Convs &array, int64_t slot, const float *a_im2col,
+                         int64_t M, int64_t K, int64_t N, float *dst,
+                         int64_t dst_ch, hostconv::Act act, const float *slope,
+                         app::Pool &pool, std::vector<float> &apad,
+                         std::vector<float> &cpad, double *t_repack,
+                         double *t_gemm, double *t_transpose,
+                         int64_t *dispatches) {
+  const int64_t rows = array.rows_per_dispatch();
+  const int64_t pk = array.padded_k(slot);
+  const int64_t pn = array.padded_n(slot);
+  if (pk < K || pn < N)
+    throw std::runtime_error(
+        "the design's padded shape " + std::to_string(pk) + "x" +
+        std::to_string(pn) + " is smaller than the convolution's own " +
+        std::to_string(K) + "x" + std::to_string(N) +
+        ", so the panel would be truncated. The design set belongs to another "
+        "model, or its B-operand layout does not match this container's.");
+  const size_t a_need = static_cast<size_t>(rows) * static_cast<size_t>(pk);
+  if (apad.size() < a_need) apad.resize(a_need);
+  const size_t c_need = static_cast<size_t>(rows) * static_cast<size_t>(pn);
+  if (cpad.size() < c_need) cpad.resize(c_need);
+
+  int64_t done = 0;
+  // The repack span is PER CHUNK, measured from the top of this chunk to just
+  // before the gemm. Measuring it from a single timestamp taken before the loop
+  // would make the SECOND chunk's span include the first chunk's gemm and
+  // transpose, so the number would report the whole convolution three times over
+  // for a two-chunk convolution -- and it would grow with the number of chunks,
+  // which is the opposite of what "cost of repacking A" means.
+  double chunk_start = app::now_s();
+  while (done < M) {
+    const int64_t chunk = std::min<int64_t>(rows, M - done);
+    // Zero FIRST, copy second. The padded columns are not written by the memcpy
+    // and must not hold the previous dispatch's activations -- that is a stale
+    // value in a column the device multiplies by, so it is a wrong number rather
+    // than a wrong shape, which makes it harder to see than a wrong shape is.
+    std::memset(apad.data(), 0,
+                static_cast<size_t>(chunk) * static_cast<size_t>(pk) *
+                    sizeof(float));
+    pool.run([&](int w2, int n2) {
+      for (int64_t r = w2; r < chunk; r += n2)
+        std::memcpy(apad.data() + static_cast<size_t>(r) * pk,
+                    a_im2col + static_cast<size_t>(done + r) * K,
+                    static_cast<size_t>(K) * sizeof(float));
+    });
+    const double tr = app::now_s();
+    array.gemm(slot, apad.data(), chunk, pk, pn, nullptr, cpad.data());
+    const double tg = app::now_s();
+    hostconv::transpose_mn_to_nchw(cpad.data(), chunk, N, dst + done, pool, pn,
+                                   dst_ch, act, slope);
+    // AFTER the gemm. A span that started before array.gemm would carry the
+    // device's own multiply and print most of the device time as host shuffling,
+    // which inverts the conclusion the number invites.
+    *t_transpose += app::now_s() - tg;
+    *t_gemm += tg - tr;
+    *t_repack += tr - chunk_start;
+    done += chunk;
+    ++*dispatches;
+    chunk_start = app::now_s();
+  }
+}
+
 std::unique_ptr<Convs> make_array_backend(
     npue::File &model, const std::vector<ConvSlot> &slots,
     const std::string &container_name, const std::string &artifacts_dir,
