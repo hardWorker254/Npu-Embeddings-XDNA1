@@ -595,7 +595,13 @@ def ru_reason(label, code):
 
 
 def matrix_table(ru=False):
-    """The whole 40-cell matrix, one row per architecture, one column per code.
+    """One row per architecture, listing the codes it can move -- NOT a grid.
+
+    Same shape as NPU_MODELS.md's table and for the same reason, which is the
+    reason it is written here too rather than left as the one grid in the tree: of
+    56 cells, 31 said the architecture has no such operation, so more than half
+    the table was one absence repeated, and the answer to "what can this dispatch"
+    came from filtering the empty cells out of a row.
 
     The cell is the status and nothing else. An earlier version put the op's long
     name under it and the table was unreadable -- worse, the names are WRONG for
@@ -604,16 +610,27 @@ def matrix_table(ru=False):
     say both. The names are in the per-architecture section below, where the
     reason for each cell has room to explain what that cell's op actually is.
     """
-    mark = MARK_RU if ru else MARK
-    head = "| " + ("архитектура" if ru else "architecture") + " | " + \
-        " | ".join(f"`{c}`" for c in npu_ops.OPS) + " |"
-    rule = "| --- | " + " | ".join("---" for _ in npu_ops.OPS) + " |"
-    lines = [head, rule]
+    # One column, every entry naming its own status -- NPU_MODELS.md's shape and
+    # for NPU_MODELS.md's reason, because a half-answered table is worse than
+    # either answer: 31 of 56 cells saying the same absence here while that file
+    # stopped saying it would leave the reader with two tables and one rule.
+    suffix = {npu_ops.BLOCKED: "невозможно" if ru else "impossible",
+              npu_ops.ON_ARRAY: "уже" if ru else "already",
+              npu_ops.UNIMPLEMENTED: ("нет кода" if ru else "no code")}
+    head = ("| архитектура | что уходит на массив |" if ru else
+            "| architecture | what goes to the array |")
+    lines = [head, "| --- | --- |"]
     for entry in ARCHES:
         label = entry[0]
         reg = reg_of(label)
-        cells = [mark[reg[c][0]] for c in npu_ops.OPS]
-        lines.append(f"| `{label}` | " + " | ".join(cells) + " |")
+        items = []
+        for c in npu_ops.OPS:
+            st = reg[c][0]
+            if st == npu_ops.HONOURS:
+                items.append(f"`{c}`")
+            elif st in suffix:
+                items.append(f"`{c}` ({suffix[st]})")
+        lines.append(f"| `{label}` | " + (", ".join(items) or "—") + " |")
     return lines
 
 
@@ -712,7 +729,15 @@ def doc(ru=False):
         a("трёх: вфьюжена в другую операцию, требует другого ядра и нового кода,")
         a("или не тайлится.")
         a("")
-        a("## Матрица")
+        a("## Что каждая архитектура может отправить на массив")
+        a("")
+        a("Список на архитектуру, а не сетка архитектура на коды: из 56 ячеек "
+          f"{counts[npu_ops.ABSENT]} повторяли бы одно и то же отсутствие, и "
+          "ответ на вопрос, что это может диспатчить, получался выбрасыванием "
+          "пустых ячеек из строки. Здесь пустых ячеек нет: один столбец, и "
+          "каждый его пункт называет свой статус сам — `conv` (уже) читается "
+          "без заголовка в трёх колонках слева. Кода, которого в списке нет, у "
+          "архитектуры нет.")
         a("")
         L.extend(matrix_table(ru=True))
         a("")
@@ -818,7 +843,14 @@ def doc(ru=False):
     a("of the three it is: fused into another op, needs a different kernel and a")
     a("new code, or does not tile.")
     a("")
-    a("## The matrix")
+    a("## What each architecture can send to the array")
+    a("")
+    a("A list per architecture, not a grid of architectures against codes: of 56 "
+      f"cells {counts[npu_ops.ABSENT]} repeated one absence, and the answer to "
+      "what can this dispatch came from filtering the empty cells out of a row. "
+      "There are no empty cells here: one column, and every entry in it names its "
+      "own status -- `conv` (already) reads without a heading three columns to "
+      "the left. A code that is not listed is not one this architecture has.")
     a("")
     L.extend(matrix_table())
     a("")

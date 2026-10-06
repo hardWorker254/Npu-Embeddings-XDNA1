@@ -25,28 +25,30 @@ Tally over the 144 cells:
 - **55** no -- the model has no such operation
 - **2** **gated** -- this model's FFN has no standalone activation pass -- see below
 
-## The matrix
+## What each model can send to the array
 
-| model | `gelu` | `layn` | `softm` | `conv` | `attn` | `mproj` | `fft` | `logit` |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `all-MiniLM-L6-v2` | **yes** | **yes** | **yes** | no | **yes** | no | no | no |
-| `bge-small-en-v1.5` | **yes** | **yes** | **yes** | no | **yes** | no | no | no |
-| `bge-micro-v2` | **yes** | **yes** | **yes** | no | **yes** | no | no | no |
-| `bge-base-en-v1.5` | **yes** | **yes** | **yes** | no | **yes** | no | no | no |
-| `bge-large-en-v1.5` | **yes** | **yes** | **yes** | no | **yes** | no | no | no |
-| `nomic-embed-text-v1.5` | **gated** | **yes** | **yes** | no | **yes** | no | no | no |
-| `embeddinggemma-300m` | impossible | impossible | **yes** | no | **yes** | no | no | no |
-| `gte-multilingual-base` | **gated** | **yes** | **yes** | no | **yes** | no | no | no |
-| `whisper-tiny` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
-| `whisper-base` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
-| `whisper-small` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
-| `whisper-medium` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
-| `whisper-large-v3` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
-| `whisper-large-v3-turbo` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
-| `vit-base-patch16-224` | **yes** | **yes** | **yes** | already | **yes** | no | no | impossible |
-| `yolov8n-pose` | no | no | no | **yes** | no | no | no | no |
-| `mediapipe-hands` | no | no | no | impossible | no | no | no | no |
-| `mediapipe-pose` | no | no | no | **yes** | no | no | no | no |
+A list per model, not a grid of models against operations. In a 144-cell grid, 55 of the cells would say the same absence in the same position, and reading the answer meant filtering the empty ones out of every row -- and the filtering IS the answer. There are no empty cells here at all: one column, and every entry in it names its own status, so `gelu` (gated) reads without a heading to its left. The header carries the absence: a code that is not listed is not an operation this model has.
+
+| model | what goes to the array |
+| --- | --- |
+| `all-MiniLM-L6-v2` | `gelu`, `layn`, `softm`, `attn` |
+| `bge-small-en-v1.5` | `gelu`, `layn`, `softm`, `attn` |
+| `bge-micro-v2` | `gelu`, `layn`, `softm`, `attn` |
+| `bge-base-en-v1.5` | `gelu`, `layn`, `softm`, `attn` |
+| `bge-large-en-v1.5` | `gelu`, `layn`, `softm`, `attn` |
+| `nomic-embed-text-v1.5` | `gelu` (gated), `layn`, `softm`, `attn` |
+| `embeddinggemma-300m` | `gelu` (impossible), `layn` (impossible), `softm`, `attn` |
+| `gte-multilingual-base` | `gelu` (gated), `layn`, `softm`, `attn` |
+| `whisper-tiny` | `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
+| `whisper-base` | `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
+| `whisper-small` | `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
+| `whisper-medium` | `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
+| `whisper-large-v3` | `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
+| `whisper-large-v3-turbo` | `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
+| `vit-base-patch16-224` | `gelu`, `layn`, `softm`, `conv` (already), `attn`, `logit` (impossible) |
+| `yolov8n-pose` | `conv` |
+| `mediapipe-hands` | `conv` (impossible) |
+| `mediapipe-pose` | `conv` |
 
 ## Where these two models differ from their kind
 

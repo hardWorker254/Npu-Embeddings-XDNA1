@@ -59,17 +59,19 @@ the operation is real and cannot be moved here, and the reason says which
 of the three it is: fused into another op, needs a different kernel and a
 new code, or does not tile.
 
-## The matrix
+## What each architecture can send to the array
 
-| architecture | `gelu` | `layn` | `softm` | `conv` | `attn` | `mproj` | `fft` | `logit` |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `gemm_rtp` | **yes** | **yes** | **yes** | - | **yes** | - | - | - |
-| `stt` | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
-| `cls` | **yes** | **yes** | **yes** | already | **yes** | - | - | blocked |
-| `pose` | - | - | - | **yes** | - | - | - | - |
-| `hands` | - | - | - | blocked | - | - | - | - |
-| `mppose` | - | - | - | **yes** | - | - | - | - |
-| `embeddinggemma-300m` | blocked | blocked | **yes** | - | **yes** | - | - | - |
+A list per architecture, not a grid of architectures against codes: of 56 cells 31 repeated one absence, and the answer to what can this dispatch came from filtering the empty cells out of a row. There are no empty cells here: one column, and every entry in it names its own status -- `conv` (already) reads without a heading three columns to the left. A code that is not listed is not one this architecture has.
+
+| architecture | what goes to the array |
+| --- | --- |
+| `gemm_rtp` | `gelu`, `layn`, `softm`, `attn` |
+| `stt` | `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
+| `cls` | `gelu`, `layn`, `softm`, `conv` (already), `attn`, `logit` (impossible) |
+| `pose` | `conv` |
+| `hands` | `conv` (impossible) |
+| `mppose` | `conv` |
+| `embeddinggemma-300m` | `gelu` (impossible), `layn` (impossible), `softm`, `attn` |
 
 `already` means the cell is empty because the work is done without a code,
 which is better than a tick. `-` means the model has no such operation,

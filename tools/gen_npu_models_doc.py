@@ -328,13 +328,61 @@ def tally():
 
 
 def matrix_table(ru=False):
-    idx = 1 if ru else 0
-    head = "| " + ("модель" if ru else "model") + " | " + \
-        " | ".join(f"`{c}`" for c in npu_ops.OPS) + " |"
-    lines = [head, "| --- | " + " | ".join("---" for _ in npu_ops.OPS) + " |"]
+    """One row per model, listing the codes that model can move -- NOT a grid.
+
+    WHY NOT A GRID, and this is a reversal rather than a first choice. The grid
+    was models x codes, 144 cells, and 55 of them said the model has no such
+    operation -- more than a third of the table carrying the same absence in the
+    same position. Reading it means filtering the empty cells out on every row to
+    find the answer, and the filtering IS the answer.
+
+    A row that lists what IS there has no empty cell to interpret, so there is
+    nothing to map a dash onto and nothing that can be misread as "empty" or "not
+    applicable". The absence is carried by the header instead: the columns say what
+    the lists mean, and a code that is not listed is not something the model has.
+    That is the same fact, said once instead of 55 times.
+
+    WHAT THE COLUMNS ARE, because a list that silently dropped the awkward cases
+    would be the easy way to lose them:
+      * `есть` / `yes`  -- dispatches today
+      * `невозможно` / `impossible` -- the model HAS the code and the board cannot
+        take it; the reason is in the architecture row, and dropping it here would
+        make a refusal invisible
+      * `уже` / `already` -- already dispatched with no code, so the code is
+        refused BY NAME; this is the one cell where a two-list table would lie
+      * `гейт` / `gated` -- dispatches, and the operation is folded into a gated
+        path so there is nothing separate for it to take over. nomic and gte are
+        the two, and their kind says `honours` while the truth for those two models
+        is not that.
+    """
+    # ONE column, and every entry in it names its own status.
+    #
+    # The shapes this went through, because the count of empty cells is the
+    # argument: a grid had 55 "no" cells and 144 cells total; three columns cut
+    # the absences to 54 dashes, and the three columns for the three awkward
+    # statuses had to be interpreted per row; one column leaves NONE, and an
+    # entry like `gelu` (гейт) carries its own caveat to the reader instead of
+    # relying on a heading three columns to the left.
+    #
+    # The caveat is a parenthetical and not a second column because a status that
+    # needs a separate column is a status the table would rather not have: `уже`
+    # and `невозможно` are rarer than `есть`, and putting them inline says that.
+    suffix = {npu_ops.BLOCKED: "невозможно" if ru else "impossible",
+              npu_ops.ON_ARRAY: "уже" if ru else "already",
+              GATED: "гейт" if ru else "gated"}
+    head = ("| модель | что уходит на массив |" if ru else
+            "| model | what goes to the array |")
+    lines = [head, "| --- | --- |"]
     for model, spec in models(TARGETS_DATA):
-        cells = [MARKS[cell(model, c)][idx] for c in npu_ops.OPS]
-        lines.append(f"| `{model}` | " + " | ".join(cells) + " |")
+        items = []
+        for code in npu_ops.OPS:
+            st = cell(model, code)
+            if st == npu_ops.HONOURS:
+                items.append(f"`{code}`")
+            elif st in suffix:
+                items.append(f"`{code}` ({suffix[st]})")
+        cells = ", ".join(items) or ("_ничего_" if ru else "_nothing_")
+        lines.append(f"| `{model}` | {cells} |")
     return lines
 
 
@@ -384,7 +432,14 @@ def doc(ru=False):
         for s in list(npu_ops.STATUSES) + [GATED]:
             a(f"- **{counts[s]}** `{s}` — {STATUS_GLOSS[s][1]};")
         a("")
-        a("## Матрица")
+        a("## Что каждая модель может отправить на массив")
+        a("")
+        a("Не сетка моделей на операции, а список на модель: в сетке из "
+          f"{n_cells} ячеек {counts[npu_ops.ABSENT]} говорили бы одно и то же "
+          "отсутствие, и читать ответ пришлось бы выбиранием пустых ячеек по "
+          "всей строке. Выборка и есть ответ, поэтому в таблице ни одной пустой "
+          "ячейки нет, а отсутствие несёт заголовок: код, которого в списке не "
+          "нет, — такой операции у модели нет.")
         a("")
         L.extend(matrix_table(ru=True))
         a("")
@@ -446,7 +501,16 @@ def doc(ru=False):
     for s in list(npu_ops.STATUSES) + [GATED]:
         a(f"- **{counts[s]}** {MARKS[s][0]} -- {STATUS_GLOSS[s][0]}")
     a("")
-    a("## The matrix")
+    a("## What each model can send to the array")
+    a("")
+    a("A list per model, not a grid of models against operations. In a "
+      f"{n_cells}-cell grid, {counts[npu_ops.ABSENT]} of the cells would say "
+      "the same absence in the same position, and reading the answer meant "
+      "filtering the empty ones out of every row -- and the filtering IS the "
+      "answer. There are no empty cells here at all: one column, and every entry "
+      "in it names its own status, so `gelu` (gated) reads without a heading to "
+      "its left. The header carries the absence: a code that is not listed is not "
+      "an operation this model has.")
     a("")
     L.extend(matrix_table())
     a("")
