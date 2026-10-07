@@ -40,26 +40,40 @@ std::string read_text(const std::string &path) {
 // Every stream of a design set, loaded into the slot design.json records, and
 // CHECKED against it: a set loaded in the wrong order runs the wrong
 // instruction stream for an op and returns a plausible number.
+
 std::vector<app::StreamEntry> load_streams(npu::Design &d,
-                                           const std::string &dir) {
+                                           const npu::DesignSource &src) {
   std::vector<app::StreamEntry> streams =
-      app::parse_streams(read_text(dir + "/design.json"));
+      app::parse_streams(src.text("design.json"));
   if (streams.empty())
-    throw std::runtime_error(dir +
-                             "/design.json lists no streams -- re-export with "
+    throw std::runtime_error(src.label() +
+                             " has no streams in design.json -- re-export "
+                             "with "
                              "tools/export/export_gemm_rtp.py");
   std::sort(streams.begin(), streams.end(),
             [](const app::StreamEntry &a, const app::StreamEntry &b) {
               return a.slot < b.slot;
             });
   for (const auto &s : streams) {
-    const size_t got = d.load_instr(dir + "/" + s.file);
+    const size_t got = d.load_instr(src, s.file);
     if (static_cast<int64_t>(got) != s.slot)
       throw std::runtime_error("stream " + s.file + " landed in slot " +
                                std::to_string(got) + ", design.json says " +
                                std::to_string(s.slot));
   }
   return streams;
+}
+
+std::vector<app::StreamEntry> load_streams(npu::Design &d,
+                                           const std::string &dir) {
+  // The directory form, kept so the tests and any caller holding a plain path
+  // keep working. Everything that HAS a container goes through the Source form
+  // below, and the two must agree: a design whose streams came out of the
+  // container while its stream table was read off disk is a stream list paired
+  // with a core that does not have those streams, and that surfaces as a
+  // dispatch mismatch several layers down rather than as "these two do not
+  // belong together".
+  return load_streams(d, npu::DesignSource::from_dir(dir));
 }
 
 const app::StreamEntry &find_op(const std::vector<app::StreamEntry> &streams,
@@ -84,10 +98,12 @@ Session::Session(npue::File &model, const std::string &model_name,
       name_(model_name),
       dev_(std::make_unique<npu::Device>()),
       pool_(std::make_unique<app::Pool>(std::max(1, threads))),
-      design_(std::make_unique<npu::Design>(*dev_, artifacts + "/gemm_rtp")),
+      design_(std::make_unique<npu::Design>(
+          *dev_, npu::prefer_embedded(&model, artifacts, "gemm_rtp"))),
       enc_(model, *design_, *pool_, geom_) {
   const std::vector<app::StreamEntry> streams =
-      load_streams(*design_, artifacts + "/gemm_rtp");
+      load_streams(*design_,
+                npu::prefer_embedded(&model, artifacts, "gemm_rtp"));
   const std::vector<int64_t> tiers = [&] {
     std::vector<int64_t> t;
     for (const auto &s : streams) t.push_back(s.batch);
@@ -181,7 +197,8 @@ Session::Session(npue::File &model, const std::string &model_name,
                       EltwiseKind kind, std::unique_ptr<npu::Design> &design,
                       std::unique_ptr<NpuEltwise> &op) {
     if (!npu_ops.count(code)) return;
-    design = std::make_unique<npu::Design>(*dev_, artifacts + "/" + dir);
+    design = std::make_unique<npu::Design>(
+        *dev_, npu::prefer_embedded(&model, artifacts, dir));
     op = std::make_unique<NpuEltwise>(*design, *pool_, kind);
     op->alloc_buffers();
     if (kind == EltwiseKind::LayerNorm && op->cols() != geom_.d_model)

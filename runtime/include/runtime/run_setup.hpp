@@ -26,8 +26,22 @@ inline void load_designs(RunContext &ctx) {
   // streams are the four GEMM shapes (tools/export/export_gemm_rtp.py). Every design
   // reference below binds to that one Design; the eltwise ops are forced onto
   // the host, and the encode runs in a single hw_context -- zero switches.
-  const bool unified =
-      std::ifstream(ctx.art + "/gemm_rtp/design.json").good();
+  // UNIFIED MODE IS "there is a gemm_rtp set", NOT "there is a directory".
+  //
+  // It used to be the second, read as `ifstream(ctx.art + "/gemm_rtp/design.json")
+  // .good()`. That made the mode a statement about the FILESYSTEM: a reader who
+  // downloaded one self-sufficient .npue and had no runtime/artifacts/ at all was
+  // told, by this line alone, that its design set was a pre-0037 export, and sent
+  // down the legacy seven-context path looking for ctx.art + "/qkv" and four
+  // siblings that a modern set has never had. The container was carrying the right
+  // xclbin the whole time.
+  //
+  // So the question is now asked of the Source, which answers "is it in the
+  // container, or on disk, or neither" -- and "neither" still selects the legacy
+  // path, exactly as before, because that is the only thing that path is for.
+  const npu::DesignSource gemm_src =
+      npu::prefer_embedded(ctx.model.get(), ctx.art, "gemm_rtp");
+  const bool unified = gemm_src.has("design.json");
   ctx.unified = unified;
 
   // COUNT BEFORE CONSTRUCTING (subtask 7). The driver allows a fixed number of
@@ -58,16 +72,18 @@ inline void load_designs(RunContext &ctx) {
         "process, or pass --allow-contention)");
 
   if (unified) {
-    ctx.ud = std::make_unique<npu::Design>(*ctx.dev, ctx.art + "/gemm_rtp");
-    std::ifstream sj(ctx.art + "/gemm_rtp/design.json");
-    std::stringstream sbuf;
-    sbuf << sj.rdbuf();
-    ctx.streams = parse_streams(sbuf.str());
+    // The SAME source, so the stream table and the Design it belongs to cannot
+    // come from two different places. Reading the JSON from disk while the xclbin
+    // came out of the container would pair a stream list with a core that does not
+    // have those streams, and the failure would surface as a dispatch mismatch
+    // several layers down rather than as "these two do not belong together".
+    ctx.ud = std::make_unique<npu::Design>(*ctx.dev, gemm_src);
+    ctx.streams = parse_streams(gemm_src.text("design.json"));
     if (ctx.streams.empty()) {
       // A pre-0037 export: four streams, no tiers, the old flat names.
-      ctx.ud->load_instr(ctx.art + "/gemm_rtp/insts_attn_out.bin");   // 1
-      ctx.ud->load_instr(ctx.art + "/gemm_rtp/insts_ffn_up.bin");     // 2
-      ctx.ud->load_instr(ctx.art + "/gemm_rtp/insts_ffn_down.bin");   // 3
+      ctx.ud->load_instr(gemm_src, "insts_attn_out.bin");   // 1
+      ctx.ud->load_instr(gemm_src, "insts_ffn_up.bin");     // 2
+      ctx.ud->load_instr(gemm_src, "insts_ffn_down.bin");   // 3
       std::printf("  designs    ONE xclbin, 4 instruction streams, one "
                   "hw_context\n");
     } else {
@@ -79,7 +95,12 @@ inline void load_designs(RunContext &ctx) {
                   return a.slot < b.slot;
                 });
       for (const auto &s : ctx.streams) {
-        const size_t got = ctx.ud->load_instr(ctx.art + "/gemm_rtp/" + s.file);
+        // Through gemm_src, not ctx.art: an instruction stream is part of the set,
+        // and a reader whose set lives in the container has no ctx.art + "/gemm_rtp"
+        // to append to. It landed in slot 0 and reported "cannot open /gemm_rtp/
+        // insts_qkv_b4.bin" before this, with a leading slash that says exactly
+        // how the empty art_ path was being used as a real directory.
+        const size_t got = ctx.ud->load_instr(gemm_src, s.file);
         if (static_cast<int64_t>(got) != s.slot)
           throw std::runtime_error("stream " + s.file + " landed in slot " +
                                    std::to_string(got) + ", design.json says " +
@@ -105,12 +126,19 @@ inline void load_designs(RunContext &ctx) {
           std::strcmp(code, "gelu") == 0   ? &ctx.ld_gelu
           : std::strcmp(code, "layn") == 0 ? &ctx.ld_ln
                                             : &ctx.ld_sm;
-      const std::string dir = ctx.art + "/" + op->design;
-      if (!std::ifstream(dir + "/design.json").good())
+      // prefer_embedded for the elementwise sets too: a container that carries
+    // gemm_rtp carries gelu/layernorm/softmax beside it, and --npu-ops gelu on a
+    // self-sufficient container is the case where "self-sufficient" would otherwise
+    // be a half-truth -- the GEMMs work and the op has nowhere to come from.
+    const npu::DesignSource op_src =
+        npu::prefer_embedded(ctx.model.get(), ctx.art, op->design);
+    const std::string dir = op_src.label();
+      // asks the SOURCE, not the filesystem: same reason as `unified` above
+      if (!op_src.has("design.json"))
         throw std::runtime_error(
             std::string("--npu-ops ") + code + " (" + op->long_name +
-            ") asks for it on the array, but " + dir +
-            "/design.json does not exist. The exporter builds every design the "
+            ") asks for it on the array, but that design set is not there (" +
+            dir + " has no design.json). The exporter builds every design the "
             "target can honour -- one command, no flag, printing the list it "
             "chose -- so a set missing this one was built before that, or built "
             "for a different model: re-run `tools/export/export_gemm_rtp.py "
@@ -119,7 +147,7 @@ inline void load_designs(RunContext &ctx) {
             " and re-pack. Or drop " + code +
             " from the list and run the host path, which is the "
             "measured-faster one");
-      *dst = std::make_unique<npu::Design>(*ctx.dev, dir);
+      *dst = std::make_unique<npu::Design>(*ctx.dev, op_src);
       const auto &inf = (*dst)->info();
       if (inf.device_recorded && !inf.device.empty() &&
           !running_device().empty() && inf.device != running_device())
@@ -137,13 +165,25 @@ inline void load_designs(RunContext &ctx) {
     // function runs BEFORE the flag is parsed, and a check that reads an empty
     // set is a check that never fires.
   } else {
-    ctx.ld_qkv = std::make_unique<npu::Design>(*ctx.dev, ctx.art + "/qkv");
-    ctx.ld_ao = std::make_unique<npu::Design>(*ctx.dev, ctx.art + "/attn_out");
-    ctx.ld_fu = std::make_unique<npu::Design>(*ctx.dev, ctx.art + "/ffn_up");
-    ctx.ld_fd = std::make_unique<npu::Design>(*ctx.dev, ctx.art + "/ffn_down");
-    ctx.ld_gelu = std::make_unique<npu::Design>(*ctx.dev, ctx.art + "/gelu");
-    ctx.ld_ln = std::make_unique<npu::Design>(*ctx.dev, ctx.art + "/layernorm");
-    ctx.ld_sm = std::make_unique<npu::Design>(*ctx.dev, ctx.art + "/softmax");
+    // The pre-0037 seven-set layout, read through prefer_embedded for the same
+    // reason as everything else. No container in this tree carries it -- the
+    // exporter has emitted the unified one for a long time -- so in practice these
+    // always resolve on disk, and the point is that the RULE is uniform rather than
+    // that this path gains anything.
+    ctx.ld_qkv = std::make_unique<npu::Design>(
+        *ctx.dev, npu::prefer_embedded(ctx.model.get(), ctx.art, "qkv"));
+    ctx.ld_ao = std::make_unique<npu::Design>(
+        *ctx.dev, npu::prefer_embedded(ctx.model.get(), ctx.art, "attn_out"));
+    ctx.ld_fu = std::make_unique<npu::Design>(
+        *ctx.dev, npu::prefer_embedded(ctx.model.get(), ctx.art, "ffn_up"));
+    ctx.ld_fd = std::make_unique<npu::Design>(
+        *ctx.dev, npu::prefer_embedded(ctx.model.get(), ctx.art, "ffn_down"));
+    ctx.ld_gelu = std::make_unique<npu::Design>(
+        *ctx.dev, npu::prefer_embedded(ctx.model.get(), ctx.art, "gelu"));
+    ctx.ld_ln = std::make_unique<npu::Design>(
+        *ctx.dev, npu::prefer_embedded(ctx.model.get(), ctx.art, "layernorm"));
+    ctx.ld_sm = std::make_unique<npu::Design>(
+        *ctx.dev, npu::prefer_embedded(ctx.model.get(), ctx.art, "softmax"));
     std::printf("  designs    7 resident xclbins\n");
   }
 
@@ -450,7 +490,11 @@ inline int setup_encoder(RunContext &ctx) {
   static std::mutex npu_mutex;
 
   auto build_attn_lane = [&](app::Pool &p) {
-  const std::string dir = ctx.art + "/gemm_rtp";
+  // Used ONLY in the error messages below, and it is the label rather than a path
+  // for the reason prefer_embedded gives one: on a self-sufficient container
+  // ctx.art is empty, and every one of those messages would have opened with "/".
+  const std::string dir =
+      npu::prefer_embedded(ctx.model.get(), ctx.art, "gemm_rtp").label();
   const int64_t hd = app::g_head_dim;
   RunContext::AttnLane lane;
   // The array softmax for THIS lane. Only when softm was asked for; attn

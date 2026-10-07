@@ -228,7 +228,13 @@ int Runtime::run(int argc, char **argv) {
         art_ = found;
     }
 
-    if (art_.empty()) {
+    // Declared OUTSIDE the branch below because the status line needs it too, and a
+    // self-sufficient container never enters that branch -- so an inner declaration
+    // would be in scope exactly when it is not the answer.
+    bool self_sufficient =
+        npu::prefer_embedded(ctx.model.get(), "", "gemm_rtp").has("design.json");
+
+    if (art_.empty() && !self_sufficient) {
         int64_t qkv_n = 0;
         try { qkv_n = ctx.model->config_int("qkv_n"); } catch (const std::exception &) {}
         std::string layout;
@@ -236,10 +242,23 @@ int Runtime::run(int argc, char **argv) {
         } catch (const std::exception &) {}
         const auto *ce = npue::hub::find(g_model_name);
         const std::string want_datapath = ce ? ce->datapath : "bf16";
+        // A CONTAINER THAT CARRIES ITS OWN SET NEEDS NO DIRECTORY, and this check
+        // has to come BEFORE pick_artifacts rather than after it: pick_artifacts
+        // answers by scanning the filesystem, so a reader with nothing on disk was
+        // refused here with "no NPU design set matches ... under <root>" while
+        // holding a container that carried the set. Asking the question after
+        // would mean keeping a message that is false whenever the file answers it.
+        //
+        // So `art_` is left EMPTY on purpose in that case. Everything downstream
+        // already goes through prefer_embedded(), which falls back to
+        // `artifacts + "/" + <set>` -- and an empty `art` makes that path a
+        // relative "/gemm_rtp", which is never consulted because the container
+        // answers first. Nothing reads `art_` as a path except pick_artifacts
+        // itself and the status line, and the status line is told which case it is.
         art_ = pick_artifacts(root_, g_hidden,
-                                 ctx.model->config_int("intermediate"),
-                                 config_flag(*ctx.model, "gated_ffn", false), qkv_n,
-                                 layout, want_datapath, g_model_name);
+                                    ctx.model->config_int("intermediate"),
+                                    config_flag(*ctx.model, "gated_ffn", false),
+                        qkv_n, layout, want_datapath, g_model_name);
         if (art_.empty())
             throw std::runtime_error(
                 "no NPU design set matches " + g_model_name + " (hidden " +
@@ -248,7 +267,13 @@ int Runtime::run(int argc, char **argv) {
                 " -- name one with --artifacts, or export one for this "
                 "generation with tools/export/export_gemm_rtp.py");
     }
-    if (!art_from_cli)
+    // THE STATUS LINE MUST SAY WHICH OF THE TWO IT IS. "artifacts" followed by an
+    // empty string is what this printed for a self-sufficient container before, and
+    // an empty path in a status block reads as a bug in the thing printing it.
+    if (self_sufficient && !art_from_cli)
+        std::printf("  artifacts  the container's own design set "
+                    "(design/gemm_rtp; no directory needed, no --artifacts given)\n");
+    else if (!art_from_cli)
         std::printf("  artifacts  %s (picked from the container's geometry; "
                     "no --artifacts given)\n", art_.c_str());
     ctx.art = art_;

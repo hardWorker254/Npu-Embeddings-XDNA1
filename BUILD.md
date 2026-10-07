@@ -204,6 +204,65 @@ python tools/verify/verify_pack_parity.py --device npu1
 python tools/verify/verify_pack_parity.py --device npu2
 ```
 
+### 2.2b The design set rides inside the container
+
+**A pack now stores the compiled designs in the `.npue` itself**, as a distinct
+role whose names are `design/<set>/<file>` — `design/gemm_rtp/design.json`,
+`design/gemm_rtp/final.xclbin`, `design/gemm_rtp/insts_*.bin`, and the
+elementwise sets beside them. Everything is stored verbatim: an xclbin is a
+loaded binary and an instruction stream is a word array, and a set that is
+byte-identical to the one on disk is the only version of this that can be
+checked against one.
+
+The reason is the reader. Without it, one file is not enough: a download from
+HuggingFace gives you the container, and the machine still needs MLIR-AIE, an
+`iron` environment and `runtime/artifacts/` laid out just so before a single
+array dispatch can happen. With it, the set travels with the weights.
+
+- **Cost, measured:** `all-MiniLM-L6-v2.npue` goes from 69,021,696 to 69,365,760
+  bytes, **+0.50%** — 272–536 KB of instruction streams against containers of
+  69 MB to 3.1 GB, the range `verify_embedded_artifacts.py` states. The packer
+  prints what it embedded and from where:
+  `design 443 KB embedded from runtime/artifacts/whisper-base/artifacts_npu1
+  (npu1, bf16): gelu 36 KB, gemm_rtp 106 KB, gemm_rtp_dec 216 KB, layernorm
+  46 KB, softmax 39 KB`.
+- **Which sets go in is the datapath's, not the machine's.** The datapath string
+  is `i8` for an int8 *or* an int4 container and `bf16` otherwise — int4 widens
+  to int8 before staging, so an int4 container carries the int8 sets and a
+  bf16 one the bf16 sets. The container and the sets have to be the same
+  element types to execute each other. The config records `artifacts_embedded`,
+  `artifacts_device`, `artifacts_datapath` and `artifacts_sets`, which is what
+  the gate reads back.
+- **An explicit `--artifacts` still wins.** Naming a directory on the command
+  line is a statement about where, and it is honoured; only when no `--artifacts`
+  was given does the container's own set get asked first, with
+  `runtime/artifacts/` as the fallback. `--no-embed-artifacts` packs a container
+  that carries nothing, and `--embed-artifacts DIR` points the packer at a
+  specific directory (and refuses it by name if that directory holds no
+  `gemm_rtp/final.xclbin`).
+- **The status block says which of the two was used**, rather than printing an
+  empty path: `artifacts  the container's own design set (design/gemm_rtp; no
+  directory needed, no --artifacts given)`. A blank where a path belongs reads
+  as a bug in the thing printing it.
+- **`list` counts a carried set as `ready`.** The state column ORs the
+  container's own statement with what `pick_artifacts` finds, so a
+  self-sufficient file is not reported as `no design` while sitting next to no
+  directory at all.
+- **Only npu1 sets are built on this machine.** A container carrying an npu1 set
+  read by an npu2 runtime falls back to the disk exactly as before — no new
+  failure mode, and no claim that both generations are covered.
+
+```sh
+python tools/verify/verify_embedded_artifacts.py
+```
+
+That gate is the only proof that one file is enough: it packs, hides
+`runtime/artifacts/` entirely, runs, and asserts the answer is **byte-identical**
+to the run with the directory present, that an elementwise op also comes out of
+the container, that the recorded datapath is not mixed with its opposite, and
+that a container *without* a set still runs (by falling back rather than by
+silently doing nothing).
+
 ### 2.3 Compile the NPU designs
 
 ```powershell

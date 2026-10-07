@@ -51,6 +51,19 @@ struct ModelEntry {
   // `pooling` was made optional and would happen again to every architecture
   // that is not an embedder.
   std::string kind;
+
+  // TRUE when the container itself holds a compiled design set under
+  // design/<set>/, i.e. it can dispatch without anything beside it. Read from
+  // the manifest, in the same `try` that reads `arch` and `kind`, so it is the
+  // file's own statement and not a directory scan that happened to find
+  // something.
+  //
+  // Needed because `list` derived its state column from pick_artifacts(), which
+  // answers by walking the filesystem -- so a published, self-sufficient
+  // container was listed as "no design" while being exactly the file that needs
+  // no design. FALSE is not a claim of absence: a container packed before this
+  // existed, or one whose reader has the set on disk, simply leaves it false.
+  bool carries_design = false;
 };
 
 
@@ -83,6 +96,14 @@ inline std::vector<ModelEntry> discover_models(const std::string &root) {
       }
       try {
         m.kind = f.config_string("kind");
+      } catch (const std::exception &) {
+      }
+      // Asked of the CONTAINER, and therefore inside its own try: a container
+      // carrying no design set is normal -- every file packed before this
+      // existed, and every container whose reader has the set on disk -- and must
+      // not be reported as unreadable.
+      try {
+        m.carries_design = f.has("design/gemm_rtp/design.json");
       } catch (const std::exception &) {
       }
       if (m.kind.empty())

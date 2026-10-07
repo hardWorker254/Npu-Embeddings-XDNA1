@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "device.hpp"
+#include "runtime/model.hpp"      // File, for DesignSource::blob()
 
 namespace xrt {
 class bo;
@@ -87,10 +88,118 @@ struct DesignInfo {
 };
 
 class Device;
+// `File` lives in ::npue and this header is already inside namespace npu, so a
+// forward declaration here would have to be spelled ::npue::File and would still be
+// a second name for a type this header then uses. model.hpp is included instead:
+// it is the owner, it is small, and DesignSource::blob() calls File::raw() anyway.
+
+// WHERE A DESIGN SET'S FILES COME FROM: a directory, or the container itself.
+//
+// WHY BOTH. A compiled design set is 272-536 KB of instruction streams plus a
+// ~71 KB xclbin, and BUILDING one needs MLIR-AIE -- a Python toolchain in a
+// .venv. So a reader who has only the .npue had, until this, to install a
+// compiler before the binary they already had could dispatch anything. Storing the
+// set in the container makes one file sufficient and puts the toolchain back where
+// a compiler belongs, which is on the build machine.
+//
+// EMBEDDED IS PREFERRED AND THE DIRECTORY IS THE FALLBACK, not the other way
+// round, and the reason is that "preferred" changes nothing for anyone who already
+// has both: every existing layout, every existing gate and every existing refusal
+// behaves exactly as it did. "Authoritative" would have been tidier to describe and
+// would have taken away a reader's ability to supply their own set -- which on npu2
+// is the ONLY way to get a working one, since nothing has ever built an npu2 set in
+// this tree and the embedded one is npu1.
+//
+// A MISSING SET IN EITHER PLACE IS NOT AN ERROR HERE. It becomes one at the point
+// of use, and it is the point of use that can say what the reader wanted: a
+// container packed before this feature, a host-only run that needs no design at all
+// (every convolution on the CPU), and an npu1 container on npu2 all pass through
+// this type without a branch.
+class DesignSource {
+public:
+  // A set on disk. `dir` is the directory CONTAINING the set -- what the code
+  // everywhere in this tree has always passed as `artifacts + "/gemm_rtp"`.
+  static DesignSource from_dir(std::string dir);
+  // A set carried by `container` under `set_name`. Reads nothing yet: whether the
+  // set is actually there is answered by has(), so a caller can offer both and let
+  // this one say no.
+  static DesignSource from_container(const npue::File &container,
+                                   std::string set_name);
+
+  bool embedded() const { return embedded_; }
+  const std::string &dir() const { return dir_; }
+  const std::string &set_name() const { return set_name_; }
+  // True when this source can supply `file`. A directory source answers by asking
+  // the filesystem; a container source by asking the manifest for the SET, not the
+  // file, because a set is stored whole or not at all and a half-present set is a
+  // corrupted container rather than a partial one.
+  bool has(const std::string &file) const;
+  std::string text(const std::string &file) const;
+  std::vector<uint8_t> blob(const std::string &file) const;
+  // What to print in an error. A directory prints its path; an embedded set prints
+  // "the container's design/<set>", because an operator who typed --artifacts and
+  // sees the path echoed back believes the directory was read.
+  std::string label() const;
+
+private:
+  DesignSource() = default;
+  std::string dir_;
+  std::string set_name_;
+  const npue::File *container_ = nullptr;
+  bool embedded_ = false;
+};
+
+// A design set from the CONTAINER when it carries one, otherwise from `artifacts`
+// on disk. THE ONLY FUNCTION IN THE RUNTIME THAT DECIDES THIS, so that "prefer the
+// embedded set" is one rule in one place rather than a choice repeated at twenty
+// construction sites -- twenty sites is twenty chances for one of them to read the
+// directory first and be the reason a container looks like it does not carry a
+// design.
+//
+// `has("design.json")` is the test and not `has("final.xclbin")`: design.json is
+// what Design's constructor opens first, and a set carrying an xclbin without it
+// would fail there with a message about a JSON file when the real problem is a
+// half-written set.
+//
+// A NULL container is legal and means "nothing on disk to consult either", which is
+// the host-only path -- every convolution on the CPU, no design needed at all.
+inline DesignSource prefer_embedded(const npue::File *container,
+                                    const std::string &artifacts,
+                                    const std::string &set_name) {
+  if (container) {
+    DesignSource s = DesignSource::from_container(*container, set_name);
+    if (s.has("design.json")) return s;
+  }
+  return DesignSource::from_dir(artifacts + "/" + set_name);
+}
+
+// WAS THE ARRAY ASKED FOR? The directory is not the answer -- a container that
+// carries its own set has no directory, and the six session constructors used to
+// read `!art.empty()` as the request, which for such a container is false.
+//
+// The failure that produced this was quiet and total: `pose --npu-ops conv` on a
+// self-sufficient container printed correct landmarks for all three people and
+// 17 keypoints, and reported `"conv": "host", "dispatches": 0`. Nothing errored.
+// The array simply was not used, and the only evidence was a field in the JSON
+// that a reader has to know to check -- which is the same shape as the run that
+// silently degraded to fp32 before the scale/smooth pair existed.
+//
+// `gemm_rtp` is the probe because it is the set every architecture's GEMM path
+// needs, including Whisper's decoder half (which additionally wants
+// gemm_rtp_dec). A container carrying only gemm_rtp_dec and no gemm_rtp has no
+// encoder either, so it would be refused further in with a better message than
+// this one could give.
+inline bool array_requested(const npue::File *container,
+                            const std::string &art) {
+  return !art.empty() ||
+         (container != nullptr &&
+          prefer_embedded(container, "", "gemm_rtp").has("design.json"));
+}
 
 class Design {
 public:
   Design(Device &dev, const std::string &dir);
+  Design(Device &dev, const DesignSource &src);
   ~Design();
   Design(const Design &) = delete;
   Design &operator=(const Design &) = delete;
@@ -107,7 +216,18 @@ public:
 
   void run(const std::vector<const void *> &inputs, void *output);
   void dispatch_only();
+  // By path, and by (source, file) for an embedded set -- the legacy per-op
+  // instruction streams are read through the same Source as the constructor,
+  // because a container that carries gemm_rtp carries them too and a reader
+  // that could only load the main stream from disk would still need a
+  // directory beside it.
   size_t load_instr(const std::string &path);
+  size_t load_instr(const DesignSource &src, const std::string &file);
+ private:
+  // One body for both load_instr overloads, so the buffer-object dance that
+  // follows cannot be got right in one spelling and wrong in the other.
+  size_t load_instr_blob(std::vector<uint8_t> instr);
+ public:
   void bind_instr(size_t slot);
   size_t stage(size_t arg_index, const void *data, size_t bytes);
   size_t stage_alloc(size_t arg_index, size_t bytes);

@@ -22,6 +22,7 @@
 
 #include "common/app_state.hpp"
 #include "common/design_selection.hpp"
+#include "runtime/design.hpp"        // prefer_embedded: the container's own set
 #include "server/embed_backend.hpp"
 #include "encoders/gemma_host_encoder.hpp"
 #include "encoders/gemma_npu_encoder.hpp"
@@ -254,6 +255,10 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
     // means "cannot tell", which is not "does not match" -- see
     // select_set_for_layout's three rules.
   }
+  // AN EXPLICIT --artifacts ONLY, for the same reason vit_mode gives: a
+  // container that carries gemm_rtp must fall through to the pick_artifacts
+  // branch below, which finds nothing on the disk and then loads the set out
+  // of the container at line 473. Sending it here would ask "." for one.
   if (!art.empty()) {
     // Same shared candidate list as the BERT path (design_selection.hpp), now
     // including the per-model <name>/artifacts_npu<arch> layout. Only
@@ -331,8 +336,13 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
                          want_layout,
                          ce ? ce->datapath : "bf16", mname);
   }
+  // THE SET, NOT THE PATH. `!art.empty()` read "a directory was resolved" as
+  // "the array is available", and for a container that carries its own set no
+  // directory is resolved -- so a 1.02 GB file with gemm_rtp inside it would
+  // have run entirely on the host while line 473 was ready to load that set.
   const bool use_npu =
-      !force_cpu && gemm_layout == "pretiled_bf16" && !art.empty();
+      !force_cpu && gemm_layout == "pretiled_bf16" &&
+      npu::array_requested(&model, art);
 
   std::printf("NpuEmbeddings C++ runtime -- EmbeddingGemma (arch=1)\n");
   std::printf("  model      %s\n", model_path.c_str());
@@ -464,23 +474,24 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
     return 2;
 
   npu::Device dev;
-  npu::Design d(dev, art + "/gemm_rtp");
-  std::vector<StreamEntry> streams;
-  {
-    std::ifstream sj(art + "/gemm_rtp/design.json");
-    std::stringstream sbuf;
-    sbuf << sj.rdbuf();
-    streams = parse_streams(sbuf.str());
-  }
+  // ONE SOURCE FOR THE CORE, THE STREAM TABLE AND THE INSTRUCTION STREAMS.
+  // Taking the design.json from disk while the xclbin came out of the
+  // container would pair a stream list with a core that does not have those
+  // streams, and that reads as a dispatch mismatch rather than as "these two
+  // do not belong together".
+  const npu::DesignSource gemm_src = npu::prefer_embedded(&model, art, "gemm_rtp");
+  npu::Design d(dev, gemm_src);
+  std::vector<StreamEntry> streams = parse_streams(gemm_src.text("design.json"));
   if (streams.empty())
-    throw std::runtime_error(art + "/gemm_rtp/design.json lists no streams -- "
-                             "re-export with tools/export/export_gemm_rtp.py");
+    throw std::runtime_error(gemm_src.label() +
+                             " has no streams in design.json -- re-export "
+                             "with tools/export/export_gemm_rtp.py");
   std::sort(streams.begin(), streams.end(),
             [](const StreamEntry &a, const StreamEntry &b) {
               return a.slot < b.slot;
             });
   for (const auto &s : streams) {
-    const size_t got = d.load_instr(art + "/gemm_rtp/" + s.file);
+    const size_t got = d.load_instr(gemm_src, s.file);
     if (static_cast<int64_t>(got) != s.slot)
       throw std::runtime_error("stream " + s.file + " landed in slot " +
                                std::to_string(got) + ", design.json says " +
@@ -663,7 +674,8 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
   };
 
   sm_design = npu_codes.count("softm")
-                  ? std::make_unique<npu::Design>(dev, art + "/softmax")
+                  ? std::make_unique<npu::Design>(
+                        dev, npu::prefer_embedded(&model, art, "softmax"))
                   : nullptr;
   if (sm_design) {
     attn_lanes[0] = build_attn_lane(*pools[0], 0);
@@ -731,8 +743,14 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
   std::printf("  path       NPU -- 4 GEMMs/layer x %lld layers = %lld "
               "dispatches, ONE xclbin, one hw_context\n",
               (long long)enc.layers, (long long)(4 * enc.layers));
-  std::printf("  designs    %s  (%zu streams, %zu batch tiers)\n", art.c_str(),
-              streams.size(), tset.size());
+  // WHICH OF THE TWO -- same reason as vit_mode: a container carrying gemm_rtp
+  // leaves art empty, and a blank where a path belongs reads as a printer bug.
+  std::printf("  designs    %s  (%zu streams, %zu batch tiers)\n",
+               (art.empty() &&
+                npu::prefer_embedded(&model, "", "gemm_rtp").has("design.json"))
+                   ? "the container's own design set (design/gemm_rtp; no directory needed)"
+                   : art.c_str(),
+               streams.size(), tset.size());
   // WHICH DATAPATH WAS ACTUALLY SELECTED (tasks/0104), read off the loaded
   // design, not off a flag -- the intention-not-value slip named at the
   // "staged" line just below has cost this project time before (tasks/0042,

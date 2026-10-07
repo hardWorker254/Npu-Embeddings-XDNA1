@@ -187,6 +187,15 @@ TOOLSET = [
     ("verify_downloads_doc", "verify/verify_downloads_doc.py",
      "models/DOWNLOADS*.md against its data file AND every CHECKPOINT.json",
      ("git",)),
+    # In the `npu` tier and not `cheap`, because the claim it makes is the one that
+    # needs the array: a container carries its own compiled design set, so a reader
+    # needs no MLIR-AIE. Proving that means MOVING runtime/artifacts/ aside and
+    # running -- which a host-only gate could do, except that the run it compares
+    # against has to dispatch, and the byte-identity it asserts is only meaningful
+    # if both runs went to the device.
+    ("verify_embedded_artifacts", "verify/verify_embedded_artifacts.py",
+     "a .npue that carries its own design set: same bytes with no directory",
+     ("npu", "runtime", "container", "designs")),
     ("parity_exporters", "verify/parity_exporters.py",
      "the split exporters against the monoliths in git",
      ("git",)),
@@ -239,7 +248,7 @@ ARTEFACTS = [
     ("runtime", "the npuembeddings executable",
      "cmake -S runtime -B runtime/build && cmake --build runtime/build"),
     ("hands_models", "the arch=7 checkpoint pair, the test photograph and "
-     "mediapipe-hands.npue,"
+     "the container at models/mediapipe-hands.npue,",
      "python tools/pipeline.py run pack_npue -- --hands-onnx "
      "models/mediapipe-hands --out models/mediapipe-hands.npue"),
     # arch=8's pair, and the photograph the golden was recorded on. The
@@ -347,7 +356,7 @@ GATE_TIERS = {
     # pins what every cell says about every architecture and is not in the list
     # that gets run is a gate that is only run by hand, which is not a gate.
     "npu": ("verify_design_numerics", "verify_whisper_model",
-            "verify_npu_op_matrix"),
+            "verify_npu_op_matrix", "verify_embedded_artifacts"),
     "whisper": ("verify_whisper_tokenizer", "verify_whisper_features",
                 "verify_whisper_cli", "verify_whisper"),
     # verify_serve_dispatch is here rather than under "release" because it needs no
@@ -421,12 +430,23 @@ def _have(kind):
         # because a container can exist with the checkpoints gone, and the gate
         # then cannot say whether it is holding this model or an empty shell.
         d = REPO / "models" / "mediapipe-hands"
+        # THE THREE FETCHED FILES live here; the CONTAINER does not.
+        # models/mediapipe-hands/ holds the ONNX pair, hand_plain.png and
+        # the --npu panel variant (hands-npu.npue), and that is all: the
+        # installed container is at models/mediapipe-hands.npue, the flat
+        # path `list`, `discover_models` and `--list-models` all glob.
+        # Checking for it one level down is what made the tier refuse to
+        # run a gate that passes when invoked by hand -- a requirement
+        # check that fails on a file that exists teaches its reader to
+        # ignore it, which is worse than having no check at all.
         want = ["palm_detection_mediapipe_2023feb.onnx",
                 "handpose_estimation_mediapipe_2023feb.onnx",
-                "hand_plain.png", "mediapipe-hands.npue"]
+                "hand_plain.png"]
         missing_ = [w for w in want if not (d / w).exists()]
+        if not (REPO / "models" / "mediapipe-hands.npue").exists():
+            missing_ = missing_ + ["models/mediapipe-hands.npue"]
         return (not missing_), (
-            f"missing in models/mediapipe-hands/: {', '.join(missing_)}\n"
+            f"missing: {', '.join(missing_)}\n"
             f"  fetch the two ONNX files from opencv/palm_detection_mediapipe and "
             f"opencv/handpose_estimation_mediapipe (Apache-2.0) and hand_plain.png "
             f"from opencv_zoo. The golden is NOT in that list: it is tracked, at "
@@ -440,9 +460,15 @@ def _have(kind):
         # ships no raw input image at all -- 385 paths, not one of them a
         # photograph.
         d = REPO / "models" / "mediapipe-pose"
+        # Same split as arch=7: the two ONNX files live here, the installed
+        # container at the flat models/mediapipe-pose.npue (mppose-npu.npue
+        # beside it is the --npu panel variant, not the container the gate
+        # names).
         want = ["person_detection_mediapipe_2023mar.onnx",
-                "pose_estimation_mediapipe_2023mar.onnx", "mediapipe-pose.npue"]
+                "pose_estimation_mediapipe_2023mar.onnx"]
         missing_ = [w for w in want if not (d / w).exists()]
+        if not (REPO / "models" / "mediapipe-pose.npue").exists():
+            missing_ = missing_ + ["models/mediapipe-pose.npue"]
         img = REPO / "docs" / "bus.jpg"
         if not img.exists():
             missing_ = missing_ + ["../../docs/bus.jpg"]

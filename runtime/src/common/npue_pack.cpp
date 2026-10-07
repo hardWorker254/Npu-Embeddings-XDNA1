@@ -28,6 +28,8 @@
 
 #include "common/npue_pack.hpp"
 
+#include "common/design_selection.hpp"  // running_device
+
 #include "common/onnx_read.hpp"
 #include "tokenizers/gemma_tokenizer_gen.hpp"
 #include "common/json_min.hpp"
@@ -285,6 +287,99 @@ std::vector<uint8_t> slurp(const std::string &path) {
   return buf;
 }
 
+// Embed a compiled design set, byte-for-byte the way tools/lib/design_embed.py
+// does it, because tools/verify/verify_pack_parity.py compares the two packers
+// byte for byte and a container that differs is a container one of them did not
+// write as intended.
+//
+// THE ORDERING IS THE WHOLE PROBLEM. Three sequences have to agree exactly:
+//   * the SETS, sorted by name -- Python's sorted(os.listdir(design_dir));
+//   * the FILES within a set, sorted by name;
+//   * the four config keys, appended LAST, in the order
+//     artifacts_embedded / artifacts_device / artifacts_datapath / artifacts_sets.
+// The last one is why this is a function taking the ostringstream rather than
+// something the Writer appends: the Python side inserts those keys into the config
+// dict immediately before write(), so they serialise after every other key, and a
+// C++ writer that emitted them earlier would produce a different JSON of the same
+// length class and fail parity on the length first.
+// RETURNS the four config keys as a JSON fragment rather than appending
+// them, because arch=0 builds its config in a std::ostringstream and
+// arches 1/2/3 in a std::string, and a helper that took one of the two
+// would work for half the architectures.
+std::string embed_design(Writer &w, const std::string &dir,
+                        const std::string &device,
+                        const std::string &datapath) {
+  namespace fs = std::filesystem;
+  if (dir.empty() || !fs::is_directory(dir)) return {};
+
+  std::vector<std::string> sets;
+  for (const auto &e : fs::directory_iterator(dir))
+    if (e.is_directory()) sets.push_back(e.path().filename().string());
+  std::sort(sets.begin(), sets.end());
+  if (sets.empty()) return {};
+
+  std::string sets_json = "{";
+  bool first_set = true;
+  for (const std::string &set_name : sets) {
+    std::vector<std::string> files;
+    for (const auto &e : fs::directory_iterator(fs::path(dir) / set_name))
+      if (e.is_regular_file()) files.push_back(e.path().filename().string());
+    std::sort(files.begin(), files.end());
+    if (files.empty()) continue;
+    uint64_t bytes = 0;
+    for (const std::string &f : files) {
+      const std::vector<uint8_t> blob = slurp((fs::path(dir) / set_name / f).string());
+      bytes += blob.size();
+      w.add("design/" + set_name + "/" + f, blob.data(), blob.size(), "U8",
+            "design", {static_cast<int64_t>(blob.size())});
+    }
+    if (!first_set) sets_json += ",";
+    first_set = false;
+    sets_json += "\"" + set_name + "\":{\"files\":" +
+                 std::to_string(files.size()) + ",\"bytes\":" +
+                 std::to_string(bytes) + "}";
+  }
+  sets_json += "}";
+  if (first_set) return {};   // nothing was stored
+
+  // artifacts_sets is a JSON STRING, not a nested object, and that is not a
+  // preference. tools/lib/design_embed.py does
+  //
+  //     writer.config["artifacts_sets"] = json.dumps(stored, separators=...)
+  //
+  // and json.dumps RETURNS A STRING, which then goes into a dict and gets
+  // serialised as a quoted, escaped string. The C++ side emitting a real nested
+  // object parsed to the same thing in every reader that walked the config --
+  // and still differed from the Python container in 26 bytes, which is exactly
+  // what verify_pack_parity.py exists to notice. Same content, different bytes,
+  // and a container whose bytes are what two packers agree on.
+  std::string escaped;
+  for (char ch : sets_json) {
+    if (ch == '"') escaped += "\\\"";
+    else escaped += ch;
+  }
+  return "\"artifacts_embedded\":\"true\""
+         ",\"artifacts_device\":\"" + device + "\""
+         ",\"artifacts_datapath\":\"" + datapath + "\""
+         ",\"artifacts_sets\":\"" + escaped + "\"";
+}
+
+// Splice `keys` INTO the config object, which `config_json` closes.
+//
+// The Python side adds them to a dict, so they land BEFORE the closing brace.
+// Appending after it produces valid JSON that parses to the same thing and is 26
+// bytes different -- and this is the second time in this function that "the
+// content is the same" turned out not to be the question. Byte for byte is.
+std::string splice_config(const std::string &config_json,
+                          const std::string &keys) {
+  if (keys.empty()) return config_json;
+  if (config_json.empty()) return keys;
+  if (config_json.back() != '}' || config_json.front() != '{') return config_json;
+  std::string body = config_json.substr(1, config_json.size() - 2);
+  return "{" + body + (body.empty() ? "" : ",") + keys + "}";
+}
+
+
 }  // namespace
 
 // Out of the anonymous namespace on purpose: the pack path in src/hub.cpp
@@ -469,7 +564,8 @@ void prepare_model(const std::string &model_dir, const std::string &vocab,
                    const std::string &layout_json,
                    const std::string &layout_hash,
                    int64_t tile_k, int64_t tile_n, int64_t max_seq,
-                   void (*log)(const std::string &), MacGeom mac) {
+                   void (*log)(const std::string &), MacGeom mac,
+                   const std::string &design_dir) {
   // Read the GRAPH, not a weight file, and hash exactly the files that read
   // covered. Both happen here rather than being passed in so a container
   // cannot record a digest of something this call did not actually read.
@@ -626,7 +722,8 @@ void prepare_model(const std::string &model_dir, const std::string &vocab,
             {hidden});
   }
 
-  w.write(out, cj.str());
+  w.write(out, splice_config(cj.str(),
+                              embed_design(w, design_dir, app::running_device(), "bf16")));
   if (log) {
     std::ostringstream s;
     s << "  packed " << w.count() << " tensors, "
@@ -647,7 +744,8 @@ void prepare_model(const std::string &model_dir, const std::string &vocab,
 void prepare_model_gemma(const std::string &model_dir, const std::string &out,
                          const std::string &source_repo,
                          void (*log)(const std::string &), int64_t tile_k,
-                         int64_t tile_n, bool host_only, MacGeom mac) {
+                         int64_t tile_n, bool host_only, MacGeom mac,
+                         const std::string &design_dir) {
   const std::string graph = std::string(model_dir) + "/" + kModelOnnx;
   const OnnxWeights ck(graph, embeddinggemma_options());
   const std::map<std::string, Tensor> &src = ck.tensors();
@@ -1010,7 +1108,8 @@ void prepare_model_gemma(const std::string &model_dir, const std::string &out,
   add_gemm_b_host(w, "dense2.weight", d2w);
   add_gemm_b_host(w, "dense3.weight", d3w);
 
-  w.write(out, cj, /*arch=*/1);
+  w.write(out, splice_config(cj, embed_design(w, design_dir, app::running_device(), "bf16")),
+          /*arch=*/1);
   if (log) {
     std::ostringstream s;
     s << "\n  tensors    : " << w.count()
@@ -1079,7 +1178,8 @@ void prepare_model_nomic(const std::string &model_dir,
                          const std::string &layout_json,
                          const std::string &layout_hash,
                          int64_t tile_k, int64_t tile_n, int64_t max_seq,
-                         void (*log)(const std::string &), MacGeom mac) {
+                         void (*log)(const std::string &), MacGeom mac,
+                         const std::string &design_dir) {
   const std::string graph = std::string(model_dir) + "/" + kModelOnnx;
   const OnnxWeights ck(graph);
   const std::map<std::string, Tensor> &src = ck.tensors();
@@ -1361,7 +1461,8 @@ void prepare_model_nomic(const std::string &model_dir,
     add_f32(tag + "ln2.bias", get(p + "norm2.bias"), "layernorm", {hidden});
   }
 
-  w.write(out, cj, /*arch=*/2);
+  w.write(out, splice_config(cj, embed_design(w, design_dir, app::running_device(), "bf16")),
+          /*arch=*/2);
   if (log) {
     std::ostringstream s;
     s << "\n  tensors    : " << w.count()
@@ -1441,7 +1542,8 @@ void prepare_model_gte(const std::string &model_dir,
                        const std::string &layout_json,
                        const std::string &layout_hash,
                        int64_t tile_k, int64_t tile_n, int64_t max_seq,
-                       void (*log)(const std::string &), MacGeom mac) {
+                       void (*log)(const std::string &), MacGeom mac,
+                         const std::string &design_dir) {
   // Widening this checkpoint's F16 to F32 is the reader's job, not this
   // packer's -- see OnnxWeights: it happens exactly once, before anything is
   // rounded to bf16, so a half-precision weight is never rounded twice.
@@ -1811,7 +1913,8 @@ void prepare_model_gte(const std::string &model_dir,
     add_f32(tag + "ln2.bias", get(p + "mlp_ln.bias"), "layernorm", {hidden});
   }
 
-  w.write(out, cj, /*arch=*/3);
+  w.write(out, splice_config(cj, embed_design(w, design_dir, app::running_device(), "bf16")),
+          /*arch=*/3);
   if (log) {
     std::ostringstream s;
     s << "\n  tensors    : " << w.count()

@@ -241,6 +241,23 @@ ARCH_MEDIAPIPE_POSE_DET_SSD_LM_REGRESS = 8
 
 FLAG_PRETILED = 1 << 0
 
+# A COMPILATED DESIGN SET, carried inside the container.
+#
+# WHY IT LIVES HERE AT ALL. A design set is 288-536 KB of instruction streams plus
+# a 71 KB xclbin, and producing it needs MLIR-AIE -- a Python toolchain the size of
+# a compiler. Without this, `curl`ing one file and running the binary is not enough:
+# the reader must also have a working AIE install to build the thing the reader
+# dispatches to. So the end user is asked to install a compiler to run a model. With
+# this, one .npue is self-sufficient and the toolchain is a BUILD-time dependency,
+# which is the only place a compiler belongs.
+#
+# ONE CONSTANT FOR THE ROLE STRING, because the alternative is the role written as a
+# literal at the writer and again at every reader, and a typo there produces a
+# container whose blobs are present, correctly sized, and never looked at -- the
+# silent-wrong-answer shape this format's design has been bent to avoid elsewhere.
+DESIGN_ROLE = "design"
+DESIGN_PREFIX = "design/"
+
 HEADER_FORMAT = "<4sIII QQQQ 16s"      # see SPEC CORRECTION above
 HEADER_SIZE = 64
 assert struct.calcsize(HEADER_FORMAT) == HEADER_SIZE
@@ -776,6 +793,25 @@ class Writer:
         self.blobs = []
         self._offset = 0
 
+    def add_design(self, set_name, file_name, blob):
+        """One file of a compiled design set, stored as raw bytes.
+
+        `blob` is bytes -- an xclbin is an ELF-ish container and an instruction
+        stream is a flat array of 32-bit words, and neither is an ndarray. It is
+        stored as U8 with the byte count as the only shape, because there is no
+        arithmetic over these bytes and pretending otherwise would invite someone
+        to reshape one.
+
+        THE NAME IS `design/<set>/<file>`, and the set name is part of it rather
+        than a separate index: a self-sufficient container carries gemm_rtp AND
+        gelu AND layernorm AND softmax, the runtime picks between them by name and
+        by datapath, and a flat `final.xclbin` in a container that holds four sets
+        would be four files of one name.
+        """
+        name = f"{DESIGN_PREFIX}{set_name}/{file_name}"
+        arr = np.frombuffer(blob, dtype=np.uint8)
+        return self.add(name, arr, "U8", DESIGN_ROLE, [len(blob)])
+
     def add(self, name, array, dtype_tag, role, logical_shape,
             layout=None, padded_shape=None):
         arr = np.ascontiguousarray(array, dtype=NP_DTYPE[dtype_tag])
@@ -866,6 +902,41 @@ class Reader:
     def __exit__(self, *exc):
         self.close()
         return False
+
+    def design_sets(self):
+        """{set_name: {file_name: entry}} for everything this container carries.
+
+        The reader side of DESIGN_ROLE, and it returns ENTRIES rather than bytes
+        so a caller can check sizes before deciding whether the set is the one it
+        wants. A container that carries no design set yields {} and NOT an error:
+        every container packed before this existed is still valid, and the host
+        path -- every convolution on the CPU -- needs no design at all.
+        """
+        out = {}
+        for name, e in self.entries.items():
+            if e.get("role") != DESIGN_ROLE or not name.startswith(DESIGN_PREFIX):
+                continue
+            rest = name[len(DESIGN_PREFIX):]
+            if "/" not in rest:
+                continue
+            set_name, file_name = rest.split("/", 1)
+            out.setdefault(set_name, {})[file_name] = e
+        return out
+
+    def design_bytes(self, set_name, file_name):
+        """The exact bytes of one embedded design file, or None if absent.
+
+        None rather than an exception, because "this container does not carry that
+        set" is the normal state of every container packed before this feature and
+        of every container whose design is still only on disk. The CALLER decides
+        whether that is fatal; a reader that raised would make the absence
+        indistinguishable from corruption.
+        """
+        e = self.design_sets().get(set_name, {}).get(file_name)
+        if e is None:
+            return None
+        start = self.data_offset + e["offset"]
+        return bytes(self._map[start:start + e["nbytes"]])
 
     def raw(self, name):
         """The tensor exactly as stored -- tiled, bf16 as uint16.

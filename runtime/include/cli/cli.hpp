@@ -380,7 +380,21 @@ inline void print_catalog(const std::string &root) {
 
     for (const auto &e : npue::hub::catalog()) {
         const ModelEntry *m = is_installed(e.name);
+        // A CARRIED SET COUNTS, and THIS is the line that matters: the catalogue
+        // loop is the one that prints every model the catalogue knows, including
+        // the ones present on disk -- the installed loop further down skips
+        // exactly those (`if (npue::hub::find(m.name)) continue;`). So a fix
+        // applied only to the installed loop changes nothing for all-MiniLM,
+        // which is both installed AND catalogued, and the state column kept
+        // saying "no design" for a file that carries the set inside it.
+        //
+        // The two sources are OR-ed, not chosen between: pick_artifacts is still
+        // what answers for a container that does not carry one, and
+        // `m->carries_design` is the container's own statement, read from its
+        // manifest rather than inferred from whatever happens to sit on disk
+        // beside it.
         const bool have_design =
+            (m && m->carries_design) ||
             !pick_artifacts(root, e.hidden, e.ffn, e.gated_ffn, e.qkv_n, "",
                             e.datapath, e.name).empty();
         const char *state = !m                              ? "available"
@@ -451,6 +465,7 @@ inline void print_catalog(const std::string &root) {
         // else's repo -- and there is no fourth case to remember, because the
         // function is what decides what a pixel kind is.
         const std::string note = pixel_command_note(m.kind);
+
         std::printf("  %-20s %-9s %6s %6s %8s %6.0f MB  %s\n", m.name.c_str(),
                     !encoder_implemented(m.arch)              ? "no encoder"
                     // These three columns say WHICH COMMAND RUNS THE FILE, and
@@ -476,8 +491,15 @@ inline void print_catalog(const std::string &root) {
                     : is_vit_arch(m.arch)                    ? "cls"
                     : is_pose_arch(m.arch)                   ? "pose"
                     : m.gemm_layout == "host"                 ? "cpu"
-                    : pick_artifacts(root, m.hidden, m.ffn, m.gated_ffn,
-                                     m.qkv_n, "", "bf16", m.name).empty()
+                    // A CONTAINER THAT CARRIES ITS OWN SET IS READY, whatever
+                    // is on disk. The `||` is the whole fix: pick_artifacts()
+                    // scans the filesystem, so a downloaded .npue that needs
+                    // nothing beside it was listed as "no design" -- the one
+                    // status this project has the most evidence about being
+                    // wrong.
+                    : !m.carries_design &&
+                          pick_artifacts(root, m.hidden, m.ffn, m.gated_ffn,
+                                         m.qkv_n, "", "bf16", m.name).empty()
                         ? "no design" : "ready",
                     layers, hidden, m.pooling.c_str(),
                     m.mb,
@@ -589,6 +611,63 @@ inline bool maybe_tokenize(const std::string &root, int argc, char **argv) {
 inline bool maybe_prepare_model(const CLIArgs &args, int argc, char **argv) {
     if (args.prepare_model_dir.empty()) return false;
     const std::string dir = args.prepare_model_dir;
+
+    // THE DESIGN SET TO STORE INSIDE THE CONTAINER, resolved the same way
+    // tools/lib/design_embed.py resolves it: <root>/runtime/artifacts/<model>
+    // [/-i8]/artifacts_npu1, accepted only when it really holds a gemm_rtp set.
+    //
+    // Two packers have to agree on this byte for byte -- verify_pack_parity.py
+    // compares them -- so the rule is written once per language and the gate
+    // compares what they PRODUCED rather than what they intended. A resolver that
+    // disagreed about the directory would show up as a length difference in the
+    // container and nothing subtler than that, which is the good case.
+    //
+    // The model name comes from the DIRECTORY being packed (models/<name>), which
+    // is also the container's basename and therefore what the runtime will look the
+    // embedded set up by. Deriving it from anything else would produce a container
+    // that carries a set the reader cannot find.
+    //
+    // THE ROOT IS FOUND BY WALKING UP FROM THE CHECKPOINT, not by counting
+    // levels and not from argv[0]. `dir` is models/<name> in this tree, so
+    // "parent_path().parent_path()" happens to be the repository root -- and it
+    // happened to be that twice, which is not a rule. The question is "where is
+    // runtime/artifacts from here", and the only honest way to answer it is to ask
+    // the filesystem going up until something answers.
+    //
+    // The earlier argv[0] version found nothing, so the C++ packer stored no set
+    // and parity complained about a 26-byte JSON difference with the four
+    // artifacts keys simply absent from that side. Under --prepare-model the thing
+    // that matters is next to the CHECKPOINT, not next to the binary.
+    const std::filesystem::path dirp(dir);
+    const std::string model_name = dirp.filename().string();
+    // A HELPER WITH EARLY RETURNS rather than nested loops with breaks. The loop
+    // version was traced and observed doing the wrong thing: after finding
+    // <model>/artifacts_npu1 it went on to try <model>-i8 and stored THAT, so the
+    // float container carried the int8 set -- a container whose layout_hash, stream
+    // table and geometry are all for a datapath it does not use. verify_pack_parity
+    // caught it as a size difference in two design entries (72046 vs 71533 bytes),
+    // which is the only reason it was caught at all rather than shipping.
+    //
+    // The rewrite is not cosmetic: three nested scopes each needing to stop the
+    // search is a place to get the exit wrong, and an early return cannot be
+    // reached by the wrong break.
+    const auto find_design_dir = [&]() -> std::string {
+      std::error_code ec;
+      std::filesystem::path up =
+          std::filesystem::absolute(dirp, ec).parent_path();
+      for (int depth = 0; depth < 4 && up != up.root_path(); ++depth) {
+        for (const std::string &n : {model_name, model_name + "-i8"})
+          for (const char *gen : {"artifacts_npu1", "artifacts_npu2"}) {
+            const std::string c =
+                (up / "runtime" / "artifacts" / n / gen).string();
+            if (std::ifstream(c + "/gemm_rtp/final.xclbin").good())
+              return c;
+          }
+        up = up.parent_path();
+      }
+      return {};
+    };
+    const std::string design_dir = find_design_dir();
 
     // --dev is read HERE as well as in Runtime::run(), because that has not
     // been entered yet and the B panel's sub-tile is the MMAC geometry: npu1
@@ -765,7 +844,7 @@ inline bool maybe_prepare_model(const CLIArgs &args, int argc, char **argv) {
     std::printf("NpuEmbeddings -- preparing %s\n", out.c_str());
     npue::prepare_model(dir, dir + "/vocab.txt", dir + "/config.json", pooling,
                         source_repo, out, lay.json, lay.hash, tile_k, tile_n,
-                        256, note, mac);
+                        256, note, mac, design_dir);
     std::printf("  wrote %s\n", out.c_str());
     return true;
 }

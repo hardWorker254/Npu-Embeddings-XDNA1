@@ -83,7 +83,8 @@
 #include "cli/flags.hpp"
 #include "common/host_kernels.hpp"
 #include "common/npu_ops_flag.hpp"   // parse_npu_ops, refuse_removed_op_flags
-#include "common/design_selection.hpp"   // artifacts_candidates
+#include "common/design_selection.hpp"
+#include "runtime/design.hpp"        // prefer_embedded: the container's own set   // artifacts_candidates
 #include "mppose/session.hpp"
 #include "runtime/device.hpp"             // require_context_budget, survey_contexts
 
@@ -264,7 +265,22 @@ inline int maybe_mppose_mode(const std::string &root, int argc, char **argv,
   std::string art;
   const bool conv_on_array =
       parse_npu_ops(flag("--npu-ops")).count("conv") != 0;
-  if (conv_on_array || !flag("--artifacts").empty()) {
+  // A CONTAINER THAT CARRIES ITS OWN SET IS ALREADY RESOLVED, and this is the
+  // gate in front of that: the refusal below used to fire first, telling an
+  // operator with a self-sufficient container to build a design set for a model
+  // whose set was inside the file they were holding.
+  //
+  // `art` stays EMPTY in that case, and that is load-bearing rather than
+  // convenient. prefer_embedded(container, art, set) asks the container first
+  // and only builds `art + "/" + set` as a fallback, so an empty `art` is never
+  // used as a path. An explicit --artifacts still wins, which is why the guard
+  // is `!from_cli` and not plain `self_sufficient`.
+  const bool from_cli = !flag("--artifacts").empty();
+  const bool self_sufficient =
+      npu::prefer_embedded(&probe, "", "gemm_rtp").has("design.json");
+  if (!from_cli && self_sufficient) {
+    // Nothing to resolve. The Design comes out of the container below.
+  } else if (conv_on_array || from_cli) {
     const std::string named = flag("--artifacts");
     std::string streams;
     try {
@@ -315,7 +331,8 @@ inline int maybe_mppose_mode(const std::string &root, int argc, char **argv,
   }
 
   const double t0 = app::now_s();
-  npue::mppose::Session session(probe, model_name, art, threads, max_people);
+  npue::mppose::Session session(probe, model_name, art, threads, max_people,
+                                  conv_on_array || from_cli);
   const double t_setup = app::now_s() - t0;
   const auto &g = session.geometry();
 

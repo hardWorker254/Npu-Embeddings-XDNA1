@@ -165,7 +165,12 @@ private:
   Tensor head(const std::vector<const Tensor *> &in);
 
   const Geometry &g_;
-  const Placement &place_;
+  // BY VALUE, and the `&` that used to be here was the whole bug: the caller
+  // is Session's constructor, whose `Placement place;` is a local that dies
+  // when the constructor returns. hands and mppose store this by value;
+  // pose stored a reference to a dead object and read reused stack for the
+  // rest of the run.
+  const Placement place_;
   app::Pool &pool_;
   NpuConvs *npu_ = nullptr;
   // The GEMM's [M, N] result for the convolution in flight, transposed into the

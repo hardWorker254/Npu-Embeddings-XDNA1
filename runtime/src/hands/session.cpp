@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //===----------------------------------------------------------------------===//
 
+#include "runtime/design.hpp"   // array_requested, prefer_embedded
 #include "hands/session.hpp"
 
 #include <algorithm>
@@ -29,12 +30,13 @@ Tensor as_tensor(const std::vector<float> &d, int64_t c, int64_t h, int64_t w) {
 }  // namespace
 
 Session::Session(npue::File &model, const std::string &model_name,
-                 const std::string &artifacts, int threads, int64_t max_hands)
+                 const std::string &artifacts, int threads, int64_t max_hands,
+                 bool want_array)
     : model_(model), art_(artifacts), name_(model_name), max_hands_(max_hands) {
   geom_ = read_geometry(model_, name_);
   pool_ = std::make_unique<app::Pool>(threads);
   Placement place;   // the default: everything on the host
-  if (!art_.empty()) {
+  if (want_array) {
     // THE SLOT RANGES, ASSIGNED HERE AND FROM ONE VECTOR. This container holds
     // the palm detector AND the landmark network, with SEPARATE convolution
     // index spaces that both start at zero, while the array backend has ONE

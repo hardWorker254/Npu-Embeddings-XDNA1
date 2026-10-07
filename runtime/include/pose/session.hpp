@@ -82,6 +82,14 @@ public:
   // streams -- see the header note.
   Session(npue::File &model, const std::string &model_name,
           const std::string &artifacts, int threads,
+          // WHETHER TO PUT THE CONVOLUTIONS ON THE ARRAY. An explicit parameter
+          // rather than `artifacts` being non-empty, because for these three
+          // architectures the request is the `--npu-ops conv` flag and nothing
+          // else -- and a container that carries its own set would otherwise
+          // answer "yes" to a question nobody asked. Measured on pose: 0.334 s on
+          // the array against 0.150 s on the host, so an unasked-for array run is
+          // a 2.2x SLOWDOWN the user never requested.
+          bool want_array = false,
           const DecodeParams &params = DecodeParams());
 
   // Declared, not defaulted, so it is DEFINED in session.cpp where

@@ -876,8 +876,54 @@ def npu_panels(pfx, ops, weights, device):
     return panels, sorted(streams), CONV_PANEL_TILE
 
 
+# -- embedding the design set -----------------------------------------------
+#
+# The same three lines in five packers, and a shared body rather than a shared
+# NAME: these modules are imported by pack_npue.py directly and are also runnable
+# as scripts, so they each need their own import line. What they share is the
+# rules, and those live in design_embed.py -- which one packer instead of five
+# would be five opportunities for four of them to disagree with the fifth about
+# which directory a datapath's set is in.
+def _embed(w, model_name, datapath, npue_args, where):
+    if npue_args is None or getattr(npue_args, "no_embed_artifacts", False):
+        return None
+    from design_embed import (GEMM_SET, embed_design_sets, find_design_dir)
+    import os
+    explicit = getattr(npue_args, "embed_artifacts", None)
+    # FOUR levels up, not three: this file is <root>/tools/pack/packers/<x>.py,
+    # so dirname is .../packers, and three of them reaches <root>/tools -- which
+    # produced the path "tools/runtime/artifacts" and a container that reported
+    # "none embedded" on a machine with every set built. A wrong root is silent
+    # here: the directory simply is not there, and the honest-looking message is
+    # about the absence rather than about the arithmetic.
+    here = os.path.abspath(__file__)
+    for _ in range(4):
+        here = os.path.dirname(here)
+    root = os.path.join(here, "runtime", "artifacts")
+    d = find_design_dir(model_name, datapath, root, explicit)
+    if d is None:
+        if explicit:
+            raise SystemExit(
+                f"--embed-artifacts {explicit} holds no {GEMM_SET}/final.xclbin. "
+                f"Point it at the directory CONTAINING the sets, not at one of "
+                f"them.")
+        print(f"  design     none embedded: no set under {root} for "
+              f"{model_name} ({datapath}). The container still runs; it needs "
+              f"the design set beside it.")
+        return None
+    r = embed_design_sets(w, d,
+                          device=getattr(npue_args, "device", "npu1") or "npu1",
+                          datapath=datapath)
+    sets = ", ".join(f"{k} {v['bytes'] / 1024:.0f} KB"
+                     for k, v in sorted(r["sets"].items()))
+    print(f"  design     {r['total_bytes'] / 1024:.0f} KB embedded from {d} "
+          f"({r['device']}, {r['datapath']}): {sets}")
+    return r
+
+
 def pack_hands(palm_onnx, lm_onnx, out_path, dry_run=False,
-                device=None, npu=False):
+                device=None, npu=False,
+                npue_args=None):
     tp = trace("palm", onnx.load(str(palm_onnx)))
     tl = trace("landmark", onnx.load(str(lm_onnx)))
     ops_p, names_p, conv_p, w_p, prelu_p, head_p = emit_ops(tp, "palm")
@@ -1008,6 +1054,7 @@ def pack_hands(palm_onnx, lm_onnx, out_path, dry_run=False,
         w.config["palm_graph"] = json.dumps(ops_p, separators=(",", ":"))
         w.config["lm_graph"] = json.dumps(ops_l, separators=(",", ":"))
 
+    _embed(w, "mediapipe-hands", "bf16", npue_args, "hands")
     w.write(out_path)
     size = os.path.getsize(out_path)
     print(f"wrote {out_path}  ({size / 1e6:.1f} MB, arch={ARCH_STRING})")

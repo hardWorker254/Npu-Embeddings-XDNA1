@@ -45,6 +45,7 @@
 
 #include "cli/flags.hpp"          // read_serve
 #include "common/design_selection.hpp"
+#include "runtime/design.hpp"        // prefer_embedded: the container's own set
 #include "common/host_kernels.hpp"
 #include "common/hub.hpp"
 #include "common/npu_ops_flag.hpp"   // parse_npu_ops, refuse_removed_op_flags
@@ -261,6 +262,13 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
     want_layout = probe.info("layer.0.qkv").layout_hash;
   } catch (const std::exception &) {
   }
+  // AN EXPLICIT --artifacts, and only that. `array_requested` was here before
+  // and sent a container carrying its own set into a branch whose whole job is
+  // resolving a LOCATION THE CALLER NAMED: art was empty, the candidates were
+  // ".", and `serve classify` refused with "no design set found for --artifacts
+  // ''; looked for gemm_rtp/design.json under ." -- a path nobody asked for,
+  // for a set sitting inside the container. The branch below handles the
+  // empty case, and it already accepts an embedded set when the disk has none.
   if (!art.empty()) {
     // The same candidate list and the same "only gemm_rtp/design.json counts"
     // rule gemma_mode uses, because the same reason applies: this arch loads
@@ -329,7 +337,8 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
                          probe.config_int("intermediate"), false,
                          probe.config_int("qkv_n"), layout, want_datapath,
                          model_name);
-    if (art.empty())
+    if (art.empty() &&
+        !npu::prefer_embedded(&probe, "", "gemm_rtp").has("design.json"))
       throw std::runtime_error(
           "no NPU design set matches " + model_name + " (hidden " +
           std::to_string(probe.config_int("hidden")) + ", datapath " +
@@ -340,7 +349,10 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
           "python tools/export/export_gemm_rtp.py --target " + model_name +
           " --arch 1");
   }
-  if (!std::ifstream(art + "/gemm_rtp/design.json").good())
+  // The Source, not the filesystem: same reason as the conv modes. A reader
+  // holding a self-sufficient container and no directory was told the set was
+  // absent, by a line that had only ever asked the disk.
+  if (!npu::prefer_embedded(&probe, art, "gemm_rtp").has("design.json"))
     throw std::runtime_error(
         art + " has no gemm_rtp/design.json. An image classifier needs "
         "gemm_rtp because its four streams ARE gemm_rtp's "
@@ -373,7 +385,15 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
                static_cast<long long>(g.patch_size),
                static_cast<long long>(g.n_pos),
                static_cast<long long>(g.num_labels));
-  std::fprintf(stderr, "  designs    %s\n", art.c_str());
+  // WHICH OF THE TWO, because an empty path in a status block reads as a bug
+  // in the thing printing it -- and a carried set leaves art empty, since
+  // prefer_embedded asks the container first and only forms art + "/" + set as
+  // a fallback.
+  std::fprintf(stderr, "  designs    %s\n",
+               (art.empty() &&
+                npu::prefer_embedded(&probe, "", "gemm_rtp").has("design.json"))
+                   ? "the container's own design set (design/gemm_rtp; no directory needed)"
+                   : art.c_str());
   std::fprintf(stderr, "  weights    %.1f MB staged on the array, %s\n",
                static_cast<double>(session.staged_bytes()) / (1024.0 * 1024.0),
                session.int8() ? "int8 operands (SmoothQuant, per-row A)"

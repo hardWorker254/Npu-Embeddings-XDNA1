@@ -98,7 +98,12 @@ void prepare_model(const std::string &model_dir, const std::string &vocab,
                    const std::string &layout_hash,
                    int64_t tile_k, int64_t tile_n, int64_t max_seq,
                    void (*log)(const std::string &) = nullptr,
-                   MacGeom mac = kMacDefault);
+                   MacGeom mac = kMacDefault,
+                   // A compiled design set to store INSIDE the container, or empty for
+                   // none. Same spelling and same bytes as
+                   // tools/lib/design_embed.py, because verify_pack_parity.py compares the
+                   // two packers byte for byte.
+                   const std::string &design_dir = {});
 
 // arch=1 (EmbeddingGemma / Gemma3 MQA+RoPE+GeGLU) mirror of
 // tools/pack/pack_npue.py's pack_gemma(). `model_dir` must hold the ONNX
@@ -120,7 +125,12 @@ void prepare_model_gemma(const std::string &model_dir, const std::string &out,
                          void (*log)(const std::string &) = nullptr,
                          int64_t tile_k = 64, int64_t tile_n = 48,
                          bool host_only = false,
-                         MacGeom mac = kMacDefault);
+                         MacGeom mac = kMacDefault,
+                   // A compiled design set to store INSIDE the container, or empty for
+                   // none. Same spelling and same bytes as
+                   // tools/lib/design_embed.py, because verify_pack_parity.py compares the
+                   // two packers byte for byte.
+                   const std::string &design_dir = {});
 
 // arch=2 (nomic-embed-text-v1.5 / RoPE + gated SwiGLU) mirror of
 // tools/pack/pack_npue.py's pack_nomic() (tasks/0069, tasks/0070, tasks/0071).
@@ -147,7 +157,12 @@ void prepare_model_nomic(const std::string &model_dir,
                          const std::string &layout_hash,
                          int64_t tile_k, int64_t tile_n, int64_t max_seq,
                          void (*log)(const std::string &) = nullptr,
-                         MacGeom mac = kMacDefault);
+                         MacGeom mac = kMacDefault,
+                   // A compiled design set to store INSIDE the container, or empty for
+                   // none. Same spelling and same bytes as
+                   // tools/lib/design_embed.py, because verify_pack_parity.py compares the
+                   // two packers byte for byte.
+                   const std::string &design_dir = {});
 
 // arch=3 (gte-multilingual-base / NTK RoPE + gated GeGLU, model_type "new")
 // mirror of tools/pack/pack_npue.py's pack_gte() (tasks/0135, tasks/0138). Same
@@ -180,6 +195,11 @@ void prepare_model_gte(const std::string &model_dir,
                        const std::string &layout_hash,
                        int64_t tile_k, int64_t tile_n, int64_t max_seq,
                        void (*log)(const std::string &) = nullptr,
-                       MacGeom mac = kMacDefault);
+                       MacGeom mac = kMacDefault,
+                   // A compiled design set to store INSIDE the container, or empty for
+                   // none. Same spelling and same bytes as
+                   // tools/lib/design_embed.py, because verify_pack_parity.py compares the
+                   // two packers byte for byte.
+                   const std::string &design_dir = {});
 
 }  // namespace npue

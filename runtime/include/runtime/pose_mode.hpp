@@ -60,6 +60,7 @@
 
 #include "cli/flags.hpp"          // read_serve
 #include "common/design_selection.hpp"
+#include "runtime/design.hpp"        // prefer_embedded: the container's own set
 #include "common/host_kernels.hpp"
 #include "common/hub.hpp"
 #include "common/npu_ops_flag.hpp"   // parse_npu_ops, refuse_removed_op_flags
@@ -246,7 +247,23 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
   // machine with no /dev/accel0. Only --npu-ops conv (or an explicit
   // --artifacts) opens one.
   std::string art;
-  if (conv_on_array || !flag("--artifacts").empty()) {
+  // A CONTAINER THAT CARRIES ITS OWN SET IS ALREADY RESOLVED, and this is the
+  // gate in front of that: the refusal below used to fire first, telling an
+  // operator with a self-sufficient container to build a design set for a model
+  // whose set was inside the file they were holding.
+  //
+  // `art` stays EMPTY in that case, and that is load-bearing rather than
+  // convenient. prefer_embedded(container, art, set) asks the container first and
+  // only builds `art + "/" + set` as a fallback, so an empty `art` is never used
+  // as a path -- and the one place that DID treat it as a path is the source of
+  // the leading-slash error "cannot open /gemm_rtp/insts_qkv_b4.bin" this feature
+  // produced on its first run.
+  const bool from_cli = !flag("--artifacts").empty();
+  const bool self_sufficient =
+      npu::prefer_embedded(&probe, "", "gemm_rtp").has("design.json");
+  if (!from_cli && self_sufficient) {
+    // Nothing to resolve. The Design comes out of the container below.
+  } else if (conv_on_array || from_cli) {
     const std::string named = flag("--artifacts");
     if (named.empty()) {
       // TWO CAUSES, AND THE MESSAGE SAYS WHICH, because they have different
@@ -314,7 +331,12 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
   }
 
   const double t0 = app::now_s();
-  npue::pose::Session session(probe, model_name, art, threads, params);
+  // The request, and ONLY the request: `conv_on_array` is --npu-ops conv and
+  // `from_cli` is an explicit --artifacts. A carried set is neither, and
+  // folding it in here is what made a plain `pose` run take the array --
+  // 0.334 s against 0.150 s, a 2.2x slowdown nobody asked for.
+  npue::pose::Session session(probe, model_name, art, threads,
+                                conv_on_array || from_cli, params);
   const double t_setup = app::now_s() - t0;
   const auto &g = session.geometry();
 

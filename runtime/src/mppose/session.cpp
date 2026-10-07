@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //===----------------------------------------------------------------------===//
 
+#include "runtime/design.hpp"   // array_requested, prefer_embedded
 #include "mppose/session.hpp"
 
 #include <algorithm>
@@ -29,7 +30,8 @@ Tensor as_tensor(const std::vector<float> &d, int64_t c, int64_t h, int64_t w) {
 }  // namespace
 
 Session::Session(npue::File &model, const std::string &model_name,
-                 const std::string &artifacts, int threads, int64_t max_people)
+                 const std::string &artifacts, int threads, int64_t max_people,
+                 bool want_array)
     : model_(model), art_(artifacts), name_(model_name), max_people_(max_people) {
   geom_ = read_geometry(model_, name_);
   pool_ = std::make_unique<app::Pool>(threads);
@@ -47,7 +49,7 @@ Session::Session(npue::File &model, const std::string &model_name,
   // layout_hash matches, every load succeeds, and the detector's boxes come out
   // of a pose network's weights. Nothing reports that.
   Placement place;   // the default: everything on the host
-  if (!art_.empty()) {
+  if (want_array) {
     place.conv_on_array = true;
     place.design_dir = art_;
     const int64_t n_det = static_cast<int64_t>(geom_.det_convs.size());

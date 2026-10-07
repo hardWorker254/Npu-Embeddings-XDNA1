@@ -7,6 +7,8 @@
 
 #include "runtime/design.hpp"
 
+#include "runtime/model.hpp"   // File, for DesignSource::blob
+
 #include "device_impl.hpp"
 #include "runtime/npu_contention.hpp"
 
@@ -24,6 +26,12 @@
 #include "xrt/xrt_kernel.h"
 
 namespace npu {
+// model.hpp declares File and Span in namespace npue; this file is inside npu, so
+// `npue::File` would resolve to npu::npue::File. One using-declaration, rather
+// than ::npue:: qualifications at each of the six uses.
+using ::npue::File;
+using ::npue::Span;
+
 namespace {
 
 size_t alignment_of(const void *p) {
@@ -130,6 +138,73 @@ xrt::bo make_data_bo(const xrt::device &dev, const xrt::kernel &k, size_t bytes,
 
 }  // namespace
 
+// ==== DesignSource: a design set from a directory OR from the container =====
+//
+// THE PREFIX AND THE ROLE ARE SPELLED IN TWO LANGUAGES -- here and in
+// tools/lib/npue.py (DESIGN_PREFIX / DESIGN_ROLE). That is a duplication, and the
+// thing that makes it survivable rather than merely lucky is that the failure mode
+// is a set that is never looked at: the container carries the right bytes, the
+// runtime asks for a name that is not there, has() says no, the directory fallback
+// finds nothing either, and the reader is told to install MLIR-AIE while holding a
+// perfectly good design set. So the two spellings are compared by
+// tools/verify/verify_embedded_artifacts.py, which is why it exists and not only
+// to check embeddings.
+static const char *kDesignPrefix = "design/";
+static const char *kDesignRole = "design";
+
+DesignSource DesignSource::from_dir(std::string dir) {
+  DesignSource s;
+  s.dir_ = std::move(dir);
+  return s;
+}
+
+DesignSource DesignSource::from_container(const File &container,
+                                          std::string set_name) {
+  DesignSource s;
+  s.container_ = &container;
+  s.set_name_ = std::move(set_name);
+  s.embedded_ = true;
+  return s;
+}
+
+static std::string design_key(const std::string &set_name,
+                              const std::string &file) {
+  return std::string(kDesignPrefix) + set_name + "/" + file;
+}
+
+bool DesignSource::has(const std::string &file) const {
+  if (container_) return container_->has(design_key(set_name_, file));
+  std::ifstream f(dir_ + "/" + file, std::ios::binary);
+  return static_cast<bool>(f);
+}
+
+std::string DesignSource::label() const {
+  if (!container_) return dir_;
+  return std::string("the container's ") + kDesignPrefix + set_name_;
+}
+
+std::string DesignSource::text(const std::string &file) const {
+  if (container_) {
+    Span sp = container_->raw(design_key(set_name_, file));
+    return std::string(static_cast<const char *>(sp.data), sp.bytes);
+  }
+  std::ifstream f(dir_ + "/" + file);
+  if (!f) throw std::runtime_error("cannot open " + dir_ + "/" + file);
+  std::stringstream ss;
+  ss << f.rdbuf();
+  return ss.str();
+}
+
+std::vector<uint8_t> DesignSource::blob(const std::string &file) const {
+  if (container_) {
+    Span sp = container_->raw(design_key(set_name_, file));
+    const uint8_t *b = static_cast<const uint8_t *>(sp.data);
+    return std::vector<uint8_t>(b, b + sp.bytes);
+  }
+  return read_file(dir_ + "/" + file);
+}
+
+
 struct Design::Impl {
   xrt::hw_context ctx;
   xrt::kernel kernel;
@@ -149,12 +224,23 @@ struct Design::Impl {
 };
 
 Design::Design(Device &dev, const std::string &dir)
+    : Design(dev, DesignSource::from_dir(dir)) {}
+
+Design::Design(Device &dev, const DesignSource &src)
     : impl_(std::make_unique<Impl>()) {
-  std::ifstream jf(dir + "/design.json");
-  if (!jf) throw std::runtime_error("cannot open " + dir + "/design.json");
-  std::stringstream ss;
-  ss << jf.rdbuf();
-  const std::string js = ss.str();
+  // `src` replaces the old `dir` in every read below, and the variable is still
+  // called `dir` for the rest of the function so the diff to the rest of this
+  // constructor is zero -- it used to name a path and it now names whatever label
+  // an error should print, which for a directory is that path and for an embedded
+  // set is "the container's design/<set>". An operator who mistyped --artifacts and
+  // sees the path echoed back believes the directory was read.
+  const std::string &dir = src.label();
+  std::string js;
+  try {
+    js = src.text("design.json");
+  } catch (const std::exception &) {
+    throw std::runtime_error("cannot open " + dir + "/design.json");
+  }
 
   info_.name = json_str(js, "name", dir);
   info_.kind = json_str(js, "kind", "gemm");
@@ -198,17 +284,18 @@ Design::Design(Device &dev, const std::string &dir)
     info_.device = json_str(js, "device", "");
   }
 
-  {
-    std::ifstream tf(dir + "/toolchain.json");
-    if (tf) {
-      std::stringstream tss;
-      tss << tf.rdbuf();
-      const std::string ts = tss.str();
-      info_.mlir_aie_version = json_str(ts, "mlir_aie_version", "unavailable");
-      info_.peano_version = json_str(ts, "peano_version", "unavailable");
-      info_.mlir_aie_git_head = json_str(ts, "mlir_aie_git_head", "unavailable");
-      info_.toolchain_recorded = true;
-    }
+  // OPTIONAL, and read through the source rather than opened directly, so an
+  // embedded set records its own toolchain exactly as a directory one does. The
+  // `has()` test is what keeps "absent" an absence: a container packed without
+  // toolchain.json in its set leaves these four fields at their defaults and
+  // `toolchain_recorded` false, which is the same state as a directory set
+  // missing the file -- and the two being indistinguishable is the point.
+  if (src.has("toolchain.json")) {
+    const std::string ts = src.text("toolchain.json");
+    info_.mlir_aie_version = json_str(ts, "mlir_aie_version", "unavailable");
+    info_.peano_version = json_str(ts, "peano_version", "unavailable");
+    info_.mlir_aie_git_head = json_str(ts, "mlir_aie_git_head", "unavailable");
+    info_.toolchain_recorded = true;
   }
 
   info_.buffer_bytes = json_size_array(js, "buffers");
@@ -223,7 +310,16 @@ Design::Design(Device &dev, const std::string &dir)
   output_index_ = info_.buffer_bytes.size() - 1;
 
   auto &d = *dev.impl();
-  auto xclbin = xrt::xclbin(dir + "/final.xclbin");
+  // FROM MEMORY WHEN EMBEDDED. xrt::xclbin has a constructor taking a
+  // std::vector<char> (xrt/experimental/xrt_xclbin.h:624), which is why an
+  // embedded set needs no temporary directory and no files unpacked to /tmp: the
+  // blob is copied out of the container's mapping and handed straight to the
+  // driver. A design set written to a temp dir would work and would also give the
+  // process a writable-by-others directory full of executable streams, which is a
+  // cost nobody should pay for a convenience.
+  std::vector<uint8_t> xclbin_bytes = src.blob("final.xclbin");
+  std::vector<char> xclbin_chars(xclbin_bytes.begin(), xclbin_bytes.end());
+  auto xclbin = xrt::xclbin(xclbin_chars);
   try {
     auto uuid = d.device.register_xclbin(xclbin);
     impl_->ctx = xrt::hw_context(d.device, uuid);
@@ -251,7 +347,7 @@ Design::Design(Device &dev, const std::string &dir)
     throw std::runtime_error(dir + ": no MLIR_AIE kernel in the xclbin");
   impl_->kernel = xrt::kernel(impl_->ctx, kname);
 
-  auto instr = read_file(dir + "/insts.bin");
+  auto instr = src.blob("insts.bin");
   impl_->n_instr_words = instr.size() / sizeof(uint32_t);
   impl_->bo_instr = xrt::bo(d.device, instr.size(), XCL_BO_FLAGS_CACHEABLE,
                                 impl_->kernel.group_id(1));
@@ -270,8 +366,15 @@ Design::Design(Device &dev, const std::string &dir)
 Design::~Design() = default;
 
 size_t Design::load_instr(const std::string &path) {
+  return load_instr_blob(read_file(path));
+}
+
+size_t Design::load_instr(const DesignSource &src, const std::string &file) {
+  return load_instr_blob(src.blob(file));
+}
+
+size_t Design::load_instr_blob(std::vector<uint8_t> instr) {
   auto &d = *dev_->impl();
-  auto instr = read_file(path);
   xrt::bo bo(d.device, instr.size(), XCL_BO_FLAGS_CACHEABLE,
              impl_->kernel.group_id(1));
   std::memcpy(bo.map<void *>(), instr.data(), instr.size());

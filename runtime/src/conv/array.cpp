@@ -15,7 +15,7 @@
 
 #include "common/design_selection.hpp"
 #include "common/host_kernels.hpp"
-#include "runtime/design.hpp"
+#include "runtime/design.hpp"        // prefer_embedded: the container's own set
 #include "runtime/device.hpp"
 #include "whisper/npu_ops.hpp"
 
@@ -42,19 +42,26 @@ std::string read_text(const std::string &path) {
 // conv-only set has three possible owners and naming one of them from the shared
 // copy would be a lie for the other two.
 std::vector<app::StreamEntry> load_streams(npu::Design &d,
-                                           const std::string &dir) {
+                                            const npu::DesignSource &src) {
+  // FROM THE SOURCE, NOT THE DIRECTORY. This is the function pose, hands and
+  // mppose all reach, and it used to be handed `artifacts + "/gemm_rtp"` --
+  // which for a self-sufficient container is "/gemm_rtp", read_text returns
+  // nothing for, and the array then engaged with ZERO streams and reported
+  // "the weight's own position 0 is outside the 0 convolutions the
+  // constructor transposed".
   std::vector<app::StreamEntry> streams =
-      app::parse_streams(read_text(dir + "/design.json"));
+      app::parse_streams(src.text("design.json"));
   if (streams.empty())
     throw std::runtime_error(
-        dir + "/design.json lists no streams -- re-export it with "
-        "tools/export/export_gemm_rtp.py --target <model> --arch 1 -n 32");
+        src.label() + " has no streams in design.json -- re-export it "
+        "with tools/export/export_gemm_rtp.py --target <model> --arch 1 "
+        "-n 32");
   std::sort(streams.begin(), streams.end(),
             [](const app::StreamEntry &a, const app::StreamEntry &b) {
               return a.slot < b.slot;
             });
   for (const auto &s : streams) {
-    const size_t got = d.load_instr(dir + "/" + s.file);
+    const size_t got = d.load_instr(src, s.file);
     if (static_cast<int64_t>(got) != s.slot)
       throw std::runtime_error("stream " + s.file + " landed in slot " +
                                std::to_string(got) + ", design.json says " +
@@ -83,7 +90,8 @@ public:
           app::Pool &pool)
       : name_(name),
         dev_(std::make_unique<npu::Device>()),
-        design_(std::make_unique<npu::Design>(*dev_, artifacts + "/gemm_rtp")),
+        design_(std::make_unique<npu::Design>(
+            *dev_, npu::prefer_embedded(&model, artifacts, "gemm_rtp"))),
         pool_(pool) {
     // ONE PANEL PER CONVOLUTION, NEVER PER STREAM NAME. This is the rule that
     // matters most in this file and it is the one an earlier version got wrong:
@@ -99,7 +107,8 @@ public:
     // `slots`, so a map could only ever have suppressed a second staging of the
     // SAME panel, which cannot happen.
     const std::vector<app::StreamEntry> streams =
-        load_streams(*design_, artifacts + "/gemm_rtp");
+        load_streams(
+            *design_, npu::prefer_embedded(&model, artifacts, "gemm_rtp"));
     rows_ = design_->info().M;
     if (rows_ <= 0)
       throw std::runtime_error(artifacts +

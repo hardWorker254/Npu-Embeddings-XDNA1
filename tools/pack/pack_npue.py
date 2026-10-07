@@ -41,6 +41,8 @@ sys.path.insert(0, str(REPO / "reference"))
 # (its docstring records two copies drifting apart). The import was never added
 # here, so pack_npue.py has not run since that refactor -- the shipped .npue
 # predates it and nothing repacked. Found while adding the vocabulary, 0036.
+from design_embed import (GEMM_SET, embed_design_sets,  # noqa: E402
+                          find_design_dir)
 from npue import (ARCH_GEMMA3_MQA_ROPE_GEGLU, ARCH_GTE_NEW_ROPE_GEGLU,  # noqa: E402
                   ARCH_NOMIC_ROPE_SWIGLU, MAC_BY_DEVICE, MAC_DEFAULT_DEVICE,
                   Writer, gemm_b_layout, layout_hash, mac_for_device, tile_b,
@@ -496,10 +498,49 @@ def gemma_qkv_blocks(hidden, head_dim, kv_heads, tile_n, n_cols=8):
     }
 
 
+# -- embedding the design set -----------------------------------------------
+#
+# ONE HELPER, FOUR CALL SITES, because the rules -- which directory, which
+# datapath, what to say when there is none -- are four decisions and not one, and
+# writing them out four times is four chances for three of them to disagree with
+# the fourth.
+#
+# A MISSING SET IS NOT AN ERROR and the caller says so out loud. Every container
+# in this tree was packed before this existed, a fresh checkout has no
+# runtime/artifacts/ at all until something is exported, and a packer that refused
+# to write a container because it could not find a design set would break every
+# host-only workflow in the repository over a convenience.
+def _embed(w, model_name, datapath, args, where):
+    if getattr(args, "no_embed_artifacts", False):
+        return None
+    explicit = getattr(args, "embed_artifacts", None)
+    root = os.path.join(REPO, "runtime", "artifacts")
+    d = find_design_dir(model_name, datapath, root, explicit)
+    if d is None and explicit:
+        raise SystemExit(
+            f"--embed-artifacts {explicit} holds no {GEMM_SET}/final.xclbin. "
+            f"Point it at the directory that CONTAINS the sets -- "
+            f"runtime/artifacts/<model>/artifacts_npu1, which is the parent of "
+            f"{GEMM_SET}/ -- not at one of the sets.")
+    if d is None:
+        print(f"  design     none embedded: no set under {root} for "
+              f"{model_name} ({datapath}). The container is fine; it needs the "
+              f"design set beside it at run time.")
+        return None
+    r = embed_design_sets(w, d, device=getattr(args, "device", "npu1") or "npu1",
+                          datapath=datapath)
+    sets = ", ".join(f"{k} {v['bytes'] / 1024:.0f} KB"
+                     for k, v in sorted(r["sets"].items()))
+    print(f"  design     {r['total_bytes'] / 1024:.0f} KB embedded from {d} "
+          f"({r['device']}, {r['datapath']}): {sets}")
+    return r
+
+
 def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
                tile_n=None, host_only=False,
                int8=False, int4_group=None, smooth_alpha=0.5, smooth_texts=128,
-               mac=MAC_DEFAULT, corpus_path=None):
+               mac=MAC_DEFAULT, corpus_path=None,
+                npue_args=None):
     """Pack an EmbeddingGemma-300M-shaped checkpoint (arch=1).
 
     Deliberately NOT the BERT path above, reused only via helpers (Writer,
@@ -902,6 +943,17 @@ def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
     add_gemm_b_host(w, "dense2.weight", np.ascontiguousarray(d2["linear.weight"].T))
     add_gemm_b_host(w, "dense3.weight", np.ascontiguousarray(d3["linear.weight"].T))
 
+    # THE ARCH=1 GAP. Every other packer in this file -- and the five copies in
+    # packers/*.py -- calls _embed before writing, and this one did not, so
+    # arch=1 was the single architecture whose container came out with
+    # `design_sets = {}` while `runtime/artifacts/embeddinggemma-300m/
+    # artifacts_npu1/gemm_rtp/final.xclbin` sat right where find_design_dir
+    # looks for it. The directory was found the moment anybody asked for it by
+    # hand; the packer simply never asked. Nothing failed: a 1.02 GB container
+    # was written, the gate listed it as packed, and `list` said "no design"
+    # for the one model whose set was the one nobody had embedded.
+    _embed(w, Path(model_dir).name,
+           "i8" if (int8 or int4_group) else "bf16", npue_args, "gemma")
     info = w.write(out)
     total = Path(out).stat().st_size
     if not host_only:
@@ -935,7 +987,8 @@ def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
 
 def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
                int8=False, int4_group=None, smooth_alpha=0.5, smooth_texts=128,
-               mac=MAC_DEFAULT, corpus_path=None):
+               mac=MAC_DEFAULT, corpus_path=None,
+                npue_args=None):
     """Pack a nomic-embed-text-v1.5-shaped checkpoint (arch=2).
 
     Emits the SAME tensor names and the SAME emission order as the BERT
@@ -1225,6 +1278,7 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
               "F32", "layernorm", [hidden])
         n_tiled += 2
 
+    _embed(w, "nomic-embed-text-v1.5", "i8" if (int8 or int4_group) else "bf16", npue_args, "nomic")
     info = w.write(out)
 
     print(f"\n  {'operand':<14} {'[K,N]':>12} {'k-blocks':>9} {'n-blocks':>9} "
@@ -1254,7 +1308,8 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
 
 def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
              mac=MAC_DEFAULT, int4_group=None, smooth_alpha=0.5,
-             smooth_texts=128, corpus_path=None):
+             smooth_texts=128, corpus_path=None,
+                npue_args=None):
     """Pack a gte-multilingual-base-shaped checkpoint (arch=3, model_type
     "new" -- the NewModel trust_remote_code implementation).
 
@@ -1537,6 +1592,7 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
               "F32", "layernorm", [hidden])
         n_tiled += 2
 
+    _embed(w, "gte-multilingual-base", "i8" if (int8 or int4_group) else "bf16", npue_args, "gte")
     info = w.write(out)
 
     print(f"\n  {'operand':<14} {'[K,N]':>12} {'k-blocks':>9} {'n-blocks':>9} "
@@ -1656,6 +1712,19 @@ def main():
                     choices=sorted(MAC_BY_DEVICE),
                     help="target generation for the B panel order "
                          "(default %(default)s)")
+    ap.add_argument("--embed-artifacts", metavar="DIR", default=None,
+                    help="also store the compiled design set under DIR inside the "
+                         "container, so the .npue needs nothing beside it. DIR is "
+                         "the directory that holds gemm_rtp/, gelu/, layernorm/, "
+                         "softmax/ -- runtime/artifacts/<model>/artifacts_npu1, or "
+                         "the <model>-i8 one for an int8 container. DEFAULT is to "
+                         "embed whatever matches the model and the datapath, "
+                         "because a container that is not self-sufficient needs "
+                         "MLIR-AIE on the reader's machine.")
+    ap.add_argument("--no-embed-artifacts", action="store_true",
+                    help="do not store a design set even if one is found. For a "
+                         "container whose reader already has one on disk, and for "
+                         "measuring what the embedding costs in file size.")
     ap.add_argument("--max-seq", type=int, default=None,
                     help=(
                         "pre-slice the position table to this many rows. "
@@ -2032,6 +2101,7 @@ def main():
                 "--dtype f32 (12.9 MiB), i8 (3.8 MiB) or i4.")
         from packers.pose import pack_pose  # noqa: E402
         return pack_pose(args.pose_onnx, args.out, device=args.device,
+                          npue_args=args,
                          npu=args.npu, dtype=dtype,
                          # None unless i4, because the pose packer refuses an
                          # --int4-group it cannot use rather than dropping it --
@@ -2080,6 +2150,7 @@ def main():
               "the int8 pair.")
         from packers.hands import pack_hands  # noqa: E402
         return pack_hands(palm[0], lms[0], args.out, dry_run=args.dry_run,
+                           npue_args=args,
                           device=args.device, npu=args.npu)
 
     if args.mppose_onnx:
@@ -2128,6 +2199,7 @@ def main():
         # a --npu with no device at all (reached by calling pack_mppose
         # directly, which is how its own --help documents it).
         return pack_mppose(det[0], pose[0], args.out, dry_run=args.dry_run,
+                            npue_args=args,
                            device=args.device, npu=args.npu)
 
     # Resolved ONCE PER LAYOUT DTYPE, here, and printed by every branch: a
@@ -2231,7 +2303,8 @@ def main():
                           int8=args.int8, int4_group=args.int4_group,
                           smooth_alpha=smooth_alpha,
                           smooth_texts=args.smooth_texts, mac=mac,
-                          corpus_path=args.int8_text_corpus)
+                          corpus_path=args.int8_text_corpus,
+                          npue_args=args)
 
     # arch=2 branch (tasks/0069-m13-nomic-arch2-container): nomic_bert is
     # RoPE + gated SwiGLU rather than BERT's absolute-position + GELU, so it
@@ -2250,7 +2323,8 @@ def main():
                           int8=args.int8, int4_group=args.int4_group,
                           smooth_alpha=smooth_alpha,
                           smooth_texts=args.smooth_texts, mac=mac,
-                          corpus_path=args.int8_text_corpus)
+                          corpus_path=args.int8_text_corpus,
+                          npue_args=args)
 
     # arch=3 branch (0.5.0, tasks/0134/0135): model_type "new" is the
     # NewModel family (gte-multilingual-base). Same routing rule as the two
@@ -2265,7 +2339,8 @@ def main():
                         mac=mac, int4_group=args.int4_group,
                         smooth_alpha=smooth_alpha,
                         smooth_texts=args.smooth_texts,
-                        corpus_path=args.int8_text_corpus)
+                        corpus_path=args.int8_text_corpus,
+                        npue_args=args)
 
     # arch=4 branch: model_type "whisper" (openai/whisper-*). Speech-to-text,
     # so this one carries a conv frontend, a positional table, TWO stacks and a
@@ -2305,6 +2380,7 @@ def main():
         return pack_whisper(model_dir, out, max_seq=args.max_seq,
                             fold_scale=not args.no_fold_scale,
                             dry_run=args.dry_run, device=args.device,
+                            npue_args=args,
                             int8=args.int8,
                             int4_group=args.int4_group,
                             int8_alpha=smooth_alpha,
@@ -2383,6 +2459,7 @@ def main():
             out = str(model_dir.parent / (model_dir.name + ".npue"))
         return pack_vit(model_dir, out, fold_scale=not args.no_fold_scale,
                         dry_run=args.dry_run, device=args.device,
+                        npue_args=args,
                         int8=args.int8, int4_group=args.int4_group,
                         int8_alpha=smooth_alpha,
                         int8_images=args.int8_images,
@@ -2536,6 +2613,7 @@ def main():
         print(f"\n  {'int4' if args.int4_group is not None else 'int8'}: "
               f"{len(qerr)} operands, weight rel_fro mean "
               f"{mean:.3e}, worst {worst[1]:.3e} ({worst[0]})")
+    _embed(w, model_dir.name, "i8" if (args.int8 or args.int4_group) else "bf16", args, "bert")
     info = w.write(args.out)
 
     # What the DMA will actually see, per distinct GEMM shape. The 1023 limit is

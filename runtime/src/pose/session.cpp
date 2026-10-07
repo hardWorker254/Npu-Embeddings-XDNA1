@@ -39,12 +39,15 @@ std::string read_text(const std::string &path) {
 // discipline vit::classify.cpp applies, copied rather than shared because the
 // two sessions have genuinely different lifetime requirements (this one builds
 // no device at all on the default path).
-std::vector<app::StreamEntry> load_streams(npu::Design &d, const std::string &dir) {
+
+std::vector<app::StreamEntry> load_streams(npu::Design &d,
+                                           const npu::DesignSource &src) {
   std::vector<app::StreamEntry> streams =
-      app::parse_streams(read_text(dir + "/design.json"));
+      app::parse_streams(src.text("design.json"));
   if (streams.empty())
-    throw std::runtime_error(dir +
-                             "/design.json lists no streams -- re-export the "
+    throw std::runtime_error(src.label() +
+                             " has no streams in design.json -- re-export "
+                             "the "
                              "pose target with tools/export/export_gemm_rtp.py "
                              "--target pose");
   std::sort(streams.begin(), streams.end(),
@@ -52,13 +55,25 @@ std::vector<app::StreamEntry> load_streams(npu::Design &d, const std::string &di
               return a.slot < b.slot;
             });
   for (const auto &s : streams) {
-    const size_t got = d.load_instr(dir + "/" + s.file);
+    const size_t got = d.load_instr(src, s.file);
     if (static_cast<int64_t>(got) != s.slot)
       throw std::runtime_error("stream " + s.file + " landed in slot " +
                                std::to_string(got) + ", design.json says " +
                                std::to_string(s.slot));
   }
   return streams;
+}
+
+std::vector<app::StreamEntry> load_streams(npu::Design &d,
+                                           const std::string &dir) {
+  // The directory form, kept so the tests and any caller holding a plain path
+  // keep working. Everything that HAS a container goes through the Source form
+  // below, and the two must agree: a design whose streams came out of the
+  // container while its stream table was read off disk is a stream list paired
+  // with a core that does not have those streams, and that surfaces as a
+  // dispatch mismatch several layers down rather than as "these two do not
+  // belong together".
+  return load_streams(d, npu::DesignSource::from_dir(dir));
 }
 
 }  // namespace
@@ -77,7 +92,8 @@ public:
                  const std::vector<Layer> &graph, app::Pool &pool)
       : name_(name),
         dev_(std::make_unique<npu::Device>()),
-        design_(std::make_unique<npu::Design>(*dev_, artifacts + "/gemm_rtp")),
+        design_(std::make_unique<npu::Design>(
+            *dev_, npu::prefer_embedded(&model, artifacts, "gemm_rtp"))),
         pool_(pool) {
     // panels_ is a SLOT PER CONVOLUTION, not per graph node, so it is sized from
     // Geometry::convs and never from `graph`. This was written as `(void)g;`
@@ -92,7 +108,8 @@ public:
     panels_.resize(g.convs.size());
 
     const std::vector<app::StreamEntry> streams =
-        load_streams(*design_, artifacts + "/gemm_rtp");
+        load_streams(*design_,
+                    npu::prefer_embedded(&model, artifacts, "gemm_rtp"));
     rows_ = design_->info().M;
     if (rows_ <= 0)
       throw std::runtime_error(artifacts +
@@ -291,7 +308,7 @@ private:
 
 Session::Session(npue::File &model, const std::string &model_name,
                  const std::string &artifacts, int threads,
-                 const DecodeParams &params)
+                 bool want_array, const DecodeParams &params)
     : model_(model),
       geom_(read_geometry(model, model_name)),
       art_(artifacts),
@@ -299,15 +316,17 @@ Session::Session(npue::File &model, const std::string &model_name,
       params_(params),
       pool_(std::make_unique<app::Pool>(std::max(1, threads))) {
   Placement place;
-  if (!art_.empty()) {
+  if (want_array) {
     // A non-empty artifacts string means the caller asked for the array. That
     // request is honoured or refused; there is no fallback to the host, because
     // a run that reported array timings while executing on the CPU would be
     // worse than no run at all.
-    if (!std::filesystem::exists(art_ + "/gemm_rtp/design.json"))
+    const npu::DesignSource gemm_src =
+        npu::prefer_embedded(&model_, art_, "gemm_rtp");
+    if (!gemm_src.has("design.json"))
       throw std::runtime_error(
-          art_ + " has no gemm_rtp/design.json. A pose session on the array "
-                 "needs one design set -- the same kind bge-base's is, plus the "
+          "A pose session on the array needs one design set "
+                 "-- the same kind bge-base's is, plus the "
                  "padded (K, N) streams this network's convolutions require. "
                  "Use tools/export/export_gemm_rtp.py --target pose, or drop "
                  "the flag to run the convolutions on the CPU, which is the "

@@ -41,6 +41,7 @@
 
 #include "cli/flags.hpp"          // read_serve
 #include "common/design_selection.hpp"
+#include "runtime/design.hpp"        // prefer_embedded: the container's own set
 #include "common/host_kernels.hpp"
 #include "common/npu_ops_flag.hpp"   // parse_npu_ops, the one --npu-ops parser
 #include "runtime/model.hpp"
@@ -120,8 +121,22 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
     // A container that does not name it is not a container this resolver can
     // filter on; an empty answer means "cannot tell", not "does not match".
   }
-  const std::string art = npue::whisper::resolve_stt_artifacts(
-      root, flag("--artifacts"), model_name, want_layout);
+  // A CONTAINER THAT CARRIES ITS OWN SET IS NOT RESOLVED FROM DISK.
+  // resolve_stt_artifacts() answers by scanning, and THROWS when it finds
+  // nothing -- so a self-sufficient Whisper reached this line, found no
+  // runtime/artifacts/ beside it, and was told to build a design set for a
+  // model whose set was inside the file being read.
+  //
+  // `art` is left empty, which is what prefer_embedded wants: it asks the
+  // container first and only forms `art + "/" + set` as a fallback.
+  const bool stt_self_sufficient =
+      npu::prefer_embedded(&probe, "", "gemm_rtp").has("design.json") &&
+      flag("--artifacts").empty();
+  const std::string art =
+      stt_self_sufficient
+          ? std::string()
+          : npue::whisper::resolve_stt_artifacts(
+                root, flag("--artifacts"), model_name, want_layout);
 
   // WHISPER ON AN INT8 DESIGN SET. The GEMM streams run: NpuGemm reads each
   // operand's .wscale and .asmooth at stage time and quantises the activation
@@ -145,8 +160,13 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
   // disagreement that did not exist.
   bool int8_design = false;
   {
-    const std::string a_dtype = app::design_field_string(
-        art + "/gemm_rtp/design.json", "a_dtype");
+    // Read through the Source so a container-carried set is not reported as
+    // "no design", which would make every self-sufficient Whisper look int8.
+    const npu::DesignSource src = npu::prefer_embedded(&probe, art, "gemm_rtp");
+    const std::string a_dtype = src.has("design.json")
+                                    ? app::design_field_string(src.text("design.json"),
+                                                             "a_dtype")
+                                    : std::string();
     int8_design = !a_dtype.empty() && a_dtype != "bf16";
   }
   const int threads = std::max(1, std::atoi(flag("--threads").empty()
@@ -231,7 +251,14 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
                static_cast<long long>(g.head_dim),
                static_cast<long long>(g.mel_bins),
                static_cast<long long>(g.vocab));
-  std::fprintf(stderr, "  designs    %s\n", art.c_str());
+  // WHICH OF THE TWO, because an empty path in a status block reads as a bug in
+  // the thing printing it -- and it printed exactly that for every
+  // self-sufficient container until now.
+  std::fprintf(stderr, "  designs    %s\n",
+               stt_self_sufficient ? "the container's own design set "
+                                         "(design/gemm_rtp; no directory "
+                                         "needed)"
+                                     : art.c_str());
   std::fprintf(stderr, "  datapath   %s\n", session.datapath_note().c_str());
   // What ran, not what could: the design set's capability is one thing and this
   // request's --npu-ops is another, and a status line that reports the

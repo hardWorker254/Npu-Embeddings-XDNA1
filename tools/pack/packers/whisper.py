@@ -326,10 +326,56 @@ def _ffn(w, st, ck_prefix, name_prefix, hidden, inter, mac=MAC_DEFAULT,
           "F32", "bias", [hidden])
 
 
+# -- embedding the design set -----------------------------------------------
+#
+# The same three lines in five packers, and a shared body rather than a shared
+# NAME: these modules are imported by pack_npue.py directly and are also runnable
+# as scripts, so they each need their own import line. What they share is the
+# rules, and those live in design_embed.py -- which one packer instead of five
+# would be five opportunities for four of them to disagree with the fifth about
+# which directory a datapath's set is in.
+def _embed(w, model_name, datapath, npue_args, where):
+    if npue_args is None or getattr(npue_args, "no_embed_artifacts", False):
+        return None
+    from design_embed import (GEMM_SET, embed_design_sets, find_design_dir)
+    import os
+    explicit = getattr(npue_args, "embed_artifacts", None)
+    # FOUR levels up, not three: this file is <root>/tools/pack/packers/<x>.py,
+    # so dirname is .../packers, and three of them reaches <root>/tools -- which
+    # produced the path "tools/runtime/artifacts" and a container that reported
+    # "none embedded" on a machine with every set built. A wrong root is silent
+    # here: the directory simply is not there, and the honest-looking message is
+    # about the absence rather than about the arithmetic.
+    here = os.path.abspath(__file__)
+    for _ in range(4):
+        here = os.path.dirname(here)
+    root = os.path.join(here, "runtime", "artifacts")
+    d = find_design_dir(model_name, datapath, root, explicit)
+    if d is None:
+        if explicit:
+            raise SystemExit(
+                f"--embed-artifacts {explicit} holds no {GEMM_SET}/final.xclbin. "
+                f"Point it at the directory CONTAINING the sets, not at one of "
+                f"them.")
+        print(f"  design     none embedded: no set under {root} for "
+              f"{model_name} ({datapath}). The container still runs; it needs "
+              f"the design set beside it.")
+        return None
+    r = embed_design_sets(w, d,
+                          device=getattr(npue_args, "device", "npu1") or "npu1",
+                          datapath=datapath)
+    sets = ", ".join(f"{k} {v['bytes'] / 1024:.0f} KB"
+                     for k, v in sorted(r["sets"].items()))
+    print(f"  design     {r['total_bytes'] / 1024:.0f} KB embedded from {d} "
+          f"({r['device']}, {r['datapath']}): {sets}")
+    return r
+
+
 def pack_whisper(model_dir, out, max_seq=None, max_target=None,
                  fold_scale=True, dry_run=False, device=None,
                  int8=False, int4_group=None, int8_alpha=0.5, int8_clips=8,
-                 int8_corpus=None):
+                 int8_corpus=None,
+                npue_args=None):
     # The B operand's dtype for this whole container, and therefore the layout
     # hash: switched once, here, so the writer, `add_gemm_b` and the printed
     # report cannot disagree about which one they wrote. A disagreement would be
@@ -639,6 +685,7 @@ def pack_whisper(model_dir, out, max_seq=None, max_target=None,
               f"({n_tiled} pre-tiled GEMM operands) to {out}")
         return 0
 
+    _embed(w, model_dir.name, "bf16", npue_args, "whisper")
     info = w.write(out)
     total = Path(out).stat().st_size
     print(f"\n  arch       : 4 whisper_encdec_gelu  d_model {d}, "
