@@ -233,7 +233,57 @@ if(MSVC)
                          /arch:${NPUE_HOST_ARCH})
   target_compile_definitions(npuembeddings PRIVATE WIN32_LEAN_AND_MEAN)
 else()
-  target_compile_options(npuembeddings PRIVATE -Wall -O2 -march=native)
+  # THE HOST ISA, AS A CACHE VARIABLE -- and the same shape as the MSVC branch
+  # above, which already had one and which is why the two disagreed about
+  # whether this binary is portable.
+  #
+  # WHAT WAS WRONG, MEASURED ON THIS MACHINE (AMD Ryzen 7 PRO 8845HS, Zen 4):
+  # `-march=native` resolves to `znver4`, which turns on AVX-512, and the binary
+  # carried 1948 `zmm` references. So the executable was not merely tuned for
+  # this CPU -- it REQUIRED this CPU's ISA, and on any AMD without AVX-512 it
+  # dies with SIGILL before main(). That is Zen 1, Zen 2 and Zen 3: EPYC Naples,
+  # Rome, Milan and Genoa up to Zen 3, and every desktop Ryzen before the 7000
+  # series. "It runs on AMD" was true of one generation of AMD and not of the
+  # rest.
+  #
+  # IT ALSO COULD NOT BE OVERRIDDEN, which is the part that made this a trap
+  # rather than an inconvenience:
+  #
+  #   cmake -DCMAKE_CXX_FLAGS="-march=x86-64-v3" ...
+  #   FLAGS = -march=x86-64-v3 -O3 -DNDEBUG -std=gnu++17 -Wall -O2 -march=native
+  #
+  # `target_compile_options` is APPENDED after CMAKE_CXX_FLAGS, so the last
+  # -march wins and the build still emitted AVX-512. (The same append is why the
+  # -O3 a few lines below does not apply to this target: `-O2` lands after it.)
+  # A reader who read the flags, saw their own -march, and assumed it applied had
+  # a binary with AVX-512 in it and no way to find out from the build log.
+  #
+  # THE DEFAULT IS `x86-64-v3`, NOT `native`, and that is a decision with a
+  # measurement behind it rather than a preference:
+  #
+  #   * v3 = AVX2 + FMA + BMI, no AVX-512. Every CPU since 2013 and every AMD
+  #     since Excavator.
+  #   * A v3 build of this tree contains ZERO `zmm` references -- the AVX-512
+  #     branch in src/encoders/bert_encoder.cpp is `#if defined(__AVX512F__)`, so
+  #     it compiles out and the AVX2 path takes over.
+  #   * Its output matches the znver4+AVX-512 build to 9.5e-08 max abs diff,
+  #     cosine 1.000000000 -- float32 summation order, the same order the tree
+  #     already calls "bf16 rounding" elsewhere.
+  #   * It costs nothing measurable here: bge-large over 256 texts 8419 ms against
+  #     8398 ms (0.25%, inside the run-to-run spread), and MediaPipe Hands with
+  #     every convolution on the host 113 ms against 114 ms.
+  #
+  # So the portable build is not a fallback here, it is the same answer for less
+  # money. `-DNPUE_HOST_ARCH=native` is still there for anyone who has measured a
+  # win on their own silicon and wants it -- and it is a CACHE variable like the
+  # MSVC one, so it is visible in cmake-gui and in CMakeCache.txt rather than
+  # being a fact buried in a target property.
+  set(NPUE_HOST_ARCH "x86-64-v3" CACHE STRING
+      "ISA the host kernels are compiled for: a portable baseline (x86-64-v2, \
+x86-64-v3), a specific -march=..., or `native` to tune for the build machine. \
+`native` makes the binary UNRUNNABLE on CPUs without that ISA -- see the note \
+above; measured free on this tree for x86-64-v3.")
+  target_compile_options(npuembeddings PRIVATE -Wall -O2 -march=${NPUE_HOST_ARCH})
   target_compile_definitions(npuembeddings PRIVATE _FILE_OFFSET_BITS=64)
 endif()
 

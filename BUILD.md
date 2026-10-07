@@ -227,6 +227,31 @@ Two things in `CMakeLists.txt` are load-bearing and are commented there:
 downgrades to static), and `/Zc:__cplusplus` is required or XRT's headers
 demand Boost.
 
+### 2.4b Which CPU the binary is built for
+
+`-DNPUE_HOST_ARCH=<arch>` picks the ISA the host kernels are compiled for. It
+defaults to **`x86-64-v3`** — AVX2 + FMA, no AVX-512 — which runs on every CPU
+since 2013 and every AMD since Excavator. That default is measured, not
+preferred: a `v3` build of this tree carries zero AVX-512 instructions, matches a
+Zen 4 + AVX-512 build to 9.5e-08 (cosine 1.000000000), and costs 0.25% on bge-large
+over 256 texts, which is inside the run-to-run spread.
+
+```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release              # portable, the default
+cmake -B build -DNPUE_HOST_ARCH=native                 # fastest HERE, runs nowhere else
+cmake -B build -DNPUE_HOST_ARCH=x86-64-v2              # pre-2013 fallback
+```
+
+**`native` makes the binary unrunnable on CPUs without that ISA** — it dies with
+SIGILL before `main()`. On a Zen 4 build machine `-march=native` turns on
+AVX-512, so the resulting executable will not start on Zen 1, 2 or 3 (EPYC Naples,
+Rome, Milan; Ryzen before the 7000 series). Build a release on the oldest
+architecture you intend to support, or leave the default alone.
+
+Note that `-DCMAKE_CXX_FLAGS="-march=..."` does **not** work: per-target options
+are appended after it, so the last `-march` wins and your flag is silently
+discarded. Use the cache variable.
+
 ### 2.5 Check it
 
 ```powershell
