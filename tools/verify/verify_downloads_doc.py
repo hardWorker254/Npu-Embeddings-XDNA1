@@ -103,45 +103,74 @@ def main() -> int:
     import json
     with open(DATA, encoding="utf-8") as f:
         src = json.load(f)
-    # Every downloadable row must EITHER carry a real per-file digest OR say in
-    # its `verified` text that the bytes are unproven. A row with a URL and
-    # neither is a link a reader cannot check and is not told why -- the one
-    # outcome worse than no link, because it invites them to trust it.
+    # THREE STATES, DECIDED BY AN EXPLICIT FIELD.
     #
-    # The first draft of this check computed a list called `unproven`, compared
-    # it against itself (always empty, so the branch never ran), and printed an
-    # `ok` line that said something the code had not established. The variable is
-    # gone rather than filled in.
-    unproven, ok_rows = [], 0
+    # `byte_evidence` is `hashed` (this row's own file was downloaded and hashed,
+    # so it must carry a 64-character digest) or `listed` (only a HEAD request, so
+    # it must carry NO digest and must say in `verified` that its bytes are
+    # unproven).
+    #
+    # IT IS A FIELD AND NOT A PHRASE FOR TWO REASONS, both learned the hard way in
+    # this file: this gate originally had no state for "listed" at all and so
+    # rejected every honest un-downloaded row, and the prose it would have had to
+    # read instead is English whose wording had already shipped one stale
+    # paragraph in models/DOWNLOADS.md (a sentence naming bge-large as unproven,
+    # which survived the download that proved it). A field cannot go stale when a
+    # sentence is reworded; a prefix match can.
+    missing, overclaimed = [], []
+    ok_rows = 0
     for name, row in sorted(src["models"].items()):
-        for o in row.get("onnx") or []:
-            sha = row.get("sha256_file")
+        ev = row.get("byte_evidence")
+        files = row.get("onnx") or []
+        if not files:
+            if ev is not None:
+                overclaimed.append(
+                    f"{name} declares byte_evidence={ev!r} but has no ONNX row to "
+                    f"apply it to -- a stale field is a claim about nothing")
+            continue
+        if ev not in ("hashed", "listed"):
+            missing.append(
+                f"{name} has a download and no byte_evidence; it must say 'hashed' "
+                f"or 'listed', because the difference between 'the bytes are proven' "
+                f"and 'the bytes are a HEAD request' is the one a reader cannot "
+                f"infer from a URL")
+            continue
+        sha = row.get("sha256_file")
+        for o in files:
             got = sha.get(o["file"]) if isinstance(sha, dict) else sha
-            if isinstance(got, str) and len(got) == 64:
+            hashed = isinstance(got, str) and len(got) == 64
+            if ev == "hashed" and not hashed:
+                missing.append(
+                    f"{name}/{o['file']} declares byte_evidence=hashed but carries no "
+                    f"64-character digest, so the row claims bytes it does not have")
+            if ev == "listed" and hashed:
+                overclaimed.append(
+                    f"{name}/{o['file']} declares byte_evidence=listed yet carries a "
+                    f"digest -- either the file really was hashed and the field is "
+                    f"wrong, or the digest was copied from somewhere else")
+            if ev == "hashed" and hashed:
                 ok_rows += 1
-            elif row.get("verified", "").startswith(("downloaded", "BOTH")):
-                unproven.append(
-                    f"{name}/{o['file']} claims it was downloaded and hashed but "
-                    f"carries no per-file digest -- so the claim cannot be checked "
-                    f"against anything")
-            else:
-                unproven.append(
-                    f"{name}/{o['file']} has a link, no digest, and no `verified` "
-                    f"text saying its bytes are unproven")
-    if unproven:
-        print(f"  FAIL  {len(unproven)} downloadable row(s) are unchecked and do "
-              f"not say so:")
-        for u in unproven[:6]:
-            print(f"   * {u}")
+    if missing:
+        print(f"  FAIL  {len(missing)} row(s) make a claim they cannot support:")
+        for m in missing[:6]:
+            print(f"   * {m}")
         bad += 1
     else:
-        print(f"  ok    all {ok_rows} downloadable rows carry a 64-character "
-              f"per-file digest; none is a bare link")
-    n_unpr = sum(1 for n_, r in src["models"].items()
-                 if r.get("onnx") and r.get("sha256_file") is None)
-    if n_unpr:
-        print(f"  note  {n_unpr} model row(s) declare their bytes unproven and are "
-              f"printed that way. A stated gap, not a silent one.")
+        print(f"  ok    every download row declares byte_evidence, and all "
+              f"{ok_rows} hashed rows carry a 64-character digest")
+    if overclaimed:
+        print(f"  FAIL  {len(overclaimed)} row(s) contradict their own evidence:")
+        for o in overclaimed[:6]:
+            print(f"   * {o}")
+        bad += 1
+    else:
+        print(f"  ok    no row claims bytes it does not carry")
+    n_listed = sum(1 for r in src["models"].values()
+                   if r.get("byte_evidence") == "listed")
+    if n_listed:
+        print(f"  note  {n_listed} row(s) are 'listed': the file is there and is the "
+              f"right shape, and the document prints it as bytes-unproven. A stated "
+              f"gap, not a silent one.")
 
     if bad:
         print(f"FAIL -- {bad} disagreement(s) between models/DOWNLOADS*.md, "

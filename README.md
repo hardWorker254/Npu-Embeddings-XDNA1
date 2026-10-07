@@ -135,8 +135,11 @@ runtime/build/npuembeddings embed all-MiniLM-L6-v2 texts.txt out.f32
 `serve` downloads and verifies the model's config and tokenizer on first use.
 **It does not download the ONNX graph** — you place that yourself, and
 [`models/DOWNLOADS.md`](models/DOWNLOADS.md) says where each of them comes from,
-which eight of the eighteen can be fetched as a ready export and which ten have
-none upstream at all. Test it:
+with a direct link for all eighteen and a column saying whose repository serves
+the graph: eight models publish their own export, and ten are served by
+`onnx-community/*` (and one Xenova repository). For a third-party export the
+recorded checksum will not match — re-record the pin from the file you placed
+rather than editing the recorded one. Test it:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/v1/embeddings \

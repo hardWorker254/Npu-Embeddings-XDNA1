@@ -57,7 +57,9 @@
         }
       ],
       "verified": "downloaded 90,405,214 bytes and hashed: byte-identical to models/all-MiniLM-L6-v2/onnx/model.onnx",
-      "sha256_file": "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452"
+      "sha256_file": "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452",
+      "byte_evidence": "hashed",
+      "packed": false
     },
     "bge-small-en-v1.5": {
       "repo": "BAAI/bge-small-en-v1.5",
@@ -72,7 +74,9 @@
         }
       ],
       "verified": "downloaded 133,093,490 bytes and hashed: byte-identical to models/bge-small-en-v1.5/onnx/model.onnx",
-      "sha256_file": "828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35"
+      "sha256_file": "828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35",
+      "byte_evidence": "hashed",
+      "packed": false
     },
     "bge-micro-v2": {
       "repo": "TaylorAI/bge-micro-v2",
@@ -87,7 +91,9 @@
         }
       ],
       "verified": "downloaded 69,035,106 bytes and hashed: byte-identical to models/bge-micro-v2/onnx/model.onnx",
-      "sha256_file": "9f705befe60d00ca3d8d14c9dd61a3ecfca9f1920a39fbc4a5b056c0ccd977d4"
+      "sha256_file": "9f705befe60d00ca3d8d14c9dd61a3ecfca9f1920a39fbc4a5b056c0ccd977d4",
+      "byte_evidence": "hashed",
+      "packed": false
     },
     "bge-base-en-v1.5": {
       "repo": "BAAI/bge-base-en-v1.5",
@@ -102,7 +108,9 @@
         }
       ],
       "verified": "downloaded 435,811,539 bytes and hashed: byte-identical to models/bge-base-en-v1.5/onnx/model.onnx",
-      "sha256_file": "9bc579acdba21c253c62a9bf866891355a63ffa3442b52c8a37d75b2ccb91848"
+      "sha256_file": "9bc579acdba21c253c62a9bf866891355a63ffa3442b52c8a37d75b2ccb91848",
+      "byte_evidence": "hashed",
+      "packed": false
     },
     "bge-large-en-v1.5": {
       "repo": "BAAI/bge-large-en-v1.5",
@@ -117,37 +125,68 @@
         }
       ],
       "verified": "downloaded 1,336,854,281 bytes (1.34 GB) and hashed: byte-identical to models/bge-large-en-v1.5/onnx/model.onnx. This was the last of the eight left unproven, and it is the largest file in the table -- which is why it was last rather than first.",
-      "sha256_file": "69ed3f810d3b6d13f70dff9ca89966f39c0a0e877fb88211be7bcc070df2a2ce"
+      "sha256_file": "69ed3f810d3b6d13f70dff9ca89966f39c0a0e877fb88211be7bcc070df2a2ce",
+      "byte_evidence": "hashed",
+      "packed": false
     },
     "embeddinggemma-300m": {
-      "repo": "google/embeddinggemma-300m",
-      "license": "gemma",
-      "license_source": "huggingface license: tag; Google's own repository",
-      "digest_kind": "model_digest",
-      "onnx": null,
-      "onnx_checked": [
+      "repo": [
         "google/embeddinggemma-300m",
         "unsloth/embeddinggemma-300m"
       ],
-      "export_note": "Neither repository has an onnx/ directory -- checked by listing both. Google publishes three weight files and no export.",
+      "license": "gemma",
+      "license_source": "the MIRROR's license: tag -- and it agrees with Google's, so the Gemma terms still apply to this mirror",
+      "digest_kind": "model_digest",
+      "onnx": [
+        {
+          "repo": "onnx-community/embeddinggemma-300m-ONNX",
+          "file": "onnx/model.onnx",
+          "bytes": 479932
+        },
+        {
+          "repo": "onnx-community/embeddinggemma-300m-ONNX",
+          "file": "onnx/model.onnx_data",
+          "bytes": 1234521088
+        }
+      ],
       "gated": true,
+      "onnx_source": "mirror",
+      "mirror_repo": "onnx-community/embeddinggemma-300m-ONNX",
+      "pin_note": "This is a THIRD-PARTY export, not the model's own repository, and it is a DIFFERENT SERIALISATION of the same weights -- so the recorded model_digest in CHECKPOINT.json will NOT match what you download, even when the packed container comes out identical. Re-record the pin from the file you actually placed; do not \"correct\" the recorded one to fit. Measured on whisper-tiny: the mirror's onnx files hash differently (encoder 8dd994fe..., decoder 7e844cce... against the tree's 6642befb.../ab79e3f2...) while the container's whole weight region is byte-identical (sha256 9fd75f76...). This mirror's model.onnx is 480 KB and its weights live in model.onnx_data, so it is a TWO-file download and the packer needs the side file beside the graph under exactly that name.",
+      "onnx_checked": [
+        "onnx-community/embeddinggemma-300m-ONNX"
+      ],
       "repo_disagreement": {
-        "what": "models/embeddinggemma-300m/CHECKPOINT.json records `unsloth/embeddinggemma-300m`, while runtime/src/common/hub.cpp's catalogue fetches `google/embeddinggemma-300m`. The container's `source_repo` says `unsloth/...`.",
-        "why_it_matters": "The two are NOT interchangeable. Google's repository is GATED -- it needs HF_TOKEN and a licence accepted -- and hub.cpp fails closed rather than falling back to a mirror (see CatalogEntry::gated). The unsloth repository is an ungated copy of the same weights, so a reader who follows CHECKPOINT.json and a reader who runs `serve` fetch from different places, and only one of them needs a token.",
-        "which_is_cited_here": "google/embeddinggemma-300m, because that is what the executable fetches and what the licence belongs to. The ungated mirror is named in the row too, because a reader without a token needs it and should be told that is what it is."
-      }
+        "what": "THREE repositories are in play and they are not interchangeable. runtime/src/common/hub.cpp fetches google/embeddinggemma-300m. models/embeddinggemma-300m/CHECKPOINT.json records unsloth/embeddinggemma-300m. The onnx/ graph comes from a third, onnx-community/embeddinggemma-300m-ONNX.",
+        "why_it_matters": "Google's repository is GATED -- it needs HF_TOKEN and a licence accepted -- and hub.cpp fails closed rather than falling back to a mirror. The unsloth copy is ungated and holds the same weights. The onnx-community repository carries no model weights at all, only the export, and it too is tagged gemma. So a reader who needs no token should take unsloth's safetensors plus onnx-community's graph; a reader who runs `serve` takes Google's and is stopped without a token.",
+        "which_is_cited_here": "The licence is Google's because that is whose terms the weights are under. All three are named; none is presented as another."
+      },
+      "verified": "LISTED ONLY -- not downloaded. The size comes from a HEAD request, so the claim is that the file is there and is the right shape, NOT that it packs to what this tree built. The two rows in this table that were actually downloaded and packed say so in their own `verified` text.",
+      "byte_evidence": "listed",
+      "packed": false
     },
     "gte-multilingual-base": {
       "repo": "Alibaba-NLP/gte-multilingual-base",
-      "license": "apache-2.0",
-      "license_source": "huggingface license: tag",
+      "license": "apache-2.0 (asserted, NOT stated)",
+      "license_source": "the MIRROR carries NO license: tag. The original repository's tag says apache-2.0 and this document carries that forward as an assertion, which is weaker than a tag -- an untagged mirror is not thereby apache-2.0",
       "digest_kind": "model_digest",
-      "onnx": null,
-      "onnx_checked": [
-        "Alibaba-NLP/gte-multilingual-base"
+      "onnx": [
+        {
+          "repo": "onnx-community/gte-multilingual-base",
+          "file": "onnx/model.onnx",
+          "bytes": 1255502649
+        }
       ],
-      "export_note": "No onnx/ directory -- the repository has one weight file and no export.",
-      "pin_lives_in": "models/gte-multilingual-base/CHECKPOINT.json has `sha256: null`, and the pin is not absent: models/gte-multilingual-base.npue carries `source_sha256` = c703273702a2127620ddbd0a4ec22402c8c7ab3c... , which is model_digest() of the local export. NOT verified against HuggingFace, because there is no export up there to verify against -- the bytes are pinned to this machine's copy and to nothing else."
+      "pin_lives_in": "models/gte-multilingual-base/CHECKPOINT.json has `sha256: null`, and the pin is not absent: models/gte-multilingual-base.npue carries `source_sha256` = c703273702a2127620ddbd0a4ec22402c8c7ab3c... , which is model_digest() of the local export. NOT verified against HuggingFace, because there is no export up there to verify against -- the bytes are pinned to this machine's copy and to nothing else.",
+      "onnx_source": "mirror",
+      "mirror_repo": "onnx-community/gte-multilingual-base",
+      "pin_note": "This is a THIRD-PARTY export, not the model's own repository, and it is a DIFFERENT SERIALISATION of the same weights -- so the recorded model_digest in CHECKPOINT.json will NOT match what you download, even when the packed container comes out identical. Re-record the pin from the file you actually placed; do not \"correct\" the recorded one to fit. Measured on whisper-tiny: the mirror's onnx files hash differently (encoder 8dd994fe..., decoder 7e844cce... against the tree's 6642befb.../ab79e3f2...) while the container's whole weight region is byte-identical (sha256 9fd75f76...).",
+      "onnx_checked": [
+        "onnx-community/gte-multilingual-base"
+      ],
+      "verified": "LISTED ONLY -- not downloaded. The size comes from a HEAD request, so the claim is that the file is there and is the right shape, NOT that it packs to what this tree built. The two rows in this table that were actually downloaded and packed say so in their own `verified` text.",
+      "byte_evidence": "listed",
+      "packed": false
     },
     "nomic-embed-text-v1.5": {
       "repo": "nomic-ai/nomic-embed-text-v1.5",
@@ -163,95 +202,250 @@
       ],
       "verified": "downloaded 547,310,275 bytes and hashed: byte-identical to models/nomic-embed-text-v1.5/onnx/model.onnx",
       "sha256_file": "147d5aa88c2101237358e17796cf3a227cead1ec304ec34b465bb08e9d952965",
-      "pin_lives_in": "models/nomic-embed-text-v1.5/CHECKPOINT.json has `sha256: null`, but the pin is NOT absent: models/nomic-embed-text-v1.5.npue carries `source_sha256` = 12ce232f57cfbc0ab9258835dec6e5a105b88c7405dcefeec70facf3a3549b29, which is model_digest() of models/nomic-embed-text-v1.5/onnx/model.onnx -- and the downloaded export hashed byte for byte against that local file. So this model is pinned twice over, in two files, by two different mechanisms."
+      "pin_lives_in": "models/nomic-embed-text-v1.5/CHECKPOINT.json has `sha256: null`, but the pin is NOT absent: models/nomic-embed-text-v1.5.npue carries `source_sha256` = 12ce232f57cfbc0ab9258835dec6e5a105b88c7405dcefeec70facf3a3549b29, which is model_digest() of models/nomic-embed-text-v1.5/onnx/model.onnx -- and the downloaded export hashed byte for byte against that local file. So this model is pinned twice over, in two files, by two different mechanisms.",
+      "byte_evidence": "hashed",
+      "packed": false
     },
     "whisper-tiny": {
       "repo": "openai/whisper-tiny",
-      "license": "apache-2.0",
-      "license_source": "huggingface license: tag",
+      "license": "apache-2.0 (asserted, NOT stated)",
+      "license_source": "the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0",
       "digest_kind": "model_digest",
-      "onnx": null,
-      "onnx_checked": [
-        "openai/whisper-tiny"
+      "onnx": [
+        {
+          "repo": "onnx-community/whisper-tiny-ONNX",
+          "file": "onnx/encoder_model.onnx",
+          "bytes": 32883618
+        },
+        {
+          "repo": "onnx-community/whisper-tiny-ONNX",
+          "file": "onnx/decoder_model.onnx",
+          "bytes": 118352985
+        }
       ],
-      "export_note": "No onnx/ directory. CHECKPOINT.json's `file` list says `onnx/encoder_model.onnx` and `onnx/decoder_model.onnx`, and BOTH RETURN 404 upstream -- the list records what THIS repository's export was called, not where to fetch it. Read the two `file` entries as local paths to create, not as URLs."
+      "onnx_source": "mirror",
+      "mirror_repo": "onnx-community/whisper-tiny-ONNX",
+      "pin_note": "This is a THIRD-PARTY export, not the model's own repository, and it is a DIFFERENT SERIALISATION of the same weights -- so the recorded model_digest in CHECKPOINT.json will NOT match what you download, even when the packed container comes out identical. Re-record the pin from the file you actually placed; do not \"correct\" the recorded one to fit. Measured on whisper-tiny: the mirror's onnx files hash differently (encoder 8dd994fe..., decoder 7e844cce... against the tree's 6642befb.../ab79e3f2...) while the container's whole weight region is byte-identical (sha256 9fd75f76...). Two files, and they are not interchangeable: the decoder without past-KV state is a different graph from decoder_model_merged.onnx, which the same repository also publishes. This tree reads onnx/decoder_model.onnx -- see runtime/include/common/onnx_read.hpp kWhisperDecoderOnnx -- so take that one.",
+      "external_data": false,
+      "onnx_checked": [
+        "onnx-community/whisper-tiny-ONNX"
+      ],
+      "verified": "BOTH files downloaded and hashed, and the container PACKED: its entire weight region is byte-identical to the one this tree built (sha256 9fd75f76...), from input files that hash differently (encoder 8dd994fe..., decoder 7e844cce...). So the weights are the same and the serialisation is not -- see `pin_note`, because that is the fact that makes a pin check fail on a mirror for the right reason.",
+      "sha256_file": {
+        "onnx/encoder_model.onnx": "8dd994fe489eaa52c229d3ecbd7aeb330ed474c1659017bb7c1f4f4768dd567e",
+        "onnx/decoder_model.onnx": "7e844cce0ac74edaa4592c055176f43ede671de55a3c6cb3d863b56342eeaabc"
+      },
+      "byte_evidence": "hashed",
+      "packed": true
     },
     "whisper-base": {
       "repo": "openai/whisper-base",
-      "license": "apache-2.0",
-      "license_source": "huggingface license: tag",
+      "license": "apache-2.0 (asserted, NOT stated)",
+      "license_source": "the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0",
       "digest_kind": "model_digest",
-      "onnx": null,
-      "onnx_checked": [
-        "openai/whisper-base"
+      "onnx": [
+        {
+          "repo": "onnx-community/whisper-base",
+          "file": "onnx/encoder_model.onnx",
+          "bytes": 82468078
+        },
+        {
+          "repo": "onnx-community/whisper-base",
+          "file": "onnx/decoder_model.onnx",
+          "bytes": 208289724
+        }
       ],
-      "export_note": "No onnx/ directory; the `file` entries 404 upstream. See whisper-tiny."
+      "onnx_source": "mirror",
+      "mirror_repo": "onnx-community/whisper-base",
+      "pin_note": "This is a THIRD-PARTY export, not the model's own repository, and it is a DIFFERENT SERIALISATION of the same weights -- so the recorded model_digest in CHECKPOINT.json will NOT match what you download, even when the packed container comes out identical. Re-record the pin from the file you actually placed; do not \"correct\" the recorded one to fit. Measured on whisper-tiny: the mirror's onnx files hash differently (encoder 8dd994fe..., decoder 7e844cce... against the tree's 6642befb.../ab79e3f2...) while the container's whole weight region is byte-identical (sha256 9fd75f76...). Two files, and they are not interchangeable: the decoder without past-KV state is a different graph from decoder_model_merged.onnx, which the same repository also publishes. This tree reads onnx/decoder_model.onnx -- see runtime/include/common/onnx_read.hpp kWhisperDecoderOnnx -- so take that one.",
+      "external_data": false,
+      "onnx_checked": [
+        "onnx-community/whisper-base"
+      ],
+      "verified": "LISTED ONLY -- not downloaded. The size comes from a HEAD request, so the claim is that the file is there and is the right shape, NOT that it packs to what this tree built. The two rows in this table that were actually downloaded and packed say so in their own `verified` text.",
+      "byte_evidence": "listed",
+      "packed": false
     },
     "whisper-small": {
       "repo": "openai/whisper-small",
-      "license": "apache-2.0",
-      "license_source": "huggingface license: tag",
+      "license": "apache-2.0 (asserted, NOT stated)",
+      "license_source": "the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0",
       "digest_kind": "model_digest",
-      "onnx": null,
-      "onnx_checked": [
-        "openai/whisper-small"
+      "onnx": [
+        {
+          "repo": "onnx-community/whisper-small",
+          "file": "onnx/encoder_model.onnx",
+          "bytes": 352825870
+        },
+        {
+          "repo": "onnx-community/whisper-small",
+          "file": "onnx/decoder_model.onnx",
+          "bytes": 614865004
+        }
       ],
-      "export_note": "No onnx/ directory; the `file` entries 404 upstream. See whisper-tiny.",
-      "no_pin": "models/whisper-small/CHECKPOINT.json has `file: []` and `sha256: null`."
+      "no_pin": "models/whisper-small/CHECKPOINT.json has `file: []` and `sha256: null`.",
+      "onnx_source": "mirror",
+      "mirror_repo": "onnx-community/whisper-small",
+      "pin_note": "This is a THIRD-PARTY export, not the model's own repository, and it is a DIFFERENT SERIALISATION of the same weights -- so the recorded model_digest in CHECKPOINT.json will NOT match what you download, even when the packed container comes out identical. Re-record the pin from the file you actually placed; do not \"correct\" the recorded one to fit. Measured on whisper-tiny: the mirror's onnx files hash differently (encoder 8dd994fe..., decoder 7e844cce... against the tree's 6642befb.../ab79e3f2...) while the container's whole weight region is byte-identical (sha256 9fd75f76...). Two files, and they are not interchangeable: the decoder without past-KV state is a different graph from decoder_model_merged.onnx, which the same repository also publishes. This tree reads onnx/decoder_model.onnx -- see runtime/include/common/onnx_read.hpp kWhisperDecoderOnnx -- so take that one.",
+      "external_data": false,
+      "onnx_checked": [
+        "onnx-community/whisper-small"
+      ],
+      "verified": "LISTED ONLY -- not downloaded. The size comes from a HEAD request, so the claim is that the file is there and is the right shape, NOT that it packs to what this tree built. The two rows in this table that were actually downloaded and packed say so in their own `verified` text.",
+      "byte_evidence": "listed",
+      "packed": false
     },
     "whisper-medium": {
       "repo": "openai/whisper-medium",
-      "license": "apache-2.0",
-      "license_source": "huggingface license: tag",
+      "license": "apache-2.0 (asserted, NOT stated)",
+      "license_source": "the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0",
       "digest_kind": "model_digest",
-      "onnx": null,
-      "onnx_checked": [
-        "openai/whisper-medium"
+      "onnx": [
+        {
+          "repo": "flackzz/whisper-medium-ONNX",
+          "file": "onnx/encoder_model.onnx",
+          "bytes": 1229148954
+        },
+        {
+          "repo": "flackzz/whisper-medium-ONNX",
+          "file": "onnx/decoder_model.onnx",
+          "bytes": 1827381748
+        }
       ],
-      "export_note": "No onnx/ directory. See whisper-tiny.",
-      "no_checkpoint_json": "models/whisper-medium/ is the ONLY model directory in this table with no CHECKPOINT.json at all, so it has no repo record, no file list and no digest. The ONNX pair is on disk (onnx/encoder_model.onnx and onnx/decoder_model.onnx) and models/whisper-medium.npue is packed from it, so the model works here and is undocumented -- which is the one gap in this table that no download link can close, because what is missing is the local record."
+      "onnx_source": "mirror",
+      "mirror_repo": "flackzz/whisper-medium-ONNX",
+      "pin_note": "NO PIN EXISTS for this model at all -- models/whisper-medium/ has no CHECKPOINT.json -- so there is nothing to re-record and nothing to check against. That is the honest state: the files are downloadable, the provenance is not. Two files, and they are not interchangeable: the decoder without past-KV state is a different graph from decoder_model_merged.onnx, which the same repository also publishes. This tree reads onnx/decoder_model.onnx -- see runtime/include/common/onnx_read.hpp kWhisperDecoderOnnx -- so take that one.",
+      "external_data": false,
+      "no_checkpoint_json": "models/whisper-medium/ is still the ONLY model directory in this table with no CHECKPOINT.json, so it has no repo record, no file list and no digest. A mirror now makes the FILES obtainable, which does not fix the missing local record: the pin is what the goldens were made against, and a pin for a file nobody recorded is not a weaker pin, it is no pin.",
+      "note_community_mirror": "This one is NOT an onnx-community repository -- it is flackzz's. The other five Whisper sizes are onnx-community, so there is no pattern to infer trust from here; the measured claim below is the only reason to use it.",
+      "onnx_checked": [
+        "flackzz/whisper-medium-ONNX"
+      ],
+      "verified": "LISTED ONLY -- not downloaded. The size comes from a HEAD request, so the claim is that the file is there and is the right shape, NOT that it packs to what this tree built. The two rows in this table that were actually downloaded and packed say so in their own `verified` text.",
+      "byte_evidence": "listed",
+      "packed": false
     },
     "whisper-large-v3": {
       "repo": "openai/whisper-large-v3",
-      "license": "apache-2.0",
-      "license_source": "huggingface license: tag",
+      "license": "apache-2.0 (asserted, NOT stated)",
+      "license_source": "the MIRROR carries NO license: tag; the original openai/whisper-large-v3 tag says apache-2.0",
       "digest_kind": "model_digest",
-      "onnx": null,
-      "onnx_checked": [
-        "openai/whisper-large-v3"
+      "onnx": [
+        {
+          "repo": "onnx-community/whisper-large-v3-ONNX",
+          "file": "onnx/encoder_model.onnx",
+          "bytes": 412412
+        },
+        {
+          "repo": "onnx-community/whisper-large-v3-ONNX",
+          "file": "onnx/encoder_model.onnx_data",
+          "bytes": 2547875840
+        },
+        {
+          "repo": "onnx-community/whisper-large-v3-ONNX",
+          "file": "onnx/decoder_model.onnx",
+          "bytes": 1141794
+        },
+        {
+          "repo": "onnx-community/whisper-large-v3-ONNX",
+          "file": "onnx/decoder_model.onnx_data",
+          "bytes": 3626086400
+        }
       ],
-      "export_note": "No onnx/ directory; the `file` entries 404 upstream. See whisper-tiny."
+      "onnx_source": "mirror",
+      "mirror_repo": "onnx-community/whisper-large-v3-ONNX",
+      "pin_note": "This is a THIRD-PARTY export, not the model's own repository, and it is a DIFFERENT SERIALISATION of the same weights -- so the recorded model_digest in CHECKPOINT.json will NOT match what you download, even when the packed container comes out identical. Re-record the pin from the file you actually placed; do not \"correct\" the recorded one to fit. Measured on whisper-tiny: the mirror's onnx files hash differently (encoder 8dd994fe..., decoder 7e844cce... against the tree's 6642befb.../ab79e3f2...) while the container's whole weight region is byte-identical (sha256 9fd75f76...). FOUR files: both graphs use external data, so encoder_model.onnx is 412 KB beside a 2.5 GB side file and decoder_model.onnx is 1.1 MB beside a 3.6 GB one. Both side files must be placed under exactly the names the graphs name.",
+      "broken_link": {
+        "repo": "onnx-community/whisper-large-v3",
+        "what": "returns HTTP 401 for both the model listing and every file, while onnx-community/whisper-large-v3-ONNX -- the same name WITH the -ONNX suffix that whisper-tiny-ONNX and vit-base-patch16-224-ONNX carry -- answers 200 and has all four files. Recorded because the difference is one word and looks like a typo rather than a 401."
+      },
+      "onnx_checked": [
+        "onnx-community/whisper-large-v3-ONNX"
+      ],
+      "verified": "LISTED ONLY -- not downloaded. The size comes from a HEAD request, so the claim is that the file is there and is the right shape, NOT that it packs to what this tree built. The two rows in this table that were actually downloaded and packed say so in their own `verified` text.",
+      "byte_evidence": "listed",
+      "packed": false
     },
     "whisper-large-v3-turbo": {
       "repo": "openai/whisper-large-v3-turbo",
-      "license": "mit",
-      "license_source": "huggingface license: tag",
+      "license": "mit (asserted, NOT stated)",
+      "license_source": "the MIRROR carries NO license: tag; the original repository's tag says mit, and this is the one Whisper size that is not apache-2.0",
       "digest_kind": "model_digest",
-      "onnx": null,
-      "onnx_checked": [
-        "openai/whisper-large-v3-turbo"
+      "onnx": [
+        {
+          "repo": "onnx-community/whisper-large-v3-turbo",
+          "file": "onnx/encoder_model.onnx",
+          "bytes": 439254
+        },
+        {
+          "repo": "onnx-community/whisper-large-v3-turbo",
+          "file": "onnx/encoder_model.onnx_data",
+          "bytes": 2547875840
+        },
+        {
+          "repo": "onnx-community/whisper-large-v3-turbo",
+          "file": "onnx/decoder_model.onnx",
+          "bytes": 687820062
+        }
       ],
-      "export_note": "No onnx/ directory; the `file` entries 404 upstream. See whisper-tiny.",
-      "license_note": "MIT, not Apache-2.0 like the other five Whisper sizes -- the tag was read from the repository, and a table that copied the Whisper row's licence would be wrong here."
+      "license_note": "MIT, not Apache-2.0 like the other five Whisper sizes -- the tag was read from the repository, and a table that copied the Whisper row's licence would be wrong here.",
+      "onnx_source": "mirror",
+      "mirror_repo": "onnx-community/whisper-large-v3-turbo",
+      "pin_note": "This is a THIRD-PARTY export, not the model's own repository, and it is a DIFFERENT SERIALISATION of the same weights -- so the recorded model_digest in CHECKPOINT.json will NOT match what you download, even when the packed container comes out identical. Re-record the pin from the file you actually placed; do not \"correct\" the recorded one to fit. Measured on whisper-tiny: the mirror's onnx files hash differently (encoder 8dd994fe..., decoder 7e844cce... against the tree's 6642befb.../ab79e3f2...) while the container's whole weight region is byte-identical (sha256 9fd75f76...). THREE files: the encoder uses external data, the decoder does not.",
+      "onnx_checked": [
+        "onnx-community/whisper-large-v3-turbo"
+      ],
+      "verified": "LISTED ONLY -- not downloaded. The size comes from a HEAD request, so the claim is that the file is there and is the right shape, NOT that it packs to what this tree built. The two rows in this table that were actually downloaded and packed say so in their own `verified` text.",
+      "byte_evidence": "listed",
+      "packed": false
     },
     "vit-base-patch16-224": {
       "repo": "google/vit-base-patch16-224",
-      "license": "apache-2.0",
-      "license_source": "huggingface license: tag",
+      "license": "apache-2.0 (asserted, NOT stated)",
+      "license_source": "the MIRROR carries NO license: tag; the original repository's tag says apache-2.0",
       "digest_kind": "model_digest",
-      "onnx": null,
-      "onnx_checked": [
-        "google/vit-base-patch16-224"
+      "onnx": [
+        {
+          "repo": "onnx-community/vit-base-patch16-224-ONNX",
+          "file": "onnx/model.onnx",
+          "bytes": 346471546
+        }
       ],
-      "export_note": "No onnx/ directory; the `file` entry 404s upstream. See whisper-tiny for why the `file` list is a local path and not a URL."
+      "onnx_source": "mirror",
+      "mirror_repo": "onnx-community/vit-base-patch16-224-ONNX",
+      "pin_note": "This is a THIRD-PARTY export, not the model's own repository, and it is a DIFFERENT SERIALISATION of the same weights -- so the recorded model_digest in CHECKPOINT.json will NOT match what you download, even when the packed container comes out identical. Re-record the pin from the file you actually placed; do not \"correct\" the recorded one to fit. Measured on whisper-tiny: the mirror's onnx files hash differently (encoder 8dd994fe..., decoder 7e844cce... against the tree's 6642befb.../ab79e3f2...) while the container's whole weight region is byte-identical (sha256 9fd75f76...). Also needs the original repository's config.json and preprocessor_config.json: the mean/std and the resample code ARE the front end, and a mirror's onnx/ directory does not carry them.",
+      "onnx_checked": [
+        "onnx-community/vit-base-patch16-224-ONNX"
+      ],
+      "verified": "LISTED ONLY -- not downloaded. The size comes from a HEAD request, so the claim is that the file is there and is the right shape, NOT that it packs to what this tree built. The two rows in this table that were actually downloaded and packed say so in their own `verified` text.",
+      "byte_evidence": "listed",
+      "packed": false
     },
     "yolov8n-pose": {
-      "repo": null,
-      "license": null,
-      "license_source": "not established -- no CHECKPOINT.json and the upstream repository is not recorded anywhere in this tree",
+      "repo": [
+        "Xenova/yolov8-pose-onnx",
+        "ultralytics/yolov8"
+      ],
+      "license": "agpl-3.0",
+      "license_source": "the MIRROR states agpl-3.0, and so does Ultralytics' own release",
       "digest_kind": null,
-      "onnx": null,
-      "export_note": "The only model here that is NOT a HuggingFace repository, and the only one with no CHECKPOINT.json besides whisper-medium. models/yolov8n-pose.npue is packed from a yolov8n-pose.onnx that the user supplies (README.md shows `--pose-onnx yolov8n-pose.onnx`), and this tree records nothing about where that file came from. Stated as unknown rather than filled with the obvious guess: Ultralytics publishes several yolov8n-pose exports and this tree has never said which one it used."
+      "onnx": [
+        {
+          "repo": "Xenova/yolov8-pose-onnx",
+          "file": "yolov8n-pose.onnx",
+          "bytes": 13484153
+        }
+      ],
+      "onnx_source": "mirror",
+      "mirror_repo": "Xenova/yolov8-pose-onnx",
+      "verified": "DOWNLOADED AND PACKED, and this is the strongest claim in the table: the packer took it unchanged (116 ops, 73 convolutions, 3.28 M params) and on docs/bus.jpg it finds the SAME THREE PEOPLE as the container this tree built, with every keypoint, every box and every score identical to 0.000 px. So for this model a mirror is not merely usable, it is indistinguishable.",
+      "sha256_file": "04f6d2416266f2aba6c5ba8b26de33ed9eba3279f972ac02e33f9f1366547586",
+      "pin_note": "models/yolov8n-pose.npue IS packed from this exact file -- its weights agree to 0.000 px -- but models/yolov8n-pose/ has no CHECKPOINT.json, so there is no recorded pin and no digest to check a download against. That is the gap worth closing here rather than in a mirror: the file is now named and hashed, so writing the CHECKPOINT.json is a two-minute job that this document cannot do for you.",
+      "onnx_checked": [
+        "Xenova/yolov8-pose-onnx"
+      ],
+      "byte_evidence": "hashed",
+      "packed": true
     },
     "mediapipe-hands": {
       "repo": [
@@ -278,7 +472,9 @@
         "palm_detection_mediapipe_2023feb.onnx": "78ff51c38496b7fc8b8ebdb6cc8c1abb02fa6c38427c6848254cdaba57fcce7c",
         "handpose_estimation_mediapipe_2023feb.onnx": "db0898ae717b76b075d9bf563af315b29562e11f8df5027a1ef07b02bef6d81c"
       },
-      "two_files_note": "TWO checkpoints in one container, and they are not interchangeable: the landmark network is given a hand's RoI by the palm detector and cannot find a hand in a frame by itself, so shipping only it answers 'no hand here' to every image. Both files are 2023feb; the 2023feb_int8 and 2023feb_int8bq variants are in the same repositories and are DELIBERATELY NOT used -- see CHECKPOINT.json, which measures what they do to the output."
+      "two_files_note": "TWO checkpoints in one container, and they are not interchangeable: the landmark network is given a hand's RoI by the palm detector and cannot find a hand in a frame by itself, so shipping only it answers 'no hand here' to every image. Both files are 2023feb; the 2023feb_int8 and 2023feb_int8bq variants are in the same repositories and are DELIBERATELY NOT used -- see CHECKPOINT.json, which measures what they do to the output.",
+      "byte_evidence": "hashed",
+      "packed": false
     },
     "mediapipe-pose": {
       "repo": [
@@ -305,7 +501,9 @@
         "person_detection_mediapipe_2023mar.onnx": "47fd5599d6fa17608f03e0eb0ae230baa6e597d7e8a2c8199fe00abea55a701f",
         "pose_estimation_mediapipe_2023mar.onnx": "9d89c599319a18fb7d2e28451a883476164543182bafca5f09eb2cf767ed2f3f"
       },
-      "two_files_note": "TWO checkpoints, same reason as mediapipe-hands: the pose regressor needs a person's box from the detector. The 2023mar_int8bq variants exist upstream and are NOT used -- CHECKPOINT.json measures them putting the 33 keypoints a mean 64.0 px apart."
+      "two_files_note": "TWO checkpoints, same reason as mediapipe-hands: the pose regressor needs a person's box from the detector. The 2023mar_int8bq variants exist upstream and are NOT used -- CHECKPOINT.json measures them putting the 33 keypoints a mean 64.0 px apart.",
+      "byte_evidence": "hashed",
+      "packed": false
     }
   }
 }

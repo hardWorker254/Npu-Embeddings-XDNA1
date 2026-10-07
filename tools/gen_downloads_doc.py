@@ -11,17 +11,27 @@ hash it against.
 
 THE FINDING THIS DOCUMENT EXISTS TO RECORD
 -----------------------------------------
-Ten of the eighteen models have NO ONNX EXPORT UPSTREAM. Their repositories
-contain no onnx/ directory, and requesting one returns 404. There is nothing to
-download, and that -- not a policy decision -- is why BUILD.md 2.2 says you
-place the weights yourself. It had never been written down, so "why is there no
-script" had no answer and the tree's position looked like an omission.
+Every model in the table has a download, and the thing worth reading past is
+WHOSE repository serves it: eight publish the export themselves, and ten are
+served by a third party (`onnx-community/*`, and one Xenova repository).
 
-Eight do publish one, and for those a link is a real link: the file exists, the
-size is known, and -- for all eight as of `verified_on` -- the bytes were
-downloaded and hashed and matched the files this tree was built against. The
-largest of them is bge-large's 1.34 GB export, which is why it took the longest
-to check rather than being left unchecked.
+THE FIRST VERSION OF THIS DOCUMENT GOT THAT WRONG, and wrong in the most
+available direction. It recorded ten models as having "no ONNX export upstream",
+because that is exactly what their own repositories returned -- no `onnx/`
+directory, and a 404 for every file. True of the wrong repository. Nine of the
+ten have an onnx-community export that anybody would actually download, so the
+document was telling readers to write their own exporter when a `curl` would
+have done. The distinction between "this model's repository has no export" and
+"no export exists" is now a column (`onnx_source`), a licence column that says
+whose terms apply, and a section on what a mirror costs you.
+
+FOR THE TWO ROWS THAT WERE MEASURED, THE CLAIM IS STRONGER THAN "it exists":
+`yolov8n-pose` packs from the Xenova file and finds the same three people on
+docs/bus.jpg to 0.000 px on every keypoint, box and score; `whisper-tiny` packs
+from onnx-community's pair and the container's ENTIRE weight region is
+byte-identical (sha256 9fd75f76...) to the one this tree built, from input files
+that hash differently. The remaining eight rows claim only that the file is there
+and is the right shape, and the rows say which rows those are.
 
 WHAT IS ASSERTED HERE, AND WHY IT IS NOT JUST PROSE
 --------------------------------------------------
@@ -231,6 +241,23 @@ def counts(rows):
     return n, with_repo, with_onnx, n - with_onnx, verified, no_ck
 
 
+def packed(rows):
+    """Rows whose export was PACKED by this tree's packer, not just downloaded.
+
+    A separate count from `verified` because the two claims differ in strength and
+    the summary conflated them: for whisper-tiny's mirror the FILE does not match
+    what this tree built -- it is a different serialisation -- and what matches is
+    the CONTAINER the packer produced from it.
+
+    AN EXPLICIT FIELD, because the first version of this sniffed the word "packed"
+    out of the `verified` prose -- and matched EIGHT ROWS THAT WERE NEVER PACKED,
+    because their text explains the packed rows by mentioning them. A summary that
+    names ten packed models when two were packed is worse than no summary, and the
+    mistake survives review because the sentence around it reads correctly.
+    """
+    return sorted(n for n, r in rows.items() if r.get("packed") is True)
+
+
 def verified_mark(row, o):
     """A PER-FILE yes/no, as (english, russian).
 
@@ -254,9 +281,18 @@ def verified_mark(row, o):
                 "**только листинг, байты не доказаны**")
     if isinstance(got, str) and len(got) == 64:
         n = f"{o['bytes']:,}"
+        # A MIRROR is a third state, and it is NOT the same as an upstream export
+        # matching. Saying "matched the local file" for a mirror would be false:
+        # whisper-tiny's mirror files hash differently from the tree's and the
+        # CONTAINER is what matches. Collapsing the two into one phrase is how a
+        # reader ends up believing a mirror's bytes are the recorded ones.
+        if row.get("onnx_source") == "mirror":
+            return (f"yes — downloaded {n} B, hashed, **packed output identical**",
+                    f"да — скачано {n} Б, захэшировано, **упакованный результат тот же**")
         return (f"yes — downloaded {n} B, hashed, matched the local file",
                 f"да — скачано {n} Б, захэшировано, совпало с локальным файлом")
-    return ("listed", "только листинг")
+    return ("**listed only, bytes unproven**",
+            "**только листинг, байты не доказаны**")
 
 
 def url(repo, f):
@@ -275,25 +311,41 @@ def en_doc(src, rows):
     a("     models/<name>/CHECKPOINT.json. -->")
     a("")
     a(f"Every model in this repository, where its files come from, and -- the part")
-    a(f"that matters -- which of them you can actually download as an ONNX export.")
+    a(f"that matters -- whether the graph comes from the model's own repository or")
+    a(f"from somebody else's, and what that costs you.")
     a("")
-    a(f"Of {n} models, **{with_onnx} publish an ONNX export you can download** and")
-    a(f"**{without} do not**. That is not a policy in this repository; it is what")
-    a("the upstream repositories contain. The ones that do not have no `onnx/`")
-    a("directory at all, and asking for one returns 404. That is the real reason")
-    a("[BUILD.md §2.2](../BUILD.md) says *\"weights are not fetched -- you place")
-    a("them\"*: for ten of the eighteen there is nothing to fetch, because the graph")
-    a("has to be produced by exporting the checkpoint yourself.")
+    # THE TWO KINDS OF ROW ARE COUNTED, NOT ASSERTED, and the prose below is chosen
+    # by which count it got. This section was WRONG ONCE already in the most
+    # embarrassing direction available: it said ten models have no ONNX upstream,
+    # which was true of the ten I had checked and false of the ten I had not --
+    # nine of them have an onnx-community export, and the tenth is Xenova's.
+    own = sum(1 for r in rows.values() if r.get("onnx") and r.get("onnx_source") != "mirror")
+    mine = sum(1 for r in rows.values() if r.get("onnx_source") == "mirror")
+    a(f"Of {n} models, **{own} publish an ONNX export in their own repository** and")
+    a(f"**{mine} are served by a third party's** (`onnx-community/*`, and one Xenova")
+    a("repository). Every model in this table has a download; what differs is whose")
+    a("repository it is in, and that has three consequences worth a section each.")
     a("")
-    a(f"Checked on **{src['verified_on']}**. Of the {with_onnx} downloadable")
-    a(f"exports, **{verified} were downloaded and hashed** and matched the files this")
-    a("tree was built against. The rest are listed by size only, and the row says so.")
-    # "^" the sentence above is only true while there IS a rest. It was written
-    # when bge-large was the one unproven row, and when that download finished
-    # the sentence stayed, describing a category that no longer existed.
-    if verified == with_onnx:
-        L[-1] = ("tree was built against. Nothing in the table rests on a listing "
-                 "alone.")
+    a("The reason that distinction had to be made at all: the ten third-party rows")
+    a("were, at first, recorded here as *\"no ONNX upstream\"*, because that is what")
+    a("the model's own repository returned -- no `onnx/` directory, and a 404 for")
+    a("every file. That was a true statement about the wrong repository. The")
+    a("onnx-community exports exist, they are what most people actually download,")
+    a("and a document that tells a reader there is nothing to fetch sends them to")
+    a("write their own exporter.")
+    a("")
+    pk = packed(rows)
+    a(f"Checked on **{src['verified_on']}**. {verified} rows had their files "
+      "downloaded and")
+    a(f"hashed; {len(rows) - verified} are listed by size from a `HEAD` request, and "
+      "the row says")
+    a("which. Hashed is not the same as agreed: for **"
+      + ", ".join(f"`{n}`" for n in pk) + "** the")
+    a("file was downloaded, packed, and the **container** came out identical to the "
+      "one")
+    a("this tree built -- which for a mirror is the stronger claim and a different "
+      "one, and")
+    a("is why those rows say *packed output identical* rather than *matched*.")
     a("")
     a("## Two different digests, and reading one as the other verifies nothing")
     a("")
@@ -312,8 +364,8 @@ def en_doc(src, rows):
     a("")
     a("## Downloadable ONNX exports")
     a("")
-    a("| model | repository | file | size | sha256 of the file | verified |")
-    a("| --- | --- | --- | --- | --- | --- |")
+    a("| model | repository | whose | file | size | sha256 of the file | verified |")
+    a("| --- | --- | --- | --- | --- | --- | --- |")
     for name, row in sorted(rows.items()):
         for o in row.get("onnx") or []:
             sha = (row.get("sha256_file") or {})
@@ -325,7 +377,9 @@ def en_doc(src, rows):
             else:
                 sh = "—"
             mark_en, _ = verified_mark(row, o)
-            a(f"| `{name}` | [`{o['repo']}`]({HF}/{o['repo']}) | [`{o['file']}`]({url(o['repo'], o['file'])}) | {o['bytes']:,} | {sh} | {mark_en} |")
+            whose = "**mirror**" if row.get("onnx_source") == "mirror" else "own"
+            a(f"| `{name}` | [`{o['repo']}`]({HF}/{o['repo']}) | {whose} | "
+              f"[`{o['file']}`]({url(o['repo'], o['file'])}) | {o['bytes']:,} | {sh} | {mark_en} |")
     a("")
     a("Full command for one file:")
     a("")
@@ -359,37 +413,66 @@ def en_doc(src, rows):
           " one matched the file this tree was built against. Nothing in this table"
           " is listed on the strength of a `HEAD` request alone.")
     a("")
-    a("## Models with no ONNX export upstream")
+    a("## The mirrors, and what one costs you")
     a("")
-    a("For these, `curl` cannot help. The checkpoint is on HuggingFace and the graph")
-    a("has to be exported from it. **This repository ships no exporter for any of")
-    a("them** -- `reference/fetch_model.py` fetches configs and tokenizers and never")
-    a("a graph -- so producing the ONNX is a step you supply. That is stated here")
-    a("rather than papered over with an invented command.")
+    a("Ten models' graphs come from somebody else's repository. Three things are")
+    a("worth knowing before you use one, and only the first is obvious.")
     a("")
-    a("| model | repository | licence | what is missing |")
-    a("| --- | --- | --- | --- |")
+    a("**1. A mirror's ONNX will NOT satisfy the pin you already have.** It is a")
+    a("different serialisation of the same weights, so `CHECKPOINT.json`'s recorded")
+    a("digest will not match what you downloaded. Measured on whisper-tiny:")
+    a("")
+    a("| | this tree's export | onnx-community's |")
+    a("| --- | --- | --- |")
+    a("| `encoder_model.onnx` sha256 | `6642befb…` | `8dd994fe…` |")
+    a("| `decoder_model.onnx` sha256 | `ab79e3f2…` | `7e844cce…` |")
+    a("| `model_digest` | `eb6a1b7f…` | `55ace44d…` |")
+    a("| **the packed container's whole weight region** | `9fd75f76…` | **`9fd75f76…`** |")
+    a("")
+    a("Same container, byte for byte, from different input files. So if a pin check")
+    a("fails on a mirror, the fix is to **re-record the pin from the file you")
+    a("actually placed** -- never to edit the recorded value until it matches, and")
+    a("never to assume the mirror is wrong because the hash differs.")
+    a("")
+    a("**2. The mirrors mostly carry no licence.** Only the two `opencv/*` MediaPipe")
+    a("repositories and `Xenova/yolov8-pose-onnx` (`agpl-3.0`) state one. Every")
+    a("`onnx-community/*` repository has **no `license:` tag at all**, so the row")
+    a("above carries the ORIGINAL repository's licence forward *as an assertion*,")
+    a("flagged as such. An untagged mirror is not thereby apache-2.0, and a reader who")
+    a("needs the licence to be certain has to read the original repository's terms.")
+    a("")
+    a("**3. `whisper-medium` is not an onnx-community repository** -- it is")
+    a("`flackzz/whisper-medium-ONNX`. The other five Whisper sizes are")
+    a("onnx-community, so there is no pattern to infer trust from, and it is the one")
+    a("mirror in this table with no measured claim behind it.")
+    a("")
+    a("| model | graph repository | licence, and where that claim comes from |")
+    a("| --- | --- | --- |")
     for name, row in sorted(rows.items()):
-        if row.get("onnx"):
+        if row.get("onnx_source") != "mirror":
             continue
-        repos = one_of(row.get("repo"))
-        rs = ", ".join(f"[`{r}`]({HF}/{r})" for r in repos) or "**not a HuggingFace model**"
         lic = row.get("license") or "?"
-        if row.get("no_checkpoint_json"):
-            miss = ("no `CHECKPOINT.json` at all -- no repo record, no file list, no "
-                    "digest; and no ONNX upstream")
-        elif row.get("no_pin"):
-            miss = "no ONNX upstream, and no digest recorded (`sha256: null`)"
-        elif row.get("repo_disagreement"):
-            miss = "no ONNX upstream (checked in both repositories)"
-        else:
-            miss = "no `onnx/` directory in the repository; requesting one 404s"
-        a(f"| `{name}` | {rs} | {lic} | {miss} |")
+        src = row.get("license_source") or "?"
+        short = src if len(src) < 150 else src[:147] + "…"
+        a(f"| `{name}` | [`{row['mirror_repo']}`]({HF}/{row['mirror_repo']}) | {lic} — {short} |")
     a("")
-    a("**A `file` list in `CHECKPOINT.json` is not a download list.** The six")
-    a("Whisper sizes record `onnx/encoder_model.onnx` and `onnx/decoder_model.onnx`,")
-    a("and **both 404 upstream** -- those entries name what this repository's own")
-    a("export is called, not where to fetch it. Read them as local paths to create.")
+    bl = [(n, r["broken_link"]) for n, r in rows.items() if r.get("broken_link")]
+    if bl:
+        a("### One of these links is wrong by one word")
+        a("")
+        for n, b in bl:
+            a(f"`{HF}/{b['repo']}` returns **HTTP 401** for the model listing and for")
+            a("every file. The working name is the same one **with the `-ONNX`")
+            a("suffix** that `whisper-tiny-ONNX` and `vit-base-patch16-224-ONNX`")
+            a(f"carry, and that answers 200 and has all four of `{n}`'s files. Recorded")
+            a("because the difference is one hyphenated word and reads as a typo rather")
+            a("than as a 401.")
+            a("")
+    a("**What a mirror is not.** None of this says a mirror is interchangeable with")
+    a("the model's own export. It says, for the two rows that were tested, that the")
+    a("packed result was identical; for the other eight the claim stops at *the file")
+    a("is there and is the right shape*. `yolov8n-pose` and `whisper-tiny` are the only")
+    a("two rows in this table with a measured claim, and the rows say which they are.")
     a("")
     a("## Everything else per model")
     a("")
@@ -480,9 +563,16 @@ def ru_doc(src, rows):
     a("")
     a("(BUILD.md на английском — перевода в дереве нет.)")
     a("")
-    a(f"Проверено **{src['verified_on']}**. Из скачиваемых экспортов **{verified} реально")
-    a("скачаны и захэшированы** и совпали с файлами, на которых построено это дерево.")
-    a("Остальные перечислены только по размеру, и строка об этом говорит.")
+    pk_ru = packed(rows)
+    a(f"Проверено **{src['verified_on']}**. Файлы в **{verified} строках скачаны и "
+      "захэшированы**;")
+    a(f"остальные {len(rows) - verified} — только листинг по размеру из `HEAD`, и "
+      "строка говорит,")
+    a("какая именно. «Захэшировано» — не то же самое, что «совпало»: у **"
+      + ", ".join(f"`{n}`" for n in pk_ru) + "**")
+    a("файл скачан, упакован, и **совпал контейнер** — тот, что собрало это дерево. Для")
+    a("зеркала это утверждение сильнее и другое, поэтому такие строки говорят «упакованный "
+      "результат тот же», а не «совпало».")
     if verified == with_onnx:
         # The same expiry the English sentence has: "the rest" describes a
         # category that stops existing the moment the last download finishes.
@@ -506,8 +596,8 @@ def ru_doc(src, rows):
     a("")
     a("## Скачиваемые ONNX-экспорты")
     a("")
-    a("| модель | репозиторий | файл | размер | sha256 файла | проверено |")
-    a("| --- | --- | --- | --- | --- | --- |")
+    a("| модель | репозиторий | чей | файл | размер | sha256 файла | проверено |")
+    a("| --- | --- | --- | --- | --- | --- | --- |")
     for name, row in sorted(rows.items()):
         for o in row.get("onnx") or []:
             sha = (row.get("sha256_file") or {})
@@ -519,39 +609,69 @@ def ru_doc(src, rows):
             else:
                 sh = "—"
             _, mark_ru = verified_mark(row, o)
-            a(f"| `{name}` | [`{o['repo']}`]({HF}/{o['repo']}) | [`{o['file']}`]({url(o['repo'], o['file'])}) | {o['bytes']:,} | {sh} | {mark_ru} |")
+            whose_ru = "**зеркало**" if row.get("onnx_source") == "mirror" else "свой"
+            a(f"| `{name}` | [`{o['repo']}`]({HF}/{o['repo']}) | {whose_ru} | "
+              f"[`{o['file']}`]({url(o['repo'], o['file'])}) | {o['bytes']:,} | {sh} | {mark_ru} |")
     a("")
-    a("## Модели без ONNX-экспорта наверху")
+    a("## Зеркала и чего они стоят")
     a("")
-    a("Для них `curl` не поможет. Чекпойнт на HuggingFace есть, а граф надо из него")
-    a("экспортировать. **Экспортера для них в этом дереве нет** —")
-    a("`reference/fetch_model.py` тянет конфиги и токенизаторы и никогда не граф, —")
-    a("так что шаг с ONNX — ваш. Это написано здесь, а не заменено выдуманной командой.")
+    a("У десяти моделей граф лежит в чужом репозитории. Прежде чем им пользоваться,")
+    a("стоит знать три вещи, и очевидна только первая.")
     a("")
-    a("| модель | репозиторий | лицензия | чего не хватает |")
-    a("| --- | --- | --- | --- |")
+    a("**1. ONNX из зеркала НЕ удовлетворит уже записанный пин.** Это другая")
+    a("сериализация тех же весов, поэтому digest из `CHECKPOINT.json` не совпадёт с")
+    a("скачанным. Измерено на whisper-tiny:")
+    a("")
+    a("| | экспорт этого дерева | onnx-community |")
+    a("| --- | --- | --- |")
+    a("| sha256 `encoder_model.onnx` | `6642befb…` | `8dd994fe…` |")
+    a("| sha256 `decoder_model.onnx` | `ab79e3f2…` | `7e844cce…` |")
+    a("| `model_digest` | `eb6a1b7f…` | `55ace44d…` |")
+    a("| **вся область весов контейнера** | `9fd75f76…` | **`9fd75f76…`** |")
+    a("")
+    a("Один и тот же контейнер, побайтово, из разных входных файлов. Так что если")
+    a("проверка пина падает на зеркале, правильное действие — **перезаписать пин по")
+    a("файлу, который вы реально положили**. Не править записанное значение, пока не")
+    a("совпадёт, и не считать зеркало неверным из-за разницы хешей.")
+    a("")
+    a("**2. У зеркал в основном нет лицензии.** Тег `license:` есть только у двух")
+    a("`opencv/*` MediaPipe и у `Xenova/yolov8-pose-onnx` (`agpl-3.0`). У всех")
+    a("`onnx-community/*` его **нет вовсе**, поэтому лицензия исходного репозитория")
+    a("перенесена в таблицу **как утверждение**, с пометкой. Репозиторий без тега не")
+    a("становится от этого apache-2.0, и тому, кому лицензия нужна точно, читать")
+    a("условия исходного репозитория.")
+    a("")
+    a("**3. `whisper-medium` — не onnx-community**, а `flackzz/whisper-medium-ONNX`.")
+    a("Остальные пять размеров Whisper на onnx-community, так что выводить доверие из")
+    a("закономерности не от чего, и это единственное зеркало в таблице без")
+    a("измеренного утверждения.")
+    a("")
+    a("| модель | репозиторий графа | лицензия и откуда это утверждение |")
+    a("| --- | --- | --- |")
     for name, row in sorted(rows.items()):
-        if row.get("onnx"):
+        if row.get("onnx_source") != "mirror":
             continue
-        repos = one_of(row.get("repo"))
-        rs = ", ".join(f"[`{r}`]({HF}/{r})" for r in repos) or "**не модель HuggingFace**"
         lic = row.get("license") or "?"
-        if row.get("no_checkpoint_json"):
-            miss = ("нет вообще `CHECKPOINT.json` — ни репозитория, ни списка файлов, "
-                    "ни хеша; и нет ONNX наверху")
-        elif row.get("no_pin"):
-            miss = "нет ONNX наверху и хеш не записан (`sha256: null`)"
-        elif row.get("repo_disagreement"):
-            miss = "нет ONNX наверху (проверено в обоих репозиториях)"
-        else:
-            miss = "нет каталога `onnx/`, запрос 404"
-        a(f"| `{name}` | {rs} | {lic} | {miss} |")
+        src = row.get("license_source") or "?"
+        short = src if len(src) < 150 else src[:147] + "…"
+        a(f"| `{name}` | [`{row['mirror_repo']}`]({HF}/{row['mirror_repo']}) | {lic} — {short} |")
     a("")
-    a("**Список `file` в `CHECKPOINT.json` — это не список для скачивания.** Шесть")
-    a("размеров Whisper записывают `onnx/encoder_model.onnx` и")
-    a("`onnx/decoder_model.onnx`, и **оба 404 наверху**: эти записи называют то, как")
-    a("назван собственный экспорт этого дерева, а не откуда его брать. Читайте их как")
-    a("локальные пути, которые надо создать.")
+    bl = [(n, r["broken_link"]) for n, r in rows.items() if r.get("broken_link")]
+    if bl:
+        a("### Одна из этих ссылок неверна на одно слово")
+        a("")
+        for n, b in bl:
+            a(f"`{HF}/{b['repo']}` отдаёт **HTTP 401** и на список модели, и на любой")
+            a("файл. Рабочее имя — то же самое **с суффиксом `-ONNX`**, который носят")
+            a("`whisper-tiny-ONNX` и `vit-base-patch16-224-ONNX`; оно отвечает 200 и")
+            a(f"содержит все четыре файла `{n}`. Записано потому, что разница — одно")
+            a("слово с дефисом и читается как опечатка, а не как 401.")
+            a("")
+    a("**Чем зеркало НЕ является.** Ничто здесь не говорит, что зеркало взаимозаменяемо")
+    a("с экспортом самой модели. Говорится, что для двух проверенных строк")
+    a("упакованный результат совпал; для остальных восьми утверждение кончается на")
+    a("*файл есть и форма правильная*. Только у `yolov8n-pose` и `whisper-tiny` есть")
+    a("измеренное утверждение, и строки говорят, у каких именно.")
     a("")
     a("## Два репозитория на одну модель: `embeddinggemma-300m`")
     a("")

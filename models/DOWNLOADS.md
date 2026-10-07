@@ -6,19 +6,28 @@
      models/<name>/CHECKPOINT.json. -->
 
 Every model in this repository, where its files come from, and -- the part
-that matters -- which of them you can actually download as an ONNX export.
+that matters -- whether the graph comes from the model's own repository or
+from somebody else's, and what that costs you.
 
-Of 18 models, **8 publish an ONNX export you can download** and
-**10 do not**. That is not a policy in this repository; it is what
-the upstream repositories contain. The ones that do not have no `onnx/`
-directory at all, and asking for one returns 404. That is the real reason
-[BUILD.md §2.2](../BUILD.md) says *"weights are not fetched -- you place
-them"*: for ten of the eighteen there is nothing to fetch, because the graph
-has to be produced by exporting the checkpoint yourself.
+Of 18 models, **8 publish an ONNX export in their own repository** and
+**10 are served by a third party's** (`onnx-community/*`, and one Xenova
+repository). Every model in this table has a download; what differs is whose
+repository it is in, and that has three consequences worth a section each.
 
-Checked on **2026-10-06**. Of the 8 downloadable
-exports, **8 were downloaded and hashed** and matched the files this
-tree was built against. Nothing in the table rests on a listing alone.
+The reason that distinction had to be made at all: the ten third-party rows
+were, at first, recorded here as *"no ONNX upstream"*, because that is what
+the model's own repository returned -- no `onnx/` directory, and a 404 for
+every file. That was a true statement about the wrong repository. The
+onnx-community exports exist, they are what most people actually download,
+and a document that tells a reader there is nothing to fetch sends them to
+write their own exporter.
+
+Checked on **2026-10-06**. 9 rows had their files downloaded and
+hashed; 9 are listed by size from a `HEAD` request, and the row says
+which. Hashed is not the same as agreed: for **`whisper-tiny`, `yolov8n-pose`** the
+file was downloaded, packed, and the **container** came out identical to the one
+this tree built -- which for a mirror is the stronger claim and a different one, and
+is why those rows say *packed output identical* rather than *matched*.
 
 ## Two different digests, and reading one as the other verifies nothing
 
@@ -37,18 +46,38 @@ pin with the wrong convention fails on a correct file and passes on nothing.
 
 ## Downloadable ONNX exports
 
-| model | repository | file | size | sha256 of the file | verified |
-| --- | --- | --- | --- | --- | --- |
-| `all-MiniLM-L6-v2` | [`sentence-transformers/all-MiniLM-L6-v2`](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) | [`onnx/model.onnx`](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx) | 90,405,214 | `6fd5d72fe4589f18…` | yes — downloaded 90,405,214 B, hashed, matched the local file |
-| `bge-base-en-v1.5` | [`BAAI/bge-base-en-v1.5`](https://huggingface.co/BAAI/bge-base-en-v1.5) | [`onnx/model.onnx`](https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/onnx/model.onnx) | 435,811,539 | `9bc579acdba21c25…` | yes — downloaded 435,811,539 B, hashed, matched the local file |
-| `bge-large-en-v1.5` | [`BAAI/bge-large-en-v1.5`](https://huggingface.co/BAAI/bge-large-en-v1.5) | [`onnx/model.onnx`](https://huggingface.co/BAAI/bge-large-en-v1.5/resolve/main/onnx/model.onnx) | 1,336,854,281 | `69ed3f810d3b6d13…` | yes — downloaded 1,336,854,281 B, hashed, matched the local file |
-| `bge-micro-v2` | [`TaylorAI/bge-micro-v2`](https://huggingface.co/TaylorAI/bge-micro-v2) | [`onnx/model.onnx`](https://huggingface.co/TaylorAI/bge-micro-v2/resolve/main/onnx/model.onnx) | 69,035,106 | `9f705befe60d00ca…` | yes — downloaded 69,035,106 B, hashed, matched the local file |
-| `bge-small-en-v1.5` | [`BAAI/bge-small-en-v1.5`](https://huggingface.co/BAAI/bge-small-en-v1.5) | [`onnx/model.onnx`](https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/onnx/model.onnx) | 133,093,490 | `828e1496d7fabb79…` | yes — downloaded 133,093,490 B, hashed, matched the local file |
-| `mediapipe-hands` | [`opencv/palm_detection_mediapipe`](https://huggingface.co/opencv/palm_detection_mediapipe) | [`palm_detection_mediapipe_2023feb.onnx`](https://huggingface.co/opencv/palm_detection_mediapipe/resolve/main/palm_detection_mediapipe_2023feb.onnx) | 3,905,734 | `78ff51c38496b7fc…` | yes — downloaded 3,905,734 B, hashed, matched the local file |
-| `mediapipe-hands` | [`opencv/handpose_estimation_mediapipe`](https://huggingface.co/opencv/handpose_estimation_mediapipe) | [`handpose_estimation_mediapipe_2023feb.onnx`](https://huggingface.co/opencv/handpose_estimation_mediapipe/resolve/main/handpose_estimation_mediapipe_2023feb.onnx) | 4,099,621 | `db0898ae717b76b0…` | yes — downloaded 4,099,621 B, hashed, matched the local file |
-| `mediapipe-pose` | [`opencv/person_detection_mediapipe`](https://huggingface.co/opencv/person_detection_mediapipe) | [`person_detection_mediapipe_2023mar.onnx`](https://huggingface.co/opencv/person_detection_mediapipe/resolve/main/person_detection_mediapipe_2023mar.onnx) | 11,990,159 | `47fd5599d6fa1760…` | yes — downloaded 11,990,159 B, hashed, matched the local file |
-| `mediapipe-pose` | [`opencv/pose_estimation_mediapipe`](https://huggingface.co/opencv/pose_estimation_mediapipe) | [`pose_estimation_mediapipe_2023mar.onnx`](https://huggingface.co/opencv/pose_estimation_mediapipe/resolve/main/pose_estimation_mediapipe_2023mar.onnx) | 5,557,238 | `9d89c599319a18fb…` | yes — downloaded 5,557,238 B, hashed, matched the local file |
-| `nomic-embed-text-v1.5` | [`nomic-ai/nomic-embed-text-v1.5`](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5) | [`onnx/model.onnx`](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/onnx/model.onnx) | 547,310,275 | `147d5aa88c210123…` | yes — downloaded 547,310,275 B, hashed, matched the local file |
+| model | repository | whose | file | size | sha256 of the file | verified |
+| --- | --- | --- | --- | --- | --- | --- |
+| `all-MiniLM-L6-v2` | [`sentence-transformers/all-MiniLM-L6-v2`](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) | own | [`onnx/model.onnx`](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx) | 90,405,214 | `6fd5d72fe4589f18…` | yes — downloaded 90,405,214 B, hashed, matched the local file |
+| `bge-base-en-v1.5` | [`BAAI/bge-base-en-v1.5`](https://huggingface.co/BAAI/bge-base-en-v1.5) | own | [`onnx/model.onnx`](https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/onnx/model.onnx) | 435,811,539 | `9bc579acdba21c25…` | yes — downloaded 435,811,539 B, hashed, matched the local file |
+| `bge-large-en-v1.5` | [`BAAI/bge-large-en-v1.5`](https://huggingface.co/BAAI/bge-large-en-v1.5) | own | [`onnx/model.onnx`](https://huggingface.co/BAAI/bge-large-en-v1.5/resolve/main/onnx/model.onnx) | 1,336,854,281 | `69ed3f810d3b6d13…` | yes — downloaded 1,336,854,281 B, hashed, matched the local file |
+| `bge-micro-v2` | [`TaylorAI/bge-micro-v2`](https://huggingface.co/TaylorAI/bge-micro-v2) | own | [`onnx/model.onnx`](https://huggingface.co/TaylorAI/bge-micro-v2/resolve/main/onnx/model.onnx) | 69,035,106 | `9f705befe60d00ca…` | yes — downloaded 69,035,106 B, hashed, matched the local file |
+| `bge-small-en-v1.5` | [`BAAI/bge-small-en-v1.5`](https://huggingface.co/BAAI/bge-small-en-v1.5) | own | [`onnx/model.onnx`](https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/onnx/model.onnx) | 133,093,490 | `828e1496d7fabb79…` | yes — downloaded 133,093,490 B, hashed, matched the local file |
+| `embeddinggemma-300m` | [`onnx-community/embeddinggemma-300m-ONNX`](https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX) | **mirror** | [`onnx/model.onnx`](https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX/resolve/main/onnx/model.onnx) | 479,932 | — | **listed only, bytes unproven** |
+| `embeddinggemma-300m` | [`onnx-community/embeddinggemma-300m-ONNX`](https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX) | **mirror** | [`onnx/model.onnx_data`](https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX/resolve/main/onnx/model.onnx_data) | 1,234,521,088 | — | **listed only, bytes unproven** |
+| `gte-multilingual-base` | [`onnx-community/gte-multilingual-base`](https://huggingface.co/onnx-community/gte-multilingual-base) | **mirror** | [`onnx/model.onnx`](https://huggingface.co/onnx-community/gte-multilingual-base/resolve/main/onnx/model.onnx) | 1,255,502,649 | — | **listed only, bytes unproven** |
+| `mediapipe-hands` | [`opencv/palm_detection_mediapipe`](https://huggingface.co/opencv/palm_detection_mediapipe) | own | [`palm_detection_mediapipe_2023feb.onnx`](https://huggingface.co/opencv/palm_detection_mediapipe/resolve/main/palm_detection_mediapipe_2023feb.onnx) | 3,905,734 | `78ff51c38496b7fc…` | yes — downloaded 3,905,734 B, hashed, matched the local file |
+| `mediapipe-hands` | [`opencv/handpose_estimation_mediapipe`](https://huggingface.co/opencv/handpose_estimation_mediapipe) | own | [`handpose_estimation_mediapipe_2023feb.onnx`](https://huggingface.co/opencv/handpose_estimation_mediapipe/resolve/main/handpose_estimation_mediapipe_2023feb.onnx) | 4,099,621 | `db0898ae717b76b0…` | yes — downloaded 4,099,621 B, hashed, matched the local file |
+| `mediapipe-pose` | [`opencv/person_detection_mediapipe`](https://huggingface.co/opencv/person_detection_mediapipe) | own | [`person_detection_mediapipe_2023mar.onnx`](https://huggingface.co/opencv/person_detection_mediapipe/resolve/main/person_detection_mediapipe_2023mar.onnx) | 11,990,159 | `47fd5599d6fa1760…` | yes — downloaded 11,990,159 B, hashed, matched the local file |
+| `mediapipe-pose` | [`opencv/pose_estimation_mediapipe`](https://huggingface.co/opencv/pose_estimation_mediapipe) | own | [`pose_estimation_mediapipe_2023mar.onnx`](https://huggingface.co/opencv/pose_estimation_mediapipe/resolve/main/pose_estimation_mediapipe_2023mar.onnx) | 5,557,238 | `9d89c599319a18fb…` | yes — downloaded 5,557,238 B, hashed, matched the local file |
+| `nomic-embed-text-v1.5` | [`nomic-ai/nomic-embed-text-v1.5`](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5) | own | [`onnx/model.onnx`](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/onnx/model.onnx) | 547,310,275 | `147d5aa88c210123…` | yes — downloaded 547,310,275 B, hashed, matched the local file |
+| `vit-base-patch16-224` | [`onnx-community/vit-base-patch16-224-ONNX`](https://huggingface.co/onnx-community/vit-base-patch16-224-ONNX) | **mirror** | [`onnx/model.onnx`](https://huggingface.co/onnx-community/vit-base-patch16-224-ONNX/resolve/main/onnx/model.onnx) | 346,471,546 | — | **listed only, bytes unproven** |
+| `whisper-base` | [`onnx-community/whisper-base`](https://huggingface.co/onnx-community/whisper-base) | **mirror** | [`onnx/encoder_model.onnx`](https://huggingface.co/onnx-community/whisper-base/resolve/main/onnx/encoder_model.onnx) | 82,468,078 | — | **listed only, bytes unproven** |
+| `whisper-base` | [`onnx-community/whisper-base`](https://huggingface.co/onnx-community/whisper-base) | **mirror** | [`onnx/decoder_model.onnx`](https://huggingface.co/onnx-community/whisper-base/resolve/main/onnx/decoder_model.onnx) | 208,289,724 | — | **listed only, bytes unproven** |
+| `whisper-large-v3` | [`onnx-community/whisper-large-v3-ONNX`](https://huggingface.co/onnx-community/whisper-large-v3-ONNX) | **mirror** | [`onnx/encoder_model.onnx`](https://huggingface.co/onnx-community/whisper-large-v3-ONNX/resolve/main/onnx/encoder_model.onnx) | 412,412 | — | **listed only, bytes unproven** |
+| `whisper-large-v3` | [`onnx-community/whisper-large-v3-ONNX`](https://huggingface.co/onnx-community/whisper-large-v3-ONNX) | **mirror** | [`onnx/encoder_model.onnx_data`](https://huggingface.co/onnx-community/whisper-large-v3-ONNX/resolve/main/onnx/encoder_model.onnx_data) | 2,547,875,840 | — | **listed only, bytes unproven** |
+| `whisper-large-v3` | [`onnx-community/whisper-large-v3-ONNX`](https://huggingface.co/onnx-community/whisper-large-v3-ONNX) | **mirror** | [`onnx/decoder_model.onnx`](https://huggingface.co/onnx-community/whisper-large-v3-ONNX/resolve/main/onnx/decoder_model.onnx) | 1,141,794 | — | **listed only, bytes unproven** |
+| `whisper-large-v3` | [`onnx-community/whisper-large-v3-ONNX`](https://huggingface.co/onnx-community/whisper-large-v3-ONNX) | **mirror** | [`onnx/decoder_model.onnx_data`](https://huggingface.co/onnx-community/whisper-large-v3-ONNX/resolve/main/onnx/decoder_model.onnx_data) | 3,626,086,400 | — | **listed only, bytes unproven** |
+| `whisper-large-v3-turbo` | [`onnx-community/whisper-large-v3-turbo`](https://huggingface.co/onnx-community/whisper-large-v3-turbo) | **mirror** | [`onnx/encoder_model.onnx`](https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/main/onnx/encoder_model.onnx) | 439,254 | — | **listed only, bytes unproven** |
+| `whisper-large-v3-turbo` | [`onnx-community/whisper-large-v3-turbo`](https://huggingface.co/onnx-community/whisper-large-v3-turbo) | **mirror** | [`onnx/encoder_model.onnx_data`](https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/main/onnx/encoder_model.onnx_data) | 2,547,875,840 | — | **listed only, bytes unproven** |
+| `whisper-large-v3-turbo` | [`onnx-community/whisper-large-v3-turbo`](https://huggingface.co/onnx-community/whisper-large-v3-turbo) | **mirror** | [`onnx/decoder_model.onnx`](https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/main/onnx/decoder_model.onnx) | 687,820,062 | — | **listed only, bytes unproven** |
+| `whisper-medium` | [`flackzz/whisper-medium-ONNX`](https://huggingface.co/flackzz/whisper-medium-ONNX) | **mirror** | [`onnx/encoder_model.onnx`](https://huggingface.co/flackzz/whisper-medium-ONNX/resolve/main/onnx/encoder_model.onnx) | 1,229,148,954 | — | **listed only, bytes unproven** |
+| `whisper-medium` | [`flackzz/whisper-medium-ONNX`](https://huggingface.co/flackzz/whisper-medium-ONNX) | **mirror** | [`onnx/decoder_model.onnx`](https://huggingface.co/flackzz/whisper-medium-ONNX/resolve/main/onnx/decoder_model.onnx) | 1,827,381,748 | — | **listed only, bytes unproven** |
+| `whisper-small` | [`onnx-community/whisper-small`](https://huggingface.co/onnx-community/whisper-small) | **mirror** | [`onnx/encoder_model.onnx`](https://huggingface.co/onnx-community/whisper-small/resolve/main/onnx/encoder_model.onnx) | 352,825,870 | — | **listed only, bytes unproven** |
+| `whisper-small` | [`onnx-community/whisper-small`](https://huggingface.co/onnx-community/whisper-small) | **mirror** | [`onnx/decoder_model.onnx`](https://huggingface.co/onnx-community/whisper-small/resolve/main/onnx/decoder_model.onnx) | 614,865,004 | — | **listed only, bytes unproven** |
+| `whisper-tiny` | [`onnx-community/whisper-tiny-ONNX`](https://huggingface.co/onnx-community/whisper-tiny-ONNX) | **mirror** | [`onnx/encoder_model.onnx`](https://huggingface.co/onnx-community/whisper-tiny-ONNX/resolve/main/onnx/encoder_model.onnx) | 32,883,618 | `8dd994fe489eaa52…` | yes — downloaded 32,883,618 B, hashed, **packed output identical** |
+| `whisper-tiny` | [`onnx-community/whisper-tiny-ONNX`](https://huggingface.co/onnx-community/whisper-tiny-ONNX) | **mirror** | [`onnx/decoder_model.onnx`](https://huggingface.co/onnx-community/whisper-tiny-ONNX/resolve/main/onnx/decoder_model.onnx) | 118,352,985 | `7e844cce0ac74eda…` | yes — downloaded 118,352,985 B, hashed, **packed output identical** |
+| `yolov8n-pose` | [`Xenova/yolov8-pose-onnx`](https://huggingface.co/Xenova/yolov8-pose-onnx) | **mirror** | [`yolov8n-pose.onnx`](https://huggingface.co/Xenova/yolov8-pose-onnx/resolve/main/yolov8n-pose.onnx) | 13,484,153 | `04f6d2416266f2ab…` | **listed only, bytes unproven** |
 
 Full command for one file:
 
@@ -58,33 +87,68 @@ curl -L -o models/<name>/onnx/model.onnx \
 sha256sum models/<name>/onnx/model.onnx   # compare with the table above
 ```
 
-**All 8 were downloaded and hashed** on the date above, and every one matched the file this tree was built against. Nothing in this table is listed on the strength of a `HEAD` request alone.
+**8 of these 18 rows have NOT been downloaded**: `embeddinggemma-300m`, `gte-multilingual-base`, `vit-base-patch16-224`, `whisper-base`, `whisper-large-v3`, `whisper-large-v3-turbo`, `whisper-medium`, `whisper-small`. For those, `sha256` is empty and the only thing measured is the size, which comes from a `HEAD` request. Treat the size as evidence the file exists and the hash as absent, not as unverified-because-missing.
 
-## Models with no ONNX export upstream
+## The mirrors, and what one costs you
 
-For these, `curl` cannot help. The checkpoint is on HuggingFace and the graph
-has to be exported from it. **This repository ships no exporter for any of
-them** -- `reference/fetch_model.py` fetches configs and tokenizers and never
-a graph -- so producing the ONNX is a step you supply. That is stated here
-rather than papered over with an invented command.
+Ten models' graphs come from somebody else's repository. Three things are
+worth knowing before you use one, and only the first is obvious.
 
-| model | repository | licence | what is missing |
-| --- | --- | --- | --- |
-| `embeddinggemma-300m` | [`google/embeddinggemma-300m`](https://huggingface.co/google/embeddinggemma-300m) | gemma | no ONNX upstream (checked in both repositories) |
-| `gte-multilingual-base` | [`Alibaba-NLP/gte-multilingual-base`](https://huggingface.co/Alibaba-NLP/gte-multilingual-base) | apache-2.0 | no `onnx/` directory in the repository; requesting one 404s |
-| `vit-base-patch16-224` | [`google/vit-base-patch16-224`](https://huggingface.co/google/vit-base-patch16-224) | apache-2.0 | no `onnx/` directory in the repository; requesting one 404s |
-| `whisper-base` | [`openai/whisper-base`](https://huggingface.co/openai/whisper-base) | apache-2.0 | no `onnx/` directory in the repository; requesting one 404s |
-| `whisper-large-v3` | [`openai/whisper-large-v3`](https://huggingface.co/openai/whisper-large-v3) | apache-2.0 | no `onnx/` directory in the repository; requesting one 404s |
-| `whisper-large-v3-turbo` | [`openai/whisper-large-v3-turbo`](https://huggingface.co/openai/whisper-large-v3-turbo) | mit | no `onnx/` directory in the repository; requesting one 404s |
-| `whisper-medium` | [`openai/whisper-medium`](https://huggingface.co/openai/whisper-medium) | apache-2.0 | no `CHECKPOINT.json` at all -- no repo record, no file list, no digest; and no ONNX upstream |
-| `whisper-small` | [`openai/whisper-small`](https://huggingface.co/openai/whisper-small) | apache-2.0 | no ONNX upstream, and no digest recorded (`sha256: null`) |
-| `whisper-tiny` | [`openai/whisper-tiny`](https://huggingface.co/openai/whisper-tiny) | apache-2.0 | no `onnx/` directory in the repository; requesting one 404s |
-| `yolov8n-pose` | **not a HuggingFace model** | ? | no `onnx/` directory in the repository; requesting one 404s |
+**1. A mirror's ONNX will NOT satisfy the pin you already have.** It is a
+different serialisation of the same weights, so `CHECKPOINT.json`'s recorded
+digest will not match what you downloaded. Measured on whisper-tiny:
 
-**A `file` list in `CHECKPOINT.json` is not a download list.** The six
-Whisper sizes record `onnx/encoder_model.onnx` and `onnx/decoder_model.onnx`,
-and **both 404 upstream** -- those entries name what this repository's own
-export is called, not where to fetch it. Read them as local paths to create.
+| | this tree's export | onnx-community's |
+| --- | --- | --- |
+| `encoder_model.onnx` sha256 | `6642befb…` | `8dd994fe…` |
+| `decoder_model.onnx` sha256 | `ab79e3f2…` | `7e844cce…` |
+| `model_digest` | `eb6a1b7f…` | `55ace44d…` |
+| **the packed container's whole weight region** | `9fd75f76…` | **`9fd75f76…`** |
+
+Same container, byte for byte, from different input files. So if a pin check
+fails on a mirror, the fix is to **re-record the pin from the file you
+actually placed** -- never to edit the recorded value until it matches, and
+never to assume the mirror is wrong because the hash differs.
+
+**2. The mirrors mostly carry no licence.** Only the two `opencv/*` MediaPipe
+repositories and `Xenova/yolov8-pose-onnx` (`agpl-3.0`) state one. Every
+`onnx-community/*` repository has **no `license:` tag at all**, so the row
+above carries the ORIGINAL repository's licence forward *as an assertion*,
+flagged as such. An untagged mirror is not thereby apache-2.0, and a reader who
+needs the licence to be certain has to read the original repository's terms.
+
+**3. `whisper-medium` is not an onnx-community repository** -- it is
+`flackzz/whisper-medium-ONNX`. The other five Whisper sizes are
+onnx-community, so there is no pattern to infer trust from, and it is the one
+mirror in this table with no measured claim behind it.
+
+| model | graph repository | licence, and where that claim comes from |
+| --- | --- | --- |
+| `embeddinggemma-300m` | [`onnx-community/embeddinggemma-300m-ONNX`](https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX) | gemma — the MIRROR's license: tag -- and it agrees with Google's, so the Gemma terms still apply to this mirror |
+| `gte-multilingual-base` | [`onnx-community/gte-multilingual-base`](https://huggingface.co/onnx-community/gte-multilingual-base) | apache-2.0 (asserted, NOT stated) — the MIRROR carries NO license: tag. The original repository's tag says apache-2.0 and this document carries that forward as an assertion, which is … |
+| `vit-base-patch16-224` | [`onnx-community/vit-base-patch16-224-ONNX`](https://huggingface.co/onnx-community/vit-base-patch16-224-ONNX) | apache-2.0 (asserted, NOT stated) — the MIRROR carries NO license: tag; the original repository's tag says apache-2.0 |
+| `whisper-base` | [`onnx-community/whisper-base`](https://huggingface.co/onnx-community/whisper-base) | apache-2.0 (asserted, NOT stated) — the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0 |
+| `whisper-large-v3` | [`onnx-community/whisper-large-v3-ONNX`](https://huggingface.co/onnx-community/whisper-large-v3-ONNX) | apache-2.0 (asserted, NOT stated) — the MIRROR carries NO license: tag; the original openai/whisper-large-v3 tag says apache-2.0 |
+| `whisper-large-v3-turbo` | [`onnx-community/whisper-large-v3-turbo`](https://huggingface.co/onnx-community/whisper-large-v3-turbo) | mit (asserted, NOT stated) — the MIRROR carries NO license: tag; the original repository's tag says mit, and this is the one Whisper size that is not apache-2.0 |
+| `whisper-medium` | [`flackzz/whisper-medium-ONNX`](https://huggingface.co/flackzz/whisper-medium-ONNX) | apache-2.0 (asserted, NOT stated) — the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0 |
+| `whisper-small` | [`onnx-community/whisper-small`](https://huggingface.co/onnx-community/whisper-small) | apache-2.0 (asserted, NOT stated) — the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0 |
+| `whisper-tiny` | [`onnx-community/whisper-tiny-ONNX`](https://huggingface.co/onnx-community/whisper-tiny-ONNX) | apache-2.0 (asserted, NOT stated) — the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0 |
+| `yolov8n-pose` | [`Xenova/yolov8-pose-onnx`](https://huggingface.co/Xenova/yolov8-pose-onnx) | agpl-3.0 — the MIRROR states agpl-3.0, and so does Ultralytics' own release |
+
+### One of these links is wrong by one word
+
+`https://huggingface.co/onnx-community/whisper-large-v3` returns **HTTP 401** for the model listing and for
+every file. The working name is the same one **with the `-ONNX`
+suffix** that `whisper-tiny-ONNX` and `vit-base-patch16-224-ONNX`
+carry, and that answers 200 and has all four of `whisper-large-v3`'s files. Recorded
+because the difference is one hyphenated word and reads as a typo rather
+than as a 401.
+
+**What a mirror is not.** None of this says a mirror is interchangeable with
+the model's own export. It says, for the two rows that were tested, that the
+packed result was identical; for the other eight the claim stops at *the file
+is there and is the right shape*. `yolov8n-pose` and `whisper-tiny` are the only
+two rows in this table with a measured claim, and the rows say which they are.
 
 ## Everything else per model
 
@@ -95,19 +159,19 @@ export is called, not where to fetch it. Read them as local paths to create.
 | `bge-large-en-v1.5` | mit | huggingface license: tag | — |
 | `bge-micro-v2` | mit | huggingface license: tag | — |
 | `bge-small-en-v1.5` | mit | huggingface license: tag | — |
-| `embeddinggemma-300m` | gemma | huggingface license: tag; Google's own repository | **gated**: the repository needs an accepted licence and `HF_TOKEN`; `hub.cpp` fails closed rather than using a mirror **two repositories disagree** — see below Neither repository has an onnx/ directory -- checked by listing both. Google publishes three weight files and no export. |
-| `gte-multilingual-base` | apache-2.0 | huggingface license: tag | models/gte-multilingual-base/CHECKPOINT.json has `sha256: null`, and the pin is not absent: models/gte-multilingual-base.npue carries `source_sha256` = c703273702a2127620ddbd0a4ec22402c8c7ab3c... , which is model_digest() of the local export. NOT verified against HuggingFace, because there is no export up there to verify against -- the bytes are pinned to this machine's copy and to nothing else. No onnx/ directory -- the repository has one weight file and no export. |
+| `embeddinggemma-300m` | gemma | the MIRROR's license: tag -- and it agrees with Google's, so the Gemma terms still apply to this mirror | **gated**: the repository needs an accepted licence and `HF_TOKEN`; `hub.cpp` fails closed rather than using a mirror **two repositories disagree** — see below |
+| `gte-multilingual-base` | apache-2.0 (asserted, NOT stated) | the MIRROR carries NO license: tag. The original repository's tag says apache-2.0 and this document carries that forward as an assertion, which is weaker than a tag -- an untagged mirror is not thereby apache-2.0 | models/gte-multilingual-base/CHECKPOINT.json has `sha256: null`, and the pin is not absent: models/gte-multilingual-base.npue carries `source_sha256` = c703273702a2127620ddbd0a4ec22402c8c7ab3c... , which is model_digest() of the local export. NOT verified against HuggingFace, because there is no export up there to verify against -- the bytes are pinned to this machine's copy and to nothing else. |
 | `mediapipe-hands` | Apache-2.0 | models/mediapipe-hands/CHECKPOINT.json -- NOT the repository, which carries no license: tag at all | TWO checkpoints in one container, and they are not interchangeable: the landmark network is given a hand's RoI by the palm detector and cannot find a hand in a frame by itself, so shipping only it answers 'no hand here' to every image. Both files are 2023feb; the 2023feb_int8 and 2023feb_int8bq variants are in the same repositories and are DELIBERATELY NOT used -- see CHECKPOINT.json, which measures what they do to the output. |
 | `mediapipe-pose` | Apache-2.0 | models/mediapipe-pose/CHECKPOINT.json -- NOT the repository, which carries no license: tag at all | TWO checkpoints, same reason as mediapipe-hands: the pose regressor needs a person's box from the detector. The 2023mar_int8bq variants exist upstream and are NOT used -- CHECKPOINT.json measures them putting the 33 keypoints a mean 64.0 px apart. |
 | `nomic-embed-text-v1.5` | apache-2.0 | huggingface license: tag | models/nomic-embed-text-v1.5/CHECKPOINT.json has `sha256: null`, but the pin is NOT absent: models/nomic-embed-text-v1.5.npue carries `source_sha256` = 12ce232f57cfbc0ab9258835dec6e5a105b88c7405dcefeec70facf3a3549b29, which is model_digest() of models/nomic-embed-text-v1.5/onnx/model.onnx -- and the downloaded export hashed byte for byte against that local file. So this model is pinned twice over, in two files, by two different mechanisms. |
-| `vit-base-patch16-224` | apache-2.0 | huggingface license: tag | No onnx/ directory; the `file` entry 404s upstream. See whisper-tiny for why the `file` list is a local path and not a URL. |
-| `whisper-base` | apache-2.0 | huggingface license: tag | No onnx/ directory; the `file` entries 404 upstream. See whisper-tiny. |
-| `whisper-large-v3` | apache-2.0 | huggingface license: tag | No onnx/ directory; the `file` entries 404 upstream. See whisper-tiny. |
-| `whisper-large-v3-turbo` | mit | huggingface license: tag | MIT, not Apache-2.0 like the other five Whisper sizes -- the tag was read from the repository, and a table that copied the Whisper row's licence would be wrong here. No onnx/ directory; the `file` entries 404 upstream. See whisper-tiny. |
-| `whisper-medium` | apache-2.0 | huggingface license: tag | models/whisper-medium/ is the ONLY model directory in this table with no CHECKPOINT.json at all, so it has no repo record, no file list and no digest. The ONNX pair is on disk (onnx/encoder_model.onnx and onnx/decoder_model.onnx) and models/whisper-medium.npue is packed from it, so the model works here and is undocumented -- which is the one gap in this table that no download link can close, because what is missing is the local record. No onnx/ directory. See whisper-tiny. |
-| `whisper-small` | apache-2.0 | huggingface license: tag | No onnx/ directory; the `file` entries 404 upstream. See whisper-tiny. |
-| `whisper-tiny` | apache-2.0 | huggingface license: tag | No onnx/ directory. CHECKPOINT.json's `file` list says `onnx/encoder_model.onnx` and `onnx/decoder_model.onnx`, and BOTH RETURN 404 upstream -- the list records what THIS repository's export was called, not where to fetch it. Read the two `file` entries as local paths to create, not as URLs. |
-| `yolov8n-pose` | — | not established -- no CHECKPOINT.json and the upstream repository is not recorded anywhere in this tree | — |
+| `vit-base-patch16-224` | apache-2.0 (asserted, NOT stated) | the MIRROR carries NO license: tag; the original repository's tag says apache-2.0 | — |
+| `whisper-base` | apache-2.0 (asserted, NOT stated) | the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0 | — |
+| `whisper-large-v3` | apache-2.0 (asserted, NOT stated) | the MIRROR carries NO license: tag; the original openai/whisper-large-v3 tag says apache-2.0 | — |
+| `whisper-large-v3-turbo` | mit (asserted, NOT stated) | the MIRROR carries NO license: tag; the original repository's tag says mit, and this is the one Whisper size that is not apache-2.0 | MIT, not Apache-2.0 like the other five Whisper sizes -- the tag was read from the repository, and a table that copied the Whisper row's licence would be wrong here. |
+| `whisper-medium` | apache-2.0 (asserted, NOT stated) | the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0 | models/whisper-medium/ is still the ONLY model directory in this table with no CHECKPOINT.json, so it has no repo record, no file list and no digest. A mirror now makes the FILES obtainable, which does not fix the missing local record: the pin is what the goldens were made against, and a pin for a file nobody recorded is not a weaker pin, it is no pin. |
+| `whisper-small` | apache-2.0 (asserted, NOT stated) | the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0 | — |
+| `whisper-tiny` | apache-2.0 (asserted, NOT stated) | the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0 | — |
+| `yolov8n-pose` | agpl-3.0 | the MIRROR states agpl-3.0, and so does Ultralytics' own release | — |
 
 ### Two repositories, one model: `embeddinggemma-300m`
 
