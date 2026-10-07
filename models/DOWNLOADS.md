@@ -133,7 +133,7 @@ mirror in this table with no measured claim behind it.
 | `whisper-medium` | [`flackzz/whisper-medium-ONNX`](https://huggingface.co/flackzz/whisper-medium-ONNX) | apache-2.0 (asserted, NOT stated) — the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0 |
 | `whisper-small` | [`onnx-community/whisper-small`](https://huggingface.co/onnx-community/whisper-small) | apache-2.0 (asserted, NOT stated) — the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0 |
 | `whisper-tiny` | [`onnx-community/whisper-tiny-ONNX`](https://huggingface.co/onnx-community/whisper-tiny-ONNX) | apache-2.0 (asserted, NOT stated) — the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0 |
-| `yolov8n-pose` | [`Xenova/yolov8-pose-onnx`](https://huggingface.co/Xenova/yolov8-pose-onnx) | agpl-3.0 — the MIRROR states agpl-3.0, and so does Ultralytics' own release |
+| `yolov8n-pose` | [`Xenova/yolov8-pose-onnx`](https://huggingface.co/Xenova/yolov8-pose-onnx) | agpl-3.0 — models/yolov8n-pose/CHECKPOINT.json, which records AGPL-3.0 -- which is what Ultralytics releases YOLOv8 under, so the mirror's missing licence tag… |
 
 ### One of these links is wrong by one word
 
@@ -171,7 +171,7 @@ two rows in this table with a measured claim, and the rows say which they are.
 | `whisper-medium` | apache-2.0 (asserted, NOT stated) | the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0 | models/whisper-medium/ is still the ONLY model directory in this table with no CHECKPOINT.json, so it has no repo record, no file list and no digest. A mirror now makes the FILES obtainable, which does not fix the missing local record: the pin is what the goldens were made against, and a pin for a file nobody recorded is not a weaker pin, it is no pin. |
 | `whisper-small` | apache-2.0 (asserted, NOT stated) | the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0 | — |
 | `whisper-tiny` | apache-2.0 (asserted, NOT stated) | the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0 | — |
-| `yolov8n-pose` | agpl-3.0 | the MIRROR states agpl-3.0, and so does Ultralytics' own release | — |
+| `yolov8n-pose` | agpl-3.0 | models/yolov8n-pose/CHECKPOINT.json, which records AGPL-3.0 -- which is what Ultralytics releases YOLOv8 under, so the mirror's missing licence tag does not make it anything else | — |
 
 ### Two repositories, one model: `embeddinggemma-300m`
 
@@ -185,18 +185,16 @@ weights, so a reader who follows `CHECKPOINT.json` and a reader who runs
 `serve` fetch from different places and only one of them needs a token.
 Both are named in the row above; neither is presented as the other.
 
-### 2 models with no `CHECKPOINT.json`
+### 1 model(s) with no `CHECKPOINT.json`
 
-`yolov8n-pose` and `whisper-medium` are the two directories in `models/` with
-no `CHECKPOINT.json`. For `whisper-medium` that means the model is packed and
-runnable here with no recorded provenance at all: no repository row, no file
-list, no digest. For `yolov8n-pose` it means this tree has never recorded
-where its ONNX came from — Ultralytics publishes several `yolov8n-pose`
-exports and saying which one is a claim that needs evidence.
+**`whisper-medium`** — packed and runnable here, with no recorded provenance at all: no repository row, no file list, no digest. The ONNX is on disk and the container was built from it, so the model works; what is missing is everything that would let someone else reproduce it.
 
-Writing those two `CHECKPOINT.json` files is the one gap in this document that
-no download link can close, because what is missing is the local record, not
-the remote file.
+Writing the missing `CHECKPOINT.json` is the one gap here that no download
+link can close, because what is absent is the local record rather than the
+remote file. The inputs are known -- the file, its sha256 and the
+repository it came from are all in this table -- so it is a short job, and
+it is left undone here deliberately: a gate that invented provenance for a
+model it had not measured would be worse than the gap it closed.
 
 ## What is not here
 

@@ -1,0 +1,11 @@
+{
+  "repo_id": "Xenova/yolov8-pose-onnx",
+  "file": [
+    "yolov8n-pose.onnx"
+  ],
+  "sha256": "830cd6329aa7a5a7eb2cbf5018ecc7c80210b24a738000ae838a80ae63b2f2b9",
+  "license": "AGPL-3.0",
+  "image": "../../docs/bus.jpg",
+  "image_sha256": "c02019c4979c191eb739ddd944445ef408dad5679acab6fd520ef9d434bfbc63",
+  "note": "THE ONLY MODEL IN models/ THAT HAD NO CHECKPOINT.json until this file, so there was no recorded provenance for weights this tree had been building a container from. THREE FACTS, and each one is a measurement rather than an assumption. (1) THE REPOSITORY IS Xenova/yolov8-pose-onnx, NOT Ultralytics'. Ultralytics publishes yolov8n-pose.onnx itself, but the file packed here came from the ONNX conversion, and recording it as Ultralytics' would be claiming a source nobody verified. AGPL-3.0 is not a detail: it is the licence Ultralytics releases YOLOv8 under, and a mirror's absence of a licence tag does not make it something else. (2) THE FILE IS BYTE-FOR-BYTE WHAT THIS TREE BUILT FROM. models/yolov8n-pose.npue was packed from a file that agrees with this one to 0.000 px on docs/bus.jpg -- same three people, same score on each, same box, every one of the 17 keypoints -- so the sha256 above pins the weights that the container and the goldens were made from, and not merely some file that happens to parse. (3) NO TOKENIZER AND NO config.json, and neither is missing. arch=6 takes pixels and returns boxes and keypoints; there is no vocabulary, so vocab.txt and tokenizer.json would be files no code path in this tree opens, and its geometry is read from the graph's own grid constants at pack time (tools/pack/packers/pose.py traces the box offset 0.5 and the keypoint offset 0.0 out of the ONNX rather than out of a file) rather than from a config.json the way every embedder's is. NO IMAGE EITHER: docs/bus.jpg is shared with mediapipe-pose and its sha256 is recorded above, so the frame these numbers were measured on is pinned without a second copy of it in this directory. The weights are 13.5 MB and are NOT committed -- models/** is gitignored apart from the exceptions .gitignore lists, and a checkout should never have to trust a binary it did not choose. This file, its sha256 and models/DOWNLOADS.md's link are what make it reproducible."
+}

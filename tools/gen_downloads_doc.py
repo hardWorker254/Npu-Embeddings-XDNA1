@@ -512,18 +512,35 @@ def en_doc(src, rows):
     a("`serve` fetch from different places and only one of them needs a token.")
     a("Both are named in the row above; neither is presented as the other.")
     a("")
-    a(f"### {no_ck} models with no `CHECKPOINT.json`")
-    a("")
-    a("`yolov8n-pose` and `whisper-medium` are the two directories in `models/` with")
-    a("no `CHECKPOINT.json`. For `whisper-medium` that means the model is packed and")
-    a("runnable here with no recorded provenance at all: no repository row, no file")
-    a("list, no digest. For `yolov8n-pose` it means this tree has never recorded")
-    a("where its ONNX came from — Ultralytics publishes several `yolov8n-pose`")
-    a("exports and saying which one is a claim that needs evidence.")
-    a("")
-    a("Writing those two `CHECKPOINT.json` files is the one gap in this document that")
-    a("no download link can close, because what is missing is the local record, not")
-    a("the remote file.")
+    # ENUMERATED FROM THE DATA, not written as a sentence. This paragraph named
+    # `yolov8n-pose` and `whisper-medium` and said "those two" -- and then
+    # yolov8n-pose got a CHECKPOINT.json, the count became 1, and the sentence kept
+    # naming both. That is the third time in this file's history that the number was
+    # recomputed correctly and the prose around it was not, which is why this
+    # section reads the list instead of holding it. A named model in generated prose
+    # is a fact with a shelf life.
+    missing_ck = sorted(n for n in rows if checkpoint(n) is None)
+    if missing_ck:
+        a(f"### {len(missing_ck)} model(s) with no `CHECKPOINT.json`")
+        a("")
+        for n in missing_ck:
+            a(f"**`{n}`** — packed and runnable here, with no recorded provenance at "
+              "all: no repository row, no file list, no digest. The ONNX is on disk "
+              "and the container was built from it, so the model works; what is "
+              "missing is everything that would let someone else reproduce it.")
+        a("")
+        a("Writing the missing `CHECKPOINT.json` is the one gap here that no download")
+        a("link can close, because what is absent is the local record rather than the")
+        a("remote file. The inputs are known -- the file, its sha256 and the")
+        a("repository it came from are all in this table -- so it is a short job, and")
+        a("it is left undone here deliberately: a gate that invented provenance for a")
+        a("model it had not measured would be worse than the gap it closed.")
+    else:
+        a("### Every model records its provenance")
+        a("")
+        a(f"All {len(rows)} directories carry a `CHECKPOINT.json`, so every row above "
+          "is backed")
+        a("by a pin the tree checks.")
     a("")
     a("## What is not here")
     a("")
@@ -684,18 +701,30 @@ def ru_doc(src, rows):
     a("разных мест, и токен нужен только одному. Оба названы в таблице; ни один не")
     a("выдаётся за другой.")
     a("")
-    a(f"### {no_ck} модели без `CHECKPOINT.json`")
-    a("")
-    a("`yolov8n-pose` и `whisper-medium` — два каталога в `models/`, где нет")
-    a("`CHECKPOINT.json`. Для `whisper-medium` это значит, что модель здесь собрана и")
-    a("работает вообще без записанного происхождения: ни строки о репозитории, ни")
-    a("списка файлов, ни хеша. Для `yolov8n-pose` — что дерево никогда не записывало,")
-    a("откуда взялся ONNX: Ultralytics публикует несколько экспортов `yolov8n-pose`, и")
-    a("сказать какой — утверждение, требующее доказательства.")
-    a("")
-    a("Написать эти два `CHECKPOINT.json` — единственная дыра в этом документе,")
-    a("которую не закроет никакая ссылка: не хватает локальной записи, а не удалённого")
-    a("файла.")
+    # Список берётся из данных, а не вписан в предложение: этот абзац называл
+    # yolov8n-pose и whisper-medium словом «оба», а потом yolov8n-pose получил
+    # CHECKPOINT.json, счётчик стал 1, а предложение продолжало называть обоих.
+    missing_ck_ru = sorted(n for n in rows if checkpoint(n) is None)
+    if missing_ck_ru:
+        a(f"### {len(missing_ck_ru)} модел(и) без `CHECKPOINT.json`")
+        a("")
+        for n in missing_ck_ru:
+            a(f"**`{n}`** — собрана и работает здесь, но вообще без записанного")
+            a("происхождения: ни строки о репозитории, ни списка файлов, ни хеша. ONNX")
+            a("на диске, контейнер собран из него — то есть модель работает; не хватает")
+            a("всего, что позволило бы кому-то её воспроизвести.")
+        a("")
+        a("Написать недостающий `CHECKPOINT.json` — единственная дыра здесь, которую не")
+        a("закроет ссылка: не хватает локальной записи, а не удалённого файла. Входные")
+        a("данные известны — файл, его sha256 и репозиторий есть в таблице, — так что")
+        a("работа короткая, и оставлена намеренно: гейт, выдумывающий происхождение для")
+        a("модели, которую не измерял, хуже дыры, которую закрывает.")
+    else:
+        a("### У каждой модели записано происхождение")
+        a("")
+        a(f"Во всех {len(rows)} каталогах есть `CHECKPOINT.json`, так что за каждой "
+          "строкой")
+        a("таблицы стоит пин, который дерево проверяет.")
     a("")
     return "\n".join(L) + "\n"
 

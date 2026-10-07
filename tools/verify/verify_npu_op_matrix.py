@@ -498,19 +498,48 @@ def main() -> int:
                     print("   " + err.strip().splitlines()[0][:160])
                     bad += 1
     print(f"  ran   {ran} cells against {BIN.name}" if ran else
-          "  ran   no cells (nothing to run against)")
+          "  ran   0 cells -- NO CELL WAS CHECKED AGAINST THE BINARY")
 
     if skipped:
         print(f"  skip  {skipped} architecture row(s) not run here -- the cells "
               f"are counted above and were NOT checked against the binary")
 
+    # ZERO CELLS IS A FAILURE, and it was a PASS until this line existed.
+    #
+    # Found by accident: every models/*.npue container on this machine had gone,
+    # and this gate -- whose entire purpose is to check the registry's claims
+    # against what the binary actually does -- printed
+    #
+    #     ran   no cells (nothing to run against)
+    #     PASS -- the registry, all four generated documents, the C++ table and
+    #            the runtime all say the same thing about every cell that could be run
+    #
+    # "Every cell that COULD be run" was zero, and it read exactly like the
+    # forty-cell run it is not. A gate that checks nothing is indistinguishable in
+    # its own output from a gate that checked everything, and that is the worst
+    # property a gate can have: it converts a missing artifact into a green light.
+    #
+    # The threshold is ZERO and not a higher number on purpose. A legitimate
+    # partial checkout runs fewer cells than a full one -- this machine ran 40 with
+    # every container present -- so pinning an exact count would make the gate
+    # depend on which models happen to be installed. What must never be acceptable
+    # is a run that verified nothing at all, and that is precisely `ran == 0`.
+    if ran == 0:
+        print(f"  FAIL  no cell was checked against {BIN.name}. Every row was "
+              f"skipped, so this run verified the registry against ITSELF and "
+              f"against nothing else -- which is not what this gate is for. The "
+              f"skip lines above name why each row went; pack or install at least "
+              f"one container and re-run.")
+        bad += 1
+
     if bad:
         print(f"FAIL -- {bad} disagreement(s) between the registry, the "
               f"generated document, the C++ table and what the runtime does")
         return 1
-    print("PASS -- the registry, all four generated documents, the C++ table and "
-          "the runtime all say the same thing about every cell that could be "
-          "run")
+    print(f"PASS -- the registry, all four generated documents, the C++ table and "
+          f"the runtime all say the same thing, and {ran} cell(s) were checked "
+          f"against {BIN.name}" + (f"; {skipped} architecture row(s) were not"
+                                   if skipped else ""))
     return 0
 
 

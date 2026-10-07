@@ -118,7 +118,7 @@
 | `whisper-medium` | [`flackzz/whisper-medium-ONNX`](https://huggingface.co/flackzz/whisper-medium-ONNX) | apache-2.0 (asserted, NOT stated) — the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0 |
 | `whisper-small` | [`onnx-community/whisper-small`](https://huggingface.co/onnx-community/whisper-small) | apache-2.0 (asserted, NOT stated) — the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0 |
 | `whisper-tiny` | [`onnx-community/whisper-tiny-ONNX`](https://huggingface.co/onnx-community/whisper-tiny-ONNX) | apache-2.0 (asserted, NOT stated) — the MIRROR carries NO license: tag; the original openai/whisper-* tag says apache-2.0 |
-| `yolov8n-pose` | [`Xenova/yolov8-pose-onnx`](https://huggingface.co/Xenova/yolov8-pose-onnx) | agpl-3.0 — the MIRROR states agpl-3.0, and so does Ultralytics' own release |
+| `yolov8n-pose` | [`Xenova/yolov8-pose-onnx`](https://huggingface.co/Xenova/yolov8-pose-onnx) | agpl-3.0 — models/yolov8n-pose/CHECKPOINT.json, which records AGPL-3.0 -- which is what Ultralytics releases YOLOv8 under, so the mirror's missing licence tag… |
 
 ### Одна из этих ссылок неверна на одно слово
 
@@ -145,16 +145,16 @@ Google гейтед — нужна принятая лицензия и заго
 разных мест, и токен нужен только одному. Оба названы в таблице; ни один не
 выдаётся за другой.
 
-### 2 модели без `CHECKPOINT.json`
+### 1 модел(и) без `CHECKPOINT.json`
 
-`yolov8n-pose` и `whisper-medium` — два каталога в `models/`, где нет
-`CHECKPOINT.json`. Для `whisper-medium` это значит, что модель здесь собрана и
-работает вообще без записанного происхождения: ни строки о репозитории, ни
-списка файлов, ни хеша. Для `yolov8n-pose` — что дерево никогда не записывало,
-откуда взялся ONNX: Ultralytics публикует несколько экспортов `yolov8n-pose`, и
-сказать какой — утверждение, требующее доказательства.
+**`whisper-medium`** — собрана и работает здесь, но вообще без записанного
+происхождения: ни строки о репозитории, ни списка файлов, ни хеша. ONNX
+на диске, контейнер собран из него — то есть модель работает; не хватает
+всего, что позволило бы кому-то её воспроизвести.
 
-Написать эти два `CHECKPOINT.json` — единственная дыра в этом документе,
-которую не закроет никакая ссылка: не хватает локальной записи, а не удалённого
-файла.
+Написать недостающий `CHECKPOINT.json` — единственная дыра здесь, которую не
+закроет ссылка: не хватает локальной записи, а не удалённого файла. Входные
+данные известны — файл, его sha256 и репозиторий есть в таблице, — так что
+работа короткая, и оставлена намеренно: гейт, выдумывающий происхождение для
+модели, которую не измерял, хуже дыры, которую закрывает.
 
