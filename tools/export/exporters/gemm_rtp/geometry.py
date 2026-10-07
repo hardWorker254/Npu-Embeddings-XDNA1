@@ -288,6 +288,31 @@ CONV_ONLY_SHAPES: dict[str, tuple[tuple[int, int], ...]] = {
     "mppose": MPPOSE_CONV_SHAPES,
 }
 
+# AND THE ASSERTION THAT MAKES THE IMPORT ABOVE MEAN SOMETHING. Two tables, two
+# directions:
+#
+#   * a kind with shapes but no entry in CONV_ONLY_KINDS is invisible to
+#     build.py's directory table and to targets.py's dispatch, so its shapes
+#     would be built by nothing and exported by nobody -- a whole design set
+#     that no gate could complain about, because nothing referenced it;
+#   * a kind in CONV_ONLY_KINDS with no shapes reaches `conv_stream_order`, which
+#     does `CONV_ONLY_SHAPES[kind]` and raises KeyError -- in the middle of an
+#     export, with a message that names a dict rather than the two tables.
+#
+# Without this the import of CONV_ONLY_KINDS was UNUSED, which is what pyflakes
+# said, and an unused import of the authoritative table is the quietest possible
+# sign that the check it was imported for is not there. The gate
+# (verify_pose_streamset.py) compares all three tables and would eventually catch
+# either direction -- but it compares them in a checkout that has the design sets
+# on disk, and an exporter that runs where they are not has nothing to fail on.
+assert set(CONV_ONLY_SHAPES) == set(CONV_ONLY_KINDS), (
+    f"the conv-only kinds and their shape tables disagree: shapes "
+    f"{sorted(set(CONV_ONLY_SHAPES))}, kinds {sorted(CONV_ONLY_KINDS)}. A fourth "
+    f"conv-only architecture has to be added to consts.CONV_ONLY_KINDS, to "
+    f"CONV_ONLY_SHAPES here, to build.py's STREAM_SET_DIRS and to "
+    f"tools/data/npu_targets.json -- and this is the line that notices two of "
+    f"the four disagreeing before an export does it halfway.")
+
 
 def conv_stream_order(kind: str) -> list[str]:
     """Stream names for one conv-only kind, in slot order.

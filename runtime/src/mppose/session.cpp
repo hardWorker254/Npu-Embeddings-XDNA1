@@ -81,11 +81,31 @@ Session::Session(npue::File &model, const std::string &model_name,
       pose_slots_[i] = static_cast<int64_t>(slots.size());
       slots.push_back(conv::ConvSlot{static_cast<int64_t>(slots.size()), "pose",
                                      "pose.", static_cast<int64_t>(i),
-                                     stream_of(geom_.pose_graph, i), cw.cin,
-                                     cw.cout, cw.kh, cw.kw, cw.b});
+                                     stream_of(geom_.pose_graph,
+                                               static_cast<int64_t>(i)),
+                                     cw.cin, cw.cout, cw.kh, cw.kw, cw.b});
     }
-    det_base_ = 0;
-    pose_base_ = det_slots_.size() == 0 ? 0 : 0;
+    // NO PER-NETWORK BASE OFFSET, and that is a decision rather than an omission.
+    // There used to be `det_base_` and `pose_base_` here, assigned as
+    //
+    //     det_base_  = 0;
+    //     pose_base_ = det_slots_.size() == 0 ? 0 : 0;
+    //
+    // -- a conditional whose two branches are both 0, so the second line could
+    // not compute the thing its own comment promised ("the number of DENSE
+    // detector convolutions"). Nothing read either field, which is the only
+    // reason it survived: clang-tidy's bugprone-branch-clone is what finally
+    // named it. Had anyone later "used" `pose_base_` on the strength of that
+    // comment, every landmark convolution would have dispatched against the
+    // DETECTOR's panel -- the right shape in most cases and the wrong weights in
+    // all of them, which is the failure this file's Placement::slots comment
+    // exists to prevent.
+    //
+    // A base offset is not needed at all: both loops below push onto ONE `slots`
+    // vector, so the pose network's slots already start at the detector's dense
+    // count, and each network's own table translates its conv index to the right
+    // absolute slot. The single source of truth is `slots`, and it is the same
+    // vector the backend is handed.
     if (slots.empty())
       throw std::runtime_error(
           name_ + ": --npu-ops conv was asked for and neither graph has a dense "

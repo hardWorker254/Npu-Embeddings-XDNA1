@@ -878,7 +878,6 @@ def npu_panels(pfx, ops, weights, device):
 
 def pack_hands(palm_onnx, lm_onnx, out_path, dry_run=False,
                 device=None, npu=False):
-    models = {}
     tp = trace("palm", onnx.load(str(palm_onnx)))
     tl = trace("landmark", onnx.load(str(lm_onnx)))
     ops_p, names_p, conv_p, w_p, prelu_p, head_p = emit_ops(tp, "palm")

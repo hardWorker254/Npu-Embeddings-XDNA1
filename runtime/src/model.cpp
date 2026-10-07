@@ -247,9 +247,6 @@ File::File(const std::string &path) {
   base_ = static_cast<const uint8_t *>(m);
 #endif
 
-  if (size_ < sizeof(FileHeader))
-    throw std::runtime_error(path + ": truncated");
-
   if (size_ < sizeof(FileHeader)) throw std::runtime_error(path + ": truncated");
   FileHeader h{};
   std::memcpy(&h, base_, sizeof h);

@@ -161,10 +161,6 @@ private:
   // a reference to the array backend, so that does too.
   std::unique_ptr<app::Pool> pool_;
   std::unique_ptr<conv::Convs> array_;
-  // The slot range each network owns in array_'s panel table. Both zero on the
-  // host path, where there is no table; the pose one is non-zero only when the
-  // array is in use, and its value is the number of DENSE detector convolutions.
-  int64_t det_base_ = 0, pose_base_ = 0;
   // conv index -> array slot, per network, -1 for a depthwise convolution. Both
   // EMPTY on the host path. They are members and not locals because the Networks
   // hold POINTERS to them and outlive this constructor -- a local would be a
