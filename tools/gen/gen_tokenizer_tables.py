@@ -37,7 +37,7 @@ import unicodedata
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-OUT = REPO / "runtime" / "include" / "bert_unicode_tables.hpp"
+OUT = REPO / "runtime" / "include" / "tokenizers" / "bert_unicode_tables.hpp"
 
 MAX_CP = 0x110000
 SIGMA = 0x03A3          # GREEK CAPITAL LETTER SIGMA

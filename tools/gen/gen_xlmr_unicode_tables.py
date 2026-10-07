@@ -37,7 +37,7 @@ import unicodedata
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-OUT = REPO / "runtime" / "include" / "xlmr_unicode_tables.hpp"
+OUT = REPO / "runtime" / "include" / "tokenizers" / "xlmr_unicode_tables.hpp"
 
 MAX_CP = 0x110000
 
