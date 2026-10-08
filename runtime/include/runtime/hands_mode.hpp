@@ -166,7 +166,7 @@ inline int maybe_hands_mode(const std::string &root, int argc, char **argv,
                       "land on. Not refused because a hand cannot be detected "
                       "over HTTP -- it can -- but because a server that accepts "
                       "the request and answers it from a DIFFERENT code path than "
-                      "`npuembeddings hands` is exactly the drift the pose "
+                      "`npuimage hands` is exactly the drift the pose "
                       "endpoint documents as a contract. Until the endpoint "
                       "exists, the CLI is the whole answer, and the Python "
                       "facade (python/npue_hands.py) refuses backend=\"http\" "
@@ -204,7 +204,7 @@ inline int maybe_hands_mode(const std::string &root, int argc, char **argv,
   if (images.empty())
     throw std::runtime_error(
         "this is a hands model, so say whose hands to find:\n"
-        "    npuembeddings hands <model> <image.png> [more.png ...]\n"
+        "    npuimage hands <model> <image.png> [more.png ...]\n"
         "  (PNG and JPEG; anything else is refused rather than guessed at)\n"
         "  --max-hands 1     run the second stage on at most N detections\n"
         "  --text            a human summary instead of JSON\n"

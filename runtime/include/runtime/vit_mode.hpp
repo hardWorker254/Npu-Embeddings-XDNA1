@@ -71,7 +71,7 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
 
   refuse_removed_op_flags(argc, argv);
   refuse_exporter_only_flags(argc, argv);
-  // The LAST occurrence wins, not the first. `npuembeddings serve <model>` puts
+  // The LAST occurrence wins, not the first. `npuimage serve <model>` puts
   // its own --threads 24 in the store BEFORE forward_common() appends whatever
   // the user typed, so the reader that took the first match silently answered
   // `serve <whisper> --threads 8` with 24 threads. Nothing on the command line
@@ -119,7 +119,7 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
   // "1" and then trips over the second load.
   std::set<std::string> npu_ops;
 
-  // --npu-ops: SIX CODES ARE HONOURED AND FOUR ARE REFUSED, each by name.
+  // --npu-ops: SIX CODES ARE HONOURED AND THREE ARE REFUSED, each by name.
   //
   // `layn` and `gelu` are genuine per-op host/array choices here, and were not
   // for a while: the refusal below once said this architecture's design set
@@ -130,12 +130,9 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
   // exactly as for kinds.stt. Each costs one extra xclbin and one extra
   // hw_context.
   //
-  // The other six are refused, and the reasons are per code because they are not
-  // one reason:
+  // The other three are refused, and the reasons are per code because they are
+  // not one reason:
   //
-  //   conv   Whisper's audio front end. A ViT's front end is decode, resize,
-  //          normalise and im2col -- all host image work, not convolutions over
-  //          a feature map, so there is nothing this code names.
   //   mproj  the mel filter bank;   fft the 400-point transform;
   //   logit  the vocabulary projection. Three audio/decoder operations. The
   //          nearest thing here is the classification head, and THAT is not a
@@ -151,17 +148,26 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
   // through the same NpuAttention Whisper does -- one class, two branches.
   //
   // And one measurement note that belongs here rather than only in the README:
-  // the numbers for `attn` at these 197 positions are a measurement (0.349 s of
-  // encoder against 0.244 s of host, i.e. the array SLOWER), printed as such
-  // further down. They say what this container does; they are not a claim that
-  // the flag is worth taking for speed, and nothing here predicts a seq this
-  // machine has not been run at.
+  // the numbers for `attn` at these 197 positions are a measurement, printed as
+  // such further down -- 0.348 s of encoder for --npu-ops gemm,attn against
+  // 0.241 s for --npu-ops gemm, i.e. the array SLOWER, and the same story for
+  // `softm` (0.806 s against 0.241 s). They say what this container does; they
+  // are not a claim that the flag is worth taking for speed, and nothing here
+  // predicts a seq this machine has not been run at. NPU_OPS.md, the `attn` and
+  // `softm` cells, is where those two pairs are written down.
   {
     std::string listing;
     for (int i = 1; i < argc - 1; ++i)
       if (std::string(argv[i]) == "--npu-ops") listing = argv[i + 1];
     const std::set<std::string> codes = parse_npu_ops(listing);
-    const std::set<std::string> dead = {"conv", "mproj", "fft", "logit"};
+    // `conv` is deliberately NOT in this set any more. It used to be, and the
+    // paragraph below carried the sentence that said the patch embedding was
+    // ALREADY on the array "with no flag at all, which is why asking for conv
+    // would add no dispatch" -- true while the four per-layer GEMMs were
+    // unconditional and false once `gemm` put them behind `--npu-ops gemm`.
+    // The two are one group now: `conv` takes the patch embedding, `gemm` takes
+    // the four per-layer GEMMs, and either can be asked for on its own.
+    const std::set<std::string> dead = {"mproj", "fft", "logit"};
     std::vector<std::string> refused;
     for (const auto &c : codes)
       if (dead.count(c)) refused.push_back(c);
@@ -169,20 +175,14 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
       std::string seen;
       for (const auto &c : refused) { if (!seen.empty()) seen += ", "; seen += c; }
       std::string keep;
-      for (const auto &c : {"layn", "gelu", "attn", "softm"})
+      for (const auto *c : {"layn", "gelu", "attn", "softm", "conv", "gemm"})
         if (codes.count(c)) { keep += keep.empty() ? c : ", " + std::string(c); }
       throw std::runtime_error(
           "--npu-ops " + seen + ": this architecture has no such "
-          "host/array choice to make. conv, mproj and fft name "
-          "Whisper's audio front end, mel bank and transform. The one "
-          "convolution this architecture has -- the patch embedding, "
-          "Conv2d(3, d, kernel, stride=kernel) -- is ALREADY on the array: "
-          "its [n_pos, patch_dim] x [patch_dim, d] shape is attn_out's own, so "
-          "it is dispatched on attn_out's instruction slot with no flag at all, "
-          "which is why asking for conv would add no dispatch. mproj and fft "
-          "have no counterpart because this front end is "
-          "decode/resize/normalise/im2col. logit names the vocabulary "
-          "projection; the nearest thing here is the classification head, which "
+          "host/array choice to make. mproj and fft name "
+          "Whisper's mel bank and transform, and this front end is "
+          "decode/resize/normalise/im2col, so neither exists here. logit names "
+          "the vocabulary projection; the nearest thing here is the classification head, which "
           "cannot run on this array at all because 1000 is not a multiple of "
           "tile_n*cols = 192 and no legal B panel of that width exists." +
           (keep.empty() ? std::string(" Drop it.")
@@ -241,8 +241,8 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
   if (images.empty() && !serving)
     throw std::runtime_error(
         "this is an image classifier, so say what to classify:\n"
-        "    npuembeddings classify <model> <image.png> [more.png ...]\n"
-        "    npuembeddings serve <model>          (POST /v1/classify)\n"
+        "    npuimage classify <model> <image.png> [more.png ...]\n"
+        "    npuimage serve <model>          (POST /v1/classify)\n"
         "  (it reads PNG and JPEG; anything else is refused rather than "
         "guessed at)");
 
@@ -411,16 +411,38 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
       return s;
     };
     std::fprintf(stderr, "  ops        (npu = dispatched, host = this process)\n");
+    // WHERE EACH OF THE TWO GEMM GROUPS RAN, read from the FLAG.
+    //
+    // Both rows used to print `npu` unconditionally, because both the patch
+    // embedding and the four per-layer GEMMs were dispatched whenever a design
+    // set was present -- and they were the one exception to this flag's own
+    // rule. With the ninth code (`gemm`) they follow `--npu-ops` like everything
+    // else, so a run with no flag dispatches nothing and a block that said
+    // `npu` beside "0 dispatches" two lines below was the last place the rule
+    // was not true.
+    const bool conv_on = app::op_on_array("conv");
+    const bool gemm_on = app::op_on_array("gemm");
     std::fprintf(stderr, "             %-26s %-5s %s\n", "patch_embed, 5th GEMM",
-                 "npu",
-                 "rides attn_out's stream: [n_patches, 768] x [768, 768] IS "
-                 "attn_out's shape, so it costs no new stream and no new design");
+                 conv_on ? "npu" : "host",
+                 conv_on
+                     ? "rides attn_out's stream: [n_patches, 768] x [768, 768] IS "
+                       "attn_out's shape, so it costs no new stream and no new design"
+                     : "the same attn_out shape, computed here; --npu-ops conv "
+                       "dispatches it, and it is the only convolution this "
+                       "architecture has");
+    // Only the streams `gemm` names: the loaded set also carries attn_qk and
+    // attn_av, which belong to `attn` and have a row of their own below.
+    std::vector<std::string> gemm_ops;
+    for (const auto &op : session.stream_ops())
+      if (std::string(app::code_for_stream(op)) == "gemm") gemm_ops.push_back(op);
     std::fprintf(stderr, "             %-26s %-5s %s\n",
                  (std::to_string(g.layers) + " x qkv/attn_out/ffn").c_str(),
-                 "npu", (joined(session.stream_ops()) + ", M=" +
-                           std::to_string(session.rows_per_dispatch()) +
-                           " rows per dispatch")
-                             .c_str());
+                 gemm_on ? "npu" : "host",
+                 (joined(gemm_ops) + ", M=" +
+                  std::to_string(session.rows_per_dispatch()) +
+                  " rows per dispatch" +
+                  (gemm_on ? "" : "; --npu-ops gemm moves them to the array"))
+                     .c_str());
     std::fprintf(stderr, "             %-26s %-5s %s\n", "image front end",
                  "host",
                  ("decode, PIL-equivalent resize to " +
@@ -473,10 +495,10 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
     // prediction was right about the direction and wrong about the precision,
     // and a line that reports an intention while a different number sits beside
     // it is the failure this block exists to prevent. Measured on this container
-    // (197 positions, 12 layers, 12 heads): the host encoder takes 0.244 s,
-    // --npu-ops softm takes 0.822 s for 12 dispatches, and the reason is the
-    // design's own row capacity -- every dispatch fills it whether the model has
-    // 2364 score rows or 12288.
+    // (197 positions, 12 layers, 12 heads): the reference arm --npu-ops gemm
+    // takes 0.241 s of encoder and --npu-ops gemm,softm takes 0.806 s for 12
+    // dispatches, and the reason is the design's own row capacity -- every
+    // dispatch fills it whether the model has 2364 score rows or 12288.
     const bool sm_on = session.softmax_on_array();
     std::string sm_why;
     if (sm_on) {
@@ -492,16 +514,19 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
       // -- 197 positions is vit-base's -- and are printed only for it. Another
       // container gets no number rather than someone else's.
       if (g.n_pos == 197)
-        sm_why += "; MEASURED 0.822 s for 12 dispatches against 0.244 s of "
-                  "host encoder, and with --npu-ops attn too NpuAttention "
-                  "dispatches it once per head per layer (144 here) for 6.7 s";
+        sm_why += "; MEASURED 0.806 s for 12 dispatches against 0.241 s on "
+                  "the --npu-ops gemm arm (1.133 s against 0.435 s when gemm "
+                  "is not asked for too), and with --npu-ops attn too "
+                  "NpuAttention dispatches it once per head per layer (144 "
+                  "here) for 6.7 s";
     } else {
       sm_why = "O(seq^2) on the host: " + std::to_string(g.n_pos) + "x" +
                std::to_string(g.n_pos) + " scores x " + std::to_string(g.heads) +
                " heads in fp32; --npu-ops softm moves it to softmax/, its own "
                "hw_context";
       if (g.n_pos == 197)
-        sm_why += ", at a MEASURED 0.822 s against 0.244 s of host encoder";
+        sm_why += ", at a MEASURED 0.806 s against 0.241 s on the "
+                  "--npu-ops gemm arm";
     }
     std::fprintf(stderr, "             %-26s %-5s %s\n", "softmax",
                  sm_on ? "npu" : "host", sm_why.c_str());
@@ -519,8 +544,8 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
   // This line used to say that no timing above seq 64 had been taken anywhere
   // in the repository while this container has 197. That was a true sentence
   // when it was written and is not one now: the array attention at 197 has been
-  // measured on vit-base-patch16-224 (0.244 s of host encoder against 0.349 s
-  // with --npu-ops attn), and a status line left carrying a claim the run below
+  // measured on vit-base-patch16-224 (0.348 s with --npu-ops gemm,attn against
+  // 0.241 s with --npu-ops gemm), and a status line left carrying a claim the run below
   // it contradicts is worse than no line. The second half is still worth saying
   // -- the numbers are one image and one machine -- so that is what it says, and
   // the measurement is only claimed for the container it was taken on.
@@ -529,8 +554,9 @@ inline int maybe_vit_mode(const std::string &root, int argc, char **argv,
                "THIS image, not a throughput claim.%s\n",
                g.n_pos == 197
                    ? " Attention at these 197 positions has been measured in "
-                     "this repository, and the array came out SLOWER than the "
-                     "host: 0.349 s of encoder against 0.244 s."
+                     "this repository (NPU_OPS.md, the attn cell), and the "
+                     "array came out SLOWER: 0.348 s of encoder with "
+                     "--npu-ops gemm,attn against 0.241 s with --npu-ops gemm."
                    : " Attention at this container's position count has not "
                      "been measured, so nothing is extrapolated from the "
                      "seq-64 designs the catalogue was built on.");

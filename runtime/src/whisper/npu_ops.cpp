@@ -14,8 +14,11 @@
 #include <stdexcept>
 
 #include "common/app_state.hpp"   // gelu_erf_exact
+#include "common/conv_host.hpp"   // hostconv::gemm_nt, the host multiply
+#include "common/host_b.hpp"      // hostb::host_b_kn, the untile
 #include "common/host_kernels.hpp"  // bf16_fill, from_bf16, now_s
 #include "common/int4_panel.hpp"     // gemm_b_panel
+#include "common/npu_ops_flag.hpp"   // op_on_array -- array or host, one place
 
 #if defined(__AVX2__)
 #include <immintrin.h>
@@ -77,7 +80,74 @@ size_t NpuGemm::stage_operand(const npue::File &model,
     }
     scales_[wslot] = std::move(sc);
   }
+  // The HOST half of the same record, for every dtype rather than only int8:
+  // an fp32 copy of the operand is what a run that did not dispatch multiplies
+  // with, and run() has no model pointer to ask. Built on demand there (see
+  // NpuGemm::host_weight) -- only the recipe is written here, three words.
+  {
+    HostWeight hw;
+    hw.model = &model;
+    hw.name = name;
+    host_w_[wslot] = std::move(hw);
+  }
   return wslot;
+}
+
+const std::vector<float> &NpuGemm::host_weight(size_t wslot, int64_t k,
+                                               int64_t n) {
+  auto it = host_w_.find(wslot);
+  if (it == host_w_.end())
+    throw std::runtime_error(
+        std::string(d_.info().name) + ": a host GEMM asked for B slot " +
+        std::to_string(wslot) +
+        ", which stage_operand() did not produce for this instance. A host run "
+        "reads its weights from the CONTAINER rather than from the design, so "
+        "it cannot proceed without the operand's name.");
+  HostWeight &hw = it->second;
+  if (hw.kn.empty()) {
+    hw.kn = hostb::host_b_kn(*hw.model, hw.name);
+    const TensorInfo &t = hw.model->info(hw.name);
+    if (t.padded_shape[0] != k || t.padded_shape[1] != n)
+      throw std::runtime_error(
+          std::string(d_.info().name) + ": " + hw.name + " is [" +
+          std::to_string(t.padded_shape[0]) + "," +
+          std::to_string(t.padded_shape[1]) + "] but this GEMM multiplies at K=" +
+          std::to_string(k) + ", N=" + std::to_string(n) +
+          ". The host reads the operand's own shape rather than trusting the "
+          "call site's, so the two disagreeing is a shape bug and not something "
+          "to pad away.");
+  }
+  return hw.kn;
+}
+
+void NpuGemm::run_host(const float *a, int64_t n_real, int64_t k, size_t wslot,
+                       const float *bias, int64_t n, float *out) {
+  const double t0 = app::now_s();
+  const std::vector<float> &w = host_weight(wslot, k, n);
+
+  // SmoothQuant, once and only on this side: the packer pre-multiplied W by
+  // asmooth, so the activation carries 1/asmooth and the product is the
+  // unsmoothed one. Scaled into a scratch row-block rather than in place --
+  // `a` belongs to the caller and to the next dispatch too.
+  const bool i8 = d_.info().a_elem_bytes == 1;
+  const float *inv_smooth = nullptr;
+  if (i8) {
+    const OpScale &sc = scale_for(wslot, "run_host");
+    if (!sc.inv_smooth.empty()) inv_smooth = sc.inv_smooth.data();
+  }
+  const float *A = a;
+  std::vector<float> scratch;
+  if (inv_smooth) {
+    scratch.assign(static_cast<size_t>(n_real) * static_cast<size_t>(k), 0.f);
+    for (int64_t r = 0; r < n_real; ++r)
+      for (int64_t c = 0; c < k; ++c)
+        scratch[static_cast<size_t>(r) * k + c] = a[r * k + c] * inv_smooth[c];
+    A = scratch.data();
+  }
+
+  hostconv::gemm_nt(A, n_real, w.data(), k, n, bias, out, pool_);
+  ++n_host;
+  t_host += app::now_s() - t0;
 }
 
 const NpuGemm::OpScale &NpuGemm::scale_for(size_t wslot,
@@ -94,13 +164,26 @@ const NpuGemm::OpScale &NpuGemm::scale_for(size_t wslot,
 
 void NpuGemm::run(size_t instr, const float *a, int64_t n_real, int64_t rows,
                   int64_t k, size_t wslot, const float *bias, int64_t n,
-                  float *out) {
+                  float *out, const char *code) {
   if (n_real <= 0 || n_real > rows)
     throw std::runtime_error(d_.info().name + ": " + std::to_string(n_real) +
                              " real rows into a " + std::to_string(rows) +
                              "-row dispatch");
   if (rows <= 0 || k <= 0 || n <= 0)
     throw std::runtime_error(d_.info().name + ": GEMM with a zero dimension");
+
+  // ARRAY OR HOST, decided once and by the command line alone.
+  //
+  // It sits before the buffer-fit check below because that check is about the
+  // DESIGN's A and C slots, and a host run touches neither: `out` is the
+  // caller's own buffer at the width the caller asked for. Keeping the two
+  // dimension checks above this line means a shape bug is still a shape bug on
+  // both paths -- what is skipped is only the machinery of dispatching.
+  if (!app::op_on_array(code ? code : op_code_)) {
+    run_host(a, n_real, k, wslot, bias, n, out);
+    return;
+  }
+
   const size_t ab = d_.info().a_elem_bytes, cb = d_.info().c_elem_bytes;
   if (static_cast<size_t>(rows) * k * ab > d_.info().buffer_bytes[0] ||
       static_cast<size_t>(rows) * n * cb > d_.info().buffer_bytes[2])

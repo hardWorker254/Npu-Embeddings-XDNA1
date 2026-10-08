@@ -51,7 +51,7 @@ here rather than discovered on the thousandth frame:
 WHAT IS THE SAME AS THE POSE FACADE
 -----------------------------------
 The numbers are the C++ runtime's, not Python's: this module runs
-``npuembeddings hands`` and parses the JSON that ``hands_mode.hpp`` writes. There
+``npuimage hands`` and parses the JSON that ``hands_mode.hpp`` writes. There
 is no second implementation of the network, the front end or the decoder, so the
 Python and the CLI cannot disagree about a landmark by a rounding step.
 ``find_binary`` and the image-bytes helper are IMPORTED from ``npue_pose`` rather
@@ -62,7 +62,7 @@ ONE BACKEND ONLY, AND WHY IT IS NOT A CHOICE
 --------------------------------------------
 ``backend="cli"`` and nothing else. The ``http`` backend is REFUSED with the
 reason rather than implemented or silently downgraded, because arch 7 has no
-HTTP endpoint: there is no ``/v1/hands``, ``npuembeddings serve`` on a hands
+HTTP endpoint: there is no ``/v1/hands``, ``npuimage serve`` on a hands
 container is refused by name, and a Python layer that quietly fell back to a
 process per frame while claiming to be a server would make a video loop slower
 with no error raised.
@@ -505,7 +505,7 @@ class HandLandmarker:
         if options.backend != "cli":
             raise ValueError(
                 f"backend is 'cli', not {options.backend!r}. arch 7 has no HTTP "
-                "endpoint: there is no /v1/hands, and `npuembeddings serve` on "
+                "endpoint: there is no /v1/hands, and `npuimage serve` on "
                 "a hands container is refused by name. This is refused rather "
                 "than honoured, and the refusal is about the missing endpoint "
                 "rather than about speed -- asking for a server that does not "
@@ -574,7 +574,7 @@ class HandLandmarker:
         measurement.
 
         The numbers are the runtime's, byte for byte: this is the JSON
-        ``npuembeddings hands`` prints, parsed.
+        ``npuimage hands`` prints, parsed.
         """
         return self._run(image, 0)
 
@@ -628,7 +628,7 @@ class HandLandmarker:
             # so stderr IS the error message here and is passed through rather
             # than replaced by "exit status 1".
             raise RuntimeError(
-                f"npuembeddings hands exited {proc.returncode}:\n"
+                f"npuimage hands exited {proc.returncode}:\n"
                 + proc.stderr.decode("utf-8", "replace").strip()
             )
         res = _to_result(json.loads(proc.stdout.decode("utf-8")), timestamp_ms)

@@ -48,6 +48,11 @@
 #include "runtime/device.hpp"
 #include "runtime/model.hpp"
 #include "runtime/pool.hpp"
+// op_on_array() -- `--npu-ops` was already parsed by the time a Session exists,
+// and on_array("gemm") is the one row of the status block that has to ask the
+// FLAG rather than a loaded design: the design is open either way.
+#include "common/design_selection.hpp"  // app::code_for_stream
+#include "common/npu_ops_flag.hpp"
 #include "tokenizers/whisper.hpp"
 #include "whisper/conv1d.hpp"
 #include "whisper/decoder.hpp"
@@ -161,6 +166,7 @@ public:
   // Whether an op is on the array in THIS session: the flag was given and the
   // design is loaded, which is the only question the status line may answer.
   bool on_array(const std::string &code) const {
+    if (code == "gemm") return app::op_on_array("gemm");
     if (code == "layn") return ln_ != nullptr;
     if (code == "softm") return softm_ != nullptr;
     if (code == "gelu") return gelu_ != nullptr;
@@ -193,6 +199,19 @@ public:
   // loaded: a set with a different stream set would print a table that lies.
   const std::vector<std::string> &enc_stream_ops() const { return enc_ops_; }
   const std::vector<std::string> &dec_stream_ops() const { return dec_ops_; }
+  // The SAME lists, narrowed to the streams `gemm` names.
+  //
+  // The two above are every stream the loaded set carries, which is what a
+  // design needs and not what ONE ROW of the status block may print: the set
+  // also carries attn_qk/attn_av (`attn`), mel_proj (`mproj`), dft400 (`fft`)
+  // and logits_0..7 (`logit`), and listing them under "encoder GEMMs" while
+  // that row said `npu` was the block claiming five streams that were on the
+  // host. Each of those has a row of its own further down, and it says where it
+  // runs.
+  const std::vector<std::string> &enc_gemm_ops() const { return enc_gemm_ops_; }
+  const std::vector<std::string> &dec_gemm_ops() const { return dec_gemm_ops_; }
+  // (The stream-name -> code split uses app::code_for_stream in
+  // common/design_selection.hpp, shared with the ViT status block.)
   // Rows per dispatch, per set, and the decoder's tiers. The status line prints
   // these because "M=512" is the difference between one dispatch and four.
   int64_t enc_rows() const { return enc_rows_; }
@@ -265,6 +284,8 @@ private:
   std::string attn_note_;
   // What each loaded design set actually carries, for the status line.
   std::vector<std::string> enc_ops_, dec_ops_;
+  // ... and the subset of those that `gemm` names, for the GEMM rows.
+  std::vector<std::string> enc_gemm_ops_, dec_gemm_ops_;
   int64_t enc_rows_ = 0;
   std::vector<int64_t> dec_tier_rows_;
   std::unique_ptr<npue::WhisperTokenizer> tok_;

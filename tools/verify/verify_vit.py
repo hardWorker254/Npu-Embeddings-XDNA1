@@ -619,7 +619,7 @@ def main() -> int:
     # transformers', which is 0.019 against 0.629 on the bus and 0.636 against
     # 0.629 once fixed. Three orders of magnitude of headroom, not a coin flip.
     print("\n4. the C++ runtime's own answer, against transformers")
-    exe = REPO / "runtime" / "build" / "npuembeddings"
+    exe = REPO / "runtime" / "build" / "npuimage"
     if not exe.is_file():
         report(False, "the C++ binary is built",
                f"{exe} is absent -- `cmake --build runtime/build`. Without it "

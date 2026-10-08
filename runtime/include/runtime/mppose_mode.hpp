@@ -182,7 +182,7 @@ inline int maybe_mppose_mode(const std::string &root, int argc, char **argv,
                       "dispatcher routes here without an endpoint to land on. Not "
                       "refused because a body pose cannot be found over HTTP -- it "
                       "can -- but because a server that answers from a DIFFERENT "
-                      "code path than `npuembeddings mppose` is exactly the drift "
+                      "code path than `npuimage mppose` is exactly the drift "
                       "the pose endpoint documents as a contract. Until the "
                       "endpoint exists, the CLI is the whole answer. The fix is a "
                       "server/mppose_backend.cpp beside server/pose_backend.cpp: "
@@ -216,7 +216,7 @@ inline int maybe_mppose_mode(const std::string &root, int argc, char **argv,
   if (images.empty())
     throw std::runtime_error(
         "this is a MediaPipe Pose model, so say whose body to find:\n"
-        "    npuembeddings mppose <model> <image.png> [more.png ...]\n"
+        "    npuimage mppose <model> <image.png> [more.png ...]\n"
         "  (PNG and JPEG; anything else is refused rather than guessed at)\n"
         "  --max-people 1    run the landmark network on at most N detections\n"
         "  --text            a human summary instead of JSON\n"

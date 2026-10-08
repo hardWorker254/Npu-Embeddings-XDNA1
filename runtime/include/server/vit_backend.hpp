@@ -15,7 +15,7 @@
 // `serve` is the verb, the container's arch picks the endpoint, and an arch that
 // refuses the verb is an arch a user has to discover by typing. So it is here.
 //
-// The answer is byte for byte what `npuembeddings classify ... --json` prints,
+// The answer is byte for byte what `npuimage classify ... --json` prints,
 // because both call npue::vit::prediction_json. See pose/result_json.hpp for why
 // that is stated as a contract rather than left to inspection.
 //

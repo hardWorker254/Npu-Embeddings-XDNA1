@@ -68,7 +68,7 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
   // not be silently ignored just because this container never used it.
   refuse_removed_op_flags(argc, argv);
   refuse_exporter_only_flags(argc, argv);
-  // The LAST occurrence wins, not the first. `npuembeddings serve <model>` puts
+  // The LAST occurrence wins, not the first. `npuaudio serve <model>` puts
   // its own --threads 24 in the store BEFORE forward_common() appends whatever
   // the user typed, so the reader that took the first match silently answered
   // `serve <whisper> --threads 8` with 24 threads. Nothing on the command line
@@ -175,7 +175,7 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
   // --serve, read through the SHARED reader so this endpoint, the embedding one
   // and the pose one cannot drift on what `--serve` with no port means. It used
   // to be read as flag("--serve") and atoi'd, which is 0 when the value is
-  // absent -- and 0 is a legal request to bind(), so `npuembeddings <root>
+  // absent -- and 0 is a legal request to bind(), so `npuaudio <root>
   // --model m.npue --serve` started and listened on a port it never printed.
   int serve_port = 8080;
   std::string serve_bind = "127.0.0.1";
@@ -185,9 +185,9 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
   if (!serve && audio.empty())
     throw std::runtime_error(
         "this is a speech-to-text model, so say what to transcribe:\n"
-        "    npuembeddings transcribe <model> <audio.wav> [--language en]\n"
+        "    npuaudio transcribe <model> <audio.wav> [--language en]\n"
         "  or serve the OpenAI-shaped endpoint:\n"
-        "    npuembeddings serve <model>      (POST /v1/audio/transcriptions)\n"
+        "    npuaudio serve <model>      (POST /v1/audio/transcriptions)\n"
         "  (neither --transcribe nor --serve was given)");
 
   npue::whisper::TranscribeOptions opts;
@@ -344,12 +344,23 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
       std::fprintf(stderr,
                    "             %-26s %-5s %s\n", "GEMM datapath", "npu",
                    "int8 (W8A8), row-scaled activations, bf16 C");
+    // Whether the four per-layer GEMMs are on the array, decided by the flag
+    // alone -- the design set is loaded either way, so it cannot be asked.
+    const bool gemm_on = session.on_array("gemm");
+    if (int8_design)
+      std::fprintf(stderr, "             %-26s %-5s %s\n", "GEMM datapath",
+                   gemm_on ? "npu" : "host",
+                   gemm_on ? "int8 (W8A8), row-scaled activations, bf16 C"
+                           : "host fp32: I8/I4 weights x .wscale, activations "
+                             "never quantised");
     std::fprintf(stderr, "             %-26s %-5s %s\n",
                  ("encoder GEMMs, " + std::to_string(g.enc_layers) + " layers")
                      .c_str(),
-                 "npu", (joined(session.enc_stream_ops()) + ", M=" +
-                         std::to_string(session.enc_rows()) + " rows")
-                            .c_str());
+                 gemm_on ? "npu" : "host",
+                 (joined(session.enc_gemm_ops()) + ", M=" +
+                  std::to_string(session.enc_rows()) + " rows" +
+                  (gemm_on ? "" : "; --npu-ops gemm sends them to the array"))
+                     .c_str());
     std::string tiers;
     for (int64_t r : session.dec_tier_rows()) {
       if (!tiers.empty()) tiers += "/";
@@ -358,9 +369,11 @@ inline int maybe_stt_mode(const std::string &root, int argc, char **argv,
     std::fprintf(stderr, "             %-26s %-5s %s\n",
                  ("decoder GEMMs, " + std::to_string(g.dec_layers) + " layers")
                      .c_str(),
-                 "npu", (joined(session.dec_stream_ops()) + ", M=" + tiers +
-                         " rows per tier")
-                            .c_str());
+                 gemm_on ? "npu" : "host",
+                 (joined(session.dec_gemm_ops()) + ", M=" + tiers +
+                  " rows per tier" +
+                  (gemm_on ? "" : "; --npu-ops gemm sends them to the array"))
+                     .c_str());
     // LayerNorm, GELU and softmax, one row each: a combined "layer_norm, gelu,
     // softmax  host" line is what hid two of the three that HAD moved, and the
     // whole point of the block is that every op is accounted for.

@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 #===----------------------------------------------------------------------===//
-# Gate for the op registry: 8 codes x 7 architectures = 56 cells.
+# Gate for the op registry: 9 codes x 7 architectures = 63 cells.
 #
 # tools/lib/npu_ops.py is the registry. It is not prose and it cannot be checked
 # by reading it, so this file checks the four things that can be checked:
 #
-#   1. the registry's own shape -- 40 cells, five statuses, one tally, and the
+#   1. the registry's own shape -- 63 cells, five statuses, one tally, and the
 #      set of codes with no design directory equal to STREAM_ONLY;
 #   2. NPU_OPS.md and NPU_OPS.ru.md (architectures x codes) and NPU_MODELS.md
 #      and NPU_MODELS.ru.md (models x codes), all GENERATED from the registry
-#      and npu_targets.json, are not stale -- and all 40 reasons are translated,
-#      so a Russian reader is never left with one English cell among forty
+#      and npu_targets.json, are not stale -- and all 63 reasons are translated,
+#      so a Russian reader is never left with one English cell among sixty-three
 #      Russian ones;
 #   2b. the model tables' cells agree with the architecture tables', except for
 #      the gated FFNs, which is the ONE difference the model table exists to
 #      record -- so a difference appearing there is a bug, not news;
 #   3. the runtime's C++ table (runtime/include/common/npu_ops_flag.hpp) carries
-#      the same eight codes with the same design directory and the same long
+#      the same nine codes with the same design directory and the same long
 #      name, in the same order. This is the duplication the two files' headers
 #      both apologise for; the apology is only worth anything if something checks
 #      it, and nothing else does -- verify_cli_flags.py checks that the FLAG
@@ -35,9 +35,9 @@
 # says, those say the arithmetic behind it is right.
 #
 # The pose row is SKIPPED, loudly, because there is no pose container in this
-# checkout. Its eight cells are counted in check 1 and absent from check 4, and
-# the summary line says so rather than reporting 32/40 as if it were the whole
-# thing. tools/verify/verify_pose.py needs a checkpoint this machine does not
+# checkout. Its nine cells are counted in check 1 and absent from check 4, and
+# the summary line says so rather than reporting the covered subset as if it
+# were the whole thing. tools/verify/verify_pose.py needs a checkpoint this machine does not
 # have either.
 #===----------------------------------------------------------------------===//
 
@@ -54,7 +54,23 @@ sys.path.insert(0, str(REPO / "tools"))
 import gen_npu_ops_doc  # noqa: E402  -- the generators NPU_OPS*.md must match
 import gen_npu_models_doc  # noqa: E402  -- ... and NPU_MODELS*.md
 
-BIN = REPO / "runtime" / "build" / "npuembeddings"
+BINDIR = REPO / "runtime" / "build"
+# What the summary lines say the cells were run against. The verb picks the
+# binary, so no ONE name describes a run that covered two families.
+NAME = "the family binaries in runtime/build"
+# WHICH BINARY RUNS EACH ROW. The verb is the family (cli/family.hpp), so
+# this is the same table the runtime refuses against -- one here would be a
+# second one to keep in step, and a row run by a foreign binary would
+# measure the family refusal and call it an op refusal.
+VERB_BIN = {"embed": "npuembeddings", "list": "npuembeddings",
+            "add": "npuembeddings", "tokenize": "npuembeddings",
+            "transcribe": "npuaudio",
+            "classify": "npuimage", "pose": "npuimage",
+            "hands": "npuimage", "mppose": "npuimage"}
+
+
+def bin_for(spec: dict) -> Path:
+    return BINDIR / VERB_BIN[spec["argv"][0]]
 HPP = REPO / "runtime" / "include" / "common" / "npu_ops_flag.hpp"
 EXPORTER = REPO / "tools" / "export" / "export_gemm_rtp.py"
 PY = REPO / ".venv" / "bin" / "python"
@@ -68,20 +84,30 @@ DOCS = (REPO / "NPU_OPS.md", REPO / "NPU_OPS.ru.md")
 # cell's reason in the registry). Changing one means a cell's status changed,
 # which is a behaviour change -- so this gate should have to be edited on purpose
 # rather than a number quietly moving under a document that still says 14.
-EXPECTED_COUNTS = {"honours": 21, "on_array": 1, "unimplemented": 0,
-                   "blocked": 3, "absent": 31}
-# honours went 20 -> 21 and blocked 4 -> 3 when arch=7's conv cell stopped being
-# `blocked`, for the reason its own cell now gives: a design set was built for its
-# twelve padded (K, N) shapes and --npu-ops conv dispatches its 61 dense
-# convolutions. `absent` did not move, so the change is exactly one cell again.
+EXPECTED_COUNTS = {"honours": 26, "on_array": 0, "unimplemented": 0,
+                   "blocked": 3, "absent": 34}
+# 9 codes x 7 rows = 63, and the tally moved from 56 in two steps:
+#
+#   +7   one cell per row for the code `gemm`: honours for the four
+#        transformer rows, absent for the three whose every weighted
+#        operation is a convolution;
+#   +1   cls/conv, which was the file's last `on_array` and became `honours`
+#        because `gemm` gave the patch embedding a flag to follow -- see that
+#        cell for why `on_array` could not survive `gemm`.
+#
+# So `on_array` now has ZERO cells. The status stays in the vocabulary because
+# the runtime still implements it (a code that would select nothing is refused
+# by name) -- it simply describes no cell any more, and this pin is where that
+# is recorded. A tally that silently dropped to zero without being pinned would
+# look exactly like a tally nobody had filled in.
 #
 # WHAT THE THREE REMAINING `blocked` CELLS ARE, because they are not the same kind
 # of blocked and the word does not say so:
-#   embeddinggemma-300m/layn   needs RMSNorm, which is a NINTH code -- a different
-#                               kernel body, not a flag
+#   embeddinggemma-300m/layn   needs RMSNorm -- a different kernel body, not a
+#                               flag; the set already carries nine codes
 #   embeddinggemma-300m/gelu   needs GeGLU taken out of a gated path, which has no
 #                               standalone pass to hand a hw_context
-#   vit-base-patch16-224/logit needs a vocabulary projection, a TENTH code
+#   vit-base-patch16-224/logit needs a vocabulary projection, which has no code
 # So all three are "this is a new operation", which is a different piece of work
 # from "this is the existing operation and there is nowhere to put it" -- and the
 # difference is the whole reason they are still blocked rather than dishonoured.
@@ -98,27 +124,28 @@ EXPECTED_COUNTS = {"honours": 21, "on_array": 1, "unimplemented": 0,
 # how far the two paths then disagree is in the cell's own prose, and it is
 # measured. Writing `blocked` instead would have been the other available lie:
 # there IS an array path, and it runs.
-# Why these numbers are 19 and 0 rather than 14 and 5: five cells were flipped
-# from `unimplemented` to `honours` when the branches were written --
+# Why the honours count is what it is rather than what it was: five cells were
+# flipped from `unimplemented` to `honours` when the branches were written --
 # gemm_rtp/attn, cls/attn, embeddinggemma-300m/attn, cls/softm and
-# embeddinggemma-300m/softm. Each was verified against the host before it was
-# counted (see NPU_OPS.md's per-cell reason), and section 4 below then runs
-# every cell of every row this harness CAN reach, so a cell that says `honours`
-# and does not dispatch fails this same gate. It cannot reach all 48: the
+# embeddinggemma-300m/softm -- and seven more became `honours` with the ninth
+# code (four of them `gemm` itself, plus cls/conv, cls/gemm and the rest). Each
+# was verified against a named reference arm before it was counted (see
+# NPU_OPS.md's per-cell reason), and section 4 below then runs every cell of
+# every row this harness CAN reach, so a cell that says `honours` and does not
+# dispatch fails this same gate. It cannot reach all 63: the
 # `hands` row is in UNRUNNABLE with the reason, and rows without a container or
 # a design set on this machine are skipped and counted separately rather than
 # quietly passed. The pin is edited ON PURPOSE, with the cells named, because
 # the alternative -- a number moving under a document that still says 14 -- is
 # the failure the comment above describes.
 #
-# The move from 40 cells to 48 is arch=7 joining as a KIND, which is eight new
-# cells and nothing else: honours is UNCHANGED at 19, so no row that claimed to
-# work stopped working. The eight are one `blocked` (hands/conv -- the
-# convolutions are GEMM-shaped and there is no design set built for them, which
-# is a missing artefact rather than missing code) and seven `absent` (no audio
-# front end, no vocabulary, no normalisation, no attention, and the activation
-# is ReLU/ReLU6/PReLU fused into the convolution's epilogue rather than a GELU
-# pass). Each of the seven names why, and the reason is the claim.
+# The move to 63 cells is the ninth code `gemm` plus cls/conv changing status,
+# and neither of them took a row that claimed to work and stopped it working:
+# every `honours` cell that existed before still says `honours`. The seven new
+# `absent` cells are the three conv-only graphs (pose, hands, mppose) answering
+# for a code they have no use for -- no MatMul anywhere, so there is no
+# per-layer projection to name -- and each says why in its own prose. The reason
+# is the claim.
 
 # One container per architecture row, and the command line that reaches it.
 # `kind` is npu_targets.json's word; the row in the registry is looked up by it,
@@ -294,7 +321,7 @@ def main() -> int:
           f"architectures = {len(npu_ops.OPS) * len(arches)} cells")
 
     # --- 1. the registry's own shape ---------------------------------------
-    if len(arches) != 7 or len(npu_ops.OPS) != 8:
+    if len(arches) != 7 or len(npu_ops.OPS) != 9:
         print(f"  FAIL  {len(npu_ops.OPS)} codes x {len(arches)} architectures "
               f"is not the 8 x 7 the document is built around. Adding a row here "
               f"means adding it to npu_ops.KINDS, to the model's kind in "
@@ -454,7 +481,7 @@ def main() -> int:
             print(f"  skip  {label}: not on this machine -- {', '.join(missing)}")
             skipped += 1
             continue
-        cmd = [str(BIN)] + spec["argv"] + [str(REPO / spec["container"]),
+        cmd = [str(bin_for(spec))] + spec["argv"] + [str(REPO / spec["container"]),
                                            str(fx[spec["input"]]),
                                            "--artifacts", str(gens)]
         # Flags that have to come AFTER the positionals, because the argument
@@ -494,10 +521,10 @@ def main() -> int:
                 elif code not in err:
                     print(f"  FAIL  {label}/{code}: refused, but the message "
                           f"never names the code, so the user cannot tell which "
-                          f"of the eight was rejected")
+                          f"of the nine was rejected")
                     print("   " + err.strip().splitlines()[0][:160])
                     bad += 1
-    print(f"  ran   {ran} cells against {BIN.name}" if ran else
+    print(f"  ran   {ran} cells against {NAME}" if ran else
           "  ran   0 cells -- NO CELL WAS CHECKED AGAINST THE BINARY")
 
     if skipped:
@@ -525,7 +552,7 @@ def main() -> int:
     # depend on which models happen to be installed. What must never be acceptable
     # is a run that verified nothing at all, and that is precisely `ran == 0`.
     if ran == 0:
-        print(f"  FAIL  no cell was checked against {BIN.name}. Every row was "
+        print(f"  FAIL  no cell was checked against {NAME}. Every row was "
               f"skipped, so this run verified the registry against ITSELF and "
               f"against nothing else -- which is not what this gate is for. The "
               f"skip lines above name why each row went; pack or install at least "
@@ -538,7 +565,7 @@ def main() -> int:
         return 1
     print(f"PASS -- the registry, all four generated documents, the C++ table and "
           f"the runtime all say the same thing, and {ran} cell(s) were checked "
-          f"against {BIN.name}" + (f"; {skipped} architecture row(s) were not"
+          f"against {NAME}" + (f"; {skipped} architecture row(s) were not"
                                    if skipped else ""))
     return 0
 

@@ -183,7 +183,7 @@ REQUIRED_FLAGS = ("--cols", "--seq", "-m", "-k", "-n", "--batches", "--rows",
 # flag would pass a byte-comparison of nothing", and that only works while every
 # entry is a flag the exporter really parses. The exporter builds every design
 # the target can honour now (tools/lib/npu_ops.py KIND_REGISTRY), so there is no
-# op-selection flag left to require; the runtime's own list of eight codes is
+# op-selection flag left to require; the runtime's own list of nine codes is
 # checked by tools/verify/verify_cli_flags.py against the C++ table instead.
 
 REQUIRED_FLAGS_ELT = ("--arch", "--out", "--batch", "--seq", "--hidden",

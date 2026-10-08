@@ -8,6 +8,7 @@
 
 #include "cli/subcommand.hpp"
 #include "cli/cli.hpp"
+#include "cli/family.hpp"
 #include "common/design_selection.hpp"
 #include "common/hub.hpp"
 #include "common/model_catalog.hpp"
@@ -72,9 +73,19 @@ std::string ensure(const std::string &root, const std::string &name,
 // which is also how it finds runtime/<stem>/artifacts_npu<N>.
 std::string resolve_container(const std::string &root, const std::string &arg,
                               const std::string &token) {
-    if (is_container_path(arg)) return arg;
-    if (looks_like_container_path(arg)) throw_missing_container(arg, root);
-    return ensure(root, arg, token);
+    std::string path;
+    if (is_container_path(arg)) path = arg;
+    else if (looks_like_container_path(arg)) throw_missing_container(arg, root);
+    else path = ensure(root, arg, token);
+    // THE FAMILY, ON THE SUBCOMMAND SIDE. resolve_model_path() makes this
+    // check for the flag form; this resolver is what every model-taking verb
+    // (serve, embed, transcribe, classify, pose, hands, mppose) goes through,
+    // and one rule applied in two places is the same rule -- two copies of the
+    // RULE are what would drift. It lands after a fetch on purpose: the
+    // container has to exist to say which arch it is, and refusing by name is
+    // worth waiting for the download rather than doing without.
+    refuse_other_family(path);
+    return path;
 }
 
 // THE FLAGS THAT CARRY A VALUE, one list, named. Two call sites need it -- the
@@ -92,7 +103,7 @@ bool flag_takes_value(const std::string &a) {
         "--bo-mode", "--npu-ops", "--language", "--task", "--max-new",
         "--chunk-seconds", "--stride-seconds", "--classify", "--pose",
         // --audio is the generic spelling of --transcribe, for the
-        // `npuembeddings <root> --model m.npue --audio a.wav` form rather than
+        // `npuaudio <root> --model m.npue --audio a.wav` form rather than
         // the `transcribe` subcommand, and stt_mode.hpp reads it with the same
         // flag("--audio") either way. It was missing here, which is not a
         // parse error: forward_common() simply forwarded neither the flag nor
@@ -262,8 +273,8 @@ int run_embed(int argc, char **argv) {
 
 // `transcribe` for a speech-to-text model. The audio file is written to the
 // flag form, which Runtime::run then dispatches by the container's arch -- one
-// code path for `npuembeddings transcribe ...` and
-// `npuembeddings <root> --model ... --transcribe ...`.
+// code path for `npuaudio transcribe ...` and
+// `npuaudio <root> --model ... --transcribe ...`.
 int run_transcribe(int argc, char **argv) {
     std::string root = default_root(argv[0]);
     std::string cli_token;
@@ -278,7 +289,7 @@ int run_transcribe(int argc, char **argv) {
     if (argc < 4 || argv[3][0] == '-')
         throw std::runtime_error(
             "`transcribe` needs an audio file:\n"
-            "    npuembeddings transcribe <model> <audio.wav> [--language en]\n"
+            "    npuaudio transcribe <model> <audio.wav> [--language en]\n"
             "  (--convert ingests through ffmpeg, for mp3/m4a/webm and for WAVs "
             "the reader refuses)");
     if (!is_container_path(model_name)) warn_if_unpinned(model_name);
@@ -296,8 +307,8 @@ int run_transcribe(int argc, char **argv) {
 // `classify` for an image classifier. The image paths are written to the flag
 // form as repeated --classify, which Runtime::run then dispatches by the
 // container's arch -- one code path for
-// `npuembeddings classify <model> <a.png> <b.png>` and
-// `npuembeddings <root> --model ... --classify <a.png>`.
+// `npuimage classify <model> <a.png> <b.png>` and
+// `npuimage <root> --model ... --classify <a.png>`.
 //
 // It is deliberately run_transcribe's shape rather than run_embed's: no
 // --threads/--pipeline defaults, because "24 threads, 4 lanes" is a statement
@@ -317,8 +328,8 @@ int run_classify(int argc, char **argv) {
     if (argc < 4 || argv[3][0] == '-')
         throw std::runtime_error(
             "`classify` needs an image:\n"
-            "    npuembeddings classify <model> <image.png> [more.png ...]\n"
-            "    npuembeddings serve <model>            (POST /v1/classify)\n"
+            "    npuimage classify <model> <image.png> [more.png ...]\n"
+            "    npuimage serve <model>            (POST /v1/classify)\n"
             "  (PNG and JPEG; anything else is refused rather than guessed at. "
             "--top-k prints the runners-up to stderr, --json to stdout)");
     if (!is_container_path(model_name)) warn_if_unpinned(model_name);
@@ -350,8 +361,8 @@ int run_classify(int argc, char **argv) {
 // `pose` for an arch=6 body-pose model. Same shape as run_classify and for the
 // same reasons: the images are written to the flag form as repeated --pose,
 // which Runtime::run dispatches by the container's arch, so
-// `npuembeddings pose <model> <a.png> <b.png>` and
-// `npuembeddings <root> --model ... --pose <a.png>` are one code path.
+// `npuimage pose <model> <a.png> <b.png>` and
+// `npuimage <root> --model ... --pose <a.png>` are one code path.
 //
 // It adds four value flags over run_classify -- --conf, --iou, --kpt, --max-det
 // -- which are also added to flag_takes_value() above, for the same reason
@@ -371,8 +382,8 @@ int run_pose(int argc, char **argv) {
     if (argc < 4 || argv[3][0] == '-')
         throw std::runtime_error(
             "`pose` needs an image, or you meant `serve`:\n"
-            "    npuembeddings pose <model> <image.png> [more.png ...]\n"
-            "    npuembeddings serve <model>            (POST /v1/pose)\n"
+            "    npuimage pose <model> <image.png> [more.png ...]\n"
+            "    npuimage serve <model>            (POST /v1/pose)\n"
             "  (PNG and JPEG; anything else is refused rather than guessed at)\n"
             "  --conf 0.25 --iou 0.70 --kpt 0.50 --max-det 300\n"
             "  --text                 a human summary instead of JSON\n"
@@ -417,7 +428,7 @@ int run_hands(int argc, char **argv) {
     if (argc < 4 || argv[3][0] == '-')
         throw std::runtime_error(
             "`hands` needs an image:\n"
-            "    npuembeddings hands <model> <image.png> [more.png ...]\n"
+            "    npuimage hands <model> <image.png> [more.png ...]\n"
             "  (PNG and JPEG; anything else is refused rather than guessed at)\n"
             "  --max-hands 1     run the landmark network on at most N\n"
             "  --text            a human summary instead of JSON\n"
@@ -472,7 +483,7 @@ int run_mppose(int argc, char **argv) {
     if (argc < 4 || argv[3][0] == '-')
         throw std::runtime_error(
             "`mppose` needs an image:\n"
-            "    npuembeddings mppose <model> <image.png> [more.png ...]\n"
+            "    npuimage mppose <model> <image.png> [more.png ...]\n"
             "  (PNG and JPEG; anything else is refused rather than guessed at)\n"
             "  --max-people 1    run the landmark network on at most N\n"
             "  --text            a human summary instead of JSON\n"
@@ -625,6 +636,17 @@ bool SubcommandDispatcher::dispatch(int argc, char **argv,
     const std::string sub = argv[1];
     auto it = handlers_.find(sub);
     if (it == handlers_.end()) return false;
+    // THREE BINARIES, ONE TABLE. argv[1] names a verb this build registers;
+    // if the process is not the binary that owns it, refuse HERE -- before a
+    // handler resolves, fetches or opens anything -- and name the binary that
+    // does own it, so the reader's next command line is already written.
+    // Exit 2, the same code a thrown refusal gives: a refusal is a refusal
+    // whether it unwinds or returns.
+    if (!owns(g_family, sub)) {
+        std::fprintf(stderr, "error: %s\n", refuse_subcommand(sub).c_str());
+        exit_code = 2;
+        return true;
+    }
     exit_code = it->second(argc, argv);
     return true;
 }

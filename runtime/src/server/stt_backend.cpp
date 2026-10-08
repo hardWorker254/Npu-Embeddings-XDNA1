@@ -180,7 +180,7 @@ int serve_stt(npue::whisper::Session &session, const std::string &model_id,
       fail(404, "not_found",
            "unknown path " + req.path +
                " -- this model serves /v1/audio/transcriptions, not /v1/"
-               "embeddings. `npuembeddings serve <model>` picks the endpoint from the "
+               "embeddings. `npuaudio serve <model>` picks the endpoint from the "
                "container's arch: text models answer /v1/embeddings, Whisper "
                "/v1/audio/transcriptions, a ViT /v1/classify and YOLOv8-pose "
                "/v1/pose.");

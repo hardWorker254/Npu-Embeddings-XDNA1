@@ -48,7 +48,7 @@ void NpuLogits::alloc_buffers(const float *embed) {
   gems_.clear();
   wslots_.clear();
   for (int c = 0; c < n_chunks_; ++c) {
-    gems_.push_back(std::make_unique<NpuGemm>(*d_, pool_));
+    gems_.push_back(std::make_unique<NpuGemm>(*d_, pool_, "logit"));
     gems_.back()->alloc_buffers();
   }
   bias_.assign(static_cast<size_t>(chunk_n_), 0.0f);

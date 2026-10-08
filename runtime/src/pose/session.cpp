@@ -116,7 +116,11 @@ public:
                                "/gemm_rtp: the design reports M = 0, so a "
                                "dispatch computes no rows");
 
-    gemm_ = std::make_unique<npue::whisper::NpuGemm>(*design_, pool_);
+    // `conv`, for the same reason conv/array.cpp's is: this backend is
+    // built only under conv_on_array, and with the default `gemm` code
+    // NpuGemm::run would take run_host() for all 436 of them.
+    gemm_ = std::make_unique<npue::whisper::NpuGemm>(*design_, pool_,
+                                                      "conv");
     gemm_->npu_mu = &mu_;
     gemm_->alloc_buffers();
 

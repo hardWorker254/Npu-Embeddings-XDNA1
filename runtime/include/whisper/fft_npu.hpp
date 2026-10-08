@@ -45,7 +45,7 @@ namespace npue::whisper {
 class NpuFft {
 public:
   NpuFft(npu::Design &design, app::Pool &pool, int64_t n_fft, int64_t n_bins)
-      : g_(design, pool), pool_(pool), n_fft_(n_fft), n_bins_(n_bins) {}
+      : g_(design, pool, "fft"), pool_(pool), n_fft_(n_fft), n_bins_(n_bins) {}
 
   void set_streams(size_t slot, int64_t rows);
 

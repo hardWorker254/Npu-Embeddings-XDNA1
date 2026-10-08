@@ -107,7 +107,7 @@ CLIArgs CLI::parse(int argc, char **argv) {
         else if (a.rfind("--", 0) == 0 && !flag_is_known(a)) {
             // A flag this build RENAMED gets the rename's message, not the
             // generic one. It matters more than it looks: `--npu-ops` and
-            // `--npu-extra-ops` take the same eight codes, so a user migrating
+            // `--npu-extra-ops` take the same nine codes, so a user migrating
             // from the old spelling is one typo away from the new one and a
             // generic "unrecognised option" sends them to --help to find out
             // which of the two they were already holding. run_setup.hpp and the
@@ -126,7 +126,8 @@ CLIArgs CLI::parse(int argc, char **argv) {
             // are not ours to judge; anything else starting with -- that the
             // table does not name is.
             throw std::runtime_error(
-                "unrecognised option " + a + ". Run `npuembeddings --help` for "
+                "unrecognised option " + a + ". Run `" + std::string(g_bin) +
+                " --help` for "
                 "the options this build accepts; a flag that is not recognised "
                 "is refused rather than ignored, because an ignored flag "
                 "changes what gets built without saying so.");

@@ -5,53 +5,53 @@
      run the script, or tools/verify/verify_npu_op_matrix.py fails.
      Russian version: NPU_MODELS.ru.md -->
 
-Eight op codes, 18 models in `tools/data/npu_targets.json`, 144 cells.
+9 op codes, 18 models in `tools/data/npu_targets.json`, 162 cells.
 
-This is the companion to [NPU_OPS.md](NPU_OPS.md), which answers "what does an ARCHITECTURE support" -- five rows, one per kind. This one answers the question you actually have when you type a model name: "what can THIS model put on the array". Russian: [NPU_MODELS.ru.md](NPU_MODELS.ru.md).
+This is the companion to [NPU_OPS.md](NPU_OPS.md), which answers "what does an ARCHITECTURE support" -- one row per architecture. This one answers the question you actually have when you type a model name: "what can THIS model put on the array". Russian: [NPU_MODELS.ru.md](NPU_MODELS.ru.md).
 
-Why a second table rather than a column on the first: a kind's row is almost always the answer, so most of this file repeats the architecture document seventeen times. The repetition is still worth printing, because two models do NOT answer with their kind's row:
+Why a second table rather than a column on the first: a kind's row is almost always the answer, so most of this file repeats the architecture document 18 times. The repetition is still worth printing, because two models do NOT answer with their kind's row:
 
 - **gemma** -- its ENCODER differs from its kind's (RMSNorm, GeGLU, and `GemmaNpuEncoder` reads no per-op flag at all). It is the only one.
 - **nomic and gte** -- they have a **gated FFN**, whose activation is part of the gated path between `ffn_up` and `ffn_down` rather than a standalone pass. Their kind says `honours` for `gelu`, and for these two models that is not true.
 
 The second is the actual reason this file exists: `--npu-ops gelu` is **refused** for gemma, and for nomic and gte no `gelu/` design is compiled at all. From the architecture table alone a reader would conclude those three behave alike.
 
-Tally over the 144 cells:
+Tally over the 162 cells:
 
-- **83** **yes** -- runs on the array today
-- **1** already -- the work is already dispatched without a code, and the code is refused
+- **99** **yes** -- runs on the array today
+- **0** already -- the work is already dispatched without a code, and the code is refused
 - **0** no code -- the model has the operation, no array branch reaches it
 - **3** impossible -- cannot be moved on this board; the reason is in NPU_OPS.md
-- **55** no -- the model has no such operation
+- **58** no -- the model has no such operation
 - **2** **gated** -- this model's FFN has no standalone activation pass -- see below
 
 ## What each model can send to the array
 
-READ THIS TABLE BY ITS HEADER OR IT LIES, AND NOT ABOUT THE ROWS -- ABOUT THE HEADER. The eight codes are what can be sent to the array ON TOP OF what the architecture already sends by itself. For a transformer that own set is four GEMM streams -- qkv, attn_out, ffn_up, ffn_down -- which dispatch BY DEFAULT and which no code in the eight names. Measured on bge-micro-v2 with no flag at all: `designs  ONE xclbin, 12 streams`, `dispatches  12`, three layers by four streams, while gelu, layn, softm and attn all read `on the HOST (fp32)`.
+READ THIS TABLE BY ITS HEADER OR IT LIES, AND NOT ABOUT THE ROWS -- ABOUT THE HEADER. The nine codes are what can be sent to the array ON TOP OF what the architecture already sends by itself. For a transformer that own set is four GEMM streams -- qkv, attn_out, ffn_up, ffn_down -- and the code that names them is `gemm`, so a row listing gelu, layn, softm and attn with no `conv` still has one code left to ask for. Nothing in this table moves until a code names it: with no flag at all the status block says host and the run reports 0 dispatches, and it was measured the other way round -- bge-micro-v2 used to print `designs  ONE xclbin, 12 streams` and `dispatches  12` for those same three layers by four streams, because `gemm` did not exist and the GEMMs went to the array unconditionally.
 
 So an embedder's row, four codes and no `conv`, does NOT mean this model never touches the array. The missing `conv` says it has no convolution operation; it does not say it has no array. `pose` and `mppose` are the other way round: their convolutions ARE that own set, which is why their rows are one code long and why there is nothing for them to add.
 
-And all eight are on the host by default, which is a measurement rather than caution. Same two texts on bge-micro-v2, five runs each: 168 ms with no flags against 265 / 260 / 252 ms with --npu-ops gelu, layn and softm one at a time, and 330 ms with all three. Dispatch wait grows 6.0 -> 22.5 / 23.3 / 24.1 / 59.2 ms. An elementwise operation on the array is one and a half to two times what it costs on the host here.
+And all nine are on the host by default -- that is a rule, not a conclusion, and for the four base GEMMs the measurements say the opposite: `gemm` on the array is 1.80x faster on ViT and 6.9x on gemma (NPU_OPS.md, the `gemm` cells). What follows is about the ELEMENTWISE codes and was measured before `gemm` was split out, when those four GEMM streams went to the array either way -- so its two arms are today's `--npu-ops gemm` and `--npu-ops gemm,<code>`, and the only thing moving between them is the elementwise op. Same two texts on bge-micro-v2, five runs each: 168 ms against 265 / 260 / 252 ms for gelu, layn and softm one at a time, and 330 ms with all three. Dispatch wait grows 6.0 -> 22.5 / 23.3 / 24.1 / 59.2 ms. An elementwise operation on the array is one and a half to two times what it costs on the host here.
 
-A list per model, not a grid of models against operations. In a 144-cell grid, 55 of the cells would say the same absence in the same position, and reading the answer meant filtering the empty ones out of every row -- and the filtering IS the answer. There are no empty cells here at all: one column, and every entry in it names its own status, so `gelu` (gated) reads without a heading to its left. The header carries the absence: a code that is not listed is not an operation this model has.
+A list per model, not a grid of models against operations. In a 162-cell grid, 58 of the cells would say the same absence in the same position, and reading the answer meant filtering the empty ones out of every row -- and the filtering IS the answer. There are no empty cells here at all: one column, and every entry in it names its own status, so `gelu` (gated) reads without a heading to its left. The header carries the absence: a code that is not listed is not an operation this model has.
 
 | model | what can additionally go to the array |
 | --- | --- |
-| `all-MiniLM-L6-v2` | `gelu`, `layn`, `softm`, `attn` |
-| `bge-small-en-v1.5` | `gelu`, `layn`, `softm`, `attn` |
-| `bge-micro-v2` | `gelu`, `layn`, `softm`, `attn` |
-| `bge-base-en-v1.5` | `gelu`, `layn`, `softm`, `attn` |
-| `bge-large-en-v1.5` | `gelu`, `layn`, `softm`, `attn` |
-| `nomic-embed-text-v1.5` | `gelu` (gated), `layn`, `softm`, `attn` |
-| `embeddinggemma-300m` | `gelu` (impossible), `layn` (impossible), `softm`, `attn` |
-| `gte-multilingual-base` | `gelu` (gated), `layn`, `softm`, `attn` |
-| `whisper-tiny` | `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
-| `whisper-base` | `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
-| `whisper-small` | `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
-| `whisper-medium` | `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
-| `whisper-large-v3` | `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
-| `whisper-large-v3-turbo` | `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
-| `vit-base-patch16-224` | `gelu`, `layn`, `softm`, `conv` (already), `attn`, `logit` (impossible) |
+| `all-MiniLM-L6-v2` | `gemm`, `gelu`, `layn`, `softm`, `attn` |
+| `bge-small-en-v1.5` | `gemm`, `gelu`, `layn`, `softm`, `attn` |
+| `bge-micro-v2` | `gemm`, `gelu`, `layn`, `softm`, `attn` |
+| `bge-base-en-v1.5` | `gemm`, `gelu`, `layn`, `softm`, `attn` |
+| `bge-large-en-v1.5` | `gemm`, `gelu`, `layn`, `softm`, `attn` |
+| `nomic-embed-text-v1.5` | `gemm`, `gelu` (gated), `layn`, `softm`, `attn` |
+| `embeddinggemma-300m` | `gemm`, `gelu` (impossible), `layn` (impossible), `softm`, `attn` |
+| `gte-multilingual-base` | `gemm`, `gelu` (gated), `layn`, `softm`, `attn` |
+| `whisper-tiny` | `gemm`, `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
+| `whisper-base` | `gemm`, `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
+| `whisper-small` | `gemm`, `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
+| `whisper-medium` | `gemm`, `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
+| `whisper-large-v3` | `gemm`, `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
+| `whisper-large-v3-turbo` | `gemm`, `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
+| `vit-base-patch16-224` | `gemm`, `gelu`, `layn`, `softm`, `conv`, `attn`, `logit` (impossible) |
 | `yolov8n-pose` | `conv` |
 | `mediapipe-hands` | `conv` |
 | `mediapipe-pose` | `conv` |
@@ -60,9 +60,9 @@ A list per model, not a grid of models against operations. In a 144-cell grid, 5
 
 ### gemma -- the only model whose ENCODER differs
 
-The other sixteen take their kind's row wholesale. gemma does not: its row lives in `MODEL_REGISTRY`, because `GemmaNpuEncoder` reads no per-op flag at all. That is a property of one encoder and not of a family, and making it another kind would claim a family that does not exist.
+Every other model takes its kind's row wholesale. gemma does not: its row lives in `MODEL_REGISTRY`, because `GemmaNpuEncoder` reads no per-op flag at all. That is a property of one encoder and not of a family, and making it another kind would claim a family that does not exist.
 
-The price of that decision is visible in the matrix: gemma's `layn` is **blocked** -- it needs RMSNorm, and `kernels/layernorm.cc` is parameterised only by `-DLN_COLS/-DLN_EPS/-DLN_ROWS`, so this is a different kernel body and a **ninth** code. Deliberately not done: the code set would grow and lose its uniformity. The full argument is the `embeddinggemma-300m/layn` cell in NPU_OPS.md.
+The price of that decision is visible in the matrix: gemma's `layn` is **blocked** -- it needs RMSNorm, and `kernels/layernorm.cc` is parameterised only by `-DLN_COLS/-DLN_EPS/-DLN_ROWS`, so this is a different kernel body and a code of its own, since the set is at nine already. Deliberately not done: the code set would grow and lose its uniformity. The full argument is the `embeddinggemma-300m/layn` cell in NPU_OPS.md.
 
 So `buildable_codes()` returns the **empty set** for gemma: the exporter compiles no sibling design at all for it.
 
@@ -76,7 +76,7 @@ That is why their `gelu` is marked `**gated**` here rather than `**yes**`, even 
 
 This column is the exporter's own answer: `npu_ops.buildable_codes()` out of `tools/lib/npu_ops.py`, the same function the build calls. Not a second opinion about it.
 
-Note what is **absent** from it: the five codes with no design directory of their own. `conv` and `attn` genuinely run on the array for whisper -- the status is `honours` in the matrix above -- and neither appears here, because they are streams **inside** the set the GEMM export already produces. A column that listed them would be wrong.
+Note what is **absent** from it: the six codes with no design directory of their own. `conv` and `attn` genuinely run on the array for whisper -- the status is `honours` in the matrix above -- and neither appears here, because they are streams **inside** the set the GEMM export already produces. A column that listed them would be wrong.
 
 `ln_cols` and `ln_eps` are the numbers the exporter takes from the model for the `layernorm/` design: row width from `hidden`, epsilon from `layer_norm_eps`. Seven models carry no such field, and the exporter then substitutes `FALLBACK_LN_EPS` -- marked `(fallback)` here so a default does not read as a per-model fact. A dash in those columns means no `layernorm/` is compiled for that model, so the numbers belong to nothing: `yolov8n-pose` does not even carry a `hidden`. `vocab` is the vocabulary width, which decides whether the logit projection is chunked.
 
@@ -101,11 +101,11 @@ Note what is **absent** from it: the five codes with no design directory of thei
 | `mediapipe-hands` | `hands` | _none_ | — | — | — |
 | `mediapipe-pose` | `mppose` | _none_ | — | — | — |
 
-## Why seventeen rows and five kinds
+## Why 18 rows and six kinds
 
-`npu_targets.json` knows five kinds (`gemm_rtp`, `stt`, `cls`, `pose`, `hands`) and seventeen models, so the model table is a little under four times the length of the kind table. That is deliberate: a kind is what can be shared, and the reader wants the answer for the name they typed.
+`npu_targets.json` knows six kinds (`gemm_rtp`, `stt`, `cls`, `pose`, `hands`, `mppose`) and eighteen models, so the model table is three times the length of the architecture table. That is deliberate: a kind is what can be shared, and the reader wants the answer for the name they typed.
 
-The split: 7 text embedders with no `kind` of their own (so `gemm_rtp`, and the `kind` column says so rather than leaving a blank), 6 whisper (`stt`), one ViT (`cls`), one YOLO-pose (`pose`), one MediaPipe hands (`mediapipe-hands`).
+The split: 8 models on `gemm_rtp` -- 7 text embedders with no `kind` of their own (the `kind` column says so rather than leaving a blank) plus gemma, 6 whisper (`stt`), one ViT (`cls`), one YOLO-pose (`pose`), one MediaPipe hands (`hands`), one MediaPipe pose (`mppose`).
 
 No row here is typed by hand. The model list is read from `tools/data/npu_targets.json`, so a model added to the catalogue lands in this table by itself -- which is the point of generating it.
 

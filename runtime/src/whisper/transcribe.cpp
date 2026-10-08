@@ -330,7 +330,11 @@ Session::Session(npue::File &model, const std::string &model_name,
   // carries five describes a design that is not the one loaded, which is worse
   // than printing nothing.
   enc_rows_ = es.rows;
-  for (const auto &s : enc_streams) enc_ops_.push_back(s.op);
+  for (const auto &s : enc_streams) {
+    enc_ops_.push_back(s.op);
+    if (std::string(app::code_for_stream(s.op)) == "gemm")
+      enc_gemm_ops_.push_back(s.op);
+  }
   // The decoder set repeats its seven streams once per batch tier, and the
   // status line prints the tier row counts separately, so the NAMES go in once:
   // printing seven names three times reads as twenty-one GEMMs per layer.
@@ -338,6 +342,11 @@ Session::Session(npue::File &model, const std::string &model_name,
     bool seen = false;
     for (const auto &have : dec_ops_) seen = seen || have == s.op;
     if (!seen) dec_ops_.push_back(s.op);
+    bool seen_g = false;
+    for (const auto &have : dec_gemm_ops_)
+      seen_g = seen_g || have == s.op;
+    if (!seen_g && std::string(app::code_for_stream(s.op)) == "gemm")
+      dec_gemm_ops_.push_back(s.op);
   }
   // The stacks take their LayerNorm (and GELU) from the array only after the
   // designs are open, so a stack can never dispatch into a design that does not
@@ -518,7 +527,7 @@ Session::Session(npue::File &model, const std::string &model_name,
           "an int8 design's conv panel cannot be tiled from fp32 conv weights; "
           "the front end runs on the host";
     if (gemm_stream && !int8_enc) {
-      conv_gemm_ = std::make_unique<NpuGemm>(*enc_design_, *pool_);
+      conv_gemm_ = std::make_unique<NpuGemm>(*enc_design_, *pool_, "conv");
       conv_gemm_->alloc_buffers();
       conv1_ = std::make_unique<NpuConv1d>(
           *enc_design_, *pool_, *conv_gemm_,

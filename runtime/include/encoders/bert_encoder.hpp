@@ -14,11 +14,18 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
+// op_on_array() -- which --npu-ops code this run was asked for. The four
+// per-layer GEMMs ask it once, in gemm(), rather than each of the twelve call
+// sites growing a branch of their own.
+#include "common/host_b.hpp"     // npue::hostb::WeightCache
+#include "common/npu_ops_flag.hpp"
 #include "runtime/encoder.hpp"
 #include "runtime/design.hpp"
 #include "runtime/device.hpp"
@@ -205,6 +212,46 @@ public:
   void add_additive_mask(std::vector<float> &scores);
 
   // GEMM and fused epilogues.
+  //
+  // ARRAY OR HOST is decided by ONE test -- op_on_array("gemm") -- and it is
+  // made once, at the top of gemm(), the single funnel all twelve call sites
+  // below go through. `--npu-ops` without `gemm` means every one of them runs
+  // on this process; with `gemm` they dispatch exactly as they did before the
+  // ninth code existed.
+  //
+  // The fusions listed here (fuse_ln, fuse_ffn and their bf16 twins) write the
+  // NEXT GEMM's A operand into the design's own buffer, which is the array's
+  // mechanism and not the host's. run() therefore gates each of them on
+  // gemm_on_array() as well as on the flags it already read: with `gemm` off
+  // they fall through to add_into + layer_norm/gelu_cpu, which is the same
+  // arithmetic with the A slot not written -- and the A slot is not read,
+  // because the host branch in gemm() never looks at `a_ready`.
+  bool gemm_on_array() const { return app::op_on_array("gemm"); }
+
+  // The host form of gemm(), reached when gemm_on_array() is false. It takes no
+  // design state at all: the operand comes from the CONTAINER (common/host_b.hpp
+  // untiles it once, on first use, and the result is kept) and the multiply is
+  // hostconv::gemm_nt -- the same blocked kernel the conv-only architectures
+  // run their networks on. `n_dispatch` does NOT move, because every dispatch
+  // count already recorded for this model counts array dispatches.
+  void host_gemm(const std::vector<float> &a, std::vector<float> &out, int64_t N,
+                 const float *bias, const float *asmooth, npu::Design &d,
+                 size_t wslot);
+
+  // One staged operand's fp32 [K, N], and the (design, slot) -> tensor-name map
+  // that finds it. Recorded by stage_all(), built on first use -- see
+  // common/host_b.hpp, which is where both the map and the reason for its
+  // key live, and where GemmaNpuEncoder's copy of this lives too.
+  // SHARED, not owned: see common/host_b.hpp, whose copy constructor is deleted
+  // precisely so the pipeline lanes below cannot silently take their own copy.
+  std::shared_ptr<npue::hostb::WeightCache> host_w_ =
+      std::make_shared<npue::hostb::WeightCache>();
+  // Host runs, counted apart from n_dispatch for the same reason NpuGemm keeps
+  // them apart: every dispatch count already recorded for this model counts
+  // array dispatches, and folding host work into that counter would silently
+  // change what 48 meant.
+  int64_t n_host = 0;
+
   struct FusedNext {
     const float *asmooth;
     int8_t *dst;

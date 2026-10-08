@@ -265,13 +265,22 @@ std::vector<float> VitEncoder::run(const std::vector<float> &patches) {
   // this is attn_out's own shape and it runs on attn_out's instruction slot.
   // The result has n_patches rows and no CLS row yet: the CLS vector is
   // PREPENDED, which is not the same as offsetting the patch rows by one.
+  //
+  // `conv` is passed per RUN, not per instance: this operand shares this
+  // instance's `gemm` calls (and its staging) but is named by `conv`, so a run
+  // with `--npu-ops gemm` and none with `--npu-ops conv` puts it on the host
+  // while the four per-layer GEMMs go to the array, and the other way round.
+  // It is the one call site in the tree that does not inherit its instance's
+  // code, and the reason is that this operand is a convolution that happens to
+  // fit a GEMM slot.
   std::vector<float> patch_out(static_cast<size_t>(rows) * d);
   {
     int64_t done = 0;
     while (done < geom_.n_patches) {
       const int64_t n = std::min<int64_t>(rows, geom_.n_patches - done);
       g_.run(streams_.attn_out, patches.data() + done * geom_.patch_dim, n, rows,
-             geom_.patch_dim, patch_.slot, patch_.bias, d, patch_out.data());
+             geom_.patch_dim, patch_.slot, patch_.bias, d, patch_out.data(),
+             "conv");
       done += n;
     }
   }

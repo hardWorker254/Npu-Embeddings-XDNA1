@@ -135,7 +135,7 @@ def main():
                     help="box IoU above which two detections are the same "
                          "person (default %(default)s)")
     ap.add_argument("--cli", default=None,
-                    help="the npuembeddings binary (default: the one next to "
+                    help="the npuimage binary (default: the one next to "
                          "this repo's runtime/build)")
     ap.add_argument("--conf", type=float, default=None,
                     help="passed to both runs; the point of a low threshold is "
@@ -148,7 +148,7 @@ def main():
     cli = args.cli or os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__)))),
-        "runtime", "build", "npuembeddings")
+        "runtime", "build", "npuimage")
     if not os.path.exists(cli):
         raise SystemExit(f"no binary at {cli}. Build it, or pass --cli.")
 

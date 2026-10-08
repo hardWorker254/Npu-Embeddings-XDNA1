@@ -26,7 +26,7 @@ rather than discovered later:
   drawing code, the counting code -- works unchanged.
 
 The numbers themselves are the C++ runtime's, not Python's: this module runs
-``npuembeddings pose`` (or POSTs to ``npuembeddings serve``, which answers
+``npuimage pose`` (or POSTs to ``npuimage serve``, which answers
 ``/v1/pose`` for a pose container) and parses
 the JSON that ``npue::pose::result_json`` writes. There is no second
 implementation of the network, the front end or the decoder, so the Python and
@@ -95,12 +95,14 @@ _COCO17 = (
 
 
 def find_binary(explicit: str | os.PathLike[str] | None = None) -> str:
-    """Locate the ``npuembeddings`` binary, or say where it looked.
+    """Locate the ``npuimage`` binary, or say where it looked.
 
     Three places, in order: the argument, ``$NPUEMBEDDINGS_BIN``, and the build
-    tree next to this file (``runtime/build/npuembeddings``), which is where
+    tree next to this file (``runtime/build/npuimage``), which is where
     ``bootstrap.sh`` leaves it. ``shutil.which`` is the last resort for an
-    installed copy.
+    installed copy. The env var keeps the name it had before the three-
+    binary split; the DEFAULT binary is npuimage because this facade runs
+    pixels, not because anything here reads the name.
 
     Every path that was tried is named in the error, because "command not found"
     for a binary this project builds is a five-minute confusion and one line of
@@ -116,18 +118,18 @@ def find_binary(explicit: str | os.PathLike[str] | None = None) -> str:
         tried.append("$NPUEMBEDDINGS_BIN=" + env)
         if os.access(env, os.X_OK):
             return env
-    # <repo>/python/npue_pose.py -> <repo>/runtime/build/npuembeddings
+    # <repo>/python/npue_pose.py -> <repo>/runtime/build/npuimage
     here = Path(__file__).resolve().parent.parent
-    built = here / "runtime" / "build" / "npuembeddings"
+    built = here / "runtime" / "build" / "npuimage"
     tried.append(str(built))
     if built.is_file() and os.access(built, os.X_OK):
         return str(built)
-    onpath = shutil.which("npuembeddings")
+    onpath = shutil.which("npuimage")
     if onpath:
         return onpath
     tried.append("$PATH")
     raise FileNotFoundError(
-        "cannot find the npuembeddings binary. Looked at:\n  "
+        "cannot find the npuimage binary. Looked at:\n  "
         + "\n  ".join(tried)
         + "\nBuild it with `cmake --build runtime/build -j` first, or point "
         "NPUEMBEDDINGS_BIN at it."
@@ -449,7 +451,7 @@ def _image_bytes(image: Any) -> tuple[bytes, str]:
 
 
 class _Server:
-    """A ``npuembeddings serve`` child, started lazily and stopped on close().
+    """A ``npuimage serve`` child, started lazily and stopped on close().
 
     A thread is not used and requests are not overlapped: the C++ server serves
     one request at a time by design (one Session, one pool), so a client that
@@ -504,7 +506,7 @@ class _Server:
                 with open(self.log.name, "r", errors="replace") as f:
                     tail = f.read()[-4000:]
                 raise RuntimeError(
-                    f"`npuembeddings serve` exited immediately ({self.proc.returncode}):\n"
+                    f"`npuimage serve` exited immediately ({self.proc.returncode}):\n"
                     + tail
                 )
             try:
@@ -515,7 +517,7 @@ class _Server:
                 last = str(exc)
             time.sleep(0.1)
         raise TimeoutError(
-            f"`npuembeddings serve` did not answer /health within {seconds:.0f}s "
+            f"`npuimage serve` did not answer /health within {seconds:.0f}s "
             f"(last error: {last}). Its output is in {self.log.name}."
         )
 
@@ -624,7 +626,7 @@ class PoseLandmarker:
             # so stderr IS the error message here and it is passed through
             # rather than replaced by "exit status 1".
             raise RuntimeError(
-                f"npuembeddings pose exited {proc.returncode}:\n"
+                f"npuimage pose exited {proc.returncode}:\n"
                 + proc.stderr.decode("utf-8", "replace").strip()
             )
         res = _to_result(json.loads(proc.stdout.decode("utf-8")), timestamp_ms)

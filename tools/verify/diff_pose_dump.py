@@ -5,7 +5,7 @@
     python tools/verify/diff_pose_dump.py MODEL.onnx CONTAINER.npue IMAGE \
         --dump runtime.bin
 
-`npuembeddings pose ... --pose-dump FILE` writes every graph node's output as
+`npuimage pose ... --pose-dump FILE` writes every graph node's output as
 raw fp32 NCHW behind a JSON header. This file reads that back, runs the same
 graph independently in NumPy (verify_pose.py's interpreter, transcribed from the
 ONNX file rather than from the container), and prints the FIRST node where the

@@ -51,7 +51,7 @@
 # and a still of one hand does not answer it.
 #
 # The hands branch is on the CLI backend, and cannot be otherwise: arch 7 has no
-# HTTP endpoint. There is no /v1/hands, `npuembeddings serve` on a hands
+# HTTP endpoint. There is no /v1/hands, `npuimage serve` on a hands
 # container is refused by name, and npue_hands refuses backend="http" with that
 # same reason rather than falling back quietly. So every frame pays a process
 # spawn and a model load. MEASURED here, 520x512, one hand, 16 threads, six runs:
@@ -168,7 +168,7 @@ def resolve_container(name: str) -> str:
     other way round as well: the hands container was packed into
     models/mediapipe-hands/hands.npue, beside the two ONNX files it was built
     from, while every table in the binary globs models/*.npue -- so `list` could
-    not see it and `npuembeddings hands mediapipe-hands` could not name it. It
+    not see it and `npuimage hands mediapipe-hands` could not name it. It
     lives at models/mediapipe-hands.npue now, and the model directory keeps the
     weights and the panel variant.
     """
@@ -196,7 +196,7 @@ def find_binary() -> str:
     if env:
         return env
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for name in ("npuembeddings", "npuembeddings.exe"):
+    for name in ("npuimage", "npuimage.exe"):
         found = which(name)
         if found:
             return found
@@ -205,7 +205,7 @@ def find_binary() -> str:
             if os.path.exists(cand):
                 return cand
     raise SystemExit(
-        "error: cannot find the npuembeddings binary.\n"
+        "error: cannot find the npuimage binary.\n"
         "  Build it with `cmake -S runtime -B runtime/build && cmake --build "
         "runtime/build`, or point NPUEMBEDDINGS_BINARY at one.\n"
         "  --task mppose calls it directly -- there is no arch=8 Python facade "
@@ -519,7 +519,7 @@ def draw_mppose(img: np.ndarray, result, thickness: int = 2,
 
 
 class MpposeCli:
-    """One arch=8 answer, from one `npuembeddings mppose` process.
+    """One arch=8 answer, from one `npuimage mppose` process.
 
     Shaped like the two facades -- a context manager with `detect_for_video` --
     so the loop below does not need a third branch. The frame is written to a
@@ -998,7 +998,7 @@ def main(argv: list[str] | None = None) -> int:
                 # than as the bug it was.
                 #
                 # Measured three ways -- the file as it is, and the demo's own encoding
-                # with and without the swap -- through the same `npuembeddings pose`
+                # with and without the swap -- through the same `npuimage pose`
                 # the loop calls, one frame, no camera in the way:
                 #
                 #   the file as it is                  3 people, joints = reference to 0 px
@@ -1070,7 +1070,7 @@ def main(argv: list[str] | None = None) -> int:
                               f"{t.get('detector', 0.0):.0f} ms, landmarks "
                               f"{t.get('landmarks', 0.0):.0f} ms, crop "
                               f"{t.get('crop', 0.0):.0f} ms")
-                        print(f"one `npuembeddings mppose` process per frame, "
+                        print(f"one `npuimage mppose` process per frame, "
                               f"so the frame time above includes its start -- "
                               f"this is the slowest of the three paths and it is "
                               f"a demonstration, not a benchmark")

@@ -245,7 +245,7 @@ ARTEFACTS = [
      "python tools/pipeline.py run pack_npue"),
     ("designs", "a design.json under runtime/artifacts/*/artifacts_npu*/",
      "python tools/pipeline.py run export_gemm_rtp --target <model> --arch 1"),
-    ("runtime", "the npuembeddings executable",
+    ("runtime", "the three runtime executables",
      "cmake -S runtime -B runtime/build && cmake --build runtime/build"),
     ("hands_models", "the arch=7 checkpoint pair, the test photograph and "
      "the container at models/mediapipe-hands.npue,",
@@ -500,9 +500,13 @@ def _have(kind):
         found = design_sets()
         return bool(found), "python tools/pipeline.py run export_gemm_rtp"
     if kind == "runtime":
-        for name in ("npuembeddings", "npuembeddings.exe"):
-            if (REPO / "runtime" / "build" / name).exists():
-                return True, ""
+        # All THREE, because they are one CMake target set built together and
+        # each gate runs the one whose family its containers belong to.
+        missing = [n for n in ("npuembeddings", "npuaudio", "npuimage")
+                   if not any((REPO / "runtime" / "build" / (n + ext)).exists()
+                              for ext in ("", ".exe"))]
+        if not missing:
+            return True, ""
         return False, "cmake -S runtime -B runtime/build && cmake --build ..."
     if kind == "npu":
         # xrt-smi is the only honest answer, and asking it is cheap. Absent

@@ -87,7 +87,7 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
 
   refuse_removed_op_flags(argc, argv);
   refuse_exporter_only_flags(argc, argv);
-  // The LAST occurrence wins, not the first. `npuembeddings serve <model>` puts
+  // The LAST occurrence wins, not the first. `npuimage serve <model>` puts
   // its own --threads 24 in the store BEFORE forward_common() appends whatever
   // the user typed, so the reader that took the first match silently answered
   // `serve <whisper> --threads 8` with 24 threads. Nothing on the command line
@@ -151,16 +151,8 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
             "dispatched GEMMs (the 73rd weight, the head's [1,16,1,1] DFL, is "
             "folded analytically into the decoder and never dispatched). The "
             "codes " +
-            std::string(codes.count("gelu") ? "gelu" : "") +
-            (codes.count("gelu") ? (codes.size() > 1 ? ", " : "") : "") +
-            (codes.count("layn") ? "layn" : "") +
-            (codes.count("layn") ? (codes.size() > 1 ? ", " : "") : "") +
-            (codes.count("softm") ? "softm" : "") +
-            (codes.count("attn") ? "attn" : "") +
-            (codes.count("mproj") ? "mproj" : "") +
-            (codes.count("fft") ? "fft" : "") +
-            (codes.count("logit") ? "logit" : "") +
-            "name Whisper's or BERT's eltwise and projection passes, and this "
+            app::npu_op_names(codes, "conv") +
+            " name Whisper's or BERT's eltwise and projection passes, and this "
             "architecture has none of them: the activations here are SiLU, "
             "which is fused into the convolution's epilogue because it is "
             "elementwise on the GEMM's own output, and there is no LayerNorm, "
@@ -175,7 +167,7 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
   // images are demanded, because a server has no image on the command line -- it
   // is a different way of NAMING the same model, not a different mode.
   //
-  // `npuembeddings serve <model>` is the one verb, and the container's arch picks
+  // `npuimage serve <model>` is the one verb, and the container's arch picks
   // which endpoint answers: /v1/embeddings for a BERT-family model,
   // /v1/audio/transcriptions for Whisper, /v1/classify for a ViT, /v1/pose for
   // this one. That is already how the speech mode works off the same flag, and it
@@ -193,8 +185,8 @@ inline int maybe_pose_mode(const std::string &root, int argc, char **argv,
   if (images.empty() && !serving)
     throw std::runtime_error(
         "this is a pose model, so say whose pose to find:\n"
-        "    npuembeddings pose <model> <image.png> [more.png ...]\n"
-        "    npuembeddings serve <model>        (POST /v1/pose)\n"
+        "    npuimage pose <model> <image.png> [more.png ...]\n"
+        "    npuimage serve <model>        (POST /v1/pose)\n"
         "  (PNG and JPEG; anything else is refused rather than guessed at)\n"
         "  --conf 0.25  --iou 0.70  --kpt 0.50  --max-det 300\n"
         "  --npu-ops conv   run the convolutions on the array instead "

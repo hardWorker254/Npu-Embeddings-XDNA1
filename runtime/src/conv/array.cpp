@@ -115,7 +115,14 @@ public:
                                "/gemm_rtp: the design reports M = 0, so a "
                                "dispatch computes no rows");
 
-    gemm_ = std::make_unique<npue::whisper::NpuGemm>(*design_, pool_);
+    // `conv`, not the NpuGemm default `gemm`: this backend exists only
+    // because --npu-ops conv named it (make_array_backend is called from
+    // behind that test), and NpuGemm::run asks g_npu_ops for the code it
+    // was constructed with. Built with the default it would answer "gemm
+    // was not named" and run every one of these on the host while this
+    // file counted the calls as dispatches.
+    gemm_ = std::make_unique<npue::whisper::NpuGemm>(*design_, pool_,
+                                                      "conv");
     gemm_->npu_mu = &mu_;
     gemm_->alloc_buffers();
 

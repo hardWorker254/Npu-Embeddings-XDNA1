@@ -818,7 +818,7 @@ RT_WORLD = 1e-3
 # Where the runtime binary is expected. It is BUILT, not shipped, so a gate that
 # cannot find it says so and stops -- a runtime section that quietly skipped
 # itself would leave the C++ path unmeasured while reporting OK.
-BINARY = os.path.join(REPO, "runtime", "build", "npuembeddings")
+BINARY = os.path.join(REPO, "runtime", "build", "npuimage")
 
 
 def _need(path, what):

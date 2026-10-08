@@ -198,6 +198,31 @@ struct StreamEntry {
   int64_t batch = 0, slot = 0, M = 0, K = 0, N = 0;
 };
 
+// Which --npu-ops code a design set's STREAM NAME belongs to.
+//
+// It exists for the status lines, which print one row per op group and have to
+// decide which of their loaded streams belongs in which row. resolve.py names
+// each stream after the operation that consumes it, so the name IS the answer
+// -- except for the four per-layer GEMM streams, which are named qkv / attn_out
+// / ffn_up / ffn_down (and the self- and cross- attention spellings) and are
+// the default.
+//
+// The DEFAULT is `gemm` on purpose: a stream this function has never heard of
+// is one of the four per-layer GEMMs until proven otherwise, so a new base
+// stream appears on the GEMM row rather than silently disappearing from it. The
+// alternative failure -- an extra name on a row -- was the one that already
+// happened: attn_qk, attn_av, mel_proj and dft400 were printed under "encoder
+// GEMMs" while that row said `npu`, i.e. five streams claimed for the array
+// while they were on the host.
+inline const char *code_for_stream(const std::string &op) {
+  if (op.rfind("attn_qk", 0) == 0 || op.rfind("attn_av", 0) == 0) return "attn";
+  if (op.rfind("mel_proj", 0) == 0) return "mproj";
+  if (op.rfind("dft", 0) == 0) return "fft";
+  if (op.rfind("conv", 0) == 0) return "conv";
+  if (op.rfind("logits", 0) == 0) return "logit";
+  return "gemm";
+}
+
 // The B-operand layout hash a design set declares, or "" if it declares none.
 //
 // THIS EXISTS BECAUSE `--artifacts <path>` SELECTED A DESIGN WITHOUT CHECKING

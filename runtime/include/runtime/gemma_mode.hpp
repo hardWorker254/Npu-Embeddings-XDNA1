@@ -139,8 +139,18 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
       if (std::string(argv[i]) == "--npu-ops") listing = argv[i + 1];
     npu_codes = parse_npu_ops(listing);
     if (!npu_codes.empty()) {
-      // TWO CODES ARE HONOURED AND SIX ARE REFUSED, and the split is by what a
+      // THREE CODES ARE HONOURED AND FIVE ARE REFUSED, and the split is by what a
       // refusal has to say about them rather than by whether they parse.
+      //
+      // `gemm`, `attn` and `softm` are honoured, and the rest are refused.
+      //
+      // `gemm` is the newest of the three and the one that changed the shape of
+      // this block: the four per-layer GEMMs used to run on the array whenever
+      // this encoder was built, with no code to select them, which made
+      // `--npu-ops` a flag whose own documented rule ("host unless listed") was
+      // false for its largest operation. GemmaNpuEncoder::gemm now asks
+      // op_on_array("gemm") the way BertEncoder::gemm does, and everything else
+      // below this line keeps meaning what it meant.
       //
       // `attn` and `softm` are honoured. Attention is a separate pass --
       // `attention(qkvbuf, ctx)` in GemmaNpuEncoder -- and takes the same
@@ -165,14 +175,16 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
       //                projection -- an embedder has none of them, so the
       //                registry marks these cells absent rather than blocked,
       //                and a refusal that called them blocked would tell a
-      //                reader that exporting harder might work.
+      //                reader that exporting harder might work. (`gemm` is NOT
+      //                among them: this encoder has four per-layer GEMMs of
+      //                its own and moving them is exactly what it honours.)
       //
       // An earlier version of this comment said the exporter built
       // attn_qk/attn_av only under `kind == "stt"` and that n_kv came from
       // `frames`. Both were true when written and both were the export's
       // policy rather than the model's; they are fixed, and a refusal naming a
       // reason that no longer holds sends the reader to repair the wrong thing.
-      const std::set<std::string> honoured = {"attn", "softm"};
+      const std::set<std::string> honoured = {"gemm", "attn", "softm"};
       std::string deadseen, onhost, absent;
       for (const auto &c : npu_codes) {
         if (honoured.count(c)) continue;
@@ -204,7 +216,8 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
                 "would be opened by nothing.";
         throw std::runtime_error(
             "--npu-ops " + deadseen + ":" + why +
-            "\n  This architecture honours --npu-ops attn and --npu-ops softm.");
+            "\n  This architecture honours --npu-ops gemm, --npu-ops attn and "
+            "--npu-ops softm.");
       }
     }
   }
@@ -705,6 +718,10 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
       e2.tiers = enc.tiers;
       e2.tier_slots = enc.tier_slots;
       e2.s_qkv = enc.s_qkv; e2.s_ao = enc.s_ao;
+      // The host path's untiled operand, shared for the same reason the staged
+      // slot vectors are shared below: one cache, mutexed, and WeightCache's
+      // copy constructor is deleted so it cannot become four.
+      e2.host_w_ = enc.host_w_;
       e2.s_fu = enc.s_fu;   e2.s_fd = enc.s_fd;
       e2.b_qkv = enc.b_qkv; e2.b_ao = enc.b_ao;
       e2.b_fu = enc.b_fu;   e2.b_fd = enc.b_fd;
@@ -740,9 +757,18 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
 
   std::printf("  hidden     %lld, tokenizer %zu tokens\n",
               (long long)enc.hidden_, enc.tok.vocab_size());
-  std::printf("  path       NPU -- 4 GEMMs/layer x %lld layers = %lld "
-              "dispatches, ONE xclbin, one hw_context\n",
-              (long long)enc.layers, (long long)(4 * enc.layers));
+  // THE DISPATCH COUNT READS THE FLAG, and it was the one number in this block
+  // that did not: it always printed `4 * layers` even when the run had asked
+  // for nothing and dispatched zero times. `gemm` is the ninth code; with it
+  // unnamed the four per-layer GEMMs are this process's, and saying a run did
+  // 96 dispatches while the counter beside it read 0 was exactly the
+  // self-contradiction this block exists to avoid.
+  const bool gemm_on_array = enc.gemm_on_array();
+  std::printf("  path       %s -- 4 GEMMs/layer x %lld layers = %lld "
+              "%s, ONE xclbin, one hw_context\n",
+              gemm_on_array ? "NPU" : "NPU encoder, host GEMMs",
+              (long long)enc.layers, (long long)(gemm_on_array ? 4 * enc.layers : 0),
+              gemm_on_array ? "dispatches" : "dispatches (--npu-ops gemm moves them)");
   // WHICH OF THE TWO -- same reason as vit_mode: a container carrying gemm_rtp
   // leaves art empty, and a blank where a path belongs reads as a printer bug.
   std::printf("  designs    %s  (%zu streams, %zu batch tiers)\n",
@@ -815,14 +841,22 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
                   d.info().device.c_str());
     }
   };
-  std::printf("  host       RMSNorm x%lld, RoPE, GeGLU%s\n",
+  // WHAT RAN WHERE, one row per op -- and `gemm` leads because it is the
+  // operation with the most of them. The line beneath used to list only what
+  // had always been host, so a run whose four GEMMs per layer were on the host
+  // described itself by everything except them.
+  where("gemm", !gemm_on_array, d,
+        gemm_on_array ? "" : "4 GEMMs/layer x the qkv/attn_out/ffn_up/ffn_down "
+                             "streams, on this process");
+  std::printf("  host       RMSNorm x%lld, RoPE, GeGLU%s%s\n",
               (long long)(4 * enc.layers + 1),
               attn_on_array && softm_on_array
                   ? ""
                   : attn_on_array
                         ? ", MQA softmax"
                         : softm_on_array ? ", MQA QK^T and softmax.V"
-                                         : ", MQA attention (2.3% of MACs)");
+                                         : ", MQA attention (2.3% of MACs)",
+              gemm_on_array ? "" : ", 4 GEMMs per layer");
   where("attn", !attn_on_array, d,
         "MQA attention over the same 2.3% of MACs, on the host");
   where("softm", !softm_on_array,

@@ -30,7 +30,7 @@ std::unique_ptr<Tokenizer> VitModel::make_tokenizer() {
               "input. Its front end is a " +
       std::to_string(geom_.image_size) + "px image and its classifier head "
               "takes the CLS row of the encoder. Use `classify`: "
-              "npuembeddings classify <model> <image.png>");
+              "npuimage classify <model> <image.png>");
 }
 
 int64_t VitModel::hidden() const { return hidden_; }

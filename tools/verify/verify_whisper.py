@@ -169,7 +169,7 @@ def main() -> int:
                                 "artifacts_npu1"))
     ap.add_argument("--checkpoint", default=str(REPO / "models" / "whisper-tiny"))
     ap.add_argument("--exe",
-                    default=str(REPO / "runtime" / "build" / "npuembeddings"))
+                    default=str(REPO / "runtime" / "build" / "npuaudio"))
     ap.add_argument("--audio", type=Path, help="one file, with --ref")
     ap.add_argument("--ref", help="the human transcript of --audio")
     ap.add_argument("--corpus", type=Path,

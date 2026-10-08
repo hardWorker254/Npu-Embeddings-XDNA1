@@ -322,6 +322,8 @@ runtime/Makefile
 # The executable an in-source build leaves in runtime/; an out-of-source one
 # puts it under runtime/build/ (already ignored above).
 runtime/npuembeddings
+runtime/npuaudio
+runtime/npuimage
 
 # Model download cache (src/common/hub.cpp writes <name>/<file>.part while a
 # fetch is in flight and renames on completion). The CHECKPOINTS themselves are

@@ -27,7 +27,7 @@ std::unique_ptr<Tokenizer> PoseModel::make_tokenizer() {
       std::string(npue::pose::kArch) +
       "), so it has no tokenizer, no vocabulary and no text input. Its front "
       "end is an image, and its output is a list of people with 17 keypoints "
-      "each rather than one vector. Use `pose`: npuembeddings pose <model> "
+      "each rather than one vector. Use `pose`: npuimage pose <model> "
       "<image.png>");
 }
 

@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "cli/family.hpp"
 #include "common/app_state.hpp"
 #include "common/design_selection.hpp"
 #include "common/hub.hpp"
@@ -125,102 +126,162 @@ inline void print_usage() {
     // literal `0` into the middle of a sentence -- the text read "2.6%.0 The
     // status block prints both sides" -- which is exactly the kind of help output
     // that teaches a reader to skim past the numbers.
+    const Family who = g_family;
+
     std::fputs(
         "NpuEmbeddings -- BERT-family embeddings on the AMD NPU (XDNA1/npu1,\n"
         "XDNA2/npu2; --dev selects the generation)\n"
+        "\n", stdout);
+
+    // WHICH OF THE THREE THIS IS, before any verb: a reader who typed the
+    // wrong binary learns it here rather than from a refusal later. This is
+    // the SAME roster string the refusals print (cli/family.hpp), so the help
+    // text and the refusal cannot drift about which program to run next.
+    std::printf("  This is %s.\n\n", g_bin);
+    std::fputs(roster(), stdout);
+    std::fputs("\n\n", stdout);
+
+    // EVERY VERB BLOCK IS GUARDED BY owns(), so nothing here documents a
+    // command this binary would refuse. Help that lists a verb and then sends
+    // the reader to another program for it is the failure the split exists to
+    // end -- and a block that printed unconditionally would be a second roster
+    // to keep in step with the first.
+    //
+    // The program name is BUILT from g_bin rather than typed: `npuaudio` and
+    // `npuimage` are the same text with one word changed, and the word that
+    // differs is the one a reader is here to learn.
+    if (owns(who, "list"))
+        std::fputs((std::string("  ") + g_bin +
+                    " list\n"
+                    "        every model this build can run, and which are installed\n"
+                    "\n").c_str(), stdout);
+
+    std::fputs((std::string("  ") + g_bin +
+                " serve <model> [--port N] [--bind ADDR]\n"
+                "        the HTTP endpoint for WHATEVER the container is. One verb,\n"
+                "        four endpoints, and the model's arch picks which:\n"
+                "          /v1/embeddings           a BERT-family text model\n"
+                "          /v1/audio/transcriptions Whisper\n"
+                "          /v1/classify             a ViT classifier\n"
+                "          /v1/pose                 YOLOv8-pose\n"
+                "        Downloads and verifies the model first if it is not\n"
+                "        installed yet. The mode is chosen by the container's arch, never\n"
+                "        by a flag, and each endpoint answers only for its own path -- a\n"
+                "        wrong path is a 404 naming the right one, never another\n"
+                "        endpoint's answer.\n"
+                "        Only this binary's own family is served here (" + g_bin +
+                "): another\n"
+                "        binary's container is refused by name before the listener opens,\n"
+                "        rather than answered by an endpoint this process is not named for.\n"
+                "\n").c_str(), stdout);
+
+    if (owns(who, "embed"))
+        std::fputs((std::string("  ") + g_bin +
+                    " embed <model> <in.txt> [out.f32]\n"
+                    "        embed a text file, one text per line\n"
+                    "\n").c_str(), stdout);
+
+    if (owns(who, "transcribe"))
+        std::fputs((std::string("  ") + g_bin +
+                    " transcribe <model> <audio.wav> [--language en]\n"
+                    "        transcribe 16 kHz audio with a Whisper model. The transcript\n"
+                    "        goes to stdout on its own and the status block to stderr, so\n"
+                    "        it pipes. --json prints the OpenAI-shaped object instead,\n"
+                    "        with one segment per 30 s window. --convert ingests through\n"
+                    "        ffmpeg (mp3, m4a, webm, or a WAV the reader refuses).\n"
+                    "\n").c_str(), stdout);
+
+    if (owns(who, "classify"))
+        std::fputs((std::string("  ") + g_bin +
+                    " classify <model> <image.png> [more.png ...]\n"
+                    "        classify images with a ViT model (vit-base-patch16-224), one\n"
+                    "        per argument. The label goes to stdout on its own and the\n"
+                    "        status block to stderr, so it pipes. PNG and JPEG only --\n"
+                    "        anything else is refused by name rather than guessed at, and\n"
+                    "        so is a non-square resize or a shortest-edge crop: the\n"
+                    "        container says which geometry it was trained with and this\n"
+                    "        reads it. --top-k prints the runners-up to stderr, --json\n"
+                    "        the objects to stdout. `embed` is not how this runs.\n"
+                    "        Over HTTP: `" + g_bin +
+                    " serve <model>`, which answers POST\n"
+                    "        /v1/classify with the same object `classify --json` prints (both\n"
+                    "        call npue::vit::prediction_json), one `image` part and an\n"
+                    "        optional `top_k`. GET /v1/labels returns the whole vocabulary, so\n"
+                    "        a client can turn an id into a name without the container.\n"
+                    "\n").c_str(), stdout);
+
+    if (owns(who, "pose"))
+        std::fputs((std::string("  ") + g_bin +
+                    " pose <model> <image.png> [more.png ...]\n"
+                    "        detect people and their 17 COCO keypoints with a YOLOv8-pose\n"
+                    "        model. Same shape as classify and for the same reasons: one\n"
+                    "        image per argument, the result on stdout and the status block\n"
+                    "        on stderr. --json prints one object per image with every box,\n"
+                    "        every joint, the 12-edge skeleton and the letterbox transform,\n"
+                    "        --text a human summary. --conf/--iou/--kpt/--max-det move the\n"
+                    "        thresholds the container was not given. --pose-dump FILE\n"
+                    "        writes every graph node's fp32 output, for diffing against an\n"
+                    "        independent interpreter.\n"
+                    "        CPU BY DEFAULT, and that is a measurement rather than a\n"
+                    "        preference. --npu-ops conv moves the 72 convolutions to\n"
+                    "        the array and nothing else, needs a container packed with --npu\n"
+                    "        and a design set, and is SLOWER here: 258 ms of network on 16\n"
+                    "        threads against 384 ms dispatched as GEMMs, because N must be a\n"
+                    "        multiple of 128 (2.6x arithmetic padding waste before anything\n"
+                    "        runs), the stem alone is 100 of the 436 dispatches, and a\n"
+                    "        dispatch costs 660 us of which 140 us is the device's GEMM. Per\n"
+                    "        layer 19 of the 72 are faster on the array and an oracle\n"
+                    "        splitting each onto its faster side measured 146 ms -- 2.6%.\n"
+                    "        The status block prints both sides, per image.\n"
+                    "        MEASURED on the CPU path, 640x640 input, i8: 29 ms front end,\n"
+                    "        258 ms network of which 88 ms is the GEMM, 57 ms im2col, 10 ms\n"
+                    "        the weight transpose and 7 ms the output transpose, 1 ms decode.\n"
+                    "\n"
+                    "        The same model over HTTP: `" + g_bin +
+                    " serve <model>`, which\n"
+                    "        answers POST /v1/pose. Multipart with one `image` part (PNG or\n"
+                    "        JPEG, by magic bytes) and optional conf, iou, kpt, max_det. The\n"
+                    "        answer is byte for byte what `pose --json` prints -- both call\n"
+                    "        npue::pose::result_json -- so the endpoint and the CLI cannot\n"
+                    "        drift. Also GET /health and GET /v1/models. Per-request\n"
+                    "        thresholds apply to that request only.\n"
+                    "\n").c_str(), stdout);
+
+    if (owns(who, "add"))
+        std::fputs((std::string("  ") + g_bin +
+                    " add <org/model> [<sha256>]\n"
+                    "        teach this installation about a model that is not built in --\n"
+                    "        typically a finetune of one that is. Reads the repository's\n"
+                    "        config.json, derives the geometry, checks a design serves it,\n"
+                    "        and writes models/catalog.json. No weights are downloaded until\n"
+                    "        the first serve/embed.\n"
+                    "        WITHOUT a sha256 the weights are NOT verified. That is allowed,\n"
+                    "        and it is warned about on every single run.\n"
+                    "\n").c_str(), stdout);
+
+    // THE MODEL ARGUMENT, once, for whichever verbs printed above. The example
+    // is per-family on purpose -- a worked command the reader of THIS binary
+    // cannot run teaches the wrong verb, which is what the guards above exist
+    // to avoid, and an example that names a file which does not exist would
+    // teach it twice.
+    std::fputs((std::string(
+        "  <model> in any of this binary's verbs is either a NAME -- looked up\n"
+        "        in models/, fetched and verified against the catalogue's sha256\n"
+        "        when the catalogue knows it -- or a PATH to a .npue, used as\n"
+        "        given and never re-resolved by name:\n"
+        "            ") + usage_example() +
         "\n"
-        "  npuembeddings list\n"
-        "        every model this build can run, and which are installed\n"
-        "\n"
-        "  npuembeddings serve <model> [--port N] [--bind ADDR]\n"
-        "        the HTTP endpoint for WHATEVER the container is. One verb,\n"
-        "        four endpoints, and the model's arch picks which:\n"
-        "          /v1/embeddings           a BERT-family text model\n"
-        "          /v1/audio/transcriptions Whisper\n"
-        "          /v1/classify             a ViT classifier\n"
-        "          /v1/pose                 YOLOv8-pose\n"
-        "        Downloads and verifies the model first if it is not\n"
-        "        installed yet. The mode is chosen by the container's arch, never\n"
-        "        by a flag, and each endpoint answers only for its own path -- a\n"
-        "        wrong path is a 404 naming the right one, never another\n"
-        "        endpoint's answer.\n"
-        "\n"
-        "  npuembeddings embed <model> <in.txt> [out.f32]\n"
-        "        embed a text file, one text per line\n"
-        "\n"
-        "  npuembeddings transcribe <model> <audio.wav> [--language en]\n"
-        "        transcribe 16 kHz audio with a Whisper model. The transcript\n"
-        "        goes to stdout on its own and the status block to stderr, so\n"
-        "        it pipes. --json prints the OpenAI-shaped object instead,\n"
-        "        with one segment per 30 s window. --convert ingests through\n"
-        "        ffmpeg (mp3, m4a, webm, or a WAV the reader refuses).\n"
-        "\n"
-        "  npuembeddings classify <model> <image.png> [more.png ...]\n"
-        "        classify images with a ViT model (vit-base-patch16-224), one\n"
-        "        per argument. The label goes to stdout on its own and the\n"
-        "        status block to stderr, so it pipes. PNG and JPEG only --\n"
-        "        anything else is refused by name rather than guessed at, and\n"
-        "        so is a non-square resize or a shortest-edge crop: the\n"
-        "        container says which geometry it was trained with and this\n"
-        "        reads it. --top-k prints the runners-up to stderr, --json\n"
-        "        the objects to stdout. `embed` is not how this runs.\n"
-        "        Over HTTP: `npuembeddings serve <model>`, which answers POST\n"
-        "        /v1/classify with the same object `classify --json` prints (both\n"
-        "        call npue::vit::prediction_json), one `image` part and an\n"
-        "        optional `top_k`. GET /v1/labels returns the whole vocabulary, so\n"
-        "        a client can turn an id into a name without the container.\n"
-        "\n"
-        "  npuembeddings pose <model> <image.png> [more.png ...]\n"
-        "        detect people and their 17 COCO keypoints with a YOLOv8-pose\n"
-        "        model. Same shape as classify and for the same reasons: one\n"
-        "        image per argument, the result on stdout and the status block\n"
-        "        on stderr. --json prints one object per image with every box,\n"
-        "        every joint, the 12-edge skeleton and the letterbox transform,\n"
-        "        --text a human summary. --conf/--iou/--kpt/--max-det move the\n"
-        "        thresholds the container was not given. --pose-dump FILE\n"
-        "        writes every graph node's fp32 output, for diffing against an\n"
-        "        independent interpreter.\n"
-        "        CPU BY DEFAULT, and that is a measurement rather than a\n"
-        "        preference. --npu-ops conv moves the 72 convolutions to\n"
-        "        the array and nothing else, needs a container packed with --npu\n"
-        "        and a design set, and is SLOWER here: 258 ms of network on 16\n"
-        "        threads against 384 ms dispatched as GEMMs, because N must be a\n"
-        "        multiple of 128 (2.6x arithmetic padding waste before anything\n"
-        "        runs), the stem alone is 100 of the 436 dispatches, and a\n"
-        "        dispatch costs 660 us of which 140 us is the device's GEMM. Per\n"
-        "        layer 19 of the 72 are faster on the array and an oracle\n"
-        "        splitting each onto its faster side measured 146 ms -- 2.6%.\n"
-        "        The status block prints both sides, per image.\n"
-        "        MEASURED on the CPU path, 640x640 input, i8: 29 ms front end,\n"
-        "        258 ms network of which 88 ms is the GEMM, 57 ms im2col, 10 ms\n"
-        "        the weight transpose and 7 ms the output transpose, 1 ms decode.\n"
-        "\n"
-        "        The same model over HTTP: `npuembeddings serve <model>`, which\n"
-        "        answers POST /v1/pose. Multipart with one `image` part (PNG or\n"
-        "        JPEG, by magic bytes) and optional conf, iou, kpt, max_det. The\n"
-        "        answer is byte for byte what `pose --json` prints -- both call\n"
-        "        npue::pose::result_json -- so the endpoint and the CLI cannot\n"
-        "        drift. Also GET /health and GET /v1/models. Per-request\n"
-        "        thresholds apply to that request only.\n"
-        "\n"
-        "  npuembeddings add <org/model> [<sha256>]\n"
-        "        teach this installation about a model that is not built in --\n"
-        "        typically a finetune of one that is. Reads the repository's\n"
-        "        config.json, derives the geometry, checks a design serves it,\n"
-        "        and writes models/catalog.json. No weights are downloaded until\n"
-        "        the first serve/embed.\n"
-        "        WITHOUT a sha256 the weights are NOT verified. That is allowed,\n"
-        "        and it is warned about on every single run.\n"
-        "\n"
-        "  <model> in serve/embed/transcribe/classify/pose/tokenize is either a\n"
-        "        NAME -- looked up in models/, fetched and verified against the\n"
-        "        catalogue's sha256 when the catalogue knows it -- or a PATH to\n"
-        "        a .npue, used as given and never re-resolved by name:\n"
-        "            npuembeddings embed models/all-MiniLM-L6-v2.npue in.txt\n"
         "        The runtime names a path-held model after its file, which is\n"
         "        also how it finds runtime/<stem>/artifacts_npu<N>.\n"
-        "\n"
-        "  Options for serve/embed/transcribe/classify:\n"
+        "\n").c_str(), stdout);
+
+    // THE OPTIONS ARE NOT FILTERED, unlike the verbs above. They are one list
+    // annotated with the verb each belongs to (`--language CODE   transcribe:`),
+    // so a reader can tell in the line itself whether it applies -- and the
+    // annotations are a property of the flag, not of the binary, whereas a verb
+    // block is a command to type.
+    std::fputs(
+        "  Options for this binary's verbs:\n"
         "    --port N          listen port (default 8080)\n"
         "    --bind ADDR       interface (default 127.0.0.1, localhost only)\n"
         "    --threads N       host thread budget (default 24 for these)\n"
@@ -232,8 +293,11 @@ inline void print_usage() {
         "                      send the listed ops to the ARRAY instead of the\n"
         "                      host, comma-separated. An op not listed runs on\n"
         "                      the host, so there is no inverse flag. The\n"
-        "                      default -- nothing listed -- is the\n"
-        "                      measured-faster host path for all of them.\n"
+        "                      default -- nothing listed -- runs every\n"
+        "                      op in this process; for most codes that\n"
+        "                      is the measured-faster side, and for\n"
+        "                      gemm it is not.\n"
+        "                        gemm   the four per-layer GEMMs\n"
         "                        gelu   GELU (exact erf; a Whisper\n"
         "                               container declares this one)\n"
         "                        layn   LayerNorm\n"
@@ -244,32 +308,34 @@ inline void print_usage() {
         "                        fft    the 400-point transform, as a GEMM\n"
         "                        logit  the tied-embedding projection, in\n"
         "                               eight chunks of the vocabulary\n"
-        "                      The same eight codes in every architecture;\n"
+        "                      The same nine codes in every architecture;\n"
         "                      which of them yours can honour is in\n"
         "                      NPU_OPS.md, and a code that cannot is refused\n"
         "                      by name with the reason, never ignored.\n"
         "                      Worth asking for? Measured, per 3 s of\n"
         "                      whisper-tiny on 16 threads: conv 0.94 -> 0.66 s\n"
-        "                      wall and 5.5 -> 3.8 s CPU, and every other code\n"
-        "                      is either neutral or slower. README,\n"
-         "                      'What to move to the NPU'.\n"
-         "                      The exporter's flag is the SAME STRING and it\n"
-         "                      BUILDS what this one selects. gelu/layn/softm\n"
-         "                      write a sibling design set each (gelu/,\n"
-         "                      layernorm/, softmax/) and cost one extra\n"
-         "                      hw_context EACH; conv/attn/mproj/fft/logit are\n"
-         "                      streams inside the GEMM sets and cost none.\n"
-         "                      A missing design is refused by name, never\n"
-         "                      silently run on the host -- and a run that\n"
-         "                      would exceed the context budget is refused\n"
-         "                      before any context is built unless\n"
-         "                      --allow-contention says the contention is\n"
-         "                      intended (see below).\n"
-         "                      The speech-to-text codes are refused on an\n"
-         "                      embedder. Replaces --npu-ops, --npu-eltwise and\n"
-         "                      --host-ln/--host-sm/--host-gelu, which are now\n"
-         "                      refused by name so a stale command line cannot\n"
-         "                      look like it worked.\n"
+        "                      wall and 5.5 -> 3.8 s CPU; gemm 1.06 -> 0.17 s\n"
+        "                      on an embedder and 0.435 -> 0.241 s on a ViT.\n"
+        "                      Every other code is either neutral or slower.\n"
+        "                      README, 'What to move to the NPU'.\n"
+        "                      The exporter's flag is the SAME STRING and it\n"
+        "                      BUILDS what this one selects. gelu/layn/softm\n"
+        "                      write a sibling design set each (gelu/,\n"
+        "                      layernorm/, softmax/) and cost one extra\n"
+        "                      hw_context EACH; gemm/conv/attn/mproj/fft/\n"
+        "                      logit are streams inside the GEMM sets and\n"
+        "                      cost none.\n"
+        "                      A missing design is refused by name, never\n"
+        "                      silently run on the host -- and a run that\n"
+        "                      would exceed the context budget is refused\n"
+        "                      before any context is built unless\n"
+        "                      --allow-contention says the contention is\n"
+        "                      intended (see below).\n"
+        "                      The speech-to-text codes are refused on an\n"
+        "                      embedder. Replaces --npu-ops, --npu-eltwise and\n"
+        "                      --host-ln/--host-sm/--host-gelu, which are now\n"
+        "                      refused by name so a stale command line cannot\n"
+        "                      look like it worked.\n"
         "    --allow-contention\n"
         "                      proceed even though another process holds NPU\n"
         "                      hw_contexts. Without it, a run that would exceed\n"
@@ -301,15 +367,15 @@ inline void print_usage() {
         "                      weights for a fixed number of positions and a\n"
         "                      cut window is a transcript of the first 30 s\n"
         "                      presented as the whole recording\n"
-         "    --stride-seconds N transcribe: overlap on EACH side of a window,\n"
-         "                      default 5 (transformers' own), so windows start\n"
-         "                      chunk - 2*stride apart and the merge\n"
-         "                      de-duplicates the overlap\n"
-         "    --json           transcribe: print {\"text\", \"segments\", ...}\n"
-         "    --top-k          classify: print the runners-up to stderr, under\n"
-         "                      the image. The whole row is ranked and the top\n"
-         "                      ten shown -- a truncated list reads as \"nothing\n"
-         "                      else is close\", which is a different claim\n"
+        "    --stride-seconds N transcribe: overlap on EACH side of a window,\n"
+        "                      default 5 (transformers' own), so windows start\n"
+        "                      chunk - 2*stride apart and the merge\n"
+        "                      de-duplicates the overlap\n"
+        "    --json           transcribe: print {\"text\", \"segments\", ...}\n"
+        "    --top-k          classify: print the runners-up to stderr, under\n"
+        "                      the image. The whole row is ranked and the top\n"
+        "                      ten shown -- a truncated list reads as \"nothing\n"
+        "                      else is close\", which is a different claim\n"
         "    --root DIR        override where models/ and the design live\n"
         "    --token VALUE     HuggingFace access token for a GATED model\n"
         "                      (falls back to the HF_TOKEN env var if omitted)\n"
@@ -342,11 +408,14 @@ inline void print_usage() {
         "                      design was exported for -- see\n"
         "                      tools/export/export_gemm_rtp.py --seq to build for a\n"
         "                      longer one.\n"
-        "\n"
-        "  The flag form is unchanged and still works:\n"
-        "    npuembeddings <root> --model NAME --artifacts DIR --serve [port]\n"
-        "  and carries the probes and benchmarks; see docs/CURRENT_STATUS.md.\n"
         "\n", stdout);
+
+    std::fputs((std::string(
+        "  The flag form is unchanged and still works:\n"
+        "    ") + g_bin +
+        " <root> --model NAME --artifacts DIR --serve [port]\n"
+        "  and carries the probes and benchmarks; see docs/CURRENT_STATUS.md.\n"
+        "\n").c_str(), stdout);
 }
 
 // A speech-to-text model needs BOTH design sets, and `pick_artifacts` only knows
@@ -514,9 +583,9 @@ inline void print_catalog(const std::string &root) {
                     // file. `note` was assembled before this printf, so the state
                     // column and this one cannot name different subcommands.
                     !note.empty()            ? note.c_str()
-                        : is_vit_arch(m.arch) ? "npuembeddings classify <name> "
+                        : is_vit_arch(m.arch) ? "npuimage classify <name> "
                                                "<image>"
-                        : is_stt_arch(m.arch) ? "npuembeddings transcribe <name> "
+                        : is_stt_arch(m.arch) ? "npuaudio transcribe <name> "
                                                "<audio.wav>"
                                               : m.repo.c_str());
     }
@@ -544,8 +613,13 @@ inline void print_catalog(const std::string &root) {
         "             shapes ARE bge-base's and its patch embedding is [n,768]x\n"
         "             [768,768], which is attn_out's shape. `classify` is how it\n"
         "             runs; `embed` is not:\n"
-        "               npuembeddings classify <name> <image.png>\n"
-        "\n  npuembeddings serve <model>\n\n");
+        "               npuimage classify <name> <image.png>\n\n");
+    // The last line of the legend names THIS binary, because the legend is
+    // printed by `list` (npuembeddings) and by the ambiguity refusal in
+    // resolve_model_path() -- which npuaudio and npuimage reach too. One
+    // literal there would have been a legend offering a program the reader
+    // did not run.
+    std::printf("  %s serve <model>\n\n", g_bin);
 }
 
 inline void warn_if_unpinned(const std::string &name) {

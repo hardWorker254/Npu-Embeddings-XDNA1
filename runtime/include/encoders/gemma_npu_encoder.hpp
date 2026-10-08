@@ -26,6 +26,8 @@
 #include "runtime/model.hpp"
 #include "encoders/gemma_kernels.hpp"
 #include "common/host_kernels.hpp"
+#include "common/host_b.hpp"     // npue::hostb::WeightCache
+#include "common/npu_ops_flag.hpp"  // op_on_array -- array or host, one place
 #include "whisper/attention_npu.hpp"  // NpuAttention -- attn as two GEMMs
 #include "tokenizers/gemma.hpp"
 
@@ -139,6 +141,32 @@ public:
   struct FusedNextBf16 {
     uint16_t *dst;
   };
+
+  // ARRAY OR HOST for the four per-layer GEMMs, decided by ONE test and made
+  // once, at the top of gemm(). Same rule as BertEncoder: with `--npu-ops`
+  // without `gemm` every one of them runs on this process, and the two fusions
+  // below -- which write the NEXT GEMM's A operand into the design's own buffer,
+  // an array mechanism -- are gated on it in run() so they are simply not taken.
+  bool gemm_on_array() const { return app::op_on_array("gemm"); }
+
+  // The host form of gemm(). No design state: the operand comes from the
+  // CONTAINER (common/host_b.hpp untiles it once, on first use, and keeps it)
+  // and the multiply is hostconv::gemm_nt. n_host counts these apart from
+  // n_dispatch because every dispatch count already recorded for this model
+  // counts array dispatches.
+  void host_gemm(const float *a, size_t a_len, std::vector<float> &out,
+                 int64_t N, const float *bias, const float *asmooth,
+                 size_t wslot);
+
+  // One staged operand's fp32 [K, N], and the (design, slot) -> tensor-name map
+  // that finds it. Recorded by stage_all(), built on first use -- see
+  // common/host_b.hpp, which is where both live and where the reason for its
+  // key lives too.
+  // SHARED, not owned: see common/host_b.hpp, whose copy constructor is deleted
+  // precisely so the pipeline lanes cannot silently take their own copy.
+  std::shared_ptr<npue::hostb::WeightCache> host_w_ =
+      std::make_shared<npue::hostb::WeightCache>();
+  int64_t n_host = 0;
 
   // NPU dispatch helpers.
   void dequant_act_bf16(const void *c, size_t c_bytes, int64_t N,

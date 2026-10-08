@@ -22,7 +22,7 @@ is fine: this runs to decide whether the runtime is right, not to be fast.
 WHAT IT IS COMPARED AGAINST
 ---------------------------
 By default it prints the reference's own decode -- boxes, scores, keypoints in
-SOURCE pixels -- so the answer can be compared with `npuembeddings pose <model>
+SOURCE pixels -- so the answer can be compared with `npuimage pose <model>
 <image> --text` by eye. With --dump-head it writes the reference's [56, 8400]
 head tensor to a binary file for a numeric comparison against the runtime's.
 
@@ -439,7 +439,7 @@ def main():
             "against a packed container is tools/verify/diff_pose_dump.py:\n"
             "    python tools/verify/diff_pose_dump.py MODEL.onnx CONTAINER.npue "
             "IMAGE --dump runtime.bin\n"
-            "which runs `npuembeddings pose CONTAINER.npue IMAGE --pose-dump "
+            "which runs `npuimage pose CONTAINER.npue IMAGE --pose-dump "
             "runtime.bin` and compares every node against this file's NumPy "
             "interpreter. This file is the ONNX-side reference on its own; what "
             "it prints by default is the reference's own decode, not a "

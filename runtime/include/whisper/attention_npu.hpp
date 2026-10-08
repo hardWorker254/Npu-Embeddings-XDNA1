@@ -62,7 +62,7 @@ public:
   NpuAttention(npu::Design &design, app::Pool &pool, int64_t n_kv,
                int64_t head_dim, int64_t ctx_cols)
       : d_(design), pool_(pool), n_kv_(n_kv), head_dim_(head_dim),
-        ctx_cols_(ctx_cols), qk_(design, pool), av_(design, pool) {}
+        ctx_cols_(ctx_cols), qk_(design, pool, "attn"), av_(design, pool, "attn") {}
 
   // The two streams' instruction-stream slots, the row count one dispatch
   // computes, and attn_qk's K -- read off the loaded design set by the caller. A

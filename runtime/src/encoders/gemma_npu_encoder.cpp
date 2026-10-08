@@ -8,6 +8,8 @@
 
 #include "encoders/gemma_npu_encoder.hpp"
 
+#include "common/conv_host.hpp"  // hostconv::gemm_nt, the host multiply
+
 #include "common/app_state.hpp"
 #include "common/int4_panel.hpp"
 
@@ -173,7 +175,13 @@ std::vector<float> GemmaNpuEncoder::encode_batch(
     });
 
     rms_norm(x.data(), hidden_, hbuf.data(), hidden_, rows, hidden_, l.ln_pf);
-    const bool fuse_ffn = fuse_ffn_epilogue &&
+    // BOTH FUSIONS ARE GATED ON WHERE THE GEMMS RUN, because each writes the
+    // next GEMM's A operand into the design's own buffer -- an array mechanism
+    // with no reader once gemm() is on the host. With `gemm` not named they are
+    // false, so geglu() runs below into a real buffer and the ffn_down GEMM is
+    // handed a normal A with a_ready=false, which the host branch ignores
+    // anyway. Same arithmetic, one free epilogue short.
+    const bool fuse_ffn = gemm_on_array() && fuse_ffn_epilogue &&
                           d.info().a_elem_bytes == 1 && at(as_fd, L);
     FusedNext fn{at(as_fd, L), static_cast<int8_t *>(d.slot_ptr(0, slot_a)),
                     nullptr};
@@ -181,7 +189,8 @@ std::vector<float> GemmaNpuEncoder::encode_batch(
       a_scale_next.resize(static_cast<size_t>(rows));
       fn.scale = a_scale_next.data();
     }
-    const bool fuse_ffn_bf16 = fuse_ffn_epilogue && d.info().a_elem_bytes == 2;
+    const bool fuse_ffn_bf16 =
+        gemm_on_array() && fuse_ffn_epilogue && d.info().a_elem_bytes == 2;
     FusedNextBf16 fn_bf16{static_cast<uint16_t *>(d.slot_ptr(0, slot_a))};
     gemm(is_fu, hbuf.data(), hbuf.size(), s_fu[L], b_fu[L], upbuf,
          2 * inter, at(ws_fu, L), at(as_fu, L), fuse_ffn ? &fn : nullptr,
@@ -257,6 +266,9 @@ size_t GemmaNpuEncoder::stage_all() {
     // the staged size -- K*N for int8 and int4, K*N*2 for bf16.
     const Panel panel = gemm_b_panel(model_, name, d.info().a_elem_bytes);
     slots.push_back(d.stage(1, panel.bytes.data, panel.bytes.bytes));
+    // Where the host path finds this weight again: gemm() is handed `wslot`,
+    // and common/host_b.hpp needs the CONTAINER tensor name to untile from.
+    host_w_->record(&d, slots.back(), name);
     bias.push_back(model_.raw(name + ".bias").as<float>());
     if (i8) {
       wsc->push_back(model_.raw(name + ".wscale").as<float>());
@@ -299,6 +311,7 @@ void GemmaNpuEncoder::reset_timers() {
   t_norm = t_attn = t_rope = t_geglu = t_tok = 0;
   n_dispatch = 0;
   n_elt_dispatch = 0;
+  n_host = 0;
 }
 
 template <typename F>
@@ -415,6 +428,40 @@ void GemmaNpuEncoder::dequant_act_bf16(const void *c, size_t c_bytes, int64_t N,
   });
 }
 
+void GemmaNpuEncoder::host_gemm(const float *a, size_t a_len,
+                                std::vector<float> &out, int64_t N,
+                                const float *bias, const float *asmooth,
+                                size_t wslot) {
+  if (a == nullptr || a_len == 0 || out.empty() || rows <= 0 ||
+      a_len % static_cast<size_t>(rows))
+    throw std::runtime_error(
+        "gemma: host GEMM input of " + std::to_string(a_len) +
+        " elements is not a whole number of the " + std::to_string(rows) +
+        " rows this encoder's shapes are built for");
+  // K comes from the INPUT, never from `out`: out is rows*N, and taking its
+  // ratio with `rows` would report N as K and multiply two differently-shaped
+  // operands that both fit the row count.
+  const int64_t K = static_cast<int64_t>(a_len) / rows;
+  if (static_cast<int64_t>(out.size()) != rows * N)
+    throw std::runtime_error(
+        "gemma: host GEMM output of " + std::to_string(out.size()) +
+        " elements is not the " + std::to_string(rows) + " x " +
+        std::to_string(N) + " this GEMM computes");
+  if (K <= 0 || N <= 0)
+    throw std::runtime_error("gemma: host GEMM with a zero dimension");
+  const std::vector<float> &w = host_w_->get(model_, &d, wslot, K, N,
+                                            d.info().name.c_str());
+  std::vector<float> scratch;
+  const float *A =
+      npue::hostb::apply_inv_smooth(a, static_cast<size_t>(rows), K, asmooth,
+                                    scratch);
+  // No a_scale and no int8 rounding here either -- see the identical note in
+  // BertEncoder::host_gemm. The host never quantises A, so what it produces is
+  // the fp32 product of the same operands rather than an int8 approximation of
+  // it, and the two agree to int8 rounding rather than bit for bit.
+  hostconv::gemm_nt(A, rows, w.data(), K, N, bias, out.data(), pool_);
+}
+
 void GemmaNpuEncoder::gemm(size_t islot, const float *a, size_t a_len, size_t wslot,
                              const float *bias, std::vector<float> &out, int64_t N,
                              const float *wscale, const float *asmooth,
@@ -426,6 +473,16 @@ void GemmaNpuEncoder::gemm(size_t islot, const float *a, size_t a_len, size_t ws
         "int8 design but this encoder has no quantisation scales -- the "
         "container is bf16, or it was packed before tools/pack/pack_npue.py "
         "--int8 supported arch=1");
+
+  // ARRAY OR HOST, decided by the command line alone, before anything that
+  // belongs to a dispatch: `a_ready` and the two fuse* pointers are all about
+  // the design's A buffer, and a host run reads neither.
+  if (!gemm_on_array()) {
+    host_gemm(a, a_len, out, N, bias, asmooth, wslot);
+    ++n_host;
+    return;
+  }
+
   double t0 = now_s();
   if (i8 && a_ready) {
   } else if (i8) {

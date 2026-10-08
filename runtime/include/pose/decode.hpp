@@ -92,7 +92,7 @@ std::vector<std::string> skeleton_edges();
 
 // One person as one JSON object, no enclosing array. Used by both the CLI and
 // the server so that the two answer identically -- the point of one function
-// here is that `npuembeddings pose` and the HTTP endpoint cannot disagree about
+// here is that `npuimage pose` and the HTTP endpoint cannot disagree about
 // what a keypoint looks like.
 std::string person_json(const Person &p, int64_t id);
 

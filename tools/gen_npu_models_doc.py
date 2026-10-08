@@ -3,10 +3,11 @@
 # Regenerate NPU_MODELS.md and NPU_MODELS.ru.md.
 #
 # The companion of tools/gen_npu_ops_doc.py. That one answers "what does an
-# ARCHITECTURE support" -- 5 rows, one per kind -- and this one answers the
+# ARCHITECTURE support" -- one row per architecture -- and this one answers the
 # question a user actually has when they type a model name: "what can THIS model
-# put on the array". 16 rows from tools/data/npu_targets.json, 8 codes, 128
-# cells.
+# put on the array". One row per model in tools/data/npu_targets.json, one
+# column per code in tools/lib/npu_ops.py, and the product of those two is the
+# cell count -- computed, never typed, because both halves move.
 #
 #   python tools/gen_npu_models_doc.py            # rewrite both files
 #   python tools/gen_npu_models_doc.py --check    # exit 1 if either is stale
@@ -15,7 +16,7 @@
 # WHY A SECOND TABLE AND NOT A COLUMN ON THE FIRST
 # ----------------------------------------------
 # A kind's row is almost always the answer, so most of this document is the
-# architecture document repeated seventeen times. The repetition is still worth
+# architecture document repeated once per model. The repetition is still worth
 # printing, for two reasons, and both are model facts the kind table cannot hold:
 #
 #   * a model whose ENCODER differs from its kind's -- gemma, and only gemma;
@@ -97,8 +98,8 @@ def models(t):
 def kind_of(spec):
     """A text embedder's kind is the default, and saying so is the point.
 
-    `kind: null` is seven of the seventeen rows, and it means "gemm_rtp". Printed as
-    an empty cell a reader cannot tell a missing field from a missing kind, so it
+    `kind: null` is the common case, and it means "gemm_rtp". Printed as an
+    empty cell a reader cannot tell a missing field from a missing kind, so it
     is printed as the default it is.
     """
     return spec.get("kind") or "gemm_rtp"
@@ -123,7 +124,7 @@ def built(model):
     """The sibling design directories the exporter compiles for this model.
 
     npu_ops.buildable_codes() -- the exporter's own function. Note what it does
-    NOT return: the five stream-only codes. `conv` and `attn` are honoured by
+    NOT return: the six stream-only codes. `conv` and `attn` are honoured by
     whisper and appear in no compiled directory, because they are streams inside
     the set the GEMM export already produces. A "compiled" column that listed
     them would be wrong, and the header says so in those words.
@@ -172,9 +173,9 @@ def ln_columns(spec, defaults, model):
 def fmt_eps(v, from_model):
     """epsilon, marked when it is the fallback rather than the model's own.
 
-    Seven of the seventeen models carry no `layer_norm_eps`, and the exporter then
-    uses FALLBACK_LN_EPS. Printing one number in both cases would make the
-    fallback look like a per-model fact.
+    A model carrying no `layer_norm_eps` gets the exporter's FALLBACK_LN_EPS.
+    Printing one number in both cases would make the fallback look like a
+    per-model fact.
     """
     return (repr(v) if from_model else f"{v!r} (fallback)")
 
@@ -183,11 +184,11 @@ def fmt_eps(v, from_model):
 # Translation lives here for the same reason it lives in gen_npu_ops_doc.py: the
 # generators are documentation, the registry is data imported by the exporter.
 RU_INTRO = [
-    "У рантайма восемь кодов операций, и в `tools/data/npu_targets.json` "
+    "У рантайма девять кодов операций, и в `tools/data/npu_targets.json` "
     "{n} моделей: {cells} ячеек.",
     "",
     "Это документ-спутник [NPU_OPS.ru.md](NPU_OPS.ru.md). Тот отвечает на "
-    "вопрос «что умеет АРХИТЕКТУРА» — пять строк, по одной на kind. Этот — на "
+    "вопрос «что умеет АРХИТЕКТУРА» — семь строк, по одной на архитектуру. Этот "
     "тот вопрос, который реально возникает, когда набирают имя модели: «что "
     "конкретно ЭТА модель может отправить на массив». Английская версия: "
     "[NPU_MODELS.md](NPU_MODELS.md).",
@@ -241,14 +242,15 @@ RU_GATED_HEAD = "## Чем эти две модели отличаются от 
 RU_GATED_BODY = [
     "### gemma — единственная, у которой отличается КОДЕР",
     "",
-    "Остальные пятнадцать берут строку своего kind'а целиком. gemma не берёт: её "
+    "Все остальные берут строку своего kind'а целиком. gemma не берёт: её "
     "строка лежит в `MODEL_REGISTRY`, потому что `GemmaNpuEncoder` не читает "
     "флаг операции вообще — это свойство одного кодера, а не семейства, и "
     "делать из него пятый kind значило бы заявить семейство, которого нет.",
     "",
     "Цена этого решения: `layn` для gemma **заблокирован** — нужен RMSNorm, а "
     "`kernels/layernorm.cc` параметризован только `-DLN_COLS/-DLN_EPS/"
-    "-DLN_ROWS`, то есть это другое тело ядра и **девятый** код. Намеренно не "
+    "-DLN_ROWS`, то есть это другое тело ядра и код отдельный, поскольку набор уже "
+    "на девяти. Намеренно не "
     "сделано: набор кодов стал бы больше и менее однородным. Подробности — в "
     "ячейке `embeddinggemma-300m/layn` файла NPU_OPS.ru.md.",
     "",
@@ -273,7 +275,7 @@ RU_BUILT_NOTE = [
     "`tools/lib/npu_ops.py`, та же функция, которую зовёт сборка. Не "
     "пересказ.",
     "",
-    "Обратите внимание, чего в ней **нет**: пяти кодов без собственного "
+    "Обратите внимание, чего в ней **нет**: шести кодов без собственного "
     "каталога. `conv` и `attn` у whisper честно работают на массиве (статус "
     "`honours` в матрице выше), но в компилируемый список не попадают, потому "
     "что это потоки **внутри** набора, который экспорт GEMM и так производит. "
@@ -288,16 +290,18 @@ RU_BUILT_NOTE = [
     "некому принадлежать: у `yolov8n-pose` нет даже `hidden`. `vocab` — "
     "ширина словаря: она решает, разбивается ли проекция в логиты на чанки.",
 ]
-RU_WHY_HEAD = "## Почему шестнадцать строк и четыре kind"
+RU_WHY_HEAD = "## Почему восемнадцать строк и шесть kind"
 RU_WHY_BODY = [
-    "kind'ов в `npu_targets.json` четыре (`gemm_rtp`, `stt`, `cls`, `pose`), а "
-    "моделей шестнадцать, и таблица по моделям длиннее в четыре раза. Это "
+    "kind'ов в `npu_targets.json` шесть (`gemm_rtp`, `stt`, `cls`, `pose`, "
+    "`hands`, `mppose`), а моделей восемнадцать, и таблица по моделям длиннее в "
+    "три раза. Это "
     "осознанно: kind — это то, что можно объединить, а читателю нужен ответ про "
     "имя, которое он вводит.",
     "",
-    "Раскладка: 7 текстовых эмбеддеров без своего `kind` (то есть `gemm_rtp`, "
-    "и это отмечено в колонке `kind`), 6 whisper (`stt`), 1 ViT (`cls`), 1 "
-    "YOLO-pose (`pose`).",
+    "Раскладка: 8 моделей на `gemm_rtp` — 7 текстовых эмбеддеров без своего "
+    "`kind` (и это отмечено в колонке `kind`) плюс gemma, 6 whisper (`stt`), 1 ViT "
+    "(`cls`), 1 YOLO-pose (`pose`), 1 MediaPipe hands (`hands`), 1 "
+    "MediaPipe pose (`mppose`).",
     "",
     "Ни одна строка здесь не выдумана: список моделей читается из "
     "`tools/data/npu_targets.json`, а не поддерживается вручную, поэтому "
@@ -370,14 +374,13 @@ def matrix_table(ru=False):
     suffix = {npu_ops.BLOCKED: "невозможно" if ru else "impossible",
               npu_ops.ON_ARRAY: "уже" if ru else "already",
               GATED: "гейт" if ru else "gated"}
-    # The header says "дополнительно" on purpose. The eight codes are the
-    # operations a caller can move ON TOP OF the architecture's own stream set,
-    # and for a transformer architecture that set is four GEMM streams
-    # (qkv/attn_out/ffn_up/ffn_down) which dispatch by DEFAULT and which NO code
-    # in the vocabulary names. Without the word, an embedder's row -- four codes,
-    # no `conv` -- reads as "this model never touches the array", which is the
-    # opposite of what it does: bge-micro-v2 makes 12 dispatches unprompted, three
-    # layers x four streams.
+    # The header says "дополнительно" on purpose. The nine codes are the
+    # operations a caller can move, and for a transformer architecture the four
+    # per-layer GEMM streams (qkv/attn_out/ffn_up/ffn_down) are among them now,
+    # because `gemm` names them. Without the word, an embedder's row -- four
+    # other codes and no `conv` -- reads as "this model never touches the
+    # array", which is the opposite of the truth once `gemm` is asked for:
+    # bge-micro-v2 then makes 12 dispatches, three layers x four streams.
     head = ("| модель | что можно дополнительно отправить на массив |" if ru else
             "| model | what can additionally go to the array |")
     lines = [head, "| --- | --- |"]
@@ -443,14 +446,17 @@ def doc(ru=False):
         a("## Что каждая модель может отправить на массив")
         a("")
         a("ЧИТАТЬ ТАБЛИЦУ ТАК, ИНАЧЕ ОНА ВРЁТ НЕ ПО СТРОКАМ, А ПО ЗАГОЛОВКУ. "
-          "Восемь кодов — это то, что можно отправить на массив СВЕРХ того, что "
+          "Девять кодов — это то, что можно отправить на массив СВЕРХ того, что "
           "архитектура и так отправляет сама. У трансформерной архитектуры этот "
           "«свой» набор — четыре GEMM-потока `qkv`, `attn_out`, `ffn_up`, "
-          "`ffn_down`; они уходят на массив ПО УМОЛЧАНИЮ, и ни один код из "
-          "восьми их не называет. Проверено на `bge-micro-v2` без единого флага: "
-          "`designs  ONE xclbin, 12 streams`, `dispatches  12` — три слоя на "
-          "четыре потока, при этом `gelu`, `layn`, `softm` и `attn` написаны "
-          "`on the HOST (fp32)`.")
+          "`ffn_down`, а код, который их называет, — `gemm`, так что строка, где "
+          "перечислены `gelu`, `layn`, `softm` и `attn` и нет `conv`, всё равно хранит "
+          "ещё один код, который можно попросить. Ничто в этой таблице не двигается, "
+          "пока его не назовёт код: без единого флага строка состояния печатает "
+          "хост, а прогон даёт 0 диспатчей. Измерено было наоборот — `bge-micro-v2` "
+          "раньше печатал `designs  ONE xclbin, 12 streams` и `dispatches  12` для тех "
+          "же трёх слоёв на четыре потока, потому что кода `gemm` ещё не было и GEMM "
+          "уходили на массив безусловно.")
         a("")
         a("Поэтому строка эмбеддинга, где перечислено четыре кода и нет `conv`, "
           "НЕ означает «эта модель не трогает массив». Отсутствие `conv` у "
@@ -459,12 +465,18 @@ def doc(ru=False):
           "«свой» набор, поэтому их строка состоит из одного кода, и это "
           "честно — им нечего добавлять.")
         a("")
-        a("И по умолчанию все восемь на хосте, и это измерение, а не "
-          "осторожность. Те же два текста на `bge-micro-v2`, по пять прогонов: "
-          "168 мс без флагов против 265 / 260 / 252 мс с `--npu-ops gelu`, "
-          "`layn`, `softm` по отдельности и 330 мс со всеми тремя. Ожидание "
-          "диспатчей растёт 6.0 -> 22.5 / 23.3 / 24.1 / 59.2 мс. Элементарная "
-          "операция на массиве здесь в полтора-два раза дороже, чем на хосте.")
+        a("И по умолчанию все девять на хосте. Это правило, а не вывод из замеров: "
+          "для четырёх базовых GEMM замеры говорят обратное — `gemm` на массиве в "
+          "1.80 раза быстрее на ViT и в 6.9 раза на gemma (ячейки `gemm` в NPU_OPS.ru.md). "
+          "Ниже речь о ПОЭЛЕМЕНТНЫХ кодах, и замерено это до того, как `gemm` "
+          "выделили в отдельный код, то есть когда четыре GEMM-потока уходили на "
+          "массив в любом случае, — так что обе руки замера это сегодняшние `--npu-ops "
+          "gemm` и `--npu-ops gemm,<код>`, и между ними движется только сама "
+          "поэлементная операция. Те же два текста на `bge-micro-v2`, по пять "
+          "прогонов: 168 мс против 265 / 260 / 252 мс для `gelu`, `layn`, "
+          "`softm` по отдельности и 330 мс со всеми тремя. Ожидание диспатчей "
+          "растёт 6.0 -> 22.5 / 23.3 / 24.1 / 59.2 мс. Элементарная операция на "
+          "массиве здесь в полтора-два раза дороже, чем на хосте.")
         a("")
         a("Список на модель, а не сетка моделей на операции: в сетке из "
           f"{n_cells} ячеек {counts[npu_ops.ABSENT]} говорили бы одно и то же "
@@ -502,18 +514,18 @@ def doc(ru=False):
     a("     run the script, or tools/verify/verify_npu_op_matrix.py fails.")
     a("     Russian version: NPU_MODELS.ru.md -->")
     a("")
-    a(f"Eight op codes, {n_models} models in `tools/data/npu_targets.json`, "
+    a(f"{len(npu_ops.OPS)} op codes, {n_models} models in `tools/data/npu_targets.json`, "
       f"{n_cells} cells.")
     a("")
     a("This is the companion to [NPU_OPS.md](NPU_OPS.md), which answers \"what "
-      "does an ARCHITECTURE support\" -- five rows, one per kind. This one "
+      "does an ARCHITECTURE support\" -- one row per architecture. This one "
       "answers the question you actually have when you type a model name: "
       "\"what can THIS model put on the array\". Russian: "
       "[NPU_MODELS.ru.md](NPU_MODELS.ru.md).")
     a("")
     a("Why a second table rather than a column on the first: a kind's row is "
-      "almost always the answer, so most of this file repeats the architecture "
-      "document seventeen times. The repetition is still worth printing, because "
+      "almost always the answer, so most of this file repeats the "
+      f"architecture document {n_models} times. The repetition is still worth printing, because "
       "two models do NOT answer with their kind's row:")
     a("")
     a("- **gemma** -- its ENCODER differs from its kind's (RMSNorm, GeGLU, and "
@@ -536,13 +548,16 @@ def doc(ru=False):
     a("## What each model can send to the array")
     a("")
     a("READ THIS TABLE BY ITS HEADER OR IT LIES, AND NOT ABOUT THE ROWS -- ABOUT "
-      "THE HEADER. The eight codes are what can be sent to the array ON TOP OF "
+      "THE HEADER. The nine codes are what can be sent to the array ON TOP OF "
       "what the architecture already sends by itself. For a transformer that own "
-      "set is four GEMM streams -- qkv, attn_out, ffn_up, ffn_down -- which "
-      "dispatch BY DEFAULT and which no code in the eight names. Measured on "
-      "bge-micro-v2 with no flag at all: `designs  ONE xclbin, 12 streams`, "
-      "`dispatches  12`, three layers by four streams, while gelu, layn, softm "
-      "and attn all read `on the HOST (fp32)`.")
+      "set is four GEMM streams -- qkv, attn_out, ffn_up, ffn_down -- and the code "
+      "that names them is `gemm`, so a row listing gelu, layn, softm and attn with "
+      "no `conv` still has one code left to ask for. Nothing in this table moves "
+      "until a code names it: with no flag at all the status block says host and "
+      "the run reports 0 dispatches, and it was measured the other way round -- "
+      "bge-micro-v2 used to print `designs  ONE xclbin, 12 streams` and `dispatches "
+      " 12` for those same three layers by four streams, because `gemm` did not "
+      "exist and the GEMMs went to the array unconditionally.")
     a("")
     a("So an embedder's row, four codes and no `conv`, does NOT mean this model "
       "never touches the array. The missing `conv` says it has no convolution "
@@ -550,12 +565,18 @@ def doc(ru=False):
       "other way round: their convolutions ARE that own set, which is why their "
       "rows are one code long and why there is nothing for them to add.")
     a("")
-    a("And all eight are on the host by default, which is a measurement rather "
-      "than caution. Same two texts on bge-micro-v2, five runs each: 168 ms with "
-      "no flags against 265 / 260 / 252 ms with --npu-ops gelu, layn and softm "
-      "one at a time, and 330 ms with all three. Dispatch wait grows 6.0 -> 22.5 "
-      "/ 23.3 / 24.1 / 59.2 ms. An elementwise operation on the array is one and a "
-      "half to two times what it costs on the host here.")
+    a("And all nine are on the host by default -- that is a rule, not a conclusion, "
+      "and for the four base GEMMs the measurements say the opposite: `gemm` on the "
+      "array is 1.80x faster on ViT and 6.9x on gemma (NPU_OPS.md, the `gemm` "
+      "cells). What follows is about the ELEMENTWISE codes and was measured before "
+      "`gemm` was split out, when those four GEMM streams went to the array "
+      "either way -- so its two arms are today's `--npu-ops gemm` and `--npu-ops "
+      "gemm,<code>`, and the only thing moving between them is the elementwise op. "
+      "Same two texts on bge-micro-v2, five runs each: 168 ms against 265 / 260 / "
+      "252 ms for gelu, layn and softm one at a time, and 330 ms with all three. "
+      "Dispatch wait grows 6.0 -> 22.5 / 23.3 / 24.1 / 59.2 ms. An "
+      "elementwise operation on the array is one and a half to two times what it "
+      "costs on the host here.")
     a("")
     a("A list per model, not a grid of models against operations. In a "
       f"{n_cells}-cell grid, {counts[npu_ops.ABSENT]} of the cells would say "
@@ -578,7 +599,7 @@ def doc(ru=False):
     a("")
     L.extend(built_table())
     a("")
-    a("## Why seventeen rows and five kinds")
+    a(f"## Why {n_models} rows and six kinds")
     a("")
     L.extend(EN_WHY_BODY)
     a("")
@@ -592,7 +613,7 @@ def doc(ru=False):
 EN_GATED_BODY = [
     "### gemma -- the only model whose ENCODER differs",
     "",
-    "The other sixteen take their kind's row wholesale. gemma does not: its row "
+    "Every other model takes its kind's row wholesale. gemma does not: its row "
     "lives in `MODEL_REGISTRY`, because `GemmaNpuEncoder` reads no per-op flag "
     "at all. That is a property of one encoder and not of a family, and making "
     "it another kind would claim a family that does not exist.",
@@ -600,7 +621,8 @@ EN_GATED_BODY = [
     "The price of that decision is visible in the matrix: gemma's `layn` is "
     "**blocked** -- it needs RMSNorm, and `kernels/layernorm.cc` is "
     "parameterised only by `-DLN_COLS/-DLN_EPS/-DLN_ROWS`, so this is a "
-    "different kernel body and a **ninth** code. Deliberately not done: the code "
+    "different kernel body and a code of its own, since the set is at nine already. "
+    "Deliberately not done: the code "
     "set would grow and lose its uniformity. The full argument is the "
     "`embeddinggemma-300m/layn` cell in NPU_OPS.md.",
     "",
@@ -626,7 +648,7 @@ EN_BUILT_NOTE = [
     "of `tools/lib/npu_ops.py`, the same function the build calls. Not a "
     "second opinion about it.",
     "",
-    "Note what is **absent** from it: the five codes with no design directory of "
+    "Note what is **absent** from it: the six codes with no design directory of "
     "their own. `conv` and `attn` genuinely run on the array for whisper -- the "
     "status is `honours` in the matrix above -- and neither appears here, "
     "because they are streams **inside** the set the GEMM export already "
@@ -643,15 +665,15 @@ EN_BUILT_NOTE = [
 ]
 
 EN_WHY_BODY = [
-    "`npu_targets.json` knows five kinds (`gemm_rtp`, `stt`, `cls`, `pose`, "
-    "`hands`) and seventeen models, so the model table is a little under four "
-    "times the length of the kind table. That is deliberate: a kind is what can "
-    "be shared, and the reader wants the answer for the name they typed.",
+    "`npu_targets.json` knows six kinds (`gemm_rtp`, `stt`, `cls`, `pose`, "
+    "`hands`, `mppose`) and eighteen models, so the model table is three times "
+    "the length of the architecture table. That is deliberate: a kind is what "
+    "can be shared, and the reader wants the answer for the name they typed.",
     "",
-    "The split: 7 text embedders with no `kind` of their own (so `gemm_rtp`, and "
-    "the `kind` column says so rather than leaving a blank), 6 whisper (`stt`), "
-    "one ViT (`cls`), one YOLO-pose (`pose`), one MediaPipe hands "
-    "(`mediapipe-hands`).",
+    "The split: 8 models on `gemm_rtp` -- 7 text embedders with no `kind` of "
+    "their own (the `kind` column says so rather than leaving a blank) plus gemma, "
+    "6 whisper (`stt`), one ViT (`cls`), one YOLO-pose (`pose`), one "
+    "MediaPipe hands (`hands`), one MediaPipe pose (`mppose`).",
     "",
     "No row here is typed by hand. The model list is read from "
     "`tools/data/npu_targets.json`, so a model added to the catalogue lands in "

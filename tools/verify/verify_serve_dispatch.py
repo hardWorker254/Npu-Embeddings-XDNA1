@@ -50,7 +50,7 @@ AND THE ONE ARCHITECTURE WITH NO ENDPOINT
 arch 7 (MediaPipe hands) is in here as a REFUSAL, not as an endpoint, because it
 is the only arch for which both would be true at once if this were wrong: a
 container the dispatcher routes to a mode that has nothing to serve. Before the
-refusal existed, `npuembeddings serve <hands>` fell through to the images check
+refusal existed, `npuimage serve <hands>` fell through to the images check
 and told the operator to say whose hands to find -- a wrong answer that read like
 a usage question. What is asserted here is the three parts of the fix:
 
@@ -266,11 +266,29 @@ def upload(name: str, filename: str, data: bytes) -> tuple[str, str, bytes]:
     return (name, filename, data)
 
 
+# THREE BINARIES, ONE PER FAMILY, and the container's arch picks one. `serve`
+# is the one verb all three have and it is gated like every other verb: an
+# npuaudio listening on a ViT's endpoint is exactly the mismatch the split
+# exists to refuse, so the ARCHES table above decides the binary and not a
+# flag on this gate. `--exe` still names ONE file, because an override that
+# had to name three would break every caller for no gain -- the siblings are
+# resolved in its directory, so overriding the TREE still works.
+FAMILY = {"embed": "npuembeddings", "whisper": "npuaudio",
+          "classify": "npuimage", "pose": "npuimage",
+          "hands": "npuimage"}
+
+
+def exe_for(exe: Path, arch: str) -> Path:
+    if exe.stem in FAMILY.values():
+        return exe
+    return exe.with_name(FAMILY[arch])
+
+
 # -- the server under test ---------------------------------------------------
 
 
 class Server:
-    """`npuembeddings serve <container>`, started and stopped for one arch."""
+    """`<family binary> serve <container>`, started and stopped for one arch."""
 
     def __init__(self, exe: Path, container: str, port: int,
                  extra: list[str] | None = None):
@@ -688,7 +706,12 @@ def check_serve_refusal(exe: Path, container: Path, port: int) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--exe", default=str(REPO / "runtime" / "build" / "npuembeddings"))
+    ap.add_argument("--exe",
+                    default=str(REPO / "runtime" / "build" / "npuembeddings"),
+                    help="one of the three runtime binaries; the other two are "
+                         "resolved in its directory from the arch under test, so "
+                         "this overrides the build TREE rather than one file "
+                         "(default: %(default)s)")
     ap.add_argument("--only", action="append", default=None,
                     help="one arch name, repeatable (default: all of ARCHES -- "
                          "the four endpoints and hands, which must refuse)")
@@ -701,8 +724,10 @@ def main() -> int:
     exe = Path(args.exe)
     print("serve: one verb, four endpoints, each container answers for its own;\n"
           "and arch 7, which has no endpoint, refuses instead -- both asserted\n")
-    if not exe.exists():
-        print(f"FAIL -- {exe} does not exist. Build it:\n"
+    needed = {exe_for(exe, n) for n in ARCHES}
+    absent = sorted(str(p) for p in needed if not p.exists())
+    if absent:
+        print(f"FAIL -- missing {' and '.join(absent)}. Build them:\n"
               f"    cmake -S runtime -B runtime/build && "
               f"cmake --build runtime/build -j")
         return 1
@@ -734,10 +759,11 @@ def main() -> int:
             continue
 
         if spec.get("refuses"):
-            results[name] = check_serve_refusal(exe, container, args.base_port + i)
+            results[name] = check_serve_refusal(exe_for(exe, name), container,
+                                          args.base_port + i)
             continue
 
-        srv = Server(exe, str(container), args.base_port + i)
+        srv = Server(exe_for(exe, name), str(container), args.base_port + i)
         ok, why = srv.start()
         if not ok:
             report(False, f"`serve {name}` starts and answers /health", why)
@@ -757,7 +783,7 @@ def main() -> int:
             # gate's business, which is true of the WORDS and false of the
             # agreement between two callers of the same session.
             if spec["path"] != "/v1/embeddings":
-                check_cli_agreement(srv, exe, name, jpeg, wav)
+                check_cli_agreement(srv, exe_for(exe, name), name, jpeg, wav)
         finally:
             srv.stop()
 

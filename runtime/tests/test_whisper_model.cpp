@@ -63,6 +63,7 @@
 
 #include "common/design_selection.hpp"  // parse_streams
 #include "common/host_kernels.hpp"      // now_s
+#include "common/npu_ops_flag.hpp"   // parse_npu_ops
 #include "runtime/design.hpp"
 #include "runtime/device.hpp"
 #include "runtime/model.hpp"
@@ -205,6 +206,26 @@ int main(int argc, char **argv) {
       std::fprintf(stderr, "unknown flag %s\n", a.c_str());
       return 2;
     }
+  }
+
+  // --npu-ops, spelled the way this binary spells it. Every one of those
+  // flags asks the same single question -- app::op_on_array(code) -- and
+  // an empty global means the host for every code, so a test that set
+  // `--attn npu` without it would dispatch the attention on the host
+  // while printing `npu`, or fail outright in NpuGemm::host_weight() for
+  // an operand only the array side had staged. Same call, same value, as
+  // a command line reading `--npu-ops ...`.
+  {
+    std::string listing;
+    auto add = [&](const char *code) {
+      if (!listing.empty()) listing += ',';
+      listing += code;
+    };
+    if (conv_mode == "npu" || conv_mode == "both") add("conv");
+    if (layn_mode == "npu") add("layn");
+    if (gelu_mode == "npu") add("gelu");
+    if (attn_mode == "npu") add("attn");
+    if (!listing.empty()) app::parse_npu_ops(listing);
   }
 
   try {

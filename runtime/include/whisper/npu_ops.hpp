@@ -50,7 +50,15 @@ class NpuEltwise;
 // the same xclbin -- cannot write each other's rows.
 class NpuGemm {
 public:
-  NpuGemm(npu::Design &design, app::Pool &pool) : d_(design), pool_(pool) {}
+  // `code` is the --npu-ops code this instance's runs belong to, and it is what
+  // decides array-vs-host per run: "gemm" for the per-layer GEMMs, "attn" for
+  // NpuAttention's QK^T and softmax.V, "conv" for NpuConv1d's two taps, "logit"
+  // for the vocabulary projection. Passed at construction because each of those
+  // classes builds its own instance and knows its own code -- except ViT, whose
+  // patch embedding rides the attn_out SLOT but is named by `conv`, so the one
+  // call site passes it per run.
+  NpuGemm(npu::Design &design, app::Pool &pool, const char *code = "gemm")
+      : d_(design), pool_(pool), op_code_(code) {}
 
   // Must be called once, before the first run(). Allocates the A and C slots
   // at the design's own buffer sizes rather than at some width this class
@@ -84,8 +92,19 @@ public:
   // caller does not know or care which datapath it is on, the design does, and
   // the eleven call sites that make up Whisper's encoder and decoder are exactly
   // the ones that must not each grow a branch on it.
+  //
+  // WHEN --npu-ops DID NOT NAME `code` THIS RUNS ON THE HOST instead, through
+  // run_host(). Same signature, same contract on `out`, no dispatch -- so the
+  // decision is made once here rather than at each of those eleven sites.
+  //
+  // `code` overrides the instance's own code for this one run, and only ViT's
+  // patch embedding uses it: that operand is staged on this same instance's
+  // `gemm` calls but is named by `conv`, so the two must be told apart per run
+  // rather than per instance. Null (everywhere else) means "the code I was
+  // constructed with".
   void run(size_t instr, const float *a, int64_t n_real, int64_t rows, int64_t k,
-           size_t wslot, const float *bias, int64_t n, float *out);
+           size_t wslot, const float *bias, int64_t n, float *out,
+           const char *code = nullptr);
 
   // INT8, when the design and the container agree that they are: A is
   // quantised per ROW (per token) here, on the way into the buffer the dispatch
@@ -106,6 +125,21 @@ public:
   void run_i8(size_t instr, const float *a, int64_t n_real, int64_t rows,
               int64_t k, size_t wslot, const float *bias, int64_t n, float *out,
               const float *wscale, const float *inv_smooth);
+
+  // THE HOST FORM, reached from run() when --npu-ops did not name `code`.
+  //
+  // It takes no design state at all: the operand is the CONTAINER's, untiled
+  // into fp32 by common/host_b.hpp, and the multiply is hostconv::gemm_nt -- the
+  // same blocked kernel arch=6 and arch=7 run their convolutions on. Nothing is
+  // dispatched, so n_dispatch does not move; t_host does, and it is reported
+  // separately for the same reason a dispatch count that included host work
+  // would be a different number from the one every existing measurement used.
+  //
+  // `rows` is ignored on purpose. The array computes all `rows` rows because
+  // that is the shape its xclbin was compiled for, and the host has no such
+  // constraint -- it computes `n_real`, which is what every caller reads back.
+  void run_host(const float *a, int64_t n_real, int64_t k, size_t wslot,
+                const float *bias, int64_t n, float *out);
 
   // acc[n_real, n] += A[n_real, k] @ B, with no bias and no epilogue.
   //
@@ -134,6 +168,12 @@ public:
   int64_t n_dispatch = 0;
   double t_dispatch = 0.0;
   double t_convert = 0.0;
+  // Host runs, and their seconds. Kept apart from n_dispatch/t_dispatch rather
+  // than folded in, because every number recorded in the registry and the
+  // README before this code existed counted DISPATCHES -- adding host work to
+  // that counter would silently change what 1152 meant.
+  int64_t n_host = 0;
+  double t_host = 0.0;
 
 private:
   // ONE OPERAND'S QUANTISATION SCALES, held against the B slot stage_operand
@@ -171,7 +211,36 @@ private:
 
   npu::Design &d_;
   app::Pool &pool_;
+  // Which --npu-ops code this instance's runs belong to. See the constructor.
+  const char *op_code_ = "gemm";
   std::unordered_map<size_t, OpScale> scales_;
+
+  // THE HOST COPY OF ONE OPERAND, built on first use and then kept.
+  //
+  // Built lazily rather than in stage_operand() because whether it is needed
+  // cannot be known there: stage_operand runs before --npu-ops has any say in
+  // how this instance is used (ViT stages one operand per code across two
+  // codes), and building every operand's fp32 copy for a run that dispatches all
+  // of them would double the model's memory for nothing. On a design that takes
+  // every GEMM this costs K*N floats per operand, once.
+  //
+  // The RECIPE is recorded at stage time (model pointer + tensor name) because
+  // run() carries neither -- it has a slot and a shape, which is what every call
+  // site holds. Same reason the scales above are keyed by slot.
+  struct HostWeight {
+    const npue::File *model = nullptr;
+    std::string name;
+    std::vector<float> kn;   // fp32 [K, N]; empty until host_b_kn() runs
+  };
+  std::unordered_map<size_t, HostWeight> host_w_;
+
+  // The fp32 [K, N] for `wslot`, untiled on first request. `k`/`n` are the
+  // shape the CALLER is multiplying at and are checked against the operand's
+  // own -- a GEMM at a different K or N from the weights it was staged for is a
+  // wrong number in a plausible range, and this is the only place both are in
+  // the same expression.
+  const std::vector<float> &host_weight(size_t wslot, int64_t k, int64_t n);
+
   std::vector<float> a_scale_;
 };
 

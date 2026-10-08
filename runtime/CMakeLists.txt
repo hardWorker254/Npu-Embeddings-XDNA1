@@ -46,8 +46,19 @@ endif()
 # so the name that was BUILT and the name that was USED were different, and
 # BUILD.md had to document the older one for its own commands to work. One
 # target, one name: npuembeddings.
-add_executable(npuembeddings
-  src/main.cpp
+#
+# THREE BINARIES, ONE LIBRARY. The sources below build a static library, and
+# three three-line mains under src/bin/ turn it into npuembeddings, npuaudio
+# and npuimage -- each setting app::g_family and calling app::entry() (see
+# cli/family.hpp for what the split means). The library is compiled ONCE
+# because the split is a statement about WHO RUNS WHAT and not about the code:
+# three copies of the runtime would be three copies of every measurement's
+# subject, and a fix applied to one binary and not the other two is exactly how
+# two binaries end up disagreeing about a refusal.
+set(NPUE_SOURCES
+  # The body of main(), shared by all three. Each binary's own main() is in
+  # src/bin/ and is compiled into the executable below, not into this library.
+  src/entry.cpp
   src/runtime.cpp
   # Subtask 1: core infrastructure (device/design/model/pool).
   src/device.cpp
@@ -197,10 +208,12 @@ add_executable(npuembeddings
   src/cli/subcommand.cpp
 )
 
-target_include_directories(npuembeddings PRIVATE include "${XRT_INCLUDE_DIR}")
+add_library(npue_core STATIC ${NPUE_SOURCES})
+
+target_include_directories(npue_core PUBLIC include "${XRT_INCLUDE_DIR}")
 
 if(DEFINED BOOST_ROOT AND EXISTS "${BOOST_ROOT}")
-  target_include_directories(npuembeddings PRIVATE "${BOOST_ROOT}")
+  target_include_directories(npue_core PUBLIC "${BOOST_ROOT}")
 endif()
 
 # The arch=5 image front end's decoders, on BOTH platforms and outside the
@@ -216,22 +229,22 @@ find_package(PNG REQUIRED)
 find_package(JPEG REQUIRED)
 
 if(WIN32)
-  target_link_libraries(npuembeddings PRIVATE winhttp ws2_32)
-  target_link_libraries(npuembeddings PRIVATE PNG::PNG JPEG::JPEG)
+  target_link_libraries(npue_core PUBLIC winhttp ws2_32)
+  target_link_libraries(npue_core PUBLIC PNG::PNG JPEG::JPEG)
 else()
-  target_link_libraries(npuembeddings PRIVATE ${XRT_COREUTIL_LIB})
+  target_link_libraries(npue_core PUBLIC ${XRT_COREUTIL_LIB})
 
   find_package(CURL REQUIRED)
-  target_link_libraries(npuembeddings PRIVATE CURL::libcurl)
-  target_link_libraries(npuembeddings PRIVATE PNG::PNG JPEG::JPEG)
+  target_link_libraries(npue_core PUBLIC CURL::libcurl)
+  target_link_libraries(npue_core PUBLIC PNG::PNG JPEG::JPEG)
 endif()
 
 if(MSVC)
   set(NPUE_HOST_ARCH "AVX2" CACHE STRING
       "MSVC /arch: level for the host kernels (AVX2 or AVX512)")
-  target_compile_options(npuembeddings PRIVATE /W3 /EHsc /Zc:__cplusplus /O2
+  target_compile_options(npue_core PRIVATE /W3 /EHsc /Zc:__cplusplus /O2
                          /arch:${NPUE_HOST_ARCH})
-  target_compile_definitions(npuembeddings PRIVATE WIN32_LEAN_AND_MEAN)
+  target_compile_definitions(npue_core PRIVATE WIN32_LEAN_AND_MEAN)
 else()
   # THE HOST ISA, AS A CACHE VARIABLE -- and the same shape as the MSVC branch
   # above, which already had one and which is why the two disagreed about
@@ -283,8 +296,8 @@ else()
 x86-64-v3), a specific -march=..., or `native` to tune for the build machine. \
 `native` makes the binary UNRUNNABLE on CPUs without that ISA -- see the note \
 above; measured free on this tree for x86-64-v3.")
-  target_compile_options(npuembeddings PRIVATE -Wall -O2 -march=${NPUE_HOST_ARCH})
-  target_compile_definitions(npuembeddings PRIVATE _FILE_OFFSET_BITS=64)
+  target_compile_options(npue_core PRIVATE -Wall -O2 -march=${NPUE_HOST_ARCH})
+  target_compile_definitions(npue_core PRIVATE _FILE_OFFSET_BITS=64)
 endif()
 
 # The pose host GEMM at -O3. One source, one reason: its inner loop is an axpy
@@ -310,3 +323,25 @@ if(NOT MSVC)
   set_source_files_properties(src/mppose/net.cpp PROPERTIES
     COMPILE_OPTIONS "-O3")
 endif()
+
+# THE THREE BINARIES. Each is one translation unit that sets its family and
+# calls app::entry(); everything else it runs comes from npue_core, linked
+# once per executable. They are built by default -- all three, because a tree
+# that built only npuembeddings would leave the other two as names in a
+# refusal message with no file behind them.
+#
+# They land in the same directory (runtime/build/) on purpose: default_root()
+# walks up from argv[0], and one directory of three binaries keeps every
+# documented command line a `./runtime/build/<verb>` away.
+foreach(npue_bin npuembeddings npuaudio npuimage)
+  add_executable(${npue_bin} src/bin/${npue_bin}_main.cpp)
+  target_link_libraries(${npue_bin} PRIVATE npue_core)
+  if(MSVC)
+    target_compile_options(${npue_bin} PRIVATE /W3 /EHsc /Zc:__cplusplus /O2
+                           /arch:${NPUE_HOST_ARCH})
+    target_compile_definitions(${npue_bin} PRIVATE WIN32_LEAN_AND_MEAN)
+  else()
+    target_compile_options(${npue_bin} PRIVATE -Wall -O2 -march=${NPUE_HOST_ARCH})
+    target_compile_definitions(${npue_bin} PRIVATE _FILE_OFFSET_BITS=64)
+  endif()
+endforeach()

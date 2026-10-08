@@ -78,9 +78,43 @@ struct NpuOp {
   const char *long_name; // for messages only
 };
 
+// The codes THIS process was asked for, set once by parse_npu_ops() -- the one
+// parser, so there is exactly one place that can leave it out of date.
+//
+// WHY A GLOBAL RATHER THAN A PARAMETER. The decision "array or host" is needed
+// at every GEMM call site, and those are 33 of them across three architectures,
+// reached through five classes (BertEncoder, VitEncoder, whisper's Encoder and
+// Decoder, NpuAttention, NpuConv1d, logits_npu) that do not all hold a
+// RunContext. Threading a set through all of them would be 33 changes where
+// this is one, and a missed one would be the failure this project treats as the
+// worst: a code the reader typed that silently did nothing.
+//
+// A second rule, and the reason the default is HOST rather than array: a run
+// that never calls parse_npu_ops() -- no --npu-ops anywhere -- leaves this
+// empty, and empty means every op is on the host, which is what the flag's
+// documentation has always promised.
+inline std::set<std::string> g_npu_ops;
+
+// True when `code` was named on the command line. Every "does this op run on
+// the array" question in the runtime asks this, so the rule lives in one place
+// and cannot be answered two ways.
+inline bool op_on_array(const std::string &code) {
+  return g_npu_ops.count(code) != 0;
+}
+
 inline const std::vector<NpuOp> &npu_op_table() {
   // Keep in sync with tools/lib/npu_ops.py -- see the header.
   static const std::vector<NpuOp> table = {
+      // FIRST, because it is the one every other entry sits on top of. The four
+      // per-layer GEMMs -- qkv, attn_out, ffn_up, ffn_down and their cross- and
+      // self-attention counterparts -- used to be unconditional: the array took
+      // them whenever a design set was there, and `--npu-ops` could only choose
+      // the ops AROUND them. That made the flag's documented rule ("every op is
+      // on the host unless it is listed") untrue for the largest op of all, and
+      // the status block printed `npu` for the whole GEMM group whatever the
+      // command line said. No design directory of its own: the streams are the
+      // set's own slots, so the cost of the code is one flag and no xclbin.
+      {"gemm", "", "the per-layer GEMMs"},
       {"gelu", "gelu", "GELU"},
       {"layn", "layernorm", "LayerNorm"},
       {"softm", "softmax", "softmax"},
@@ -152,7 +186,8 @@ inline std::set<std::string> parse_npu_ops(const std::string &list) {
       throw std::runtime_error(
           "--npu-ops: '" + code +
           "' is not an op this build knows. Valid codes: [" + npu_op_codes() +
-          "] (layn = LayerNorm, softm = softmax, gelu = GELU, conv = Whisper's "
+          "] (gemm = the per-layer GEMMs, layn = LayerNorm, softm = softmax, "
+          "gelu = GELU, conv = Whisper's "
           "conv1/conv2, attn = attention as two GEMMs (QK^T and softmax.V), "
           "mproj = the mel "
           "filter bank as a GEMM, fft = the 400-point transform as a GEMM, "
@@ -169,6 +204,30 @@ inline std::set<std::string> parse_npu_ops(const std::string &list) {
     item.push_back(c);
   }
   commit();
+  // On success, and only on success: a list that threw part-way through must
+  // not leave a half-parsed set where the whole one belongs. Every call site
+  // passes the flag's own value read off argv, so replacing (rather than
+  // merging) keeps `--npu-ops` given twice meaning "the last one wins" here as
+  // it does everywhere else.
+  g_npu_ops = out;
+  return out;
+}
+
+// Join a parsed set into the form a refusal prints: "gemm, gelu" -- every code
+// the reader actually typed, in set order, with no hand-typed list of the codes
+// this build knows. Each mode's refusal used to spell its own subset with an
+// if-ladder (`codes.count("gelu") ? "gelu" : ""` + ...), so adding a ninth code
+// meant finding three ladders and one of them would have been missed -- and a
+// missed one prints an empty name, i.e. a refusal that will not say what was
+// refused. `exclude` drops a code the message already accounts for on its own.
+inline std::string npu_op_names(const std::set<std::string> &codes,
+                                const std::string &exclude = std::string()) {
+  std::string out;
+  for (const auto &c : codes) {
+    if (!exclude.empty() && c == exclude) continue;
+    if (!out.empty()) out += ", ";
+    out += c;
+  }
   return out;
 }
 

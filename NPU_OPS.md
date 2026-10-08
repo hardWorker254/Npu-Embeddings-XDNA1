@@ -6,9 +6,13 @@
      Russian version: NPU_OPS.ru.md -->
 
 The runtime has ONE flag for this, `--npu-ops CODES`, and its default is
-the empty set: **every op runs on the CPU, which is the measured-faster
-path in every case measured so far.** Passing codes is how you ask for the
-array instead, one op at a time.
+the empty set: **every op runs on the CPU.** That is where a run starts,
+not a verdict on where it should end, and the measurements now disagree
+with it for the ninth code: `gemm` on the array beats the host on every
+transformer here (bge, 15 texts 1.06 s -> 0.17 s; ViT 0.435 s -> 0.241 s;
+Gemma 0.69 s -> 0.10 s; Whisper's encoder 0.70 s -> 0.51 s), while `attn`
+and `softm` on the array stay slower than the host they replace. Passing
+codes is how you ask for the array instead, one op at a time.
 
 The exporter has **no such flag**. One command builds every design the
 target can use:
@@ -22,9 +26,9 @@ it takes no op flag at all -- `--npu-ops`, `--npu-extra-ops` and
 `--npu-eltwise` are refused by name there, each with its own message. The
 table below is what it reads.
 
-There are 8 codes and 7 architectures: 56 cells. Of those, 21 run on the array today, 1 is already there without a code, 0 are operations the model has and no array branch reaches, 3 cannot be moved on this board for a stated reason, and 31 do not exist in that model at all.
+There are 9 codes and 7 architectures: 63 cells. Of those, 26 run on the array today, 0 are already there without a code, 0 are operations the model has and no array branch reaches, 3 cannot be moved on this board for a stated reason, and 34 do not exist in that model at all.
 
-## The eight codes
+## The nine codes
 
 Three are elementwise designs of their own, compiled into a sibling
 directory next to the GEMM set:
@@ -33,9 +37,16 @@ directory next to the GEMM set:
 - `layn` -- LayerNorm, in `layernorm/`.
 - `softm` -- softmax, in `softmax/`.
 
-Five are **not** designs of their own. They are streams added to a design
-set the GEMM export already produces, so asking for them costs no extra
-xclbin -- which is why `build.py` compiles nothing for them and only
+`gemm` is the set itself rather than a directory: it names the four GEMM
+streams the export already writes (qkv, attn_out, ffn_up, ffn_down), so it
+compiles nothing new -- it picks between the array and this process, not
+between two artefacts. It is why the base GEMMs can move at all:
+
+- `gemm` -- the per-layer GEMMs: the four GEMM streams are the set's own slots (qkv, attn_out, ffn_up, ffn_down), so there is nothing to compile -- the code chooses between the array and this process, not between two artefacts.
+
+Five more are **not** designs of their own. They are streams added to a
+design set the GEMM export already produces, so asking for them costs no
+extra xclbin -- which is why `build.py` compiles nothing for them and only
 `resolve.py` has to know they exist:
 
 - `attn` -- attention, as two GEMMs: its two streams are added to the gemm_rtp and gemm_rtp_dec sets themselves, not as a directory of their own.
@@ -61,26 +72,33 @@ new code, or does not tile.
 
 ## What each architecture can send to the array
 
-A list per architecture, not a grid of architectures against codes: of 56 cells 31 repeated one absence, and the answer to what can this dispatch came from filtering the empty cells out of a row. There are no empty cells here: one column, and every entry in it names its own status -- `conv` (already) reads without a heading three columns to the left. A code that is not listed is not one this architecture has.
+A list per architecture, not a grid of architectures against codes: of 63 cells 34 repeated one absence, and the answer to what can this dispatch came from filtering the empty cells out of a row. There are no empty cells here: one column, and every entry in it names its own status -- `conv` reads `yes` on all three pose rows without a heading. A code that is not listed is not one this architecture has.
 
 | architecture | what can additionally go to the array |
 | --- | --- |
-| `gemm_rtp` | `gelu`, `layn`, `softm`, `attn` |
-| `stt` | `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
-| `cls` | `gelu`, `layn`, `softm`, `conv` (already), `attn`, `logit` (impossible) |
+| `gemm_rtp` | `gemm`, `gelu`, `layn`, `softm`, `attn` |
+| `stt` | `gemm`, `gelu`, `layn`, `softm`, `conv`, `attn`, `mproj`, `fft`, `logit` |
+| `cls` | `gemm`, `gelu`, `layn`, `softm`, `conv`, `attn`, `logit` (impossible) |
 | `pose` | `conv` |
 | `hands` | `conv` |
 | `mppose` | `conv` |
-| `embeddinggemma-300m` | `gelu` (impossible), `layn` (impossible), `softm`, `attn` |
+| `embeddinggemma-300m` | `gemm`, `gelu` (impossible), `layn` (impossible), `softm`, `attn` |
 
-`already` means the cell is empty because the work is done without a code,
-which is better than a tick. `-` means the model has no such operation,
+`already` has no cell of its own any more -- the ninth code took the last one,
+and the status stayed because the runtime still implements it. `-` means the
+model has no such operation,
 which is permanent and correct. `no code` is the honest middle: the
 operation is there, and nothing reaches it.
 
 ## `gemm_rtp` -- Text embedders
 
 BERT and friends: bge, MiniLM, nomic, gte. This is also the default for a text embedder with no `kind` of its own.
+
+### `gemm` -- the per-layer GEMMs: **honours**
+
+the four GEMMs per layer -- qkv, attn_out, ffn_up, ffn_down -- on the set's own instruction slots, which is what the array is FOR in an embedder. Until this code existed they were the one op the flag could not turn off: the condition was the PRESENCE of a design set, so a run with no --npu-ops at all dispatched them and the status block printed `npu` for the whole group whatever the command line said. The code makes them selectable like the other eight. The host path is this build's own and not a borrowed reference: the container stores each B operand pre-tiled for the array (block_panel, 64x48 at MiniLM), so the runtime untiles it back to fp32 ONCE at load -- same six-axis walk common/int4_panel.hpp already does for int4, read backwards -- and multiplies it with common/conv_host.hpp's gemm_nt, the kernel arch=6 and arch=7 already run their convolutions on.
+
+Design directory: none -- the four GEMM streams are the set's own slots (qkv, attn_out, ffn_up, ffn_down), so there is nothing to compile -- the code chooses between the array and this process, not between two artefacts. See `STREAM_ONLY` in `tools/lib/npu_ops.py`.
 
 ### `gelu` -- GELU: **honours**
 
@@ -96,7 +114,7 @@ Design directory: `layernorm/`, built automatically by the exporter for any targ
 
 ### `softm` -- softmax: **honours**
 
-softmax over the score matrix, its own pass between the two attention GEMMs. MEASURED on bge-base, 15 texts, arch 1: 1.70 s against 0.16 s of host embedding, relfro 1.15e-02 / cos 0.999933 against the host vectors (max|d| 1.6e-03). The row WIDTH is the whole of the difficulty here, and it was wrong until it was measured: the design is compiled for sm_cols = padded n_kv (64 -> 384, resolve.py:414) because NpuAttention, its other consumer, pads its score rows to the kernel's own width, while the host's qk_impl laid rows g_seq wide. elt_chunks cannot catch that -- its only guard is `n % cols != 0`, and batch*heads*g_seq*g_seq is a multiple of 384 anyway -- so the kernel normalised 384-element windows, six real score rows at a time, and the embedding came back at relfro 7.08e-01 / cos 0.749237895. BertEncoder now lays the rows out at the design's width, with -1e30 past g_seq, whenever the array takes the softmax; the default path is byte-identical to what it was and `attn,softm` (relfro 1.21e-02) is unchanged. COST, and it is not a defect in this cell but in how the two flags combine: asking for attn,softm puts the softmax inside NpuAttention, which dispatches it once per head per chunk rather than once per layer, and every dispatch fills the design's whole 12288-row capacity -- 100.90 s for 15 texts against 1.38 s for attn alone.
+softmax over the score matrix, its own pass between the two attention GEMMs. MEASURED on bge-base-en-v1.5, 15 texts, arch 1: `--npu-ops gemm,softm` is 1.70 s against `--npu-ops gemm`'s 0.17 s (10.0x SLOWER), relfro 1.391e-02 / cos 0.999903381, min cos 0.999844372, max|d| 2.259e-03 against that same arm. Plain `--npu-ops softm`, the four GEMMs on this process as they now are by default, is 1.58 s against the all-host default's 1.06 s, 36 dispatches against 0. The reference arm is named rather than called 'host' because it is not one: `gemm` is what every run did before this code was split out, and it is what the original pairing was. The row WIDTH is the whole of the difficulty here, and it was wrong until it was measured: the design is compiled for sm_cols = padded n_kv (64 -> 384, resolve.py:414) because NpuAttention, its other consumer, pads its score rows to the kernel's own width, while the host's qk_impl laid rows g_seq wide. elt_chunks cannot catch that -- its only guard is `n % cols != 0`, and batch*heads*g_seq*g_seq is a multiple of 384 anyway -- so the kernel normalised 384-element windows, six real score rows at a time, and the embedding came back at relfro 7.08e-01 / cos 0.749237895. BertEncoder now lays the rows out at the design's width, with -1e30 past g_seq, whenever the array takes the softmax; the default path is byte-identical to what it was and `gemm,attn,softm` (relfro 1.21e-02) is unchanged. COST, and it is not a defect in this cell but in how the two flags combine: asking for attn,softm puts the softmax inside NpuAttention, which dispatches it once per head per chunk rather than once per layer, and every dispatch fills the design's whole 12288-row capacity -- 100.59 s for 15 texts against 1.36 s for `gemm,attn`, both re-measured with this change.
 
 Design directory: `softmax/`, built automatically by the exporter for any target of this architecture.
 
@@ -106,7 +124,7 @@ names Whisper's conv1/conv2 -- an audio front end, and this architecture has non
 
 ### `attn` -- attention, as two GEMMs: **honours**
 
-qk() and av() in BertEncoder::run dispatch on the set's own attn_qk/attn_av streams through the shared NpuAttention. BERT's fused qkv is Q|K|V per position, so the K|V block the class wants is reached by passing qkv + d_model with a stride of 3*d_model -- the same offset Whisper's own self-attention uses, and no new code. The exporter builds the streams from the registry like any other honoured code; n_kv comes from the target's max_seq_len, which is the context the CONTAINER was packed for (all-MiniLM: 256, presliced) and not the checkpoint's 512 positions -- reading config.json instead would build a panel 512 wide over a tensor that cannot address past 256. Padding past the live positions is exact: NpuAttention writes -1e30 into those columns before the softmax, so a wider n_kv costs arithmetic and not accuracy. attn_qk's K is head_dim padded up to tile_k, which is what makes a 32-wide head (three of these eight models) buildable at all, and the runtime zeroes the matching rows of the gathered Q block so the extra MACs contribute 0*0. Same CAVEAT as cls/stt: attention on the array is SLOWER than the host pass. MEASURED on bge-base, 15 texts, arch 1: 1.38 s against 0.16 s of host embedding (8.6x SLOWER), relfro 1.58e-02 / cos 0.999876, max|d| 2.2e-03 -- against Whisper's 4.6x. This code makes the model runnable on the array, not faster.
+qk() and av() in BertEncoder::run dispatch on the set's own attn_qk/attn_av streams through the shared NpuAttention. BERT's fused qkv is Q|K|V per position, so the K|V block the class wants is reached by passing qkv + d_model with a stride of 3*d_model -- the same offset Whisper's own self-attention uses, and no new code. The exporter builds the streams from the registry like any other honoured code; n_kv comes from the target's max_seq_len, which is the context the CONTAINER was packed for (all-MiniLM: 256, presliced) and not the checkpoint's 512 positions -- reading config.json instead would build a panel 512 wide over a tensor that cannot address past 256. Padding past the live positions is exact: NpuAttention writes -1e30 into those columns before the softmax, so a wider n_kv costs arithmetic and not accuracy. attn_qk's K is head_dim padded up to tile_k, which is what makes a 32-wide head (three of these eight models) buildable at all, and the runtime zeroes the matching rows of the gathered Q block so the extra MACs contribute 0*0. Same CAVEAT as cls/stt: attention on the array is SLOWER than the host pass. MEASURED on bge-base-en-v1.5, 15 texts, arch 1: `--npu-ops gemm,attn` is 1.36 s against `--npu-ops gemm`'s 0.17 s (8.0x SLOWER), with 4752 dispatches against that arm's 144 -- 4608 of them this code's, one per head per query chunk. Plain `--npu-ops attn` is 2.00 s against the all-host default's 1.06 s, 4608 dispatches against 0. Correctness against the `gemm` arm: relfro 1.398e-02, mean cos 0.999902308, min cos 0.999853313, max|d| 2.093e-03. This code makes the model runnable on the array, not faster.
 
 Design directory: none -- its two streams are added to the gemm_rtp and gemm_rtp_dec sets themselves, not as a directory of their own. See `STREAM_ONLY` in `tools/lib/npu_ops.py`.
 
@@ -125,6 +143,12 @@ names Whisper's TIED TOKEN EMBEDDING used as the logit matrix (decoder.cpp:196: 
 ## `stt` -- Speech to text
 
 Whisper (all sizes) and anything else that carries an audio front end.
+
+### `gemm` -- the per-layer GEMMs: **honours**
+
+the encoder's qkv / attn_out / ffn_up / ffn_down and the decoder's self_qkv / self_attn_out / cross_q / cross_attn_out / ffn_up / ffn_down, on the two sets' own slots (gemm_rtp and gemm_rtp_dec). This is the cell that made the flag's rule true: those eleven call sites went to the array on the strength of a design set being present, not on the strength of being named, and the status block hardcoded `npu` for both GEMM rows. Named now, host by default. The host path untiles each pre-tiled B panel back to fp32 once at load and runs it through gemm_nt; the decoder's eight chunked logit streams are NOT this cell -- they are `logit`, and stay host unless that is named too.
+
+Design directory: none -- the four GEMM streams are the set's own slots (qkv, attn_out, ffn_up, ffn_down), so there is nothing to compile -- the code chooses between the array and this process, not between two artefacts. See `STREAM_ONLY` in `tools/lib/npu_ops.py`.
 
 ### `gelu` -- GELU: **honours**
 
@@ -152,7 +176,7 @@ Design directory: none -- it runs on the stream gemm_rtp already exports, so the
 
 ### `attn` -- attention, as two GEMMs: **honours**
 
-the two GEMMs that bracket the softmax, as attn_qk and attn_av streams in the same set. MEASURED 4.32 s against 0.94 s on the host over a 3 s window: it works, and it is 4.6x slower.
+the two GEMMs that bracket the softmax, as attn_qk and attn_av streams in the same set. MEASURED on whisper-base over /home/prof/jfk.wav (11 s of speech), on the `time` line the runtime prints: `--npu-ops attn` puts the DECODER at 4.19 s against the default's 0.60 s and the encoder at 0.76 s against 0.70 s, 5856 dispatches against 0. The cost lives in the decoder, because that is where attention runs once per generated token, and end to end it is 7.0x slower. Naming `gemm` as well (`gemm,attn`, 7008 dispatches) gives 4.42 s of decoder and 0.52 s of encoder -- the same picture, since those two arms differ only in where the four per-layer GEMMs run. It works, and it is not faster.
 
 Design directory: none -- its two streams are added to the gemm_rtp and gemm_rtp_dec sets themselves, not as a directory of their own. See `STREAM_ONLY` in `tools/lib/npu_ops.py`.
 
@@ -178,31 +202,39 @@ Design directory: none -- its streams are added to the gemm_rtp_dec set itself, 
 
 ViT. Its four GEMM streams are `gemm_rtp`'s, which is why the classification head lives here.
 
+### `gemm` -- the per-layer GEMMs: **honours**
+
+the four per-layer GEMMs -- qkv, attn_out, ffn_up, ffn_down over 12 layers -- plus this row's patch embedding when `conv` is named beside it: 48 dispatches, 49 with conv. Host by default like every other code, and this is the row where that bites hardest, because these four were the ones a reader got for nothing. MEASURED, vit-base-patch16-224, bf16, docs/bus.jpg, best of 5 encoder time: 0.241 s against the all-host default's 0.435 s -- 1.80x FASTER, the one code in this file whose answer for speed is yes rather than no. Correctness on this image: top-1 `minibus` either way, top-1 confidence 0.62916 against 0.63782 (dp 8.7e-03); `gemm,conv` together is 0.241 s and dp 8.8e-03. The 48 is also the count that used to sit inside every other cell's total, which is why those cells read 48 fewer.
+
+Design directory: none -- the four GEMM streams are the set's own slots (qkv, attn_out, ffn_up, ffn_down), so there is nothing to compile -- the code chooses between the array and this process, not between two artefacts. See `STREAM_ONLY` in `tools/lib/npu_ops.py`.
+
 ### `gelu` -- GELU: **honours**
 
-pre-LN with an ungated FFN, so the activation IS a standalone pass and the gelu/ design takes it over. MEASURED on vit-base-patch16-224, bf16, bus.jpg, best of 8: 0.343 s against the host's 0.248 s, 1.38x SLOWER. CAVEAT, and it is about accuracy rather than the code: resolve.py forces the exact-erf kernel only for kind stt, and a ViT keeps the exporter's `poly` default, so this design is the degree-8 fit -- 2.49e-3 relative from the exact erf the host computes. The measured drift on the label set was under 0.011 in confidence, which is why it is a caveat and not a refusal. A target wanting the exact kernel has to say so in its overrides; nothing in the tree does.
+pre-LN with an ungated FFN, so the activation IS a standalone pass and the gelu/ design takes it over. MEASURED on vit-base-patch16-224, bf16, docs/bus.jpg, best of 5 encoder time: 0.332 s for `--npu-ops gemm,gelu` against 0.241 s for `--npu-ops gemm`, 1.38x SLOWER. The first arm names `gemm` in both, so the four per-layer GEMMs are on the array in both and the difference is this pass alone -- which is the pairing every figure in this row came from, and worth naming now that the default puts those four on this process. Plain `--npu-ops gelu`, with them here by default, is 0.558 s against the default's 0.435 s (12 eltwise dispatches either way), top-1 `minibus` at 0.63684 (dp 1.0e-03). CAVEAT, and it is about accuracy rather than the code: resolve.py forces the exact-erf kernel only for kind stt, and a ViT keeps the exporter's `poly` default, so this design is the degree-8 fit -- 2.49e-3 relative from the exact erf the host computes. The measured drift on the label set was under 0.011 in confidence, which is why it is a caveat and not a refusal. A target wanting the exact kernel has to say so in its overrides; nothing in the tree does.
 
 Design directory: `gelu/`, built automatically by the exporter for any target of this architecture.
 
 ### `layn` -- LayerNorm: **honours**
 
-25 sites (2 per layer plus the final one), the same kernel. MEASURED 0.377 s against 0.248 s: 1.52x slower.
+25 sites (2 per layer plus the final one), the same kernel. MEASURED on vit-base-patch16-224, bf16, docs/bus.jpg, best of 5 encoder time: 0.355 s for `--npu-ops gemm,layn` against 0.241 s for `--npu-ops gemm` (1.47x SLOWER, 25 eltwise dispatches beside that arm's 48); plain `--npu-ops layn` is 0.492 s against the all-host default's 0.435 s, top-1 still `minibus` at 0.64026 (dp 2.4e-03).
 
 Design directory: `layernorm/`, built automatically by the exporter for any target of this architecture.
 
 ### `softm` -- softmax: **honours**
 
-the softmax is INSIDE attention, so it is named here as the array's half of that pass, and it is MEASURED on its own: vit-base-patch16-224, bus.jpg, arch 5, `--npu-ops softm` puts the encoder at 0.822 s against the host's 0.244 s (61 dispatches, 49 of them the GEMMs and 12 of them one softmax per block), against 0.349 s for `attn` alone. Correctness is checked on the full 1000-way probability row, not on the top-5 that would have agreed anyway: relfro 1.959e-02, cos 0.999869, max|d| 1.02e-02, with the label and the whole top-5 identical to the host and the top-10 centered-logit shift under 5.3e-02. The design's width is the padded key count (197 -> 384 against lcm(tile_k, tile_n)=192), because npue::whisper::attention -- which IS this model's host path -- lays score rows out at the kernel's own width, so a whole row fits one dispatch rather than 64 columns of it. COST of asking for both codes at once, stated because it is the one result a reader would not guess: `attn,softm` is 6.685 s. NpuAttention then calls the softmax once per head per chunk -- 144 extra dispatches -- and each dispatch fills the design's whole 12288-row capacity whatever the caller needed. The cell honours the flag; the combination honours it slowly.
+the softmax is INSIDE attention, so it is named here as the array's half of that pass, and it is MEASURED on its own: vit-base-patch16-224, bf16, docs/bus.jpg: best of 5 encoder time, 0.806 s for `--npu-ops gemm,softm` against 0.241 s for `--npu-ops gemm` (3.3x SLOWER, 60 dispatches against that arm's 48 -- 48 GEMM plus 12 eltwise, one softmax per block), and 1.133 s for plain `--npu-ops softm` against the all-host default's 0.435 s, 0 encoder dispatches and the same 12 eltwise. The old total for this cell was 61; the missing 49 were the four per-layer GEMMs and the patch embed, which `gemm` and `conv` own now. Correctness is checked on the full 1000-way probability row, not on the top-5 that would have agreed anyway, and against the reference arm `gemm` names -- arch 5 has no `--cpu`, so that arm is the only one that ever existed here: relfro 1.959e-02, cos 0.999869, max|d| 1.02e-02, with the label and the whole top-5 identical and the top-10 centered-logit shift under 5.3e-02. On this image top-1 stays `minibus` at 0.63585, dp 2.0e-03 from the default. The design's width is the padded key count (197 -> 384 against lcm(tile_k, tile_n)=192), because npue::whisper::attention -- which IS this model's host path -- lays score rows out at the kernel's own width, so a whole row fits one dispatch rather than 64 columns of it. COST of asking for both codes at once, stated because it is the one result a reader would not guess: `gemm,attn,softm` is 6.671 s against `gemm,attn`'s 0.348 s, and plain `attn,softm` is 7.038 s against the default's 0.435 s. NpuAttention then calls the softmax once per head per chunk -- 144 extra dispatches -- and each dispatch fills the design's whole 12288-row capacity whatever the caller needed. The cell honours the flag; the combination honours it slowly.
 
 Design directory: `softmax/`, built automatically by the exporter for any target of this architecture.
 
-### `conv` -- conv1d (Whisper's audio front end): **on_array**
+### `conv` -- conv1d (Whisper's audio front end): **honours**
 
-the patch embedding IS a convolution, Conv2d(3, d, kernel=16, stride=16), and it is ALREADY on the array. im2col makes it [n_patches, patch_dim] x [patch_dim, d], which is attn_out's own shape, so it is dispatched on attn_out's instruction slot with no flag at all (runtime/src/vit/encoder.cpp:267). Asking for conv would add no dispatch. The rewrite is exact on one ground only: stride equals kernel with padding 0, so the 196 windows neither overlap nor skip and im2col is a permutation, not a sum.
+the patch embedding IS a convolution, Conv2d(3, d, kernel=16, stride=16), and `conv` is the code that decides whether its one dispatch happens. im2col makes it [197, 768] x [768, 768], which is attn_out's own shape, so it dispatches on attn_out's instruction slot and needs no stream of its own -- no hw_context and no extra xclbin for it. The rewrite is exact on one ground only: stride equals kernel with padding 0, so the 196 windows neither overlap nor skip and im2col is a permutation, not a sum. This cell used to read `on_array`, which said asking for conv would add no dispatch. That was true only while the four per-layer GEMMs were unconditional, and `gemm` ended that: a cell that still claimed nothing could change would be the one op in the file the reader cannot reach. MEASURED, vit-base-patch16-224, bf16, docs/bus.jpg, best of 5 encoder time: 0.426 s for `--npu-ops conv` (1 encoder dispatch) against the all-host default's 0.435 s -- inside the noise, one im2col GEMM out of forty-nine. Top-1 `minibus` either way, top-1 confidence 0.63260 against 0.63782 (dp 5.2e-03).
+
+Design directory: none -- it runs on the stream gemm_rtp already exports, so there is nothing to compile. See `STREAM_ONLY` in `tools/lib/npu_ops.py`.
 
 ### `attn` -- attention, as two GEMMs: **honours**
 
-12 heads over 197 positions, on the set's own attn_qk/attn_av streams -- the exporter builds them from this registry entry like any other honoured code, and n_kv is the container's max_seq_len (197) padded to 384 against lcm(tile_k, tile_n). A ViT has no attention of its own: vit/encoder.cpp calls npue::whisper::attention(), so the array branch added here is the one NpuAttention already provides, reached through the same shared host path. MEASURED on vit-base-patch16-224, bus.jpg, arch 5: 0.349 s against the host's 0.244 s for the whole encoder (1.43x SLOWER), 337 dispatches against 49. Correctness on the full 1000-way probability row: relfro 4.384e-03, cos 0.999993, max|d| 2.1e-03, label and top-5 identical to the host, top-10 centered-logit shift under 1.9e-02 -- the 197-position row, so nothing here rests on the seq 64 the older notes stopped at. The cost above 64 positions is this number now, measured rather than left open.
+12 heads over 197 positions, on the set's own attn_qk/attn_av streams -- the exporter builds them from this registry entry like any other honoured code, and n_kv is the container's max_seq_len (197) padded to 384 against lcm(tile_k, tile_n). A ViT has no attention of its own: vit/encoder.cpp calls npue::whisper::attention(), so the array branch added here is the one NpuAttention already provides, reached through the same shared host path. MEASURED on vit-base-patch16-224, bf16, docs/bus.jpg, best of 5 encoder time: 0.348 s for `--npu-ops gemm,attn` against 0.241 s for `--npu-ops gemm` (1.44x SLOWER), 336 dispatches against that arm's 48 -- 288 of them this code's, two per head per layer. Plain `--npu-ops attn` is 0.593 s against the all-host default's 0.435 s (1.36x SLOWER), 288 dispatches against 0. The old pair here was 0.349 s against 0.244 s and 337 against 49; `gemm,attn` against `gemm` reproduces the first, and the missing one dispatch is the patch embed, which `conv` owns now. Correctness on the full 1000-way probability row, against that same reference arm: relfro 4.384e-03, cos 0.999993, max|d| 2.1e-03, label and top-5 identical, top-10 centered-logit shift under 1.9e-02 -- the 197-position row, so nothing here rests on the seq 64 the older notes stopped at. On this image top-1 stays `minibus` at 0.63385, dp 4.0e-03 from the default. The cost above 64 positions is this number now, measured rather than left open.
 
 Design directory: none -- its two streams are added to the gemm_rtp and gemm_rtp_dec sets themselves, not as a directory of their own. See `STREAM_ONLY` in `tools/lib/npu_ops.py`.
 
@@ -221,6 +253,10 @@ the classification head is a real [768, 1000] projection, so this is not an abse
 ## `pose` -- Pose
 
 YOLO pose. No transformer, no normalisation, no attention -- most of this row is `absent`, and that is the answer.
+
+### `gemm` -- the per-layer GEMMs: **absent**
+
+every weighted operation in this network is a convolution, so there is no per-layer projection for a tenth code to name; the set stands at nine here. tools/pack/packers/pose.py only ever dispatches a node whose op_type is `Conv`, and its GRAPH_OPS is {Conv, Mul, Sigmoid, Add, Concat, Split, MaxPool, Resize} with no MatMul in it; the 1x1 detection head is a convolution too. Nothing is missing: `conv` already names every matrix multiply this graph contains.
 
 ### `gelu` -- GELU: **absent**
 
@@ -258,7 +294,11 @@ no vocabulary: the head is a 1x1 convolution producing one class score and a DFL
 
 ## `hands` -- Hand landmarks
 
-MediaPipe hands: a palm detector and a hand-landmark network in ONE container, run in that order with the whole decode between them. Seven of this row's eight cells are `absent` and one is `blocked`, and neither is an oversight.
+MediaPipe hands: a palm detector and a hand-landmark network in ONE container, run in that order with the whole decode between them. Eight of this row's nine cells are `absent`; the ninth is `conv`, because those 100 dense convolutions are every weighted operation the graph has.
+
+### `gemm` -- the per-layer GEMMs: **absent**
+
+every weighted operation in this network is a convolution, so there is no per-layer projection for a tenth code to name; the set stands at nine here. tools/pack/packers/hands.py is Conv-only at every site that could dispatch a node -- FUSIBLE is (Conv, Add) and its dispatch loop tests op_type == Conv -- and the graph is those 100 dense convolutions `conv` speaks for. Nothing is missing: `conv` already names every matrix multiply this graph contains.
 
 ### `gelu` -- GELU: **absent**
 
@@ -304,7 +344,11 @@ no vocabulary: the landmark head emits 21 screen points, a presence and a handed
 
 ## `mppose` -- Body pose
 
-MediaPipe Pose: детектор человека и сеть позы в ОДНОМ контейнере, плюс одна операция, которой нет ни в одной другой архитектуре этого дерева. Семь ячеек `absent` и одна `blocked`, как и у рук, и по той же причине.
+MediaPipe Pose: детектор человека и сеть позы в ОДНОМ контейнере, плюс одна операция, которой нет ни в одной другой архитектуре этого дерева. Восемь ячеек `absent` и одна `conv`, как и у рук, и по той же причине.
+
+### `gemm` -- the per-layer GEMMs: **absent**
+
+every weighted operation in this network is a convolution, so there is no per-layer projection for a tenth code to name; the set stands at nine here. tools/pack/packers/mppose.py rejects a dispatch target whose op_type is not Conv by name -- it collects the offenders and refuses rather than skipping them -- and the graph is those 161 convolutions `conv` speaks for. Nothing is missing: `conv` already names every matrix multiply this graph contains.
 
 ### `gelu` -- GELU: **absent**
 
@@ -354,17 +398,23 @@ no vocabulary: the landmark head emits 39 rows of x/y/z/visibility/presence, a c
 
 The one model whose ENCODER differs from its kind, so it gets a row of its own rather than another kind.
 
+### `gemm` -- the per-layer GEMMs: **honours**
+
+the four per-layer GEMMs -- qkv, attn_out, ffn_up, ffn_down across 24 layers, 96 dispatches -- behind `--npu-ops gemm` like every other architecture. GemmaNpuEncoder::gemm asks the same app::op_on_array("gemm") BertEncoder::gemm does, and the two FFN fusions that write the NEXT GEMM's A operand into the design's own buffer are gated on it as well: with the GEMM on this process they have no reader, so they are simply not taken and GeGLU computes into a real buffer instead. MEASURED, arch 1, bf16, `--prefix ""`, end-to-end wall at 4 texts / 8 texts: default 0 dispatches at 0.69 s / 0.95 s, `gemm` 96 dispatches at 0.10 s / 0.18 s -- 6.9x and 5.3x FASTER. Correctness against the same encoder with its GEMMs on this process, 4 texts: relfro 5.184e-03, min cosine 0.999982595, max|d| 7.95e-04. This cell could not be given a status before, and that is exactly what the hole was: the 96 happened anyway.
+
+Design directory: none -- the four GEMM streams are the set's own slots (qkv, attn_out, ffn_up, ffn_down), so there is nothing to compile -- the code chooses between the array and this process, not between two artefacts. See `STREAM_ONLY` in `tools/lib/npu_ops.py`.
+
 ### `gelu` -- GELU: **blocked**
 
 GeGLU computes the activation INSIDE the gated path, between ffn_up and ffn_down, so there is no separate pass for a hw_context to take over and honouring the code would print 'on the ARRAY' while moving nothing. Measured rather than argued: the runtime once took host_gelu straight off the flag, printed the ARRAY line for a design it never opened, and returned vectors at relfro 0.000e+00 against its own host path (6.1e-03 for the ungated bge-base, same flag).
 
 ### `layn` -- LayerNorm: **blocked**
 
-gemma normalises with RMSNorm, not LayerNorm: no mean pass, no beta, its own rms_norm_eps. kernels/layernorm.cc is parameterised only by -DLN_COLS/-DLN_EPS/-DLN_ROWS, so this is a different kernel body, a new design kind and a NINTH code. It is deliberately not done: that would make the code set larger and less uniform -- three of the four transformer architectures would carry a norm code and one would not. Refused rather than quietly meaning two different operations.
+gemma normalises with RMSNorm, not LayerNorm: no mean pass, no beta, its own rms_norm_eps. kernels/layernorm.cc is parameterised only by -DLN_COLS/-DLN_EPS/-DLN_ROWS, so this is a different kernel body, a new design kind and a code of its own, since the set is at nine already. It is deliberately not done: that would make the code set larger and less uniform -- three of the four transformer architectures would carry a norm code and one would not. Refused rather than quietly meaning two different operations.
 
 ### `softm` -- softmax: **honours**
 
-GemmaNpuEncoder::attention reads the same per-op flag the gemm_rtp row does -- the enc dispatch set is built from this registry entry, so asking for softm reaches it and asking for attn does too. Softmax is INSIDE attention here, so it is the array's half of that one pass: the wide softmax design runs over the score chunk NpuAttention has already staged, at n_kv = 512 (the sliding window, padded to 576 against lcm(tile_k, tile_n)=192) rather than the container's 2048. MEASURED on embeddinggemma-300m, arch 1: the attention column of the breakdown goes from 21 ms on the host path to 1497 ms with `softm` -- the host figure is 4 texts (42 ms at 8), while softmax itself is flat in the request count (1517 ms at 4 texts, 1559 at 8) because the design is paid in its padded row width rather than in rows touched -- with 96 dispatches becoming 96 + 24 softmax ones, at relfro 6.227e-03 against the host vectors. Asking for `attn,softm` at once is the outlier and is stated as measured: 18711 ms and 672 + 288 dispatches at 4 texts, relfro 6.664e-03, and 37.7 s of wall at 8. The cause is one line long -- NpuAttention calls the softmax per head per chunk while every call fills the design's whole 12288-row capacity -- and it is the reason this flag should be wanted for correctness on the array rather than for speed.
+GemmaNpuEncoder::attention reads the same per-op flag the gemm_rtp row does -- the enc dispatch set is built from this registry entry, so asking for softm reaches it and asking for attn does too. Softmax is INSIDE attention here, so it is the array's half of that one pass: the wide softmax design runs over the score chunk NpuAttention has already staged, at n_kv = 512 (the sliding window, padded to 576 against lcm(tile_k, tile_n)=192) rather than the container's 2048. MEASURED on embeddinggemma-300m, arch 1: the attention column of the breakdown goes from 16 ms at the default to 1488 ms with `gemm,softm` -- 4 texts; at 8 it is 30 -> 1579 -- while plain `--npu-ops softm`, the four GEMMs on this process, gives 1478 / 1519 for the same reason the 8 is flat: the design is paid in its padded row width rather than in rows touched. Dispatches, 4 texts / 8: plain `softm` 0 + 24 softmax, `gemm,softm` 96 + 24. Correctness, 4 texts: relfro 7.249e-03 against the default arm, min cosine 0.999958634, max|d| 1.10e-03. Asking for `attn,softm` at once is the outlier and is stated as measured: `gemm,attn,softm` is 18691 ms of attention column and 18.80 s of wall at 4 texts, 37304 ms and 37.49 s at 8, 672 + 288 dispatches at 4 and 1248 + 576 at 8, against `gemm,attn`'s 0.45 s; plain `attn,softm` is 19.86 s / 39.13 s. The cause is one line long -- NpuAttention calls the softmax per head per chunk while every call fills the design's whole 12288-row capacity -- and it is the reason this flag should be wanted for correctness on the array rather than for speed.
 
 Design directory: `softmax/`, built automatically by the exporter for any target of this architecture.
 
@@ -374,7 +424,7 @@ names Whisper's conv1/conv2 -- an audio front end, and this architecture has non
 
 ### `attn` -- attention, as two GEMMs: **honours**
 
-attention() dispatches on the enc set's own attn_qk/attn_av streams, but it CANNOT reach Whisper's NpuAttention by changing a stride, and the reason is worth recording because it is the one place this model's geometry is genuinely different rather than a different number. That class takes ONE `d_model` and uses it three times over: the offset from a key row to its value (d_model), the stride of the output row (d_model), and the head count (d_model / head_dim). For BERT and Whisper those three are the same number -- K and V are each one d_model wide. Gemma is MULTI-QUERY: 3 query heads of 256 over ONE key/value head of 256, so the K|V half-width is 256 while the output row is 768 and the head count is 3. One parameter cannot carry all three, so the class gains a separate kv_width and this model is what needs it. Second thing that is this model's own: its attention is BANDED -- sliding_window 512, every 6th layer -- while the container is packed to 2048. NpuAttention masks a SUFFIX of a score row, the padding past the sequence, and a band is not a suffix, so n_kv is the window and the runtime REFUSES a sequence longer than it rather than computing full attention where the model computes local attention. RoPE is applied to the qkv buffer before the pass runs, so the array's A operand is the post-RoPE activations and nothing has to move it. MEASURED here rather than borrowed from Whisper: on embeddinggemma-300m, 4 texts, arch 1, the attention column of the breakdown goes 21 ms (host) -> 358 ms (`attn`), 96 dispatches becoming 672, at relfro 5.735e-03 against the host vectors -- 17x slower on this model, where Whisper's own attn is 4.6x. The text count is part of the measurement because this column scales with the query rows: the same run over 8 texts is 708 ms and 1248 dispatches, so match the dispatch count before comparing milliseconds. Slower on both, so this code makes the model runnable on the array, not faster.
+attention() dispatches on the enc set's own attn_qk/attn_av streams, but it CANNOT reach Whisper's NpuAttention by changing a stride, and the reason is worth recording because it is the one place this model's geometry is genuinely different rather than a different number. That class takes ONE `d_model` and uses it three times over: the offset from a key row to its value (d_model), the stride of the output row (d_model), and the head count (d_model / head_dim). For BERT and Whisper those three are the same number -- K and V are each one d_model wide. Gemma is MULTI-QUERY: 3 query heads of 256 over ONE key/value head of 256, so the K|V half-width is 256 while the output row is 768 and the head count is 3. One parameter cannot carry all three, so the class gains a separate kv_width and this model is what needs it. Second thing that is this model's own: its attention is BANDED -- sliding_window 512, every 6th layer -- while the container is packed to 2048. NpuAttention masks a SUFFIX of a score row, the padding past the sequence, and a band is not a suffix, so n_kv is the window and the runtime REFUSES a sequence longer than it rather than computing full attention where the model computes local attention. RoPE is applied to the qkv buffer before the pass runs, so the array's A operand is the post-RoPE activations and nothing has to move it. MEASURED here rather than borrowed from Whisper, embeddinggemma-300m, arch 1, attention column of the breakdown at 4 texts / 8 texts: default 16 / 30 ms, `gemm` 19 / 47, `gemm,attn` 356 / 701 with 672 / 1248 dispatches against that arm's 96. The same pair without `gemm` is 357 / 705 with 576 / 1152 dispatches against the default's 0 -- 17x slower here, where Whisper's own attn is 7.0x. End-to-end wall for that plain pair is 1.14 s / 1.90 s against 0.69 s / 0.95 s. The text count is part of the measurement because this column scales with the query rows, so match the dispatch count before comparing milliseconds. Correctness against the default arm, 4 texts: relfro 6.777e-03, min cosine 0.999969959, max|d| 9.3e-04. Slower on both, so this code makes the model runnable on the array, not faster.
 
 Design directory: none -- its two streams are added to the gemm_rtp and gemm_rtp_dec sets themselves, not as a directory of their own. See `STREAM_ONLY` in `tools/lib/npu_ops.py`.
 
@@ -394,10 +444,10 @@ names the tied token embedding used as the logit matrix; gemma_npu_encoder.cpp c
 
 - `tools/lib/npu_ops.py` -- the registry. The exporter builds from it.
 - `runtime/include/common/npu_ops_flag.hpp` -- the runtime's second copy
-  of the eight codes and their long names. Neither side can include the
+  of the nine codes and their long names. Neither side can include the
   other, so each points at the other, and the failure mode of the
   duplication is a refusal by name on both sides -- never a wrong number.
 - `tools/verify/verify_npu_op_matrix.py` -- asserts this file is exactly
-  what `tools/gen_npu_ops_doc.py` prints, asserts the 40-cell count and
+  what `tools/gen_npu_ops_doc.py` prints, asserts the 63-cell count and
   the per-status tally, and asserts the runtime accepts or refuses each
   cell's codes the way this document says.

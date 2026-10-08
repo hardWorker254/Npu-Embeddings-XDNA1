@@ -43,7 +43,7 @@ class NpuMelProj {
 public:
   NpuMelProj(npu::Design &design, app::Pool &pool, int64_t n_bins,
              int64_t n_mels)
-      : g_(design, pool), pool_(pool), n_bins_(n_bins), n_mels_(n_mels) {}
+      : g_(design, pool, "mproj"), pool_(pool), n_bins_(n_bins), n_mels_(n_mels) {}
 
   // The stream's slot and row count, read off the loaded set by the caller.
   void set_streams(size_t slot, int64_t rows);

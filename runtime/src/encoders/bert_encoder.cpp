@@ -9,7 +9,10 @@
 #include "encoders/bert_encoder.hpp"
 
 #include "common/app_state.hpp"
+#include "common/conv_host.hpp"  // hostconv::gemm_nt, the host multiply
+#include "common/host_b.hpp"     // hostb::host_b_kn, the untile
 #include "common/int4_panel.hpp"
+#include "common/npu_ops_flag.hpp"  // op_on_array -- array or host, one place
 #include "encoders/gemma_kernels.hpp"
 #include "runtime/model.hpp"
 #include "tokenizers/tokenizer_facade.hpp"
@@ -67,6 +70,10 @@ size_t BertEncoder::stage_all() {
     // bf16 -- which is what the slot sizes this function returns add up to.
     const Panel panel = gemm_b_panel(model_, name, d.info().a_elem_bytes);
     slots.push_back(d.stage(1, panel.bytes.data, panel.bytes.bytes));
+    // Where the host path finds this weight again: gemm() is handed `wslot`,
+    // and common/host_b.hpp needs the CONTAINER tensor name to untile from.
+    // Written here because this is the only place that knows both halves.
+    host_w_->record(&d, slots.back(), name);
     bias.push_back(model_.raw(name + ".bias").as<float>());
     bytes += panel.bytes.bytes;
     if (i8 && wsc) {
@@ -655,6 +662,33 @@ void BertEncoder::dequant_act_bf16(const void *c, size_t c_bytes, int64_t N,
   });
 }
 
+void BertEncoder::host_gemm(const std::vector<float> &a,
+                            std::vector<float> &out, int64_t N,
+                            const float *bias, const float *asmooth,
+                            npu::Design &d, size_t wslot) {
+  if (a.empty() || rows <= 0 || a.size() % static_cast<size_t>(rows))
+    throw std::runtime_error(
+        "bert: host GEMM input of " + std::to_string(a.size()) +
+        " elements is not a whole number of the " + std::to_string(rows) +
+        " rows this encoder's shapes are built for");
+  const int64_t K = static_cast<int64_t>(a.size()) / rows;
+  if (K <= 0 || N <= 0)
+    throw std::runtime_error("bert: host GEMM with a zero dimension");
+  const std::vector<float> &w = host_w_->get(model_, &d, wslot, K, N,
+                                            d.info().name.c_str());
+  std::vector<float> scratch;
+  const float *A =
+      npue::hostb::apply_inv_smooth(a.data(), static_cast<size_t>(rows), K,
+                                    asmooth, scratch);
+  // NOTE, and it is the honest half of this path: no a_scale, no int8 rounding.
+  // The array quantises A per ROW to int8 and dequantises C with that row's
+  // scale; the host never quantises, so the number it produces is the fp32
+  // product of the same operands rather than an int8 approximation of it. The
+  // two therefore agree to int8 rounding and not bit for bit -- which is what
+  // every comparison of host against array in this project measures.
+  hostconv::gemm_nt(A, rows, w.data(), K, N, bias, out.data(), pool_);
+}
+
 void BertEncoder::gemm(npu::Design &d, size_t islot, const std::vector<float> &a,
                          size_t wslot, const float *bias, std::vector<float> &out,
                          int64_t N, const float *wscale,
@@ -667,6 +701,16 @@ void BertEncoder::gemm(npu::Design &d, size_t islot, const std::vector<float> &a
         "int8 design but this encoder has no quantisation scales -- the "
         "container is bf16, or a pipeline lane was constructed without "
         "copying ws_*/as_* from lane 0");
+
+  // ARRAY OR HOST, decided by the command line alone, before anything that
+  // belongs to a dispatch: `a_ready` and the two fuse* pointers are all about
+  // the design's A buffer, and a host run reads neither.
+  if (!gemm_on_array()) {
+    host_gemm(a, out, N, bias, asmooth, d, wslot);
+    ++n_host;
+    return;
+  }
+
   double t0 = now_s();
   if (i8 && a_ready) {
   } else if (i8) {
@@ -1325,6 +1369,13 @@ std::vector<float> BertEncoder::encode(const std::vector<std::string> &texts,
 
 std::vector<float> BertEncoder::run(const std::vector<float> &emb_in) {
   std::vector<float> x = emb_in;
+  // Read ONCE for the whole pass: whether the four per-layer GEMMs dispatch is
+  // a property of this run, not of the layer, and the four fused epilogues
+  // below are each gated on it as well as on their own condition -- see the
+  // note by gemm_on_array() in the header. With it false the arithmetic is the
+  // add_into + layer_norm/gelu_cpu pair, which is the same computation with the
+  // next A operand not written, and the host branch in gemm() does not read it.
+  const bool gemm_on = gemm_on_array();
   layer_norm(x, s_ln[0]);
 
   qkvbuf.resize(rows * 3 * g_hidden);
@@ -1403,9 +1454,9 @@ std::vector<float> BertEncoder::run(const std::vector<float> &emb_in) {
 
     gemm(attn_out_, is_ao, ctx, s_ao[L], b_ao[L], proj, g_hidden,
          i8w(ws_ao, L), i8w(as_ao, L));
-    const bool fuse_ln = fuse_ffn_epilogue && host_ln &&
+    const bool fuse_ln = gemm_on && fuse_ffn_epilogue && host_ln &&
                          ffn_up_.info().a_elem_bytes == 1;
-    const bool fuse_ln_bf16 = fuse_ffn_epilogue && host_ln &&
+    const bool fuse_ln_bf16 = gemm_on && fuse_ffn_epilogue && host_ln &&
                               ffn_up_.info().a_elem_bytes == 2;
     if (fuse_ln) {
       const float *asf = i8w(as_fu, L);
@@ -1430,7 +1481,7 @@ std::vector<float> BertEncoder::run(const std::vector<float> &emb_in) {
     FusedNext fn{i8w(as_fd, L),
                  static_cast<int8_t *>(ffn_down_.slot_ptr(0, slot_a)),
                  nullptr, g_gated_ffn};
-    const bool fuse_ffn = fuse_ffn_epilogue && host_gelu &&
+    const bool fuse_ffn = gemm_on && fuse_ffn_epilogue && host_gelu &&
                           ffn_up_.info().a_elem_bytes == 1 &&
                           ffn_down_.info().a_elem_bytes == 1;
     if (fuse_ffn) {
@@ -1439,7 +1490,7 @@ std::vector<float> BertEncoder::run(const std::vector<float> &emb_in) {
     }
     FusedNextBf16 fn_bf16{
         static_cast<uint16_t *>(ffn_down_.slot_ptr(0, slot_a)), g_gated_ffn};
-    const bool fuse_ffn_bf16 = fuse_ffn_epilogue && host_gelu &&
+    const bool fuse_ffn_bf16 = gemm_on && fuse_ffn_epilogue && host_gelu &&
                                ffn_up_.info().a_elem_bytes == 2 &&
                                ffn_down_.info().a_elem_bytes == 2;
     gemm(ffn_up_, is_fu, x, s_fu[L], b_fu[L], up,
@@ -1467,7 +1518,8 @@ std::vector<float> BertEncoder::run(const std::vector<float> &emb_in) {
            i8w(ws_fd, L), i8w(as_fd, L));
     }
     const bool last = (L + 1 == g_layers);
-    if (fuse_ffn_epilogue && host_ln && qkv_.info().a_elem_bytes == 1) {
+    if (gemm_on && fuse_ffn_epilogue && host_ln &&
+        qkv_.info().a_elem_bytes == 1) {
       const float *asq = last ? nullptr : i8w(as_qkv, L + 1);
       if (asq && (inv_smooth.size() != static_cast<size_t>(g_hidden) ||
                   inv_smooth_src != asq)) {
@@ -1482,7 +1534,8 @@ std::vector<float> BertEncoder::run(const std::vector<float> &emb_in) {
                          : nullptr,
                      asq ? a_scale.data() : nullptr);
       qkv_a_ready = !last;
-    } else if (fuse_ffn_epilogue && host_ln && qkv_.info().a_elem_bytes == 2) {
+    } else if (gemm_on && fuse_ffn_epilogue && host_ln &&
+               qkv_.info().a_elem_bytes == 2) {
       add_norm_bf16(x, down, s_ln[2 + 2 * L] - 1,
                     last ? nullptr
                          : static_cast<uint16_t *>(qkv_.slot_ptr(0, slot_a)));

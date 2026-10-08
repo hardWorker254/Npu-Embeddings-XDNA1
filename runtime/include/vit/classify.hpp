@@ -133,7 +133,7 @@ private:
 
 // ONE JSON spelling of a classification result, for both callers.
 //
-// `npuembeddings classify ... --json` and POST /v1/classify answer the same
+// `npuimage classify ... --json` and POST /v1/classify answer the same
 // object, byte for byte, because they call the same function. Same reasoning as
 // pose/result_json.hpp: the CLI's output is what a reader compares by eye and the
 // endpoint's is what a program parses, and two emitters would surface as "the

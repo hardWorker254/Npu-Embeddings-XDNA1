@@ -47,6 +47,7 @@
 #include <stdexcept>
 
 #include "common/design_selection.hpp"
+#include "common/npu_ops_flag.hpp"   // parse_npu_ops
 #include "runtime/design.hpp"
 #include "runtime/device.hpp"
 #include "runtime/model.hpp"
@@ -106,6 +107,19 @@ int main(int argc, char **argv) {
     if (a == "--artifacts" && i + 1 < argc) art = argv[i + 1];
     if (a == "--fft" && i + 1 < argc) fft_npu = std::string(argv[i + 1]) == "npu";
     if (a == "--mproj" && i + 1 < argc) mproj_npu = std::string(argv[i + 1]) == "npu";
+  }
+  // See test_whisper_model.cpp: --fft/--mproj are this binary's spelling
+  // of --npu-ops, and NpuGemm reads the global the real flag sets. Without
+  // it NpuMelProj and NpuFft answer "mproj/fft was not named", take the
+  // host path, and throw on an operand only the array side had staged.
+  {
+    std::string listing;
+    if (fft_npu) listing = "fft";
+    if (mproj_npu) {
+      if (!listing.empty()) listing += ',';
+      listing += "mproj";
+    }
+    if (!listing.empty()) app::parse_npu_ops(listing);
   }
   // The pool is what makes the front end affordable (conv2 is quadratic in
   // hidden), and a parallel split that changed the answer would be worse than

@@ -2,7 +2,7 @@
 //
 // NpuEmbeddings -- ONE JSON spelling of a pose result, for both callers.
 //
-// `npuembeddings pose ... --json` and the HTTP endpoint answer the same object,
+// `npuimage pose ... --json` and the HTTP endpoint answer the same object,
 // byte for byte, because they call the same function. That is not tidiness: the
 // CLI's output is what a reader compares against MediaPipe's PoseLandmarker by
 // eye, and the endpoint's output is what a program parses. Two emitters would

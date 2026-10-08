@@ -6,7 +6,7 @@
 // THE DEFAULT PATH OPENS NO DEVICE, AND THE OTHER ONE DOES NOT EXIST
 // ---------------------------------------------------------------
 // Same contract as arch=6: Session(...) with no artifacts is a host-only
-// session, and `npuembeddings hands` and the gate both work on a machine with no
+// session, and `npuimage hands` and the gate both work on a machine with no
 // /dev/accel0 at all.
 //
 // What differs is the second half of the contract. arch=6's --npu-ops conv

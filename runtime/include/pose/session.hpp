@@ -10,7 +10,7 @@
 // optimisation, it is the measured shape of the model: 150 ms on 16 CPU threads
 // against 290 ms on the array for the same 72 dispatched convolutions (see
 // net.hpp for the arithmetic behind both numbers). So `Session(...)` with no
-// `artifacts` constructs a host-only session, and `npuembeddings pose` and
+// `artifacts` constructs a host-only session, and `npuimage pose` and
 // `python/npue_pose.py` both work on a machine with no /dev/accel0 at all --
 // which is also what makes the parity gate in tools/verify/verify_pose.py
 // runnable anywhere.

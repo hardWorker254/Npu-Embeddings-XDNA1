@@ -128,7 +128,7 @@ NPU_CONTAINER = os.path.join(MODEL_DIR, "mppose-npu.npue")
 IMAGE = os.path.join(REPO, "docs", "bus.jpg")
 GOLDEN_DET = os.path.join(REPO, "reference", "goldens", "mppose_det.json")
 GOLDEN_POSE = os.path.join(REPO, "reference", "goldens", "mppose_pose.json")
-BINARY = os.path.join(REPO, "runtime", "build", "npuembeddings")
+BINARY = os.path.join(REPO, "runtime", "build", "npuimage")
 
 # Seeded, and the same every run: section 1 must fail the SAME way twice for the
 # message to be worth anything.

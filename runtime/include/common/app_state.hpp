@@ -223,7 +223,7 @@ inline bool encoder_implemented(const std::string &arch) {
          // WHAT THAT PRINTED: "a table that prints `no encoder` for a container
          // that classifies perfectly well is a lie of exactly the shape this
          // whitelist exists to prevent." Both have a mode, a verb and a gate --
-         // `npuembeddings hands`, `npuembeddings mppose`, verify_hands,
+         // `npuimage hands`, `npuimage mppose`, verify_hands,
          // verify_mppose. They were absent because nothing had ever printed
          // their rows: their containers sat in models/mediapipe-hands/ and
          // models/mediapipe-pose/, while every table here globs models/*.npue, so
@@ -315,7 +315,7 @@ inline bool subcommand_for_kind(const std::string &kind) {
 // `--npu-ops conv` refuses with the packing command rather than falling back.
 inline std::string pixel_command_note(const std::string &kind) {
   if (!is_pixel_kind(kind)) return std::string();
-  return "npuembeddings " + kind + " <name> <image>; CPU only unless packed "
+  return "npuimage " + kind + " <name> <image>; CPU only unless packed "
                                       "with --npu";
 }
 
@@ -424,7 +424,7 @@ inline void set_model_shape(npue::File &m) {
         "[batch, seq] matrix of token ids and this container wants an "
         "[n_patches, 768] matrix of pixels. Both are [rows, 768] and nothing "
         "downstream would tell, which is why this is refused. Use "
-        "`npuembeddings classify <model> <image.png>`.");
+        "`npuimage classify <model> <image.png>`.");
 
   g_layers = m.config_int("num_layers");
   g_hidden = m.config_int("hidden");

@@ -380,9 +380,9 @@ python tools/verify/verify_whisper_cli.py
 # `--npue models/<m>.npue --tensor qkv=<tensor>` to also stage real weights
 python tools/verify/verify_design_numerics.py
 
-# WHAT EVERY CODE SAYS ABOUT EVERY ARCHITECTURE: the registry's own shape (40
+# WHAT EVERY CODE SAYS ABOUT EVERY ARCHITECTURE: the registry's own shape (63
 # cells, five statuses, one pinned tally), all four generated documents against
-# it, the C++ table against the Python one, and then all 40 cells run against
+# it, the C++ table against the Python one, and then all 63 cells run against
 # THIS binary -- a cell that says `honours` and does not dispatch fails it.
 # Needs the build and the NPU, which is why it is not in the cheap tier
 python tools/verify/verify_npu_op_matrix.py

@@ -117,7 +117,9 @@ cmake -S runtime -B runtime/build -DCMAKE_BUILD_TYPE=Release
 cmake --build runtime/build -j"$(nproc)"
 ```
 
-Produces `runtime/build/npuembeddings` — one executable, one name.
+Produces `runtime/build/npuembeddings`, `npuaudio` and `npuimage` — three
+executables from one codebase, differing only in which modes they accept
+(see [Command-line reference](#command-line-reference)).
 
 ### 3. Run it
 
@@ -182,11 +184,13 @@ embedding
 
 `*` = on the array instead when its op is named in `--npu-ops`.
 
-The array does the four GEMMs per layer; attention and the elementwise ops run
-on the host by default because they were **measured faster on the host** — the
-elementwise designs pay a fixed per-dispatch cost that a 384-wide row-wise op
-does not amortise. `--npu-ops` exists to make that an explicit, measurable
-choice, not because it is the default.
+Every op runs on this process by default, the four GEMMs per layer included —
+that is where a run starts, not a verdict. Naming an op in `--npu-ops` is what
+moves it to the array, and the measurements go both ways: the four GEMMs are
+1.80x faster on the array on a ViT and 6.9x on gemma, while attention and the
+elementwise ops are slower there, because their designs pay a fixed per-dispatch
+cost that a 384-wide row-wise op does not amortise. `--npu-ops` exists to make
+that an explicit, measurable choice.
 
 **`--pipeline N`** splits one request into right-sized chunks and runs `N` of
 them concurrently, each in its own thread with its own host-side buffers and
@@ -201,7 +205,7 @@ array work, not more array throughput.
 
 | Operation | Default | On the array when | Costs |
 |---|---|---|---|
-| QKV / attention-out / FFN-up / FFN-down / cross-Q / cross-K\|V GEMM | array | always | — |
+| QKV / attention-out / FFN-up / FFN-down / cross-Q / cross-K\|V GEMM | host | `--npu-ops gemm` | no context: the four streams are the sets' own slots |
 | conv1, conv2 (Whisper) | host | `--npu-ops conv` | no context: the encoder set's own `[rows, d, d]` stream |
 | attention, as QK^T and softmax·V GEMMs | host | `--npu-ops attn` | no context: two more streams in the same sets |
 | the mel filter bank, as a GEMM | host | `--npu-ops mproj` | no context: one more stream in the encoder set |
@@ -211,8 +215,9 @@ array work, not more array throughput.
 | softmax | host | `--npu-ops softm` | one `hw_context` (`softmax/`) |
 | GELU | host | `--npu-ops gelu` | one `hw_context` (`gelu/`) — exact erf for Whisper, the degree-8 `poly` fit (2.49e-3 relative) for everything else; see the caveat below |
 
-The five GEMM-shaped codes (`conv`, `attn`, `mproj`, `fft`, `logit`) need no
-sibling design set: each one is a stream inside a set that already exists, so
+The six GEMM-shaped codes (`gemm`, `conv`, `attn`, `mproj`, `fft`, `logit`)
+need no sibling design set: each one is a stream inside a set that already
+exists, so
 they cost no `hw_context` and the runtime refuses a set that does not carry
 them **by name** rather than answering from the host. The three elementwise
 ones are whole xclbins of their own and cost one context each, so all three is
@@ -220,69 +225,75 @@ five contexts of the six npu1 allows.
 
 ### Which architecture honours which code
 
-**One flag, eight codes, one parser — and the set a given architecture can
+**One flag, nine codes, one parser — and the set a given architecture can
 honour is a property of the MODEL, not of the flag.** There are no
-architecture-specific NPU flags anywhere in the tree; the GEMMs are on the array
-everywhere and unconditionally, with no flag, because there is no GEMM code.
+architecture-specific NPU flags anywhere in the tree. The default is the empty
+set: every op runs on this process, and naming a code is what moves that op to
+the array. The four base GEMMs were the one exception — they went to the array
+whenever a design set was present, with no code to name — until the ninth code
+`gemm` gave them one, so they follow the same rule as the other eight.
 
-All 40 cells (5 architectures × 8 codes) were measured by running every code
+All 63 cells (7 architectures × 9 codes) were measured by running every code
 against every container on this machine with a real invocation of each mode, not
 read off the source. They now live in a registry — `tools/lib/npu_ops.py` — which
 the exporter reads to decide what to build, and
 [**NPU_OPS.md**](NPU_OPS.md) is generated from it with a reason per cell.
-`tools/verify/verify_npu_op_matrix.py` runs all 40 cells against the binary and
+`tools/verify/verify_npu_op_matrix.py` runs all 63 cells against the binary and
 fails if the runtime and the table disagree — every architecture row has a
 fixture now, pose included, so nothing is skipped for want of a container.
 **One flat table would hide the thing worth knowing: the empty cells are four
 different situations, and only one of them is permanent.**
 
-| | BERT | gemma-300m | whisper | ViT | pose |
-|---|---|---|---|---|---|
-| `gelu` | ✓ | △ | ✓ | ✓ | — |
-| `layn` | ✓ | ◇ | ✓ | ✓ | — |
-| `softm` | ✓ | ✓ | ✓ | ✓ | — |
-| `conv` | — | — | ✓ | ⊕ | ✓ |
-| `attn` | ✓ | ✓ | ✓ | ✓ | — |
-| `mproj` | — | — | ✓ | — | — |
-| `fft` | — | — | ✓ | — | — |
-| `logit` | — | — | ✓ | ◇ | — |
-| **counts** | 4 ✓ | 2 ✓ | 8 ✓ | 5 ✓ | 1 ✓ |
+| | BERT | gemma-300m | whisper | ViT | pose | hands | mppose |
+|---|---|---|---|---|---|---|---|
+| `gemm` | ✓ | ✓ | ✓ | ✓ | — | — | — |
+| `gelu` | ✓ | △ | ✓ | ✓ | — | — | — |
+| `layn` | ✓ | ◇ | ✓ | ✓ | — | — | — |
+| `softm` | ✓ | ✓ | ✓ | ✓ | — | — | — |
+| `conv` | — | — | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `attn` | ✓ | ✓ | ✓ | ✓ | — | — | — |
+| `mproj` | — | — | ✓ | — | — | — | — |
+| `fft` | — | — | ✓ | — | — | — | — |
+| `logit` | — | — | ✓ | ◇ | — | — | — |
+| **counts** | 5 ✓ | 3 ✓ | 9 ✓ | 6 ✓ | 1 ✓ | 1 ✓ | 1 ✓ |
 
-* **✓ — runs on the array now** (19 cells).
-* **⊕ — already on the array, with nothing for the code to select** (1 cell:
-  `ViT conv`), explained below.
-* **— — the model has no such operation** (17 cells). Permanent, and correct.
+* **✓ — runs on the array when its code is named** (26 cells).
+* **⊕ — already on the array, with nothing for the code to select** (0 cells:
+  it was `ViT conv`, and `gemm` ended that, explained below).
+* **— — the model has no such operation** (34 cells). Permanent, and correct.
 * **△ ◇ — the model has the operation and this board cannot compute it** (3
   cells; `◇` takes two of them), explained per symbol below.
-  19 + 1 + 17 + 3 = 40.
+  26 + 0 + 34 + 3 = 63.
 
 There is no longer an "unimplemented" symbol in this table, and that is the
 change worth noticing: the five cells that used to read **▢** — `attn` for BERT,
 gemma and ViT, `softm` for gemma and ViT — are ✓ now, each with a measured reason
-in NPU_OPS.md. The counts row is codes on the array (19 honoured + 1 already
-there = 20), not a count of ticks in one column.
+in NPU_OPS.md. The counts row is codes the array can honour (26 of them), not a
+count of ticks in one column.
 
-The 17 permanent cells, by reason:
+The 34 permanent cells, by reason:
 
 | cells | why |
 |---|---|
 | `conv`, `mproj`, `fft` on BERT, gemma (6); `mproj`, `fft` on ViT (2) | these name Whisper's **audio front end**, its **mel filter bank** and its **400-point transform**. A text or image encoder has none of them. |
 | `logit` on BERT, gemma (2) | `logit` names Whisper's **tied token embedding used as the logit matrix** — `decoder.cpp:196`, "the checkpoint has no proj_out: the logit matrix is the tied token". An embedder stops at its pooling head and has no such tensor: `bert_encoder.cpp` and `gemma_npu_encoder.cpp` contain **zero** occurrences of `logit` or `vocab`. |
-| all 7 non-`conv` codes on pose (7) | `runtime/include/pose/net.hpp` exposes exactly one weighted op, `conv(..., bool silu, ...)`, plus `concat/slice/add/maxpool/upsample/head`. Its SiLU is fused into the convolution epilogue. There is **no normalization op at all**: `tools/pack/packers/pose.py:91` is `GRAPH_OPS = {Conv, Mul, Sigmoid, Add, Concat, Split, MaxPool, Resize}` and `BatchNormalization` is absent from it, so a graph carrying BN would be *refused by name* — and `grep BatchNormalization` over `tools/` and `docs/` returns nothing, because ultralytics folds BN into the conv weights at export. No attention, no vocabulary. Nothing for a code to name. |
+| all 8 non-`conv` codes on pose (8) | `runtime/include/pose/net.hpp` exposes exactly one weighted op, `conv(..., bool silu, ...)`, plus `concat/slice/add/maxpool/upsample/head`. Its SiLU is fused into the convolution epilogue. There is **no normalization op at all**: `tools/pack/packers/pose.py:91` is `GRAPH_OPS = {Conv, Mul, Sigmoid, Add, Concat, Split, MaxPool, Resize}` and `BatchNormalization` is absent from it, so a graph carrying BN would be *refused by name* — and `grep BatchNormalization` over `tools/` and `docs/` returns nothing, because ultralytics folds BN into the conv weights at export. No attention, no vocabulary. Nothing for a code to name. |
+| all 8 non-`conv` codes on hands and mppose (16) | Both graphs are convolutions end to end — a palm detector and a hand-landmark network, or a person detector and a pose network — so neither carries a `MatMul` and there is no per-layer projection for a code to name. Their packers are `Conv`-only by construction: `tools/pack/packers/hands.py` tests `op_type == Conv` at every dispatch site with `FUSIBLE` as `(Conv, Add)`, and `tools/pack/packers/mppose.py` refuses by name a target whose `op_type` is not `Conv`. |
 
 The four special cells:
 
-**⊕ `ViT conv` — the model HAS a convolution, and it is already on the array.**
+**✓ `ViT conv` — the model HAS a convolution, and `conv` is what selects it.**
 ViT's patch embedding is `Conv2d(3, 768, kernel=16, stride=16)`, im2col'd to
 `[197, 768] @ [768, 768]`. That K and N are exactly `attn_out`'s shape, so it is
-dispatched on `attn_out`'s instruction slot — unconditionally, with no flag, as
-one of the 49 GEMMs (`runtime/src/vit/encoder.cpp:267`,
-`g_.run(streams_.attn_out, ...)`). The cell carries ⊕ rather than a tick because
-**the work is already done**: `conv` names Whisper's `conv1`/`conv2` streams,
-which a ViT's design set does not carry, and honouring it would dispatch nothing
-new. This is the one cell that is better as it stands than as a tick — and asking
-for it is **refused**, with exactly that as the reason, because a code that
-selects nothing is the failure this project treats as worst.
+dispatched on `attn_out`'s instruction slot (`runtime/src/vit/encoder.cpp:267`,
+`g_.run(streams_.attn_out, ...)`). This cell used to read **⊕**: the four
+per-layer GEMMs went to the array with no flag, so `conv` selected nothing, and a
+code that changes no dispatch is the failure this project treats as worst. The
+ninth code ended that — with `gemm` off by default the patch embed runs here too,
+and `--npu-ops conv` on its own is now worth one dispatch. MEASURED on
+`vit-base-patch16-224.npue` bf16, `bus.jpg`, best of 5 encoder time:
+0.426 s for `--npu-ops conv` against 0.435 s for the all-host default —
+within noise, one im2col GEMM out of forty-nine.
 
 **⚠ Caveat on `gelu`, `ViT` and `gemm_rtp` rows — the activation is the `poly`
 fit, not the exact erf.** Only `kind: stt` gets the exact-erf kernel; a BERT or a
@@ -305,7 +316,7 @@ FFN's activation is part of the gated path between `ffn_up` and `ffn_down` rathe
 than a separate pass (nomic and gte drop `gelu` for the same structural reason,
 and their rows say so).
 
-**◇ `gemma layn` — would need a NINTH code, and is deliberately not done.**
+**◇ `gemma layn` — would need a code of its own, since the set is at nine already, and is deliberately not done.**
 gemma uses **RMSNorm**, not LayerNorm: no mean pass, no beta, its own
 `rms_norm_eps`. `kernels/layernorm.cc` is parameterised only by
 `-DLN_COLS/-DLN_EPS/-DLN_ROWS`, so RMSNorm is a different kernel body, a new
@@ -425,20 +436,20 @@ point is "put this on the array" must not quietly not do that. Each op also
 costs one more `hw_context` out of six.
 
 Which codes a given architecture honours is a table with a reason per cell, not
-a flag to guess at: [**NPU_OPS.md**](NPU_OPS.md). Of the 40 cells, 19 run on the
-array today, 1 is already dispatched without a code (and the code is refused,
-because there is nothing for it to select), 3 cannot be moved on this board for a
-stated reason, and 17 do not exist in that model at all.
+a flag to guess at: [**NPU_OPS.md**](NPU_OPS.md). Of the 63 cells, 26 run on the
+array when their code is named, 0 are dispatched without needing one (that was
+`ViT conv`, and `gemm` ended it), 3 cannot be moved on this board for a stated
+reason, and 34 do not exist in that model at all.
 
 That table is per ARCHITECTURE. For the question you actually have — what can
 *this* model name do — there is a second generated table,
-[**NPU_MODELS.md**](NPU_MODELS.md): 16 models × 8 codes, with a column for what
+[**NPU_MODELS.md**](NPU_MODELS.md): 18 models × 9 codes, with a column for what
 the exporter compiles for each one and the geometry it takes. It differs from the
 first in exactly two places, and both are model facts: `gemma`'s encoder, and the
 **gated FFN** of `nomic` and `gte`, which has no standalone activation pass, so
 their `gelu` is not built even though their kind honours it.
 
-`conv` is one of the five codes with no sibling design set, and that is
+`conv` is one of the six codes with no sibling design set, and that is
 deliberate: it is a speech-to-text op (Whisper's two audio convolutions) which
 runs on the encoder set's own `[rows, d, d]` stream, so there is nothing to build
 and an exporter asked for it refuses the code by name. On an embedder it is
@@ -477,7 +488,7 @@ read the ratios, not the last digit.
 
 ### The same question asked of a ViT
 
-The table above is Whisper's, because Whisper is where all eight codes are
+The table above is Whisper's, because Whisper is where all nine codes are
 reachable. For a classifier only two of them are, and the answer for those two
 is the same one the Whisper table already gives — **the work per dispatch has to
 beat the dispatch**, and a ViT's elementwise passes are too small for it.
@@ -486,13 +497,17 @@ Measured on `vit-base-patch16-224.npue` bf16, `bus.jpg` (810×1080), 16 host
 threads, best of 8 after a warm-up run. Wall is front end + encoder, which is
 the whole per-image cost minus the 0.9 ms head:
 
-| `--npu-ops` | wall, s | vs host | label | p | elt dispatches |
+| `--npu-ops` | wall, s | vs `gemm` | label | p | elt dispatches |
 |---|---:|---:|---|---:|---:|
-| *(nothing)* | **0.248** | 1.00× | minibus | 0.629 | 0 |
-| `gelu` | 0.343 | 1.38× slower | minibus | 0.635 | 12 |
-| `layn` | 0.377 | 1.52× slower | minibus | 0.631 | 25 |
-| `layn,gelu` | 0.449 | 1.81× slower | minibus | 0.640 | 37 |
+| `gemm` | **0.248** | 1.00× | minibus | 0.629 | 0 |
+| `gemm,gelu` | 0.343 | 1.38× slower | minibus | 0.635 | 12 |
+| `gemm,layn` | 0.377 | 1.52× slower | minibus | 0.631 | 25 |
+| `gemm,layn,gelu` | 0.449 | 1.81× slower | minibus | 0.640 | 37 |
 
+Each row names `gemm` because that is what these arms were when they were
+measured: the four base GEMMs went to the array with no flag, so today the first
+row *is* `--npu-ops gemm` and every later row adds to it. With nothing named at
+all every op is on this process now, and that arm lives in [**NPU_OPS.md**](NPU_OPS.md).
 The **labels agree in all four rows** and the confidences agree to within 0.011
 absolute — that spread is the bf16 datapath, not the schedule, and it is the
 same order as the int8 row in the table above. So the flag is honest: it puts
@@ -501,7 +516,8 @@ the work where it was asked to and returns the same answer.
 The dispatch counts are **measured per image**, not derived from the model's
 layer count: 25 LayerNorm sites (2 per layer plus the final one) and 12 GELU
 blocks, and they are reported as `elt_dispatches` in the `classify --json`
-object — a separate field from `dispatches`, which is the 49 GEMMs and stays 49.
+object — a separate field from `dispatches`, which counts the base GEMMs: 48 with
+`gemm`, 49 with `gemm,conv`, 0 with nothing named.
 
 So the honest summary for a classifier is the same as for Whisper's `layn` and
 `gelu`: **both codes work, both are slower, and the default stays on the host.**
@@ -515,11 +531,13 @@ its work is d² MACs, so the host's cost grows with the square of the width whil
 the array's grows with the dispatch count, which is constant. Per 30 s window on
 16 host workers: 0.11 s → 0.02 s at d=384, 1.37 s → 0.07 s at d=1280. The
 measured 0.94 → 0.66 s wall and 5.54 → 3.81 s CPU on whisper-tiny is that same
-ratio on a short window, and it gets **better** with width, not worse.
+ratio on a short window, and it gets **better** with width, not worse. Its two
+arms are today's `--npu-ops gemm` and `--npu-ops gemm,conv`: those were taken
+while the four base GEMMs were on the array either way.
 
-The GEMMs are already there — they are the model, and they are what the array is
-for. Everything else is host work whose arithmetic is small next to its
-dispatch count.
+The four base GEMMs are the rest of the picture — they are the model, and `gemm`
+is what moves them now. Everything else is host work whose arithmetic is small
+next to its dispatch count.
 
 ### 2. Balance: `conv,mproj,logit` — or just `conv`
 
@@ -538,10 +556,12 @@ four times worse, because 511 of the 512 rows are padding.
 
 ### 3. Maximum CPU saving at acceptable performance: everything
 
-All eight codes: **1.05 s of CPU against 5.54 s** — 5.3x less — for 4.90 s of
-wall against 0.94 s. That is the honest trade: the CPU stops doing the
-conversions, the fp64 work and the panel tiling, and the array does the
-dispatches instead.
+All nine codes: **1.05 s of CPU against 5.54 s** — 5.3x less — for 4.90 s of
+wall against 0.94 s. Both counter-arms are today's `--npu-ops gemm`, not the
+all-host default: these were taken while the four base GEMMs went to the array
+with no flag, so naming nothing put them there anyway. That is the honest trade:
+the CPU stops doing the conversions, the fp64 work and the panel tiling, and the
+array does the dispatches instead.
 
 The middle point is `conv,mproj,layn,gelu,logit`: 1.56 s wall (1.7x slower) for
 3.62 s CPU (35% less), which is the set to pick when the transcript may be 60%
@@ -585,20 +605,38 @@ is research rather than wiring.
 
 ## Command-line reference
 
-`npuembeddings --help` is authoritative and kept in sync with this section.
+Each binary's own `--help` is authoritative and kept in sync with this section.
+
+### Three binaries, one codebase
+
+The build produces `npuembeddings`, `npuaudio` and `npuimage`. They share every
+line of runtime code and differ in exactly one thing: which modes they accept. A
+verb run in the wrong binary, and a container belonging to another family, are
+both **refused by name** and print this roster, so the next command line is
+already written:
+
+    npuembeddings   embed, list, add, tokenize, serve
+    npuaudio        transcribe, serve
+    npuimage        classify, pose, hands, mppose, serve
+
+`serve` is in all three because the endpoint is chosen by the container's arch;
+each binary still accepts only its own family's containers, so `npuaudio` will
+not listen on a ViT's endpoint and says so before the socket opens.
 
 ### Subcommands
 
-| Command | What it does |
-|---|---|
-| `list` | every model this build can run, and which are installed |
-| `serve <model>` | the HTTP endpoint for whatever the container is; downloads the model if needed |
-| `embed <model> <in.txt> [out.f32]` | embed a text file, one text per line |
-| `transcribe <model> <audio.wav>` | transcribe 16 kHz audio with a Whisper model; the transcript alone on stdout |
-| `classify <model> <image>` | image classification (arch=5); `--top-k` prints the runners-up to stderr |
-| `pose <model> <image...>` | body pose (arch=6); MediaPipe-shaped JSON on stdout, `--text` for a human summary |
-| `add <org/model> [<sha256>]` | register a model this build does not know (a finetune) |
-| `tokenize` | tokenizer round-trip, for debugging |
+| Command | Binary | What it does |
+|---|---|---|
+| `list` | `npuembeddings` | every model this build can run, and which are installed |
+| `serve <model>` | any of the three | the HTTP endpoint for whatever the container is; downloads the model if needed, and refuses a container from another family |
+| `embed <model> <in.txt> [out.f32]` | `npuembeddings` | embed a text file, one text per line |
+| `transcribe <model> <audio.wav>` | `npuaudio` | transcribe 16 kHz audio with a Whisper model; the transcript alone on stdout |
+| `classify <model> <image>` | `npuimage` | image classification (arch=5); `--top-k` prints the runners-up to stderr |
+| `pose <model> <image...>` | `npuimage` | body pose (arch=6); MediaPipe-shaped JSON on stdout, `--text` for a human summary |
+| `hands <model> <image...>` | `npuimage` | MediaPipe hands (arch=7); no HTTP endpoint yet, so `serve` on it is refused by name |
+| `mppose <model> <image...>` | `npuimage` | MediaPipe body pose (arch=8) |
+| `add <org/model> [<sha256>]` | `npuembeddings` | register a model this build does not know (a finetune) |
+| `tokenize` | `npuembeddings` | tokenizer round-trip, for debugging |
 
 ### One verb, four endpoints
 
@@ -611,6 +649,12 @@ which endpoint answers:
 | 4 | Whisper | `POST /v1/audio/transcriptions` |
 | 5 | ViT classifier | `POST /v1/classify` |
 | 6 | YOLOv8-pose | `POST /v1/pose` |
+
+All four exist in all three binaries, and each binary only opens the endpoint
+for its own family's container: `npuaudio` answers
+`/v1/audio/transcriptions` alone, `npuimage` the two pixel endpoints, and
+`npuembeddings` `/v1/embeddings`. A container from another family is refused
+by name before the listener opens.
 
 The modes are dispatched on `arch` in `runtime/src/runtime.cpp` before `--serve`
 is ever read, so no two of them can meet and no flag chooses between them. A path
@@ -702,7 +746,7 @@ python tools/pack/pack_npue.py --model-dir models/whisper-base \
 python tools/export/export_gemm_rtp.py --target whisper-base --arch 1 --out runtime
 
 # 3. transcribe.
-./runtime/build/npuembeddings transcribe whisper-base recording.wav
+./runtime/build/npuaudio transcribe whisper-base recording.wav
 ```
 
 **`--max-seq` has two defaults, and that is the point.** An embedder's position
@@ -873,7 +917,7 @@ python tools/export/export_gemm_rtp.py --target vit-base-patch16-224-i8 \
     --arch 1 --int8 --out runtime
 
 # 4. classify.
-./runtime/build/npuembeddings classify vit-base-patch16-224 photo.png
+./runtime/build/npuimage classify vit-base-patch16-224 photo.png
 ```
 
 **An int8 container needs its own design set, and this is not a detail.** The
@@ -913,12 +957,12 @@ cannot be built or run on a one-NPU machine.
 
 ### The classify endpoint
 
-`npuembeddings serve vit-base-patch16-224` answers `POST /v1/classify`, and the
+`npuimage serve vit-base-patch16-224` answers `POST /v1/classify`, and the
 answer is **the same bytes** `classify --json` prints — both call
 `npue::vit::prediction_json`.
 
 ```bash
-./runtime/build/npuembeddings serve models/vit-base-patch16-224.npue --port 8080
+./runtime/build/npuimage serve models/vit-base-patch16-224.npue --port 8080
 
 curl -s -F image=@photo.jpg localhost:8080/v1/classify
 # {"image": "photo.jpg", "label": 654, "name": "minibus", "p": 0.629018188,
@@ -1120,16 +1164,16 @@ python tools/pack/pack_npue.py --pose-onnx yolov8n-pose.onnx \
 
 # 2. run it. One image per argument; the result on stdout, the status block on
 #    stderr.
-./runtime/build/npuembeddings pose models/yolov8n-pose.npue photo.jpg --text
+./runtime/build/npuimage pose models/yolov8n-pose.npue photo.jpg --text
 
 # 3. the machine-readable form: every box, every joint, the skeleton, and the
 #    letterbox transform, so a client can map its own annotations through the
 #    same pipeline the model saw.
-./runtime/build/npuembeddings pose models/yolov8n-pose.npue photo.jpg --json
+./runtime/build/npuimage pose models/yolov8n-pose.npue photo.jpg --json
 
 # 4. every graph node's fp32 output, for diffing against an independent
 #    interpreter. This is how the 116-node parity below was established.
-./runtime/build/npuembeddings pose models/yolov8n-pose.npue photo.jpg \
+./runtime/build/npuimage pose models/yolov8n-pose.npue photo.jpg \
     --pose-dump /tmp/rt.bin
 python tools/verify/diff_pose_dump.py yolov8n-pose.onnx \
     models/yolov8n-pose.npue photo.jpg --dump /tmp/rt.bin --head /tmp/ref.bin
@@ -1157,7 +1201,7 @@ python tools/export/export_gemm_rtp.py --target yolov8n-pose --arch 1 \
 
 # 7. run it. --artifacts names that set; without it this run would silently be
 #    the host path again and any comparison against it would be trivially equal.
-./runtime/build/npuembeddings pose models/yolov8n-pose.npue photo.jpg \
+./runtime/build/npuimage pose models/yolov8n-pose.npue photo.jpg \
     --npu-ops conv --artifacts runtime/artifacts/yolov8n-pose/artifacts_npu1 \
     --text
 ```
@@ -1169,12 +1213,12 @@ the per-layer numbers behind them.
 
 ### The pose endpoint
 
-`npuembeddings serve <model> --port 8080` serves the same model over HTTP at
+`npuimage serve <model> --port 8080` serves the same model over HTTP at
 `POST /v1/pose`, and the answer is **the same bytes** the CLI prints — both call
 `npue::pose::result_json`, so the endpoint and `--json` cannot drift.
 
 ```bash
-./runtime/build/npuembeddings serve models/yolov8n-pose.npue --port 8080
+./runtime/build/npuimage serve models/yolov8n-pose.npue --port 8080
 
 curl -s localhost:8080/health
 # {"status":"ok","model":"yolov8n-pose",...,"kind":"pose","engine":"host",
@@ -1228,7 +1272,7 @@ hardware has.
 ### The Python facade
 
 `python/npue_pose.py` is a MediaPipe-shaped API over the same binary. It has no
-numerics of its own: it runs `npuembeddings pose` (or POSTs to `npuembeddings serve`)
+numerics of its own: it runs `npuimage pose` (or POSTs to `npuimage serve`)
 and parses that JSON, so there is exactly one place a keypoint is computed.
 
 ```python

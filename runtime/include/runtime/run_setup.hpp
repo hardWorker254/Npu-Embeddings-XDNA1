@@ -58,7 +58,17 @@ inline void load_designs(RunContext &ctx) {
     // One context for the unified GEMM design plus one per op --npu-ops sends to
     // the array. Counted from the request, not from what got loaded, so the
     // guard refuses BEFORE any Design is built (the point of the whole check).
-    want_contexts = 1 + static_cast<int>(ctx.npu_ops.size());
+    //
+    // ONLY the codes that carry a design DIRECTORY are counted, because the
+    // other six -- gemm, conv, attn, mproj, fft, logit -- are instruction
+    // streams INSIDE the unified set and cost a slot of the context that is
+    // already being counted by the `1`. Counting all of them made the sum a
+    // fiction that grew with every code the reader typed: `--npu-ops gemm` alone
+    // asked for two contexts of which one was ever opened. The STT path has
+    // always counted this way (stt_mode.hpp); this is the two halves agreeing.
+    want_contexts = 1;  // the unified gemm_rtp set itself
+    for (const auto &op : app::npu_op_table())
+      if (op.design[0] && ctx.npu_ops.count(op.code)) ++want_contexts;
   } else {
     want_contexts = 7;   // legacy per-op set: one xclbin per design
   }
@@ -380,8 +390,14 @@ inline void setup_flags_pools(RunContext &ctx) {
   // without attn_qk/attn_av is refused as an artifact that was never exported
   // for this model -- not as a missing capability.
   for (const auto &code : ctx.npu_ops) {
+    // `gemm` joins `attn` in NOT being refused here, and for the same reason in
+    // reverse: an embedder's per-layer GEMMs are exactly this pipeline's work,
+    // so `--npu-ops gemm` is a request this container can honour. It was the
+    // ninth code, and it was the one the old hand-typed allow-list would have
+    // rejected as "a speech-to-text op" -- the argument below is about Whisper's
+    // conv1/conv2, not about matrix multiplication.
     if (code == "gelu" || code == "layn" || code == "softm" ||
-        code == "attn")
+        code == "attn" || code == "gemm")
       continue;
     const NpuOp *op = find_npu_op(code);
     throw std::runtime_error(
@@ -796,6 +812,13 @@ inline int setup_encoder(RunContext &ctx) {
       e2.as_qkv = ctx.enc->as_qkv; e2.as_ao = ctx.enc->as_ao;
       e2.as_fu = ctx.enc->as_fu;   e2.as_fd = ctx.enc->as_fd;
       e2.s_ln = ctx.enc->s_ln; e2.h_gamma = ctx.enc->h_gamma; e2.h_beta = ctx.enc->h_beta;
+      // The host path's untiled operand goes with them, by the same rule as
+      // everything two lines above. The shared_ptr is copied, NOT the weights:
+      // common/host_b.hpp deletes WeightCache's copy constructor so this line
+      // cannot become a per-lane copy of ~340 MB of fp32 without somebody
+      // noticing in review -- and the cache is mutexed because every lane asks
+      // for the same tensor the first time a GEMM runs on the host.
+      e2.host_w_ = ctx.enc->host_w_;
       // The tier table is POLICY, and every lane needs it. A lane without it
       // silently falls back to the pre-0037 flat slot contract (0,1,2,3),
       // which under the 16-stream export selects the wrong shapes entirely --

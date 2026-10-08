@@ -1,11 +1,19 @@
-//===- main.cpp -----------------------------------------------------------*- C++ -*-===//
+//===- entry.cpp ------------------------------------------------------------*- C++ -*-===//
 //
-// NpuEmbeddings -- thin entry point.
-// Parses CLI args, dispatches subcommands, or loads a model and runs
-// the encode/benchmark pipeline.
+// The body of main(), shared by all three binaries.
+//
+// npuembeddings, npuaudio and npuimage each have a three-line main() under
+// src/bin/ that sets app::g_family / app::g_bin and calls app::entry(). The
+// family is therefore decided ONCE, at process start, by the binary that was
+// exec'd -- never inferred from argv, because a renamed copy of the binary
+// would then change which modes it runs, and a reader who renamed a binary to
+// fit a script would get a program that disagrees with its own name in a way
+// nothing on the command line could explain.
+//
 // SPDX-License-Identifier: Apache-2.0
 //===----------------------------------------------------------------------===//
 
+#include "cli/family.hpp"
 #include "cli/cli.hpp"
 #include "cli/subcommand.hpp"
 #include "runtime/runtime.hpp"
@@ -13,7 +21,13 @@
 
 #include <exception>
 
-int main(int argc, char **argv) try {
+namespace app {
+
+// The container's family is checked inside resolve_model_path(), which every
+// path here goes through -- flag form, `--tokenize`, and the single-installed-
+// model shortcut alike. Subcommands resolve through resolve_container(), which
+// checks the same way, so nothing below has to remember to.
+int entry(int argc, char **argv) try {
     auto args = app::CLI::parse(argc, argv);
 
     if (args.help || argc == 1) {
@@ -61,3 +75,5 @@ int main(int argc, char **argv) try {
     std::fprintf(stderr, "error: %s\n", e.what());
     return 2;
 }
+
+}  // namespace app

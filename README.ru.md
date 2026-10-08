@@ -89,15 +89,17 @@ rm -rf CMakeFiles CMakeCache.txt && cmake .. && make -j8
 бинаря. Проверяйте и размер сразу после сборки, а не потом: файловая система на
 этой машине несколько раз возвращала выход сборки к предыдущему.
 
-Сборка даёт **один** бинарь — `runtime/build/npuembeddings`. Раньше их было два:
-таргет назывался `npuembed`, а `npuembeddings` был его `POST_BUILD`-копией, так
-что имя, которое собиралось, и имя, которое запускали, не совпадали.
+Сборка даёт **три** бинаря — `runtime/build/npuembeddings`, `npuaudio` и
+`npuimage`: один код, три точки входа, и различаются они ровно тем, какие
+режимы принимают (см. «Справочник по командной строке»). Раньше был один: таргет
+назывался `npuembed`, а `npuembeddings` был его `POST_BUILD`-копией, так что
+имя, которое собиралось, и имя, которое запускали, не совпадали.
 
 ### 3. Запуск
 
 ```bash
 # что установлено и что может работать
-./runtime/build/npueembeddings list
+./runtime/build/npuembeddings list
 
 # эндпоинт в форме OpenAI на 127.0.0.1:8080
 ./runtime/build/npueembeddings serve models/all-MiniLM-L6-v2.npue
@@ -485,19 +487,37 @@ mel-каналы — те, что иначе прижал бы пол — чит
 
 ## Справочник по командной строке
 
-`npuembeddings --help` авторитетен и синхронизирован с этим разделом.
+`<бинарник> --help` авторитетен и синхронизирован с этим разделом — свой у каждого из трёх бинарников.
+
+### Три бинара, один код
+
+`cmake --build` собирает `npuembeddings`, `npuaudio` и `npuimage`. Общий весь
+рантайм, и различаются они ровно одним: какие режимы принимают. Команда,
+вызванная не в том бинарнике, и контейнер чужой семьи **отказываются по
+имени** и печатают эту же таблицу, так что следующая строка командной строки
+уже написана:
+
+    npuembeddings   embed, list, add, tokenize, serve
+    npuaudio        transcribe, serve
+    npuimage        classify, pose, hands, mppose, serve
+
+`serve` есть у всех трёх, потому что эндпоинт выбирает архитектура контейнера;
+но каждый бинарник принимает контейнеры только своей семьи.
 
 ### Подкоманды
 
-| | |
-|---|---|
-| `serve` | `npuembeddings serve <модель> [--port N] [--bind ADDR]` — эндпоинт для того, чем является контейнер; модель докачивается сама, если её нет |
-| `embed` | `npuembeddings embed <модель> <in.txt> [out.f32]` — батч, одно предложение в строке |
-| `list` | что установлено и что может работать |
-| `transcribe` | `npuembeddings transcribe <модель> <audio.wav>` (arch=4) |
-| `classify` | `npuembeddings classify <модель> <картинка>` (arch=5) |
-| `pose` | `npuembeddings pose <модель> <картинка...>` (arch=6) — JSON в форме MediaPipe на stdout, `--text` для человеческого резюме |
-| `add` | `npuembeddings add <org/model> [<sha256>]` — добавить в установку модель, которой нет в сборке |
+| Подкоманда | Бинарник | Что делает |
+|---|---|---|
+| `serve` | любой из трёх | `serve <модель> [--port N] [--bind ADDR]` — эндпоинт для того, чем является контейнер; модель докачивается сама, если её нет. Контейнер чужой семьи отказывается по имени |
+| `embed` | `npuembeddings` | `embed <модель> <in.txt> [out.f32]` — батч, одно предложение в строке |
+| `list` | `npuembeddings` | что установлено и что может работать |
+| `tokenize` | `npuembeddings` | перекодирование текста токенизатором, для отладки |
+| `transcribe` | `npuaudio` | `transcribe <модель> <audio.wav>` (arch=4) |
+| `classify` | `npuimage` | `classify <модель> <картинка>` (arch=5) |
+| `pose` | `npuimage` | `pose <модель> <картинка...>` (arch=6) — JSON в форме MediaPipe на stdout, `--text` для человеческого резюме |
+| `hands` | `npuimage` | `hands <модель> <картинка...>` (arch=7); HTTP-эндпоинта нет, `serve` на нём отказывается по имени |
+| `mppose` | `npuimage` | `mppose <модель> <картинка...>` (arch=8) |
+| `add` | `npuembeddings` | `add <org/model> [<sha256>]` — добавить в установку модель, которой нет в сборке |
 
 ### Одна подкоманда, четыре эндпоинта
 
@@ -695,7 +715,7 @@ python tools/export/export_gemm_rtp.py --target vit-base-patch16-224-i8 \
     --arch 1 --int8 --out runtime
 
 # 4. классификация.
-./runtime/build/npuembeddings classify vit-base-patch16-224 photo.png
+./runtime/build/npuimage classify vit-base-patch16-224 photo.png
 ```
 
 **int8-контейнеру нужен свой набор дизайнов, и это не мелочь.** У двух
@@ -746,12 +766,12 @@ tasks/0080.
 
 ### Эндпоинт классификации
 
-`npuembeddings serve vit-base-patch16-224` отвечает на `POST /v1/classify`, и
+`npuimage serve vit-base-patch16-224` отвечает на `POST /v1/classify`, и
 ответ — **те же байты**, что печатает `classify --json`: оба зовут
 `npue::vit::prediction_json`.
 
 ```bash
-./runtime/build/npuembeddings serve models/vit-base-patch16-224.npue --port 8080
+./runtime/build/npuimage serve models/vit-base-patch16-224.npue --port 8080
 
 curl -s -F image=@photo.jpg localhost:8080/v1/classify
 # {"image": "photo.jpg", "label": 654, "name": "minibus", "p": 0.629018188,
@@ -952,16 +972,16 @@ python tools/pack/pack_npue.py --pose-onnx yolov8n-pose.onnx \
 
 # 2. Запуск. По одному изображению на аргумент; результат в stdout, блок
 #    состояния в stderr.
-./runtime/build/npuembeddings pose models/yolov8n-pose.npue photo.jpg --text
+./runtime/build/npuimage pose models/yolov8n-pose.npue photo.jpg --text
 
 # 3. Машиночитаемая форма: все боксы, все суставы, скелет и преобразование
 #    letterbox, чтобы клиент мог провести свои аннотации через тот же
 #    конвейер, который видела модель.
-./runtime/build/npuembeddings pose models/yolov8n-pose.npue photo.jpg --json
+./runtime/build/npuimage pose models/yolov8n-pose.npue photo.jpg --json
 
 # 4. fp32-выход каждого узла графа — для сверки с независимым интерпретатором.
 #    Именно так было установлено паритетное совпадение 116 узлов ниже.
-./runtime/build/npuembeddings pose models/yolov8n-pose.npue photo.jpg \
+./runtime/build/npuimage pose models/yolov8n-pose.npue photo.jpg \
     --pose-dump /tmp/rt.bin
 python tools/verify/diff_pose_dump.py yolov8n-pose.onnx \
     models/yolov8n-pose.npue photo.jpg --dump /tmp/rt.bin --head /tmp/ref.bin
@@ -990,7 +1010,7 @@ python tools/export/export_gemm_rtp.py --target yolov8n-pose --arch 1 \
 
 # 7. Запуск. --artifacts называет этот набор; без него этот же прогон тихо был бы
 #    хостовым, и любое сравнение с ним было бы тривиально равным.
-./runtime/build/npuembeddings pose models/yolov8n-pose.npue photo.jpg \
+./runtime/build/npuimage pose models/yolov8n-pose.npue photo.jpg \
     --npu-ops conv --artifacts runtime/artifacts/yolov8n-pose/artifacts_npu1 \
     --text
 ```
@@ -1002,12 +1022,12 @@ python tools/export/export_gemm_rtp.py --target yolov8n-pose --arch 1 \
 
 ### Эндпоинт позы
 
-`npuembeddings serve <model> --port 8080` отдаёт ту же модель по HTTP на
+`npuimage serve <model> --port 8080` отдаёт ту же модель по HTTP на
 `POST /v1/pose`, и ответ — **те же байты**, что печатает CLI: оба зовут
 `npue::pose::result_json`, так что эндпоинт и `--json` разойтись не могут.
 
 ```bash
-./runtime/build/npuembeddings serve models/yolov8n-pose.npue --port 8080
+./runtime/build/npuimage serve models/yolov8n-pose.npue --port 8080
 
 curl -s localhost:8080/health
 # {"status":"ok","model":"yolov8n-pose",...,"kind":"pose","engine":"host",
@@ -1060,7 +1080,7 @@ URL держит честным не вторая подкоманда, а вт�
 ### Python-фасад
 
 `python/npue_pose.py` — API в форме MediaPipe поверх того же бинарника. Своей
-арифметики у него нет: он запускает `npuembeddings pose` (или делает POST в
+арифметики у него нет: он запускает `npuimage pose` (или делает POST в
 `serve`) и разбирает этот JSON, поэтому точка, где считается сустав, ровно
 одна.
 

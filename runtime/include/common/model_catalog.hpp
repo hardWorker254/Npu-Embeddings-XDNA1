@@ -19,6 +19,7 @@
 #include <system_error>
 #include <vector>
 
+#include "cli/family.hpp"
 #include "common/app_state.hpp"
 #include "runtime/model.hpp"
 
@@ -215,15 +216,15 @@ inline void print_model_table(const std::vector<ModelEntry> &v) {
     // verbs AND both containers sat in subdirectories, so no table had ever had
     // to name them.
     //
-    // FOR A PIXEL KIND THE VERB IS THE KIND -- `npuembeddings hands`,
-    // `npuembeddings mppose`, `npuembeddings pose` -- so a table of literals
+    // FOR A PIXEL KIND THE VERB IS THE KIND -- `npuimage hands`,
+    // `npuimage mppose`, `npuimage pose` -- so a table of literals
     // would be three rows differing in one word, which is a place to forget one.
     // Assembling the string removes the duplication instead of documenting it.
     const std::string verb =
         !subcommand_for_kind(m.kind)  ? std::string()
-        : is_pixel_kind(m.kind)      ? "npuembeddings " + m.kind
-        : m.kind == "cls"            ? "npuembeddings classify"
-        : m.kind == "stt"            ? "npuembeddings transcribe"
+        : is_pixel_kind(m.kind)      ? "npuimage " + m.kind
+        : m.kind == "cls"            ? "npuimage classify"
+        : m.kind == "stt"            ? "npuaudio transcribe"
                                      : std::string();
     const char *how = verb.empty() ? nullptr : verb.c_str();
     if (how)
@@ -272,8 +273,13 @@ inline bool is_container_path(const std::string &arg) {
 // wins over a name of the same spelling, because a path names a FILE and a
 // name names a row in <root>/models/ -- and they need not be the same file:
 // `--model ./builds/mine.npue` must not be re-resolved against models/.
-inline std::string resolve_model_path(const std::string &root,
-                                      const std::string &want) {
+//
+// The resolution proper, without the family check the public entry point adds
+// below: three return points here, and a check written three times is a check
+// that stops being written the fourth time.
+namespace detail {
+inline std::string resolve_model_path_raw(const std::string &root,
+                                          const std::string &want) {
   if (looks_like_container_path(want)) {
     if (is_container_path(want)) return want;
     throw_missing_container(want, root);
@@ -305,6 +311,22 @@ inline std::string resolve_model_path(const std::string &root,
     }
   print_model_table(models);
   throw std::runtime_error("no model named '" + want + "' is installed");
+}
+
+}  // namespace detail
+
+// THE FAMILY, DECIDED WHERE THE PATH IS. This is the choke point the flag
+// form has by construction -- `--model`, `--tokenize`, the single-installed-
+// model shortcut and every subcommand that resolves through here all end in
+// this one function -- and it is why `npuembeddings --model whisper-base.npue`
+// names npuaudio instead of opening a design set it will not dispatch to.
+// Subcommands with their own resolver (resolve_container) check the same way
+// beside it, so there is one rule and two places that apply it.
+inline std::string resolve_model_path(const std::string &root,
+                                      const std::string &want) {
+  const std::string path = detail::resolve_model_path_raw(root, want);
+  refuse_other_family(path);
+  return path;
 }
 
 // Resolve --model to a container. Accepts a name as printed in the table or a

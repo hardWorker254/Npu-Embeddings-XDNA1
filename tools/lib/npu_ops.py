@@ -34,12 +34,18 @@ import sys
 # and the two of them are empty for different reasons -- so the reason is a third
 # field, not a template:
 #
+#   `gemm`  is the four per-layer GEMMs themselves (qkv, attn_out, ffn_up,
+#           ffn_down, and the self-/cross-attention counterparts), which used to
+#           run on the array whenever a design set was present and were the one
+#           exception to this flag's own rule. They are streams of the
+#           gemm_rtp / gemm_rtp_dec sets every export already has.
 #   `conv`  runs on the encoder set's own [rows, d, d] stream (attn_out's
 #           shape), which every export already has.
 #   `attn`  ADDS two streams (attn_qk, attn_av) to the same set, so the
 #           exporter has work to do -- in the GEMM set, not in a directory of
 #           its own. What it does NOT do is compile anything here.
 OPS: dict[str, tuple[str, str]] = {
+    "gemm": ("", "the per-layer GEMMs"),
     "gelu": ("gelu", "GELU"),
     "layn": ("layernorm", "LayerNorm"),
     "softm": ("softmax", "softmax"),
@@ -62,6 +68,10 @@ OPS: dict[str, tuple[str, str]] = {
 # the code is skipped: a requested op that quietly did nothing is the failure
 # this project treats as worst, and a line that says WHY keeps the fact honest.
 NO_DESIGN: dict[str, str] = {
+    "gemm": "the four GEMM streams are the set's own slots (qkv, attn_out, "
+            "ffn_up, ffn_down), so there is nothing to compile -- the code "
+            "chooses between the array and this process, not between two "
+            "artefacts",
     "conv": "it runs on the stream gemm_rtp already exports, so there is "
             "nothing to compile",
     "attn": "its two streams are added to the gemm_rtp and gemm_rtp_dec sets "
@@ -210,15 +220,24 @@ GEMM_STREAMS: dict[str, tuple[str, ...]] = {
 #
 # ONE FLAG, AND EVERY CELL IS ABOUT THE MODEL
 # -------------------------------------------
-# The runtime's flag is one string with eight codes and one parser
+# The runtime's flag is one string with nine codes and one parser
 # (runtime/include/common/npu_ops_flag.hpp, which is the second copy of the
 # table above and points back here). There are no architecture-specific NPU
-# flags anywhere in the tree: the GEMMs are on the array in all four
-# architectures and unconditionally, because there is no GEMM code.
+# flags anywhere in the tree. THE RULE IS ONE RULE FOR ALL NINE: an op is on
+# the host unless the command line names it.
+#
+# The rule held for the other eight codes; the four per-layer GEMMs -- qkv,
+# attn_out, ffn_up, ffn_down -- ran on the array whenever a design set was
+# present, so a run that named nothing still put the model's largest
+# operation on the array while every status line around it said host, and the
+# flag could not turn it off. `gemm` is what makes those four selectable like
+# the other eight; the host path behind it
+# is the runtime's (the container's B panels are pre-tiled for the array, so
+# untiling them into fp32 is part of what the code does).
 #
 # What differs is which codes an architecture can HONOUR, and that is a
-# property of the MODEL, not of the flag. So this file records all 40 cells
-# (5 architectures x 8 codes) with a status and a reason, and three programs
+# property of the MODEL, not of the flag. So this file records all 63 cells
+# (7 rows x 9 codes) with a status and a reason, and three programs
 # read it:
 #
 #   * the EXPORTER builds every design whose cell says `honours` -- see
@@ -279,7 +298,7 @@ STATUS_MEANING: dict[str, str] = {
 # "compile a directory". Kept as a named set because the exporter's two halves
 # (resolve.py adds the streams, build.py compiles the directories) have to
 # agree about which codes they are.
-STREAM_ONLY = frozenset({"conv", "attn", "mproj", "fft", "logit"})
+STREAM_ONLY = frozenset({"gemm", "conv", "attn", "mproj", "fft", "logit"})
 
 _NO_AUDIO = "an audio front end, and this architecture has none"
 
@@ -293,6 +312,23 @@ _NO_AUDIO = "an audio front end, and this architecture has none"
 # all, which is a property of that one encoder and not of "embedders".
 KIND_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
     "gemm_rtp": {
+        "gemm": (HONOURS,
+                 "the four GEMMs per layer -- qkv, attn_out, ffn_up, "
+                 "ffn_down -- on the set's own instruction slots, which is "
+                 "what the array is FOR in an embedder. Until this code "
+                 "existed they were the one op the flag could not turn off: "
+                 "the condition was the PRESENCE of a design set, so a run "
+                 "with no --npu-ops at all dispatched them and the status "
+                 "block printed `npu` for the whole group whatever the "
+                 "command line said. The code makes them selectable like the "
+                 "other eight. The host path is this build's own and not a "
+                 "borrowed reference: the container stores each B operand "
+                 "pre-tiled for the array (block_panel, 64x48 at MiniLM), so "
+                 "the runtime untiles it back to fp32 ONCE at load -- "
+                 "same six-axis walk common/int4_panel.hpp already does for "
+                 "int4, read backwards -- and multiplies it with "
+                 "common/conv_host.hpp's gemm_nt, the kernel arch=6 and "
+                 "arch=7 already run their convolutions on."),
         "gelu": (HONOURS,
                  "an ungated FFN's activation is a standalone pass, so the "
                  "gelu/ design takes it over. A GATED FFN (nomic, gte, gemma) "
@@ -312,9 +348,17 @@ KIND_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
                  "with the wrong numbers."),
         "softm": (HONOURS,
                   "softmax over the score matrix, its own pass between the two "
-                  "attention GEMMs. MEASURED on bge-base, 15 texts, arch 1: "
-                  "1.70 s against 0.16 s of host embedding, relfro 1.15e-02 / "
-                  "cos 0.999933 against the host vectors (max|d| 1.6e-03). "
+                  "attention GEMMs. MEASURED on bge-base-en-v1.5, 15 texts, "
+                  "arch 1: `--npu-ops gemm,softm` is 1.70 s against "
+                  "`--npu-ops gemm`'s 0.17 s (10.0x SLOWER), relfro 1.391e-02 "
+                  "/ cos 0.999903381, min cos 0.999844372, max|d| 2.259e-03 "
+                  "against that same arm. Plain `--npu-ops softm`, the four "
+                  "GEMMs on this process as they now are by default, is 1.58 s "
+                  "against the all-host default's 1.06 s, 36 dispatches "
+                  "against 0. The reference arm is named rather than called "
+                  "'host' because it is not one: `gemm` is what every run did "
+                  "before this code was split out, and it is what the original "
+                  "pairing was. "
                   "The row WIDTH is the whole of the difficulty here, and it "
                   "was wrong until it was measured: the design is compiled for "
                   "sm_cols = padded n_kv (64 -> 384, resolve.py:414) because "
@@ -328,13 +372,14 @@ KIND_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
                   "BertEncoder now lays the rows out at the design's width, "
                   "with -1e30 past g_seq, whenever the array takes the "
                   "softmax; the default path is byte-identical to what it was "
-                  "and `attn,softm` (relfro 1.21e-02) is unchanged. COST, and "
-                  "it is not a defect in this cell but in how the two flags "
-                  "combine: asking for attn,softm puts the softmax inside "
-                  "NpuAttention, which dispatches it once per head per chunk "
-                  "rather than once per layer, and every dispatch fills the "
-                  "design's whole 12288-row capacity -- 100.90 s for 15 texts "
-                  "against 1.38 s for attn alone."),
+                  "and `gemm,attn,softm` (relfro 1.21e-02) is unchanged. "
+                  "COST, and it is not a defect in this cell but in how the "
+                  "two flags combine: asking for attn,softm puts the softmax "
+                  "inside NpuAttention, which dispatches it once per head per "
+                  "chunk rather than once per layer, and every dispatch fills "
+                  "the design's whole 12288-row capacity -- 100.59 s for 15 "
+                  "texts against 1.36 s for `gemm,attn`, both re-measured "
+                  "with this change."),
         "conv": (ABSENT, "names Whisper's conv1/conv2 -- " + _NO_AUDIO + "."),
         "attn": (HONOURS,
                  "qk() and av() in BertEncoder::run dispatch on the set's own "
@@ -356,10 +401,16 @@ KIND_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
                  "all, and the runtime zeroes the matching rows of the gathered "
                  "Q block so the extra MACs contribute 0*0. Same CAVEAT as "
                  "cls/stt: attention on the array is SLOWER than the host pass. "
-                 "MEASURED on bge-base, 15 texts, arch 1: 1.38 s against "
-                 "0.16 s of host embedding (8.6x SLOWER), relfro 1.58e-02 / "
-                 "cos 0.999876, max|d| 2.2e-03 -- against Whisper's 4.6x. This "
-                 "code makes the model runnable on the array, not faster."),
+                 "MEASURED on bge-base-en-v1.5, 15 texts, arch 1: "
+                 "`--npu-ops gemm,attn` is 1.36 s against `--npu-ops gemm`'s "
+                 "0.17 s (8.0x SLOWER), with 4752 dispatches against that "
+                 "arm's 144 -- 4608 of them this code's, one per head per "
+                 "query chunk. Plain `--npu-ops attn` is 2.00 s against the "
+                 "all-host default's 1.06 s, 4608 dispatches against 0. "
+                 "Correctness against the `gemm` arm: relfro 1.398e-02, mean "
+                 "cos 0.999902308, min cos 0.999853313, max|d| 2.093e-03. "
+                 "This code makes the model runnable on the array, not "
+                 "faster."),
         "mproj": (ABSENT, "names the slaney mel filter bank -- " + _NO_AUDIO + "."),
         "fft": (ABSENT, "names the 400-point transform -- " + _NO_AUDIO + "."),
         "logit": (ABSENT,
@@ -370,6 +421,19 @@ KIND_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
                   "`logit` or `vocab`."),
     },
     "stt": {
+        "gemm": (HONOURS,
+                 "the encoder's qkv / attn_out / ffn_up / ffn_down and the "
+                 "decoder's self_qkv / self_attn_out / cross_q / "
+                 "cross_attn_out / ffn_up / ffn_down, on the two sets' own "
+                 "slots (gemm_rtp and gemm_rtp_dec). This is the cell that "
+                 "made the flag's rule true: those eleven call sites went to "
+                 "the array on the strength of a design set being present, "
+                 "not on the strength of being named, and the status block "
+                 "hardcoded `npu` for both GEMM rows. Named now, host by "
+                 "default. The host path untiles each pre-tiled B panel back "
+                 "to fp32 once at load and runs it through gemm_nt; the "
+                 "decoder's eight chunked logit streams are NOT this cell -- "
+                 "they are `logit`, and stay host unless that is named too."),
         "gelu": (HONOURS,
                  "a Whisper checkpoint declares `activation: gelu` and the "
                  "packer refuses anything else, so the design is the exact-erf "
@@ -390,8 +454,17 @@ KIND_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
                  "count, which is constant."),
         "attn": (HONOURS,
                  "the two GEMMs that bracket the softmax, as attn_qk and attn_av "
-                 "streams in the same set. MEASURED 4.32 s against 0.94 s on "
-                 "the host over a 3 s window: it works, and it is 4.6x slower."),
+                 "streams in the same set. MEASURED on whisper-base over "
+                 "/home/prof/jfk.wav (11 s of speech), on the `time` line the "
+                 "runtime prints: `--npu-ops attn` puts the DECODER at 4.19 s "
+                 "against the default's 0.60 s and the encoder at 0.76 s "
+                 "against 0.70 s, 5856 dispatches against 0. The cost lives in "
+                 "the decoder, because that is where attention runs once per "
+                 "generated token, and end to end it is 7.0x slower. Naming "
+                 "`gemm` as well (`gemm,attn`, 7008 dispatches) gives 4.42 s of "
+                 "decoder and 0.52 s of encoder -- the same picture, since "
+                 "those two arms differ only in where the four per-layer GEMMs "
+                 "run. It works, and it is not faster."),
         "mproj": (HONOURS,
                   "the mel bank as one more stream in the encoder set, at "
                   "(201 bins, the model's mel count)."),
@@ -405,11 +478,41 @@ KIND_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
                   "largest shipping design uses."),
     },
     "cls": {
+        # The code that moved every other cell in this row: the four per-layer
+        # GEMMs used to run on the array whether or not anything
+        # was asked for, so `--npu-ops softm` reported 61 dispatches of which 49
+        # were these. They are behind the flag now, which is why the cells below
+        # quote `gemm,<X>` against `gemm` -- that pairing is what the original
+        # numbers were taken on, and re-measuring it reproduces them.
+        "gemm": (HONOURS,
+                 "the four per-layer GEMMs -- qkv, attn_out, ffn_up, ffn_down "
+                 "over 12 layers -- plus this row's patch embedding when `conv` "
+                 "is named beside it: 48 dispatches, 49 with conv. Host by "
+                 "default like every other code, and this is the row where that "
+                 "bites hardest, because these four were the ones a reader got "
+                 "for nothing. MEASURED, vit-base-patch16-224, bf16, "
+                 "docs/bus.jpg, best of 5 encoder time: 0.241 s against the "
+                 "all-host default's 0.435 s -- 1.80x FASTER, the one code in "
+                 "this file whose answer for speed is yes rather than no. "
+                 "Correctness on this image: top-1 `minibus` either way, "
+                 "top-1 confidence 0.62916 against 0.63782 (dp 8.7e-03); "
+                 "`gemm,conv` together is 0.241 s and dp 8.8e-03. The 48 is "
+                 "also the count that used to sit inside every other cell's "
+                 "total, which is why those cells read 48 fewer."),
         "gelu": (HONOURS,
                  "pre-LN with an ungated FFN, so the activation IS a standalone "
                  "pass and the gelu/ design takes it over. MEASURED on "
-                 "vit-base-patch16-224, bf16, bus.jpg, best of 8: 0.343 s "
-                 "against the host's 0.248 s, 1.38x SLOWER. CAVEAT, and it is "
+                 "vit-base-patch16-224, bf16, docs/bus.jpg, best of 5 encoder "
+                 "time: 0.332 s for `--npu-ops gemm,gelu` against 0.241 s for "
+                 "`--npu-ops gemm`, 1.38x SLOWER. The first arm names `gemm` "
+                 "in both, so the four per-layer GEMMs are on the array in "
+                 "both and the difference is this pass alone -- which is the "
+                 "pairing every figure in this row came from, and worth "
+                 "naming now that the default puts those four on this process. "
+                 "Plain `--npu-ops gelu`, with them here by default, is 0.558 s "
+                 "against the default's 0.435 s (12 eltwise dispatches either "
+                 "way), top-1 `minibus` at 0.63684 (dp 1.0e-03). CAVEAT, and "
+                 "it is "
                  "about accuracy rather than the code: resolve.py forces the "
                  "exact-erf kernel only for kind stt, and a ViT keeps the "
                  "exporter's `poly` default, so this design is the degree-8 fit "
@@ -420,41 +523,67 @@ KIND_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
                  "overrides; nothing in the tree does."),
         "layn": (HONOURS,
                  "25 sites (2 per layer plus the final one), the same kernel. "
-                 "MEASURED 0.377 s against 0.248 s: 1.52x slower."),
+                 "MEASURED on vit-base-patch16-224, bf16, docs/bus.jpg, best "
+                 "of 5 encoder time: 0.355 s for `--npu-ops gemm,layn` against "
+                 "0.241 s for `--npu-ops gemm` (1.47x SLOWER, 25 eltwise "
+                 "dispatches beside that arm's 48); plain `--npu-ops layn` is "
+                 "0.492 s against the all-host default's 0.435 s, top-1 still "
+                 "`minibus` at 0.64026 (dp 2.4e-03)."),
         "softm": (HONOURS,
                   "the softmax is INSIDE attention, so it is named here as the "
                   "array's half of that pass, and it is MEASURED on its own: "
-                  "vit-base-patch16-224, bus.jpg, arch 5, `--npu-ops softm` "
-                  "puts the encoder at 0.822 s against the host's 0.244 s "
-                  "(61 dispatches, 49 of them the GEMMs and 12 of them one "
-                  "softmax per block), against 0.349 s for `attn` alone. "
+                  "vit-base-patch16-224, bf16, docs/bus.jpg: best of 5 "
+                  "encoder time, 0.806 s for `--npu-ops gemm,softm` against "
+                  "0.241 s for `--npu-ops gemm` (3.3x SLOWER, 60 dispatches "
+                  "against that arm's 48 -- 48 GEMM plus 12 eltwise, one "
+                  "softmax per block), and 1.133 s for plain `--npu-ops softm` "
+                  "against the all-host default's 0.435 s, 0 encoder "
+                  "dispatches and the same 12 eltwise. The old total for this "
+                  "cell was 61; the missing 49 were the four per-layer GEMMs "
+                  "and the patch embed, which `gemm` and `conv` own now. "
                   "Correctness is checked on the full 1000-way probability "
-                  "row, not on the top-5 that would have agreed anyway: "
+                  "row, not on the top-5 that would have agreed anyway, and "
+                  "against the reference arm `gemm` names -- arch 5 has no "
+                  "`--cpu`, so that arm is the only one that ever existed here: "
                   "relfro 1.959e-02, cos 0.999869, max|d| 1.02e-02, with the "
-                  "label and the whole top-5 identical to the host and the "
-                  "top-10 centered-logit shift under 5.3e-02. The design's "
+                  "label and the whole top-5 identical and the top-10 "
+                  "centered-logit shift under 5.3e-02. On this image top-1 "
+                  "stays `minibus` at 0.63585, dp 2.0e-03 from the default. "
+                  "The design's "
                   "width is the padded key count (197 -> 384 against "
                   "lcm(tile_k, tile_n)=192), because npue::whisper::attention "
                   "-- which IS this model's host path -- lays score rows out "
                   "at the kernel's own width, so a whole row fits one "
                   "dispatch rather than 64 columns of it. COST of asking for "
                   "both codes at once, stated because it is the one result a "
-                  "reader would not guess: `attn,softm` is 6.685 s. "
+                  "reader would not guess: `gemm,attn,softm` is 6.671 s "
+                  "against `gemm,attn`'s 0.348 s, and plain `attn,softm` is "
+                  "7.038 s against the default's 0.435 s. "
                   "NpuAttention then calls the softmax once per head per "
                   "chunk -- 144 extra dispatches -- and each dispatch fills "
                   "the design's whole 12288-row capacity whatever the caller "
                   "needed. The cell honours the flag; the combination honours "
                   "it slowly."),
-        "conv": (ON_ARRAY,
+        "conv": (HONOURS,
                  "the patch embedding IS a convolution, Conv2d(3, d, "
-                 "kernel=16, stride=16), and it is ALREADY on the array. im2col "
-                 "makes it [n_patches, patch_dim] x [patch_dim, d], which is "
-                 "attn_out's own shape, so it is dispatched on attn_out's "
-                 "instruction slot with no flag at all "
-                 "(runtime/src/vit/encoder.cpp:267). Asking for conv would add "
-                 "no dispatch. The rewrite is exact on one ground only: stride "
-                 "equals kernel with padding 0, so the 196 windows neither "
-                 "overlap nor skip and im2col is a permutation, not a sum."),
+                 "kernel=16, stride=16), and `conv` is the code that decides "
+                 "whether its one dispatch happens. im2col makes it [197, 768] "
+                 "x [768, 768], which is attn_out's own shape, so it "
+                 "dispatches on attn_out's instruction slot and needs no stream "
+                 "of its own -- no hw_context and no extra xclbin for it. The "
+                 "rewrite is exact on one ground only: stride equals kernel "
+                 "with padding 0, so the 196 windows neither overlap nor skip "
+                 "and im2col is a permutation, not a sum. This cell used to "
+                 "read `on_array`, which said asking for conv would add no "
+                 "dispatch. That was true only while the four per-layer GEMMs "
+                 "were unconditional, and `gemm` ended that: a cell that still "
+                 "claimed nothing could change would be the one op in the file "
+                 "the reader cannot reach. MEASURED, vit-base-patch16-224, "
+                 "bf16, docs/bus.jpg, best of 5 encoder time: 0.426 s for "
+                 "`--npu-ops conv` (1 encoder dispatch) against the all-host "
+                 "default's 0.435 s -- inside the noise, one im2col GEMM out of "
+                 "forty-nine. Top-1 `minibus` either way, top-1 confidence "
+                 "0.63260 against 0.63782 (dp 5.2e-03)."),
         "attn": (HONOURS,
                  "12 heads over 197 positions, on the set's own attn_qk/attn_av "
                  "streams -- the exporter builds them from this registry entry "
@@ -463,16 +592,25 @@ KIND_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
                  "ViT has no attention of its own: vit/encoder.cpp calls "
                  "npue::whisper::attention(), so the array branch added here is "
                  "the one NpuAttention already provides, reached through the "
-                 "same shared host path. MEASURED on vit-base-patch16-224, "
-                 "bus.jpg, arch 5: 0.349 s against the host's 0.244 s for the "
-                 "whole encoder (1.43x SLOWER), 337 dispatches against 49. "
-                 "Correctness on the full 1000-way probability row: relfro "
-                 "4.384e-03, cos 0.999993, max|d| 2.1e-03, label and top-5 "
-                 "identical to the host, top-10 centered-logit shift under "
-                 "1.9e-02 -- the 197-position row, so nothing here rests on "
-                 "the seq 64 the older notes stopped at. The cost above 64 "
-                 "positions is this number now, measured rather than left "
-                 "open."),
+                 "same shared host path. MEASURED on "
+                 "vit-base-patch16-224, bf16, docs/bus.jpg, best of 5 "
+                 "encoder time: 0.348 s for `--npu-ops gemm,attn` against "
+                 "0.241 s for `--npu-ops gemm` (1.44x SLOWER), 336 dispatches "
+                 "against that arm's 48 -- 288 of them this code's, two per "
+                 "head per layer. Plain `--npu-ops attn` is 0.593 s against "
+                 "the all-host default's 0.435 s (1.36x SLOWER), 288 "
+                 "dispatches against 0. The old pair here was 0.349 s against "
+                 "0.244 s and 337 against 49; `gemm,attn` against `gemm` "
+                 "reproduces the first, and the missing one dispatch is the "
+                 "patch embed, which `conv` owns now. Correctness on the full "
+                 "1000-way probability row, against that same reference arm: "
+                 "relfro 4.384e-03, cos 0.999993, max|d| 2.1e-03, label and "
+                 "top-5 identical, top-10 centered-logit shift under 1.9e-02 "
+                 "-- the 197-position row, so nothing here rests on the seq 64 "
+                 "the older notes stopped at. On this image top-1 stays "
+                 "`minibus` at 0.63385, dp 4.0e-03 from the default. The cost "
+                 "above 64 positions is this number now, measured rather than "
+                 "left open."),
         "mproj": (ABSENT, "a mel filter bank is part of an " + _NO_AUDIO + "."),
         "fft": (ABSENT, "a 400-point transform is part of an " + _NO_AUDIO + "."),
         "logit": (BLOCKED,
@@ -484,6 +622,14 @@ KIND_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
                   "cost as a host matvec, so the point is moot for speed.)"),
     },
     "pose": {
+        "gemm": (ABSENT,
+                 "every weighted operation in this network is a convolution, so there is no "
+                 "per-layer projection for a tenth code to name; the set stands at nine "
+                 "here. tools/pack/packers/pose.py only ever dispatches a node whose op_type is "
+                 "`Conv`, and its GRAPH_OPS is {Conv, Mul, Sigmoid, Add, Concat, Split, MaxPool, "
+                 "Resize} with no MatMul in it; the 1x1 detection head is a convolution too. "
+                 "Nothing is missing: `conv` already names every matrix multiply this graph "
+                 "contains."),
         "conv": (HONOURS,
                  "the 72 dispatched convolutions, on the pose stream set's own "
                  "convNNxMM streams (a shim has 16 DMA buffer descriptors, which "
@@ -519,6 +665,14 @@ KIND_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
     # 58-node hand-landmark network -- which is why this row is the only one
     # whose `conv` cell is blocked rather than honoured: see it.
     "hands": {
+        "gemm": (ABSENT,
+                 "every weighted operation in this network is a convolution, so there is no "
+                 "per-layer projection for a tenth code to name; the set stands at nine "
+                 "here. tools/pack/packers/hands.py is Conv-only at every site that could "
+                 "dispatch a node -- FUSIBLE is (Conv, Add) and its dispatch loop tests op_type "
+                 "== Conv -- and the graph is those 100 dense convolutions `conv` speaks for. "
+                 "Nothing is missing: `conv` already names every matrix multiply this graph "
+                 "contains."),
         "conv": (HONOURS,
                  "It dispatches, and it is 1.8x SLOWER here. Both are "
                  "measured, and both belong in the same cell.\n\n"
@@ -597,6 +751,13 @@ KIND_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
     # 120-node pose-landmark network -- and one NEW operation, DepthToSpace, which
     # is what builds the detector's three pyramid levels out of one 7x7 map.
     "mppose": {
+        "gemm": (ABSENT,
+                 "every weighted operation in this network is a convolution, so there is no "
+                 "per-layer projection for a tenth code to name; the set stands at nine "
+                 "here. tools/pack/packers/mppose.py rejects a dispatch target whose op_type is "
+                 "not Conv by name -- it collects the offenders and refuses rather than skipping "
+                 "them -- and the graph is those 161 convolutions `conv` speaks for. Nothing is "
+                 "missing: `conv` already names every matrix multiply this graph contains."),
         "conv": (HONOURS,
                  "It dispatches, and it is 2.4x SLOWER here, and it does NOT "
                  "agree with the host path to within a pixel. All three are "
@@ -706,6 +867,26 @@ KIND_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
 # exist.
 MODEL_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
     "embeddinggemma-300m": {
+        # The honest hole this cell closes: the encoder dispatched its 96 GEMMs
+        # whatever the reader typed, so there was no status that could be told
+        # truthfully.
+        "gemm": (HONOURS,
+                 "the four per-layer GEMMs -- qkv, attn_out, ffn_up, ffn_down "
+                 "across 24 layers, 96 dispatches -- behind `--npu-ops gemm` "
+                 "like every other architecture. GemmaNpuEncoder::gemm asks "
+                 "the same app::op_on_array(\"gemm\") BertEncoder::gemm does, "
+                 "and the two FFN fusions that write the NEXT GEMM's A operand "
+                 "into the design's own buffer are gated on it as well: with "
+                 "the GEMM on this process they have no reader, so they are "
+                 "simply not taken and GeGLU computes into a real buffer "
+                 "instead. MEASURED, arch 1, bf16, `--prefix \"\"`, "
+                 "end-to-end wall at 4 texts / 8 texts: default 0 dispatches "
+                 "at 0.69 s / 0.95 s, `gemm` 96 dispatches at 0.10 s / 0.18 s "
+                 "-- 6.9x and 5.3x FASTER. Correctness against the same "
+                 "encoder with its GEMMs on this process, 4 texts: relfro "
+                 "5.184e-03, min cosine 0.999982595, max|d| 7.95e-04. This "
+                 "cell could not be given a status before, and that is exactly "
+                 "what the hole was: the 96 happened anyway."),
         "gelu": (BLOCKED,
                  "GeGLU computes the activation INSIDE the gated path, between "
                  "ffn_up and ffn_down, so there is no separate pass for a "
@@ -719,7 +900,8 @@ MODEL_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
                  "gemma normalises with RMSNorm, not LayerNorm: no mean pass, no "
                  "beta, its own rms_norm_eps. kernels/layernorm.cc is "
                  "parameterised only by -DLN_COLS/-DLN_EPS/-DLN_ROWS, so this is "
-                 "a different kernel body, a new design kind and a NINTH code. "
+                 "a different kernel body, a new design kind and a code of "
+                 "its own, since the set is at nine already. "
                  "It is deliberately not done: that would make the code set "
                  "larger and less uniform -- three of the four transformer "
                  "architectures would carry a norm code and one would not. "
@@ -734,17 +916,21 @@ MODEL_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
                   "n_kv = 512 (the sliding window, padded to 576 against "
                   "lcm(tile_k, tile_n)=192) rather than the container's 2048. "
                   "MEASURED on embeddinggemma-300m, arch 1: the attention "
-                  "column of the breakdown goes from 21 ms on the host path to "
-                  "1497 ms with `softm` -- the host figure is 4 texts (42 ms "
-                  "at 8), while softmax itself is flat in the request count "
-                  "(1517 ms at 4 texts, 1559 at 8) because the design is paid "
-                  "in its padded row width rather than in rows touched -- with "
-                  "96 dispatches becoming 96 + 24 softmax ones, at relfro "
-                  "6.227e-03 against the host vectors. Asking for "
+                  "column of the breakdown goes from 16 ms at the default to "
+                  "1488 ms with `gemm,softm` -- 4 texts; at 8 it is 30 -> "
+                  "1579 -- while plain `--npu-ops softm`, the four GEMMs on "
+                  "this process, gives 1478 / 1519 for the same reason the 8 "
+                  "is flat: the design is paid in its padded row width rather "
+                  "than in rows touched. Dispatches, 4 texts / 8: plain "
+                  "`softm` 0 + 24 softmax, `gemm,softm` 96 + 24. "
+                  "Correctness, 4 texts: relfro 7.249e-03 against the default "
+                  "arm, min cosine 0.999958634, max|d| 1.10e-03. Asking for "
                   "`attn,softm` at once is the outlier and is stated as "
-                  "measured: 18711 ms and 672 + 288 dispatches at 4 texts, "
-                  "relfro 6.664e-03, and 37.7 s of wall at 8. The cause is "
-                  "one line long -- "
+                  "measured: `gemm,attn,softm` is 18691 ms of attention column "
+                  "and 18.80 s of wall at 4 texts, 37304 ms and 37.49 s at 8, "
+                  "672 + 288 dispatches at 4 and 1248 + 576 at 8, against "
+                  "`gemm,attn`'s 0.45 s; plain `attn,softm` is 19.86 s / "
+                  "39.13 s. The cause is one line long -- "
                   "NpuAttention calls the softmax per head per chunk while "
                   "every call fills the design's whole 12288-row capacity -- "
                   "and it is the reason this flag should be wanted for "
@@ -773,17 +959,20 @@ MODEL_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
                  "computes local attention. RoPE is applied to the qkv buffer "
                  "before the pass runs, so the array's A operand is the "
                  "post-RoPE activations and nothing has to move it. MEASURED "
-                 "here rather than borrowed from Whisper: on "
-                 "embeddinggemma-300m, 4 texts, arch 1, the attention column "
-                 "of the breakdown goes 21 ms (host) -> 358 ms (`attn`), 96 "
-                 "dispatches becoming 672, at relfro 5.735e-03 against the "
-                 "host vectors -- 17x slower on this model, where Whisper's "
-                 "own attn is 4.6x. The text count is part of the measurement "
-                 "because this column scales with the query rows: the same "
-                 "run over 8 texts is 708 ms and 1248 dispatches, so match "
-                 "the dispatch count before comparing milliseconds. Slower on "
-                 "both, so this code makes the model runnable on the array, "
-                 "not faster."),
+                 "here rather than borrowed from Whisper, embeddinggemma-300m, "
+                 "arch 1, attention column of the breakdown at 4 texts / 8 "
+                 "texts: default 16 / 30 ms, `gemm` 19 / 47, `gemm,attn` 356 "
+                 "/ 701 with 672 / 1248 dispatches against that arm's 96. The "
+                 "same pair without `gemm` is 357 / 705 with 576 / 1152 "
+                 "dispatches against the default's 0 -- 17x slower here, where "
+                 "Whisper's own attn is 7.0x. End-to-end wall for that plain "
+                 "pair is 1.14 s / 1.90 s against 0.69 s / 0.95 s. The text "
+                 "count is part of the measurement because this column scales "
+                 "with the query rows, so match the dispatch count before "
+                 "comparing milliseconds. Correctness against the default arm, "
+                 "4 texts: relfro 6.777e-03, min cosine 0.999969959, max|d| "
+                 "9.3e-04. Slower on both, so this code makes the model "
+                 "runnable on the array, not faster."),
         "conv": (ABSENT, "names Whisper's conv1/conv2 -- " + _NO_AUDIO + "."),
         "mproj": (ABSENT, "a mel filter bank is part of an " + _NO_AUDIO + "."),
         "fft": (ABSENT, "a 400-point transform is part of an " + _NO_AUDIO + "."),

@@ -6,7 +6,7 @@
 // THE DEFAULT PATH OPENS NO DEVICE, AND THE OTHER ONE DOES NOT EXIST
 // ---------------------------------------------------------------
 // Same contract as arch=6 and arch=7: Session(...) with no artifacts is a
-// host-only session, and `npuembeddings pose` on an arch=8 container and the gate
+// host-only session, and `npuimage mppose` on an arch=8 container and the gate
 // both work on a machine with no /dev/accel0 at all.
 //
 // What differs is the second half. arch=6's --npu-ops conv dispatches 72

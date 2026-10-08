@@ -5,7 +5,7 @@
 //	POST /v1/pose   multipart/form-data, one `image` part (PNG or JPEG),
 //	                optional `conf`, `iou`, `kpt`, `max_det`
 //
-// The answer is byte for byte what `npuembeddings pose ... --json` prints: both
+// The answer is byte for byte what `npuimage pose ... --json` prints: both
 // call npue::pose::result_json. That is stated as a contract rather than left to
 // inspection because the two are compared against each other -- the CLI's is
 // what somebody reads to decide whether the model is right, the endpoint's is
