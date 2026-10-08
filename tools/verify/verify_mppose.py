@@ -102,6 +102,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "lib"))
 
 from npue import Reader  # noqa: E402
+import conv_quant  # noqa: E402
 
 ARCH_MEDIAPIPE_POSE = 8
 ARCH_STRING = "mediapipe_pose_det_ssd_lm_regress"
@@ -118,7 +119,17 @@ POSE_ONNX = os.path.join(MODEL_DIR, "pose_estimation_mediapipe_2023mar.onnx")
 # models/*.npue, so the container existed and no table could see it.
 CONTAINER_DEFAULT = os.path.join(REPO, "models", "mediapipe-pose.npue")
 
-CONTAINER = CONTAINER_DEFAULT
+# A ONE-ELEMENT LIST and not a plain string, because main() points
+# it at the container the caller named with --container and the
+# sections below read it as a global: a bare string assigned in
+# main() would be a local, and sections 3 and 4 would keep
+# verifying the default container while reporting the quantised
+# one -- the same reason verify_hands.py's CONTAINER is a list.
+# The default is the flat path every other model uses (the move
+# out of models/mediapipe-pose/ is written out at length in
+# tools/verify/verify_hands.py, where the same thing happened
+# for arch=7).
+CONTAINER = [CONTAINER_DEFAULT]
 # The SAME container with the pre-tiled bf16 B panels staged, which is what the
 # array path dispatches against. It is a separate file on purpose: staging the
 # panels takes it from 18.3 MB to 29.9 MB, and reusing one path for both would
@@ -164,6 +175,20 @@ WORLD_TOL_MEAN = 5e-3      # measured 0.00216 m
 WORLD_TOL_MAX = 3e-2       # measured 0.01514 m
 MASK_TOL_FRAC = 5e-3       # measured 1.15e-03 of the non-zero count
 
+# The container's own statement of its CONV-WEIGHT precision, read
+# from its config by main(): absent or "f32" means the checkpoint's
+# own floats and every gate in this file applies. "bf16", "i8" or
+# "i4" means the convolutions hold quantised weights, and the
+# sections that compare the container against onnxruntime (1),
+# against the numbers recorded from the checkpoint's floats (3) and
+# against the fixed fp32 container's array path (4) turn into
+# measurements: a tolerance measured on those floats is not a bar a
+# quantised container can clear, so what it can do is report how
+# far the quantisation moved it. Section 2 stays a gate at every
+# precision -- the anchor table is not a conv weight and is exact
+# whatever the weights are made of.
+_QUANT = {"dtype": None}
+
 
 class Fail(Exception):
     pass
@@ -175,12 +200,35 @@ def check(cond, msg):
     return True
 
 
+def _gate(cond, msg):
+    """A check that a quantised container turns into a measurement.
+
+    The counts and tolerances of sections 1, 3 and 4 are measured on
+    fp32 containers: the container against the checkpoint's own
+    floats, on one frame, at thresholds the fp32 residuals fit
+    under. A quantised container holds quantised weights, so those
+    numbers are what the quantisation COSTS -- including finding no
+    person at all, which happens at i4 -- and a container that
+    cannot clear a bar written for floats it no longer holds has to
+    say so, not fail a gate. The check still runs and its failure is
+    still printed, in full, because the size of the deviation is the
+    measurement; it just does not stop the run. Section 2, which is
+    exact, never routes through here.
+    """
+    if cond:
+        return True
+    if _QUANT["dtype"] is None:
+        raise Fail(msg)
+    print(f"     measured: {msg}")
+    return False
+
+
 def _need(path, what):
     if not os.path.exists(path):
         raise Fail(f"{what} is not there: {path}\n"
                    f"  Pack it with `python tools/pack/pack_npue.py "
                    f"--mppose-onnx models/mediapipe-pose --out "
-                   f"{CONTAINER}`, or fetch the two checkpoints into "
+                   f"{CONTAINER[0]}`, or fetch the two checkpoints into "
                    f"models/mediapipe-pose/ -- that directory's CHECKPOINT.json "
                    f"names both repositories and both sha256s.")
 
@@ -497,17 +545,27 @@ def section_1(reader, verbose):
               f"{pfx}: {len(want) - len(used)} of onnxruntime's outputs were "
               f"never matched")
         for name, rel in rows:
-            if verbose or rel > 1e-5:
+            if _QUANT["dtype"] is not None:
+                print(f"     measured   {name:<12} peak-rel {rel:.3e}")
+            elif verbose or rel > 1e-5:
                 print(f"     ok   {name:<12} peak-rel {rel:.3e}")
-        check(worst <= TOL_PEAK_REL,
+        _gate(worst <= TOL_PEAK_REL,
               f"{pfx}: the packed graph reaches {worst:.3e} of onnxruntime's "
               f"peak, above the {TOL_PEAK_REL:.0e} this section allows. The "
               f"per-output numbers are above. A number of the ORDER OF ONE here "
               f"is a rearranged graph that still has the right shape and a "
               f"plausible range: ONNX's DepthToSpace order is the one that does "
               f"it, and `--inject` makes this exact check catch that case.")
-    print(f"     both networks reproduce onnxruntime on all seven outputs "
-          f"(worst {TOL_PEAK_REL:.0e} allowed)")
+        if _QUANT["dtype"] is not None:
+            print(f"     {pfx} worst peak-rel {worst:.3e} -- MEASURED, "
+                  f"not gated: the conv weights are "
+                  f"{_QUANT['dtype']}, so this is what the "
+                  f"quantisation costs against onnxruntime's floats. "
+                  f"A number of the order of ONE is still a rearranged "
+                  f"graph, and that the section above would have caught.")
+    if _QUANT["dtype"] is None:
+        print(f"     both networks reproduce onnxruntime on all seven outputs "
+              f"(worst {TOL_PEAK_REL:.0e} allowed)")
 
 
 # ==============================================================================
@@ -633,6 +691,14 @@ def section_4(reader, verbose):
     architecture's geometry rather than of the array, and which has no tolerance
     here because any tolerance would be a claim that the two paths are
     interchangeable. They are not, and this file says so with numbers instead.
+
+    A QUANTISED CONTAINER CHANGES WHAT THE COMPARISON IS. The host side is
+    THIS container and the array side is the fixed fp32 container with bf16
+    panels, so the deltas are then across precisions: measured and reported,
+    not gated, including the count -- an i4 container can find no person at
+    all. What stays gated at every precision is inside _run_array: that the
+    array path runs and dispatches, which is a property of the design set,
+    and the design set is the same at every precision.
     """
     print("  4. the array path against the host path, same frame")
     art = os.path.join(REPO, "runtime", "artifacts", "mediapipe-pose",
@@ -660,38 +726,63 @@ def section_4(reader, verbose):
             f"and note that --npu needs --device: N pads to tile_n*cols and cols "
             f"is a property of the array, so a panel built without one is not a "
             f"panel the design can read.")
-    host, _ = _run_runtime(CONTAINER)
+    host, _ = _run_runtime(CONTAINER[0])
     arr, line = _run_array(NPU_CONTAINER)
 
-    hd, ad = host["detections"][0], arr["detections"][0]
-    check(len(host["detections"]) == len(arr["detections"]) == 1,
+    # The host side is THIS container; the array side is the fixed
+    # fp32 container with bf16 panels (see NPU_CONTAINER above). For
+    # an fp32 container the two are the same precision and the deltas
+    # below are gated at the bf16 panel budget. For a quantised one
+    # the comparison is across precisions, so the deltas are measured
+    # and reported instead -- with the count included, because an i4
+    # container can find no person at all and that is a fact about
+    # the quantisation, not about a graph section 1 already pinned.
+    both = (host["detections"] and arr["detections"]
+            and host["poses"] and arr["poses"])
+    _gate(len(host["detections"]) == len(arr["detections"]) == 1,
           f"the host found {len(host['detections'])} people and the array "
           f"{len(arr['detections'])}; the two paths must agree on the COUNT for "
           f"the rest of this section to mean anything")
-    ds = abs(hd["score"] - ad["score"])
-    check(ds <= 3e-3,
-          f"detector score differs by {ds:.3e}. The panels are bf16, so this is "
-          f"the expected order of magnitude; a larger one means the array is "
-          f"running something other than this network.")
-    dk = max(abs(hd["keypoints"][i][j] - ad["keypoints"][i][j])
-             for i in range(4) for j in range(2))
-    check(dk <= 3.0,
-          f"the detector's keypoints differ by {dk:.3f} px, outside the 3 px "
-          f"bf16 budget. These four points decide the landmark network's crop "
-          f"AND its rotation angle, so this number is what the pose difference "
-          f"below is made of.")
-    if verbose:
-        print(f"     detector  score within {ds:.1e}, keypoints within {dk:.2f} "
-              f"px -- bf16 panel precision")
+    if both:
+        hd, ad = host["detections"][0], arr["detections"][0]
+        ds = abs(hd["score"] - ad["score"])
+        _gate(ds <= 3e-3,
+              f"detector score differs by {ds:.3e}. The panels are bf16, so this is "
+              f"the expected order of magnitude; a larger one means the array is "
+              f"running something other than this network.")
+        dk = max(abs(hd["keypoints"][i][j] - ad["keypoints"][i][j])
+                 for i in range(4) for j in range(2))
+        _gate(dk <= 3.0,
+              f"the detector's keypoints differ by {dk:.3f} px, outside the 3 px "
+              f"bf16 budget. These four points decide the landmark network's crop "
+              f"AND its rotation angle, so this number is what the pose difference "
+              f"below is made of.")
+        if verbose:
+            print(f"     detector  score within {ds:.1e}, keypoints within {dk:.2f} "
+                  f"px -- bf16 panel precision")
 
-    ph, pa = host["poses"][0], arr["poses"][0]
-    lh = np.asarray(ph["landmarks"], np.float64)
-    la = np.asarray(pa["landmarks"], np.float64)
-    xy = np.abs(lh[:, :2] - la[:, :2]).max(axis=1)
-    dc = abs(ph["pose_confidence"] - pa["pose_confidence"])
-    print(f"     pose      landmarks mean {xy.mean():.1f} / median "
-          f"{np.median(xy):.1f} / max {xy.max():.1f} px, pose confidence "
-          f"{ph['pose_confidence']:.4f} against {pa['pose_confidence']:.4f}")
+        ph, pa = host["poses"][0], arr["poses"][0]
+        lh = np.asarray(ph["landmarks"], np.float64)
+        la = np.asarray(pa["landmarks"], np.float64)
+        xy = np.abs(lh[:, :2] - la[:, :2]).max(axis=1)
+        dc = abs(ph["pose_confidence"] - pa["pose_confidence"])
+        print(f"     pose      landmarks mean {xy.mean():.1f} / median "
+              f"{np.median(xy):.1f} / max {xy.max():.1f} px, pose confidence "
+              f"{ph['pose_confidence']:.4f} against {pa['pose_confidence']:.4f}"
+              + (" -- MEASURED across precisions, not gated"
+                 if _QUANT["dtype"] else ""))
+    else:
+        msg = (f"the host side found {len(host['detections'])} detection(s) "
+               f"and {len(host['poses'])} pose(s) on this frame, the array "
+               f"side {len(arr['detections'])} and {len(arr['poses'])}; "
+               f"with no pair on both sides there is no delta to measure")
+        if _QUANT["dtype"] is None:
+            raise Fail(msg + " -- on an fp32 container both sides find one "
+                       "person and one pose, so a missing pair is a fault, "
+                       "not a precision")
+        print(f"     measured: {msg}. The array side is the fixed fp32 "
+              f"container with bf16 panels; the host side is this "
+              f"{_QUANT['dtype']} container")
     print(f"     {line}")
     th = host["timings_ms"]["total"]
     ta = arr["timings_ms"]["total"]
@@ -702,7 +793,7 @@ def section_4(reader, verbose):
     # The registry cell says `honours` and says 2.4x slower. If a future design
     # set makes the array WINNER, this fails and the cell has to be rewritten --
     # which is the point of asserting a direction rather than a range.
-    check(ta > th,
+    _gate(ta > th,
           f"the array path is now {th / ta:.2f}x FASTER than the host "
           f"({ta:.0f} ms against {th:.0f} ms). That is a real result and a good "
           f"one, and the registry cell, NPU_OPS.md and NPU_MODELS.md all say the "
@@ -729,42 +820,56 @@ def section_3(reader, verbose):
                   else POSE_ONNX),
               f"{name}'s recorded checkpoint is not the one on disk")
 
-    got, _ = _run_runtime(CONTAINER)
+    got, _ = _run_runtime(CONTAINER[0])
 
-    check(len(got["detections"]) == gd["n_kept"],
-          f"the runtime found {len(got['detections'])} people and the recorded "
-          f"answer has {gd['n_kept']}. THIS IS THE ONE COUNTS CHECK. The "
-          f"detector's score and NMS thresholds come from the container, so a "
-          f"different count is either a different graph or a different "
-          f"threshold, and section 1 has already ruled out the graph.")
+    # Every comparison below is a distance from what the checkpoint's
+    # own floats produce, so a quantised container gets them as
+    # measurements: the counts included -- an i4 container can find
+    # no person at all, which is a fact about the quantisation,
+    # not about the graph that section 1 already pinned.
+    if not _gate(len(got["detections"]) == gd["n_kept"],
+                 f"the runtime found {len(got['detections'])} people and the recorded "
+                 f"answer has {gd['n_kept']}. THIS IS THE ONE COUNTS CHECK. The "
+                 f"detector's score and NMS thresholds come from the container, so a "
+                 f"different count is either a different graph or a different "
+                 f"threshold, and section 1 has already ruled out the graph."):
+        if not got["detections"]:
+            print("     the runtime found no person on this frame, so "
+                  "the detector's row and every pose number below have "
+                  "nothing to be compared against")
+            return
     d = got["detections"][0]
     row = gd["rows"][0]
-    check(abs(d["score"] - row[12]) <= DET_TOL_SCORE,
+    _gate(abs(d["score"] - row[12]) <= DET_TOL_SCORE,
           f"detector score {d['score']:.9f} against the recorded "
           f"{row[12]:.9f}, outside {DET_TOL_SCORE:.0e}")
     deltas = [abs(d["box"][i] - row[i]) for i in range(4)]
     deltas += [abs(d["keypoints"][k][j] - row[4 + 2 * k + j])
                for k in range(4) for j in range(2)]
-    check(max(deltas) <= DET_TOL_PX,
+    _gate(max(deltas) <= DET_TOL_PX,
           f"the detector's box or keypoints are {max(deltas):.5f} px from the "
           f"recorded row, outside {DET_TOL_PX} px")
     if verbose:
         print(f"     score {d['score']:.9f} vs {row[12]:.9f}; box and keypoints "
               f"within {max(deltas):.5f} px")
 
-    check(len(got["poses"]) == gp["n_persons"],
-          f"the runtime reported {len(got['poses'])} poses and the recorded "
-          f"answer has {gp['n_persons']}. The confidence gate is "
-          f"pose_conf_threshold, read from the container.")
+    if not _gate(len(got["poses"]) == gp["n_persons"],
+                 f"the runtime reported {len(got['poses'])} poses and the recorded "
+                 f"answer has {gp['n_persons']}. The confidence gate is "
+                 f"pose_conf_threshold, read from the container."):
+        if not got["poses"]:
+            print("     the runtime reported no pose, so the pose "
+                  "numbers below have nothing to be compared against")
+            return
 
     p, q = got["poses"][0], gp["poses"][0]
-    check(abs(p["pose_confidence"] - q["conf"]) <= POSE_TOL_CONF,
+    _gate(abs(p["pose_confidence"] - q["conf"]) <= POSE_TOL_CONF,
           f"pose confidence {p['pose_confidence']:.9f} against the recorded "
           f"{q['conf']:.9f}, outside {POSE_TOL_CONF:.0e}")
 
     want_bbox = [q["bbox"][0][0], q["bbox"][0][1], q["bbox"][1][0], q["bbox"][1][1]]
     bb = [abs(p["bbox"][i] - want_bbox[i]) for i in range(4)]
-    check(max(bb) <= LM_TOL_XY_MAX,
+    _gate(max(bb) <= LM_TOL_XY_MAX,
           f"the reported pose box is {max(bb):.4f} px away, outside "
           f"{LM_TOL_XY_MAX} px")
 
@@ -777,48 +882,50 @@ def section_3(reader, verbose):
     z = np.abs(cl[:, 2] - gl[:, 2])
     vis = np.abs(cl[:, 3] - gl[:, 3]).max()
     pres = np.abs(cl[:, 4] - gl[:, 4]).max()
-    check(xy.mean() <= LM_TOL_XY_MEAN,
+    _gate(xy.mean() <= LM_TOL_XY_MEAN,
           f"landmarks differ by {xy.mean():.4f} px on average, outside "
           f"{LM_TOL_XY_MEAN}")
-    check(xy.max() <= LM_TOL_XY_MAX,
+    _gate(xy.max() <= LM_TOL_XY_MAX,
           f"the worst landmark is {xy.max():.4f} px out, outside "
           f"{LM_TOL_XY_MAX}. On this frame the four worst are the far-side "
           f"foot, ankle, heel and knee, which is where a different resampler "
           f"and a different network disagree most.")
-    check(z.mean() <= LM_TOL_Z_MEAN,
+    _gate(z.mean() <= LM_TOL_Z_MEAN,
           f"depth differs by {z.mean():.4f} px on average, outside "
           f"{LM_TOL_Z_MEAN}")
-    check(z.max() <= LM_TOL_Z_MAX,
+    _gate(z.max() <= LM_TOL_Z_MAX,
           f"the worst depth is {z.max():.4f} px out, outside {LM_TOL_Z_MAX}")
-    check(vis <= LM_TOL_VIS,
+    _gate(vis <= LM_TOL_VIS,
           f"visibility differs by {vis:.3e}, outside {LM_TOL_VIS:.0e}")
-    check(pres <= LM_TOL_PRES,
+    _gate(pres <= LM_TOL_PRES,
           f"presence differs by {pres:.3e}, outside {LM_TOL_PRES:.0e}")
 
     cw = np.abs(np.asarray(p["world_landmarks"], np.float64)
                 - np.asarray(q["world"], np.float64)).max(axis=1)
-    check(cw.mean() <= WORLD_TOL_MEAN,
+    _gate(cw.mean() <= WORLD_TOL_MEAN,
           f"world points differ by {cw.mean():.5f} m on average, outside "
           f"{WORLD_TOL_MEAN}")
-    check(cw.max() <= WORLD_TOL_MAX,
+    _gate(cw.max() <= WORLD_TOL_MAX,
           f"the worst world point is {cw.max():.5f} m out, outside "
           f"{WORLD_TOL_MAX}")
 
     nz_cpp = p["segmentation_mask"]["nonzero"]
     nz_want = q["mask_nnz"]
     frac = abs(nz_cpp - nz_want) / max(nz_want, 1)
-    check(frac <= MASK_TOL_FRAC,
+    _gate(frac <= MASK_TOL_FRAC,
           f"the mask has {nz_cpp} non-zero pixels against the recorded "
           f"{nz_want}, {frac:.4%} away, outside {MASK_TOL_FRAC:.2%}. The mask is "
           f"a binary silhouette whose boundary is where a resampler and a "
           f"threshold disagree first, so this counts boundary pixels and says "
           f"nothing about the interior.")
 
-    print(f"     detector  score within {abs(d['score'] - row[12]):.1e}, "
-          f"box+keypoints within {max(deltas):.5f} px")
-    print(f"     pose      conf within {abs(p['pose_confidence'] - q['conf']):.1e}"
+    measured = " -- MEASURED against the recording, not gated" \
+        if _QUANT["dtype"] else ""
+    print(f"     detector  score delta {abs(d['score'] - row[12]):.1e}, "
+          f"box+keypoints delta {max(deltas):.5f} px{measured}")
+    print(f"     pose      conf delta {abs(p['pose_confidence'] - q['conf']):.1e}"
           f", landmarks mean {xy.mean():.3f} / median {np.median(xy):.3f} / "
-          f"max {xy.max():.3f} px, world max {cw.max():.5f} m")
+          f"max {xy.max():.3f} px, world max {cw.max():.5f} m{measured}")
     print(f"               mask {nz_cpp} non-zero against {nz_want} ({frac:.3%})")
 
 
@@ -948,7 +1055,11 @@ def main():
     import argparse
     ap = argparse.ArgumentParser(
         description="verify an arch=8 MediaPipe Pose container and the C++ "
-                    "runtime built from it")
+                    "runtime built from it. A container whose config declares "
+                    "a quantised conv_weight_dtype gets sections 1, 3 and 4 "
+                    "as measurements -- the fp32 tolerances are not a bar "
+                    "quantised weights can clear -- while section 2, the "
+                    "exact anchor table, stays a gate")
     ap.add_argument("--container", default=None,
                     help="the .npue to check (default: models/mediapipe-pose.npue)")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -958,7 +1069,8 @@ def main():
                          "unbroken code passes")
     args = ap.parse_args()
 
-    container = args.container or CONTAINER
+    container = args.container or CONTAINER[0]
+    CONTAINER[0] = container
     _need(container, "the packed container")
     _need(IMAGE, "the golden's photograph")
     _need(GOLDEN_DET, "the recorded detector answer")
@@ -985,6 +1097,13 @@ def main():
           f"landmark net divides by 255 and stops")
     check(reader.config.get("pose_image_std") == [1.0] * 3,
           f"pose_image_std is {reader.config.get('pose_image_std')}")
+    # The container's own statement of its conv-weight precision.
+    # Absent means the checkpoint's own floats; "f32" says the same
+    # thing in words. Anything else is a quantised container, and
+    # _QUANT is what turns sections 1, 3 and 4 into measurements.
+    _dtype = conv_quant.conv_weight_dtype(
+        reader.config.get("conv_weight_dtype", "f32"))
+    _QUANT["dtype"] = None if _dtype == "f32" else _dtype
 
     if args.inject:
         _need(DET_ONNX, "the person detector checkpoint")
@@ -1016,15 +1135,28 @@ def main():
           f"{sum(1 for o in json.loads(reader.config['det_graph']) if o['op'] == 'd2s')}"
           f" + "
           f"{sum(1 for o in json.loads(reader.config['pose_graph']) if o['op'] == 'd2s')}"
-          f" d2s")
+          f" d2s, conv weights {_QUANT['dtype'] or 'f32'}")
     for fn in (section_1, section_2, section_3, section_4):
         fn(reader, args.verbose)
-    print("OK: the container holds these two checkpoints in this arrangement, "
-          "the anchor table is the one the packer verified against the zoo's "
-          "literal one, the C++ runtime reproduces the recorded answer, and the "
-          "array path dispatches against a design set checked in both "
-          "directions -- slower than the host and a different answer, both "
-          "measured and both in the registry cell.")
+    if _QUANT["dtype"] is None:
+        print("OK: the container holds these two checkpoints in this arrangement, "
+              "the anchor table is the one the packer verified against the zoo's "
+              "literal one, the C++ runtime reproduces the recorded answer, and the "
+              "array path dispatches against a design set checked in both "
+              "directions -- slower than the host and a different answer, both "
+              "measured and both in the registry cell.")
+    else:
+        print(f"MEASURED, NOT GATED, for the quantised parts: "
+              f"conv_weight_dtype is {_QUANT['dtype']}, so sections 1, 3 "
+              f"and 4 reported their deviations against onnxruntime, the "
+              f"recorded zoo answer and the fixed fp32 container's array "
+              f"path instead of holding them to tolerances measured on "
+              f"the checkpoint's own floats -- those numbers above are the "
+              f"cost of the quantisation, and a container that found no "
+              f"person said so where it happened. What still gated, and "
+              f"held: section 2, the anchor table, which is exact and is "
+              f"not a conv weight; the shape and hash checks inside the "
+              f"other sections; and the array path's dispatch itself.")
 
 
 if __name__ == "__main__":

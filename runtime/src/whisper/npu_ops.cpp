@@ -33,6 +33,41 @@ void NpuGemm::alloc_buffers() {
 
 size_t NpuGemm::stage_operand(const npue::File &model,
                               const std::string &name) {
+  // A HOST-LAYOUT CONTAINER (`--dtype f32`, gemm_layout "host"): row-major
+  // F32 operands, no panel and no layout_hash, so there is nothing for the DMA
+  // to read. The host half of this call needs only the TENSOR NAME (host_w_ is
+  // a recipe, not bytes), so that is all that is written -- and the array half
+  // is refused by name instead of falling through to a layout check whose
+  // message ("repack with tools/pack/pack_npue.py") would blame the packer for
+  // a container that was packed exactly as asked.
+  //
+  // Absent means PRETILED: the key is arch=1's alone in older containers and
+  // only the spelled-out value flips the path.
+  bool host_layout = false;
+  try {
+    host_layout = model.config_string("gemm_layout") == "host";
+  } catch (const std::exception &) {
+    host_layout = false;
+  }
+  if (host_layout) {
+    if (app::op_on_array("gemm"))
+      throw std::runtime_error(
+          name + ": this container is `--dtype f32` (gemm_layout \"host\") -- "
+          "its GEMM operands are row-major F32 for the CPU, and the MMAC "
+          "multiplies bf16 and int8 only. --npu-ops gemm is refused rather "
+          "than silently ignored; drop the flag, or repack with --dtype bf16/"
+          "i8 for the array.");
+    // stage() numbers slots from zero within this design's buffer, so a value
+    // this far out is one it cannot produce; nothing binds it (the bind is the
+    // array path, which has already refused above).
+    static constexpr size_t kHostSlot = static_cast<size_t>(1) << 40;
+    const size_t wslot = kHostSlot + host_w_.size();
+    HostWeight hw;
+    hw.model = &model;
+    hw.name = name;
+    host_w_[wslot] = std::move(hw);
+    return wslot;
+  }
   const std::string &want = d_.info().b_layout_hash;
   const std::string &got = model.info(name).layout_hash;
   if (want.empty())

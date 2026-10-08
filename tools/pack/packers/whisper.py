@@ -194,6 +194,56 @@ class _Int8:
                 f"({worst[0]})")
 
 
+class _Host:
+    """The `--dtype f32` emitter: row-major F32 [K, N], no tiling, no scales.
+
+    The SAME two methods as _Int8 -- `emit(w, name, mat, key, fold)` and
+    `report()` -- because every call site below branches on `if ctx` and not on
+    the dtype family: a third branch at those six sites would be six more
+    places for the packer's three schemes to disagree about which one wrote
+    which operand.
+
+    `key` is the calibration lookup and is ignored here: an f32 operand is the
+    checkpoint's own precision, so there is nothing to calibrate and no error
+    to report. `fold` is accepted for the same reason `_Int8` accepts it -- a
+    call site passes it whether or not it applies -- and applied in fp32
+    before the write, exactly as the bf16 path does.
+
+    The tensor's layout kind is `gemm_b_host`, the string pack_gemma's host
+    branch and tools/pack/pack_npue.py's add_gemm_b_host() both use, so a
+    reader cannot tell which of the four packers wrote it -- which is the
+    point: the format is one thing, not five.
+    """
+
+    def emit(self, w, name, mat, key=None, fold=None):
+        mat = np.ascontiguousarray(mat, dtype=np.float32)
+        if fold is not None:
+            mat = mat * np.float32(fold)
+        K, N = mat.shape
+        w.add(name, mat.reshape(-1), "F32", "gemm_b_host", [K, N])
+
+    def report(self) -> str:
+        return ("  f32: row-major operands, no quantisation, GEMM on the host "
+                "(the array multiplies bf16 and int8 only)")
+
+
+def _operand_note(host_only: bool, int8: bool) -> str:
+    """The one `fusions` entry that names the operand scheme, for this packer.
+
+    Three schemes and one sentence, chosen in one place so the container's own
+    prose cannot describe the array's panel while the bytes are row-major --
+    the disagreement tasks/0078 fixed for `a_dtype`, in the strings.
+    """
+    if host_only:
+        return ('GEMM operands row-major F32 (gemm_layout "host"), GEMM on '
+                "the CPU -- the array multiplies bf16 and int8 only, so "
+                "--npu-ops gemm is refused on this container by name")
+    if int8:
+        return ("GEMM operands pre-tiled int8 block_panel (64,32) with a "
+                "per-output-channel scale and a SmoothQuant factor")
+    return "GEMM operands pre-tiled bf16 block_panel (64,32)"
+
+
 def _fuse_qkv(w, name, st, prefix, hidden, scale, fold_scale=True,
               mac=MAC_DEFAULT, ctx=None, key=None):
     """Fuse q|k|v for an attention that has a bias on q and v but NOT on k.
@@ -375,7 +425,7 @@ def pack_whisper(model_dir, out, max_seq=None, max_target=None,
                  fold_scale=True, dry_run=False, device=None,
                  int8=False, int4_group=None, int8_alpha=0.5, int8_clips=8,
                  int8_corpus=None,
-                npue_args=None):
+                npue_args=None, host_only=False):
     # The B operand's dtype for this whole container, and therefore the layout
     # hash: switched once, here, so the writer, `add_gemm_b` and the printed
     # report cannot disagree about which one they wrote. A disagreement would be
@@ -393,6 +443,16 @@ def pack_whisper(model_dir, out, max_seq=None, max_target=None,
             f"quantise (int8=False); int4 is the int8 datapath with 4-bit "
             f"weights, so it has nothing to attach to. Refusing rather than "
             f"emitting a bf16 container that ignores it.")
+    if host_only and int8:
+        # Two answers to one question: an f32 container is the checkpoint's own
+        # precision on the CPU, an int8 one is a pre-tiled panel for the array.
+        # pack_gemma's guard, restated here rather than shared, because these
+        # modules are runnable as scripts as well as imported.
+        raise SystemExit(
+            "--dtype f32 and the int8 datapath are two answers to the same "
+            "question: f32 is row-major F32 on the host, i8 is a pre-tiled "
+            "panel for the array. Refusing rather than dropping one. int8="
+            "False for the f32 control, or drop --dtype f32.")
     model_dir = Path(model_dir)
     # int8's sub-tile is NOT bf16's on npu1 -- see npue.MAC_BY_DEVICE. The
     # dtype is required by mac_for_device for that reason.
@@ -499,7 +559,12 @@ def pack_whisper(model_dir, out, max_seq=None, max_target=None,
     # exists at all. `I8_DTYPE` is switched here rather than inside add_gemm_b so
     # that the layout hash, the writer and the printed report all read one value.
     ictx = None
-    if int8:
+    if host_only:
+        # FIRST, and exclusive: there is no calibration to run for an operand
+        # that is the checkpoint's own precision, so I8_DTYPE stays BF16 here
+        # and the config below overrides a_dtype to "f32" from `host_only`.
+        ictx = _Host()
+    elif int8:
         I8_DTYPE = "I8"
         import whisper_int8
         clips, corpus_label = whisper_int8.load_or_make_corpus(
@@ -516,6 +581,13 @@ def pack_whisper(model_dir, out, max_seq=None, max_target=None,
     config = {
         "arch": "whisper_encdec_gelu",
         "kind": "stt",
+        # The layout the operands are stored in, stated by the container: "host"
+        # is plain row-major F32 for runtime/include/common/host_b.hpp (a
+        # self-describing file, so the runtime needs no hint from the packer),
+        # "pretiled_bf16" is the array's block_panel. The MMAC multiplies bf16
+        # and int8 only, so `--npu-ops gemm` on a host container is refused by
+        # name at run time rather than ignored.
+        "gemm_layout": "host" if host_only else "pretiled_bf16",
         "source_repo": f"openai/{model_dir.name}",
         "source_sha256": src_sha,
         "d_model": d,
@@ -548,7 +620,7 @@ def pack_whisper(model_dir, out, max_seq=None, max_target=None,
         # GEMM operand is int8 with a per-output-channel scale and a
         # SmoothQuant factor, and the design set must be exported with --int8 or
         # the runtime refuses the container by name when the two disagree.
-        "a_dtype": I8_DTYPE,
+        "a_dtype": "f32" if host_only else I8_DTYPE,
         **({"int4_group": int4_group} if int4_group is not None else {}),
         "fusions": [
             "qkv fused into one [d,3d] operand per attention; the K half of "
@@ -556,10 +628,7 @@ def pack_whisper(model_dir, out, max_seq=None, max_target=None,
             "cross-attention K|V fused into [d,2d]; its Q is separate because "
             "its A operand is the decoder state",
             "1/sqrt(head_dim) folded into every Q weight and Q bias",
-            ("GEMM operands pre-tiled int8 block_panel (64,32) with a "
-             "per-output-channel scale and a SmoothQuant factor"
-             if int8 else
-             "GEMM operands pre-tiled bf16 block_panel (64,32)"),
+            _operand_note(host_only, int8),
             "convs, LayerNorms, biases, embedding tables and the tokenizer "
             "table kept fp32 / raw",
             "the checkpoint's decoding policy (generation_config.json's "
@@ -681,18 +750,28 @@ def pack_whisper(model_dir, out, max_seq=None, max_target=None,
     st.close()
 
     if dry_run:
-        print(f"  would write {len(w.entries)} tensors "
-              f"({n_tiled} pre-tiled GEMM operands) to {out}")
+        print(f"  would write {len(w.entries)} tensors"
+              + ("" if host_only else f" ({n_tiled} pre-tiled GEMM operands)")
+              + f" to {out}")
         return 0
 
-    _embed(w, model_dir.name, "bf16", npue_args, "whisper")
+    # THE DATAPATH IS THIS PACK'S, not always bf16. It was hardcoded, so an
+    # int8 container embedded the bf16 set beside it -- and the runtime prefers
+    # the embedded one (stt_mode reads a_dtype out of it to decide int8_design),
+    # which means the file came with the WRONG design glued in: bf16 design,
+    # i8 operands, refused at load by layout hash and by a_elem_bytes. The
+    # int8 and int4 designs exist under <model>-i8 (export_gemm_rtp --int8) and
+    # find_design_dir looks for exactly that spelling when datapath is "i8".
+    _embed(w, model_dir.name, "i8" if (int8 or int4_group) else "bf16",
+           npue_args, "whisper")
     info = w.write(out)
     total = Path(out).stat().st_size
     print(f"\n  arch       : 4 whisper_encdec_gelu  d_model {d}, "
           f"{enc_layers}+{dec_layers} layers, {heads} heads x {head_dim}, "
           f"{mel} mel bins, vocab {vocab}")
     print(f"  source     : {src_sha[:16]}...  (openai/{model_dir.name})")
-    print(f"  tensors    : {len(w.entries)}  ({n_tiled} pre-tiled GEMM operands)")
+    print(f"  tensors    : {len(w.entries)}"
+          + ("" if host_only else f"  ({n_tiled} pre-tiled GEMM operands)"))
     print(f"  tokenizer  : {len(blob) / 1e6:.2f} MB table, "
           f"{len(vm.ids)} ids, {len(vm.merges)} merges")
     print(f"  decoding   : {config['suppress_tokens']} suppressed ids, "
@@ -702,8 +781,14 @@ def pack_whisper(model_dir, out, max_seq=None, max_target=None,
     print(f"  file       : {out}  ({total / 1e6:.2f} MB)")
     if ictx:
         print(ictx.report())
-    print(f"  layout_hash: "
-          f"{layout_hash(gemm_b_layout(TILE_K, TILE_N, mac[0], mac[1], dtype=I8_DTYPE))[:16]}..."
-          f"  (mac s={mac[0]} t={mac[1]}, {device or MAC_DEFAULT_DEVICE}"
-          f"{', i8 operands' if int8 else ''})")
+    # A host pack has no layout to hash: the tiles it would hash were never
+    # written. Printing one anyway is the fail-open shape this project has
+    # already paid for twice (tasks/0042, tasks/0078).
+    if host_only:
+        print("  layout     : none -- row-major F32, GEMM on the host")
+    else:
+        print(f"  layout_hash: "
+              f"{layout_hash(gemm_b_layout(TILE_K, TILE_N, mac[0], mac[1], dtype=I8_DTYPE))[:16]}..."
+              f"  (mac s={mac[0]} t={mac[1]}, {device or MAC_DEFAULT_DEVICE}"
+              f"{', i8 operands' if int8 else ''})")
     return 0

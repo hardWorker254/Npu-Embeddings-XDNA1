@@ -357,6 +357,34 @@ inline int run_gemma_mode(npue::File &model, const std::string &model_path,
       !force_cpu && gemm_layout == "pretiled_bf16" &&
       npu::array_requested(&model, art);
 
+  // A HOST CONTAINER CANNOT SEND ANY OF THE THREE HONOURED CODES TO THE ARRAY,
+  // so the parse block above would be accepting a flag this run cannot act on:
+  // `use_npu` is false by construction (gemm_layout is not pretiled), the host
+  // encoder never asks op_on_array() at all, and the run would exit 0 having
+  // used the CPU for exactly the operation the operator named -- the silent
+  // downgrade the refusal table two hundred lines up exists to rule out. The
+  // other four encoders refuse this in their own staging (BertEncoder::
+  // stage_all, NpuGemm::stage_operand, VitEncoder::stage_all); arch=1 has no
+  // staging to refuse it from, so it is refused here instead of being honoured
+  // in a table and then ignored by the branch below.
+  if (gemm_layout != "pretiled_bf16" && !npu_codes.empty()) {
+    std::string listing;
+    for (const char *c : {"gemm", "attn", "softm"})
+      if (npu_codes.count(c)) {
+        if (!listing.empty()) listing += ", ";
+        listing += c;
+      }
+    if (!listing.empty())
+      throw std::runtime_error(
+          std::string(model_path) +
+          ": this container is `--dtype f32` (gemm_layout \"host\") -- its "
+          "GEMM operands are row-major F32 for the CPU, and the MMAC "
+          "multiplies bf16 and int8 only. --npu-ops " + listing +
+          " is refused rather than silently ignored (this encoder runs every "
+          "op on the host for such a container); drop the flag, or repack "
+          "with --dtype bf16/i8 for the array.");
+  }
+
   std::printf("NpuEmbeddings C++ runtime -- EmbeddingGemma (arch=1)\n");
   std::printf("  model      %s\n", model_path.c_str());
 

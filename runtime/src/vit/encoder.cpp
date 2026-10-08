@@ -28,6 +28,22 @@ size_t VitEncoder::stage_all() {
   const int64_t d = geom_.d_model;
   size_t bytes = 0;
 
+  // A HOST-LAYOUT CONTAINER (`--dtype f32`, gemm_layout "host"): plain
+  // row-major F32 operands, no panel and no layout_hash. Nothing is staged --
+  // stage_operand() below returns a cache key instead of a slot for exactly
+  // this case -- so the dtype block that follows would be reasoning about the
+  // array's one A element width for a container that never dispatches, and its
+  // "this build dispatches BF16, I8 or I4" arm would refuse an F32 operand it
+  // was never asked to dispatch. `int8_` still has to be SET (it is false, and
+  // it is what keeps the .wscale/.asmooth sidecar check out of the operand
+  // lambda below).
+  bool host_layout = false;
+  try {
+    host_layout = model_.config_string("gemm_layout") == "host";
+  } catch (const std::exception &) {
+    host_layout = false;
+  }
+
   // THE OPERAND DTYPE, decided ONCE and from the entries rather than from the
   // config string. `a_dtype` is what a packer wrote; the tensor directory's
   // dtypes are what the bytes are. A container whose two disagree -- a packer
@@ -38,7 +54,9 @@ size_t VitEncoder::stage_all() {
   // Two operands of different dtypes in one container is refused rather than
   // resolved per operand: the array's MMAC has ONE A element width, so a mixed
   // container has no legal dispatch schedule at all.
-  {
+  if (host_layout) {
+    int8_ = false;
+  } else {
     const std::string a = model_.info("layer.0.qkv").dtype;
     const std::string b = model_.info("layer.0.ffn_down").dtype;
     const std::string c = model_.info("frontend.patch_embed").dtype;
@@ -76,6 +94,9 @@ size_t VitEncoder::stage_all() {
   auto operand = [&](const std::string &name, Operand &out) {
     out.slot = g_.stage_operand(model_, name);
     out.bias = model_.raw(name + ".bias").as<float>();
+    if (host_layout)
+      return;  // nothing staged, so nothing to account for: `bytes` is the
+               // DEVICE's holding, and an F32 operand never reaches it
     if (int8_) {
       // The sidecars are NOT optional, and this check stays even though the
       // scales themselves are no longer read here: stage_operand() takes them

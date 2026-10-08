@@ -622,6 +622,15 @@ void prepare_model(const std::string &model_dir, const std::string &vocab,
      << ",\"max_seq_len\":" << max_seq
      << ",\"pooling\":\"" << pooling << "\",\"l2_normalize\":true"
      << ",\"activation\":\"gelu_erf_exact\""
+     // The layout key, in the position tools/pack/pack_npue.py's
+     // BERT packer writes it (after activation, before tile_k):
+     // the two packers are compared byte for byte by
+     // tools/verify/verify_pack_parity.py, and a config key one
+     // of them omits is a FAIL that is not a bug. This packer
+     // only ever produces the pre-tiled layout -- the row-major
+     // F32 "host" containers are a --dtype f32 the Python packer
+     // owns -- so the value is the constant, but the KEY stays.
+     << ",\"gemm_layout\":\"pretiled_bf16\""
      << ",\"tile_k\":" << tile_k << ",\"tile_n\":" << tile_n
      << ",\"mac_s\":" << mac.s << ",\"mac_t\":" << mac.t
      // The operand datapath (tasks/0078). This C++ packer only produces bf16

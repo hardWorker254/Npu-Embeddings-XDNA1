@@ -8,6 +8,8 @@
 
 #include "hands/geometry.hpp"
 
+#include "common/host_kernels.hpp"   // bf16_read
+
 #include <algorithm>
 #include <sstream>
 
@@ -87,8 +89,19 @@ void jpad4(const npue::json::Value &o, const std::string &label, int64_t *pad) {
 //     name, and the array backend counts the two separately, so accepting it
 //     would let a container disagree with itself about how many of its
 //     convolutions the array can take.
+//
+// `wdtype` is the container's conv_weight_dtype -- "f32" when the key is
+// ABSENT, which is how every container packed before the key existed reads and
+// must keep reading. Whatever it says, the byte count is checked against what
+// that dtype implies for this shape BEFORE anything is read: `Span::as<T>()`
+// casts blindly, so a payload that contradicts its declared precision used to
+// be read as a plausible fp32 array of the wrong length rather than refused.
+// `w_storage` receives the widened/dequantised fp32 weight (bf16 and the two
+// int dtypes) and must outlive `c`; on f32 it stays empty and `c.w` points
+// straight into the mapping, exactly as before.
 ConvW read_conv(npue::File &f, const std::string &pfx, int i, bool want_depthwise,
-                const std::string &label) {
+                const std::string &wdtype, int64_t i4_group,
+                std::vector<float> &w_storage, const std::string &label) {
   ConvW c;
   c.index = i;
   const std::string base = pfx + ".conv." + std::to_string(i);
@@ -110,7 +123,116 @@ ConvW read_conv(npue::File &f, const std::string &pfx, int i, bool want_depthwis
           "the difference would be this architecture's accuracy rather than a "
           "crash.");
   }
-  c.w = f.raw(base + ".w").as<float>();
+  const int64_t want = c.cout * c.cin * c.kh * c.kw;
+  // [Cout, K] -- the view the scale rule and the payload are both indexed in.
+  const int64_t N = c.cout, K = c.cin * c.kh * c.kw;
+  if (wdtype == "f32") {
+    if (static_cast<int64_t>(wi.nbytes) != want * 4)
+      throw std::runtime_error(
+          label + ": " + base + ".w is " + std::to_string(wi.nbytes) +
+          " bytes, which is not " + std::to_string(want * 4) +
+          " fp32 values for a [" + std::to_string(c.cout) + ", " +
+          std::to_string(c.cin) + ", " + std::to_string(c.kh) + ", " +
+          std::to_string(c.kw) + "] weight. A weight whose byte count "
+          "disagrees with its shape is not a weight at a different precision; "
+          "it is a number of the wrong size.");
+    c.w = f.raw(base + ".w").as<float>();
+  } else if (wdtype == "bf16") {
+    // Two bytes per weight, the source's own bits rounded RNE, no sidecars.
+    if (static_cast<int64_t>(wi.nbytes) != want * 2)
+      throw std::runtime_error(
+          label + ": " + base + ".w is " + std::to_string(wi.nbytes) +
+          " bytes, which is not " + std::to_string(want * 2) + " for " +
+          std::to_string(want) +
+          " bf16 values. A weight whose byte count disagrees with its shape is "
+          "not a weight at a different precision; it is a number of the wrong "
+          "size.");
+    w_storage.resize(static_cast<size_t>(want));
+    app::bf16_read(w_storage.data(), f.raw(base + ".w").data,
+                   static_cast<size_t>(want));
+    c.w = w_storage.data();
+  } else {
+    // int8: one byte per weight. int4: one byte per TWO weights, and K may be
+    // ODD -- MediaPipe's stems are 3x3xC -- so the payload is ceil(K/2) bytes
+    // per row with a zero pad nibble at the end. ceil, not K/2: computing it
+    // the other way makes the last nibble of the last row a phantom weight.
+    const int64_t packed = wdtype == "i8" ? K : (K + 1) / 2;
+    if (static_cast<int64_t>(wi.nbytes) != N * packed)
+      throw std::runtime_error(
+          label + ": " + base + ".w is " + std::to_string(wi.nbytes) +
+          " bytes, which is not " + std::to_string(N * packed) + " for a [" +
+          std::to_string(N) + ", " + std::to_string(K) + "] " + wdtype +
+          " weight. The scale tensors are read next and are sized against the "
+          "shape, so a payload of the wrong length is caught here rather than "
+          "reading past the end of it.");
+    if (!f.has(base + ".wscale"))
+      throw std::runtime_error(
+          label + ": " + base + ".wscale is not in the container, and " +
+          base + ".w says its weights are " + wdtype +
+          ". An integer payload without its scale is bytes whose meaning is "
+          "one multiply away and not present in the file: the reader would "
+          "either invent a factor of 1 or -- if it looked the other way -- "
+          "leave raw quantisation levels in a convolution that expects "
+          "weights.");
+    const auto &si = f.info(base + ".wscale");
+    if (static_cast<int64_t>(si.nbytes) != N * 4)
+      throw std::runtime_error(
+          label + ": " + base + ".wscale is " + std::to_string(si.nbytes) +
+          " bytes for " + std::to_string(N) +
+          " output channels. The scale is per output channel -- one per row of "
+          "this weight -- and a scale count that disagrees with the row count "
+          "puts every channel after the last one on another channel's factor.");
+    const float *const s = f.raw(base + ".wscale").as<float>();
+    w_storage.resize(static_cast<size_t>(want));
+    if (wdtype == "i8") {
+      const int8_t *const q = f.raw(base + ".w").as<int8_t>();
+      for (int64_t n = 0; n < N; ++n)
+        for (int64_t k = 0; k < K; ++k)
+          w_storage[static_cast<size_t>(n * K + k)] =
+              static_cast<float>(q[n * K + k]) * s[n];
+    } else {
+      // The group scales are [G, N] -- indexed by group along the INPUT axis
+      // first -- and the dequantisation is the rank-1 product the packer
+      // measured its error against (tools/lib/conv_quant.py's
+      // dequantise_payload, transcribed here exactly as pose's reader has it).
+      // Zero groups are held at 1 by the packer, so a dead input channel stays
+      // exactly zero instead of becoming NaN.
+      const int64_t G = i4_group > 0 ? (K + i4_group - 1) / i4_group : 1;
+      if (!f.has(base + ".gscale"))
+        throw std::runtime_error(
+            label + ": " + base + ".gscale is not in the container, and " +
+            base + ".w says its weights are i4 with a group of " +
+            std::to_string(i4_group) + ". The group scale is what places each "
+            "weight against its own group's range; without it there is no "
+            "dequantisation, only a per-channel one applied to a payload "
+            "quantised against another factor.");
+      const auto &gi = f.info(base + ".gscale");
+      if (static_cast<int64_t>(gi.nbytes) != G * N * 4)
+        throw std::runtime_error(
+            label + ": " + base + ".gscale is " + std::to_string(gi.nbytes) +
+            " bytes, not " + std::to_string(G * N * 4) + " -- [" +
+            std::to_string(G) + ", " + std::to_string(N) + "] for a group of " +
+            std::to_string(i4_group ? i4_group : K) + " over K=" +
+            std::to_string(K) + ". Read with any other stride, every weight "
+            "past the first group is wrong and every shape still matches.");
+      const float *const gs = f.raw(base + ".gscale").as<float>();
+      const uint8_t *const p = f.raw(base + ".w").as<uint8_t>();
+      for (int64_t n = 0; n < N; ++n)
+        for (int64_t k = 0; k < K; ++k) {
+          // Four bits, low nibble first, SIGN-EXTENDED. A nibble of 0xF is
+          // -1 and not 15: reading them unsigned maps the most negative
+          // weight onto the most positive one, in every group, which looks
+          // like a network whose activations are too warm.
+          const uint8_t byte = p[n * ((K + 1) / 2) + k / 2];
+          int v = (k & 1) ? ((byte >> 4) & 0x0F) : (byte & 0x0F);
+          if (v >= 8) v -= 16;
+          const int64_t gsel = i4_group > 0 ? k / i4_group : 0;
+          w_storage[static_cast<size_t>(n * K + k)] =
+              static_cast<float>(v) * s[n] * gs[gsel * N + n];
+        }
+    }
+    c.w = w_storage.data();
+  }
   if (f.has(base + ".b"))
     c.b = f.raw(base + ".b").as<float>();
   return c;
@@ -121,6 +243,10 @@ struct GraphRead {
   std::vector<ConvW> convs;
   std::vector<std::string> nodes;
   std::vector<Slope> slopes;
+  // Widened/dequantised fp32 weights, one entry per convolution, moved into
+  // Geometry::w_storage below. Empty entries on an f32 container, whose
+  // ConvW::w points into the mapping instead.
+  std::vector<std::vector<float>> w_storage;
 };
 
 // Read one network. `pfx` namespaces its tensors, and it is not decoration:
@@ -131,6 +257,7 @@ struct GraphRead {
 GraphRead read_one_graph(npue::File &f, const std::string &pfx,
                          const std::string &graph_key,
                          const std::string &nodes_key, int64_t num_convs,
+                         const std::string &wdtype, int64_t i4_group,
                          const std::string &label) {
   GraphRead g;
   const npue::json::Value ops = need_json(f, graph_key, label);
@@ -245,6 +372,7 @@ GraphRead read_one_graph(npue::File &f, const std::string &pfx,
 
   const size_t n_conv = static_cast<size_t>(std::max<int64_t>(num_convs, max_conv + 1));
   g.convs.resize(n_conv);
+  g.w_storage.resize(n_conv);
   for (size_t i = 0; i < n_conv; ++i) {
     const std::string base = pfx + ".conv." + std::to_string(i);
     if (!f.has(base + ".w"))
@@ -260,7 +388,8 @@ GraphRead read_one_graph(npue::File &f, const std::string &pfx,
         dw = l.op == Op::DwConv;
         break;
       }
-    g.convs[i] = read_conv(f, pfx, static_cast<int>(i), dw, label);
+    g.convs[i] = read_conv(f, pfx, static_cast<int>(i), dw, wdtype, i4_group,
+                           g.w_storage[i], label);
   }
 
   // The slope count is DERIVED from the op list rather than declared in the
@@ -459,14 +588,64 @@ Geometry read_geometry(npue::File &f, const std::string &label) {
     }
   }
 
+  // -- the weight precision, and the int4 group
+  //
+  // BOTH KEYS ARE OPTIONAL, and their ABSENCE means f32 with no group. Four
+  // containers were packed before either key existed -- mediapipe-hands.npue,
+  // mediapipe-pose.npue and the two .f32 variants under models/variants -- and
+  // they must keep reading exactly as they did, which is plain fp32. What is
+  // NOT optional any more is the byte count against the declared precision: a
+  // container whose payload contradicts its own dtype is refused below rather
+  // than read as a plausible fp32 array of the wrong length.
+  std::string wdtype = "f32";
+  try {
+    wdtype = f.config_string("conv_weight_dtype");
+  } catch (const std::exception &) {
+    wdtype = "f32";
+  }
+  if (wdtype != "f32" && wdtype != "bf16" && wdtype != "i8" && wdtype != "i4")
+    throw std::runtime_error(
+        label + ": conv_weight_dtype is '" + wdtype +
+        "', and this runtime reads f32, bf16, i8 and i4. There is no fp16 or "
+        "fp8 convolution weight here, and reading either as one of the four "
+        "produces a network with the right shapes and no relationship to the "
+        "checkpoint.");
+  int64_t i4_group = 0;
+  try {
+    i4_group = f.config_int("conv_int4_group");
+  } catch (const std::exception &) {
+    // Absent along with conv_weight_dtype on the pre-key containers, where the
+    // dtype is f32 and the group means nothing. Absent while the dtype says i4
+    // is different: the group decides which scale each weight multiplies by,
+    // and defaulting it would be picking a stride for the packer.
+    if (wdtype == "i4")
+      throw std::runtime_error(
+          label + ": conv_weight_dtype is 'i4' and conv_int4_group is not in "
+          "the container. The group size is what places each weight against "
+          "its own group's scale, so a reader that had to default it would "
+          "choose the stride of the dequantisation itself.");
+    i4_group = 0;
+  }
+  if (i4_group < 0)
+    throw std::runtime_error(
+        label + ": conv_int4_group is " + std::to_string(i4_group) +
+        ". Zero means one group over the whole input axis -- per-channel int4 "
+        "-- and is the only value below 1 with a meaning.");
+  if (i4_group > 0 && wdtype != "i4")
+    throw std::runtime_error(
+        label + ": conv_int4_group is " + std::to_string(i4_group) + " and "
+        "conv_weight_dtype is '" + wdtype +
+        "'. The group only means anything for four-bit weights, so a container "
+        "that states both has a scale the reader cannot place.");
+
   // -- the two graphs and their weights
   {
     GraphRead palm = read_one_graph(f, "palm", "palm_graph", "palm_graph_nodes",
                                     need_int(f, "palm_num_convs", label),
-                                    label + "/palm");
+                                    wdtype, i4_group, label + "/palm");
     GraphRead lm = read_one_graph(f, "lm", "lm_graph", "lm_graph_nodes",
                                   need_int(f, "lm_num_convs", label),
-                                  label + "/lm");
+                                  wdtype, i4_group, label + "/lm");
     g.palm_graph = std::move(palm.layers);
     g.palm_nodes = std::move(palm.nodes);
     g.palm_convs = std::move(palm.convs);
@@ -475,6 +654,15 @@ Geometry read_geometry(npue::File &f, const std::string &label) {
     g.lm_nodes = std::move(lm.nodes);
     g.lm_convs = std::move(lm.convs);
     g.lm_slopes = std::move(lm.slopes);
+    // The storage moves too, and the ConvW::w pointers into it stay valid:
+    // moving a std::vector transfers its buffer without touching it, so the
+    // palms' entries land first and the landmarks' after them, in each conv's
+    // original order within its own graph.
+    g.w_storage.reserve(palm.w_storage.size() + lm.w_storage.size());
+    for (std::vector<float> &v : palm.w_storage)
+      g.w_storage.push_back(std::move(v));
+    for (std::vector<float> &v : lm.w_storage)
+      g.w_storage.push_back(std::move(v));
   }
 
   // -- the anchor table, GENERATED, in the graph's own row order

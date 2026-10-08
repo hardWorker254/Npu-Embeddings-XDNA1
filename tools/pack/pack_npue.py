@@ -988,7 +988,7 @@ def pack_gemma(model_dir, out, source_repo_override=None, tile_k=None,
 def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
                int8=False, int4_group=None, smooth_alpha=0.5, smooth_texts=128,
                mac=MAC_DEFAULT, corpus_path=None,
-                npue_args=None):
+                npue_args=None, host_only=False):
     """Pack a nomic-embed-text-v1.5-shaped checkpoint (arch=2).
 
     Emits the SAME tensor names and the SAME emission order as the BERT
@@ -1026,6 +1026,16 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
             f"quantise (int8=False); int4 is the int8 datapath with 4-bit "
             f"weights, so it has nothing to attach to. Refusing rather than "
             f"emitting a bf16 container that ignores it.")
+    # The same pair pack_gemma refuses: an f32 operand IS the quantisation-free
+    # control, so `--dtype f32 --dtype-something int8` would have to pick one,
+    # and it picks the wrong one silently. One dtype per container.
+    if host_only and int8:
+        raise SystemExit(
+            "--dtype f32 and the int8 datapath are two answers to the same "
+            "question: an f32 container is plain row-major F32 on the host, "
+            "an int8 one is a pre-tiled panel for the array. Refusing rather "
+            "than dropping one of them. int8=False for the f32 control, or "
+            "drop --dtype f32.")
     model_dir = Path(model_dir)
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     src, _ = load(model_dir / MODEL_ONNX)
@@ -1086,8 +1096,12 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
     print(f"packing {model_dir.name} -> {Path(out).name}  (arch=nomic_bert_rope_swiglu)")
     print(f"  hidden={hidden} heads={H} head_dim={head_dim} layers={L} "
           f"inter={inter} rope_theta={theta}")
-    print(f"  tile ({tile_k}, {tile_n}), mac (s={mac[0]}, t={mac[1]}), "
-          f"1/sqrt({head_dim}) = {scale:.17g}"
+    # A host pack tiles nothing, so it says so rather than printing a tile and
+    # a mac that no descriptor in the file carries (the BERT path's banner
+    # makes the same split).
+    print(("  HOST-only GEMMs, f32 operands" if host_only else
+           f"  tile ({tile_k}, {tile_n}), mac (s={mac[0]}, t={mac[1]})")
+          + f", 1/sqrt({head_dim}) = {scale:.17g}"
           f"{' folded into Q' if fold_scale else ' NOT folded'}")
 
     # This project's OWN choice, not the checkpoint's -- labelled as such in
@@ -1114,7 +1128,12 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
 
     config = {
         "arch": "nomic_bert_rope_swiglu",
-        "a_dtype": "i8" if int8 else "bf16",
+        # LAYOUT + DTYPE, as the container states them: "host" is plain
+        # row-major F32 [K, N] for common/host_b.hpp, and tile_k/tile_n/mac
+        # are the ARRAY's descriptor so they are absent rather than carried
+        # as numbers nothing reads -- pack_gemma writes it the same way.
+        "gemm_layout": "host" if host_only else "pretiled_bf16",
+        "a_dtype": "f32" if host_only else ("i8" if int8 else "bf16"),
         **({"int4_group": int4_group} if int4_group is not None else {}),
         "model_type": cfg["model_type"],
         "source_repo": json.loads(
@@ -1131,7 +1150,8 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
         "position_embedding_type": "rope",
         "rope_theta": theta,
         "attention_bias": False, "mlp_bias": False,
-        "tile_k": tile_k, "tile_n": tile_n, "mac_s": mac[0], "mac_t": mac[1],
+        **({} if host_only else {"tile_k": tile_k, "tile_n": tile_n,
+                                 "mac_s": mac[0], "mac_t": mac[1]}),
         "prompts": prompts,
         "prompt_default": "search_document",
         "prompts_source": "npuembeddings, NOT from the checkpoint -- "
@@ -1153,7 +1173,7 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
             "qkv_fused": True,
             "transposed_to_kn": True,
             "qk_scale_folded_into_q": fold_scale,
-            "gemm_operands_bf16": True,
+            "gemm_operands_bf16": not host_only,
             "biases_and_layernorm_fp32": True,
             "gated_ffn_fused_fc11_fc12": True,
             "position_embeddings_zeroed_rope_instead": True,
@@ -1217,6 +1237,11 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
     qerr = []
 
     def emit(name, mat, layer, op):
+        # HOST FIRST (see the BERT path): row-major F32 has no panel to tile,
+        # so int8/int4 cannot apply to it either.
+        if host_only:
+            add_gemm_b_host(w, name, mat)
+            return
         if not int8:
             add_gemm_b(w, name, mat, tile_k, tile_n, mac=mac)
             return
@@ -1281,18 +1306,23 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
     _embed(w, "nomic-embed-text-v1.5", "i8" if (int8 or int4_group) else "bf16", npue_args, "nomic")
     info = w.write(out)
 
-    print(f"\n  {'operand':<14} {'[K,N]':>12} {'k-blocks':>9} {'n-blocks':>9} "
-          f"{'tiles':>7} {'max BD dim':>11}")
-    shapes = {"qkv": (hidden, 3 * hidden), "attn_out": (hidden, hidden),
-              "ffn_up": (hidden, 2 * inter), "ffn_down": (inter, hidden)}
-    for nm, (K, N) in shapes.items():
-        kb, nb = K // tile_k, N // tile_n
-        flag = "" if max(kb, nb) < 1024 else "  <-- OVER 1023"
-        print(f"  {nm:<14} {str([K, N]):>12} {kb:>9} {nb:>9} {kb*nb:>7} "
-              f"{max(kb, nb):>11}{flag}")
+    # A host pack prints neither table: there is no DMA here, and a row of
+    # tile counts over a row-major container describes a descriptor the file
+    # does not carry.
+    if not host_only:
+        print(f"\n  {'operand':<14} {'[K,N]':>12} {'k-blocks':>9} "
+              f"{'n-blocks':>9} {'tiles':>7} {'max BD dim':>11}")
+        shapes = {"qkv": (hidden, 3 * hidden), "attn_out": (hidden, hidden),
+                  "ffn_up": (hidden, 2 * inter), "ffn_down": (inter, hidden)}
+        for nm, (K, N) in shapes.items():
+            kb, nb = K // tile_k, N // tile_n
+            flag = "" if max(kb, nb) < 1024 else "  <-- OVER 1023"
+            print(f"  {nm:<14} {str([K, N]):>12} {kb:>9} {nb:>9} {kb*nb:>7} "
+                  f"{max(kb, nb):>11}{flag}")
 
     total = Path(out).stat().st_size
-    print(f"\n  tensors    : {len(w.entries)}  ({n_tiled} pre-tiled GEMM operands)")
+    print(f"\n  tensors    : {len(w.entries)}"
+          + ("" if host_only else f"  ({n_tiled} pre-tiled GEMM operands)"))
     print(f"  json       : {info['json_length']} B at {info['json_offset']}")
     print(f"  data       : {info['data_length']/1e6:.2f} MB at {info['data_offset']}")
     print(f"  file       : {total/1e6:.2f} MB")
@@ -1300,16 +1330,20 @@ def pack_nomic(model_dir, out, tile_k, tile_n, max_seq, fold_scale,
     # The dtype is part of the layout, so printing the bf16 hash over int8
     # tensors reports the intention rather than the value -- the same shape as
     # tasks/0042's `tile (64, 32)` and 0078's banner, both of which cost time.
-    print(f"  layout_hash: "
-          f"{layout_hash(gemm_b_layout(tile_k, tile_n, mac[0], mac[1], dtype=b_layout_dtype(int8)))[:16]}..."
-          f"{'  (i8 operands)' if int8 else ''}")
+    # A host pack has no layout to hash, so it says that instead.
+    if host_only:
+        print("  layout     : none -- row-major F32, GEMM on the host")
+    else:
+        print(f"  layout_hash: "
+              f"{layout_hash(gemm_b_layout(tile_k, tile_n, mac[0], mac[1], dtype=b_layout_dtype(int8)))[:16]}..."
+              f"{'  (i8 operands)' if int8 else ''}")
     return 0
 
 
 def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
              mac=MAC_DEFAULT, int4_group=None, smooth_alpha=0.5,
              smooth_texts=128, corpus_path=None,
-                npue_args=None):
+                npue_args=None, host_only=False):
     """Pack a gte-multilingual-base-shaped checkpoint (arch=3, model_type
     "new" -- the NewModel trust_remote_code implementation).
 
@@ -1439,13 +1473,33 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
     print(f"packing {model_dir.name} -> {Path(out).name}  (arch=gte_new_rope_geglu)")
     print(f"  hidden={hidden} heads={H} head_dim={head_dim} layers={L} "
           f"inter={inter} rope=ntk(20000 x 8.0, 32 baked inv_freq)")
-    print(f"  tile ({tile_k}, {tile_n}), mac (s={mac[0]}, t={mac[1]}), "
-          f"1/sqrt({head_dim}) = {scale:.17g}"
+    # No tile and no mac for a host pack: the file carries neither, and a
+    # banner naming them over row-major F32 is the fail-open shape the BERT
+    # and nomic banners already refuse.
+    print(("  HOST-only GEMMs, f32 operands" if host_only else
+           f"  tile ({tile_k}, {tile_n}), mac (s={mac[0]}, t={mac[1]})")
+          + f", 1/sqrt({head_dim}) = {scale:.17g}"
           f"{' folded into Q (weights AND bias)' if fold_scale else ' NOT folded'}")
 
     config = {
         "arch": "gte_new_rope_geglu",
-        "a_dtype": "bf16",
+        # NOT a literal. This was hardcoded "bf16" while the emit() below was
+        # already writing I8 panels when int8 was asked for, so every int8 and
+        # int4 container this packer produced CONTRADICTED ITSELF: bytes of one
+        # width, config claiming another -- the exact disagreement verify_npue's
+        # section B reports and design_selection refuses at load. It went
+        # unnoticed because the bf16 pack (the only one shipped before
+        # tasks/0078) was correct in both places, and a constant that is right
+        # for the default looks like a constant that is right.
+        "gemm_layout": "host" if host_only else "pretiled_bf16",
+        "a_dtype": "f32" if host_only else ("i8" if int8 else "bf16"),
+        # int4's K-group, stated in the container because int4_panel.hpp reads
+        # it from there and REFUSES an I4 payload that declares none ("the
+        # container states no int4_group"). Every other packer in this file has
+        # always written it; this one did not, so a --dtype i4 pack from arch=3
+        # produced a file that would not load -- and the omission was invisible
+        # in the bf16 case, where the key is not written and not wanted.
+        **({"int4_group": int4_group} if int4_group is not None else {}),
         "model_type": cfg["model_type"],
         "source_repo": json.loads(
             (model_dir / "CHECKPOINT.json").read_text(encoding="utf-8"))["repo_id"],
@@ -1475,13 +1529,14 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
                      "alone is wrong by 1.9e-02 relfro at layer 0.",
         "attention_bias": True,
         "mlp_bias": "down_only -- up_gate_proj is genuinely bias-free",
-        "tile_k": tile_k, "tile_n": tile_n, "mac_s": mac[0], "mac_t": mac[1],
+        **({} if host_only else {"tile_k": tile_k, "tile_n": tile_n,
+                                 "mac_s": mac[0], "mac_t": mac[1]}),
         "fusions": {
             "qkv_fused": True,
             "transposed_to_kn": True,
             "qk_scale_folded_into_q": fold_scale,
             "qk_scale_folded_into_q_bias": fold_scale,
-            "gemm_operands_bf16": True,
+            "gemm_operands_bf16": not host_only,
             "biases_and_layernorm_fp32": True,
             "gated_ffn_fused_upstream": True,
             "position_embeddings_zeroed_rope_instead": True,
@@ -1534,6 +1589,11 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
     qerr = []
 
     def emit(name, mat, layer, op):
+        # HOST FIRST, before the dtype family -- row-major F32 has no panel to
+        # tile, so int8/int4 cannot apply to it either (same order as BERT).
+        if host_only:
+            add_gemm_b_host(w, name, mat)
+            return
         if not int8:
             add_gemm_b(w, name, mat, tile_k, tile_n, mac=mac)
             return
@@ -1595,18 +1655,21 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
     _embed(w, "gte-multilingual-base", "i8" if (int8 or int4_group) else "bf16", npue_args, "gte")
     info = w.write(out)
 
-    print(f"\n  {'operand':<14} {'[K,N]':>12} {'k-blocks':>9} {'n-blocks':>9} "
-          f"{'tiles':>7} {'max BD dim':>11}")
-    shapes = {"qkv": (hidden, 3 * hidden), "attn_out": (hidden, hidden),
-              "ffn_up": (hidden, 2 * inter), "ffn_down": (inter, hidden)}
-    for nm, (K, N) in shapes.items():
-        kb, nb = K // tile_k, N // tile_n
-        flag = "" if max(kb, nb) < 1024 else "  <-- OVER 1023"
-        print(f"  {nm:<14} {str([K, N]):>12} {kb:>9} {nb:>9} {kb*nb:>7} "
-              f"{max(kb, nb):>11}{flag}")
+    # No tile table for a host pack: there is no DMA and no tiling in the file.
+    if not host_only:
+        print(f"\n  {'operand':<14} {'[K,N]':>12} {'k-blocks':>9} "
+              f"{'n-blocks':>9} {'tiles':>7} {'max BD dim':>11}")
+        shapes = {"qkv": (hidden, 3 * hidden), "attn_out": (hidden, hidden),
+                  "ffn_up": (hidden, 2 * inter), "ffn_down": (inter, hidden)}
+        for nm, (K, N) in shapes.items():
+            kb, nb = K // tile_k, N // tile_n
+            flag = "" if max(kb, nb) < 1024 else "  <-- OVER 1023"
+            print(f"  {nm:<14} {str([K, N]):>12} {kb:>9} {nb:>9} {kb*nb:>7} "
+                  f"{max(kb, nb):>11}{flag}")
 
     total = Path(out).stat().st_size
-    print(f"\n  tensors    : {len(w.entries)}  ({n_tiled} pre-tiled GEMM operands)")
+    print(f"\n  tensors    : {len(w.entries)}"
+          + ("" if host_only else f"  ({n_tiled} pre-tiled GEMM operands)"))
     print(f"  json       : {info['json_length']} B at {info['json_offset']}")
     print(f"  data       : {info['data_length']/1e6:.2f} MB at {info['data_offset']}")
     print(f"  file       : {total/1e6:.2f} MB")
@@ -1619,10 +1682,13 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
     # exactly what the int8 run then refuses to resolve.
     # (Computed into a local first: the expression will not fit on one line and
     # an f-string expression cannot span lines.)
-    lhash = layout_hash(gemm_b_layout(tile_k, tile_n, mac[0], mac[1],
-                                      dtype=b_layout_dtype(int8)))[:16]
-    print(f"  layout_hash: {lhash}..."
-          f"{'  (i8 operands)' if int8 else ''}")
+    if host_only:
+        print("  layout     : none -- row-major F32, GEMM on the host")
+    else:
+        lhash = layout_hash(gemm_b_layout(tile_k, tile_n, mac[0], mac[1],
+                                          dtype=b_layout_dtype(int8)))[:16]
+        print(f"  layout_hash: {lhash}..."
+              f"{'  (i8 operands)' if int8 else ''}")
     if int8 and qerr:
         worst = max(qerr, key=lambda t: t[1])
         mean = sum(e for _, e in qerr) / len(qerr)
@@ -1637,11 +1703,21 @@ def pack_gte(model_dir, out, tile_k, tile_n, max_seq, fold_scale, int8=False,
 # because they predate it, and all three resolve to ONE value in main() below
 # so a container's bytes cannot depend on which of them happened to be typed.
 #
-#   f32    plain row-major F32 operands, `gemm_layout: "host"` -- a container
-#          for the CPU control encoder, and the only one the host path can
-#          read. arch=1 ONLY: every other architecture has no host encoder in
-#          this build (runtime/src/runtime.cpp refuses --cpu by name for them),
-#          so packing f32 there would write a file nothing can run.
+#   f32    plain row-major F32 operands, `gemm_layout: "host"` -- the
+#          checkpoint's own precision, written as the checkpoint stores it,
+#          for the CPU path in runtime/include/common/host_b.hpp (host_b_kn
+#          UNTILES the array's panel back to fp32; an F32 tensor needs no
+#          untile, and that branch reads it as-is). Every architecture, since
+#          tasks/0140: the GEMM runs on the HOST by default for all of them,
+#          --npu-ops gemm is what sends it to the array, and on a container
+#          with no panel that request is REFUSED BY NAME rather than ignored
+#          -- which is the same rule `--cpu` is refused under. `--cpu` itself
+#          remains arch=1's (runtime/src/runtime.cpp, the flag that names the
+#          host-only control encoder); an f32 container needs no such flag,
+#          because the default is already the host.
+#          What it is NOT: a smaller file. F32 is 2x bf16 per weight, and
+#          this is the point -- the base-type variant measures what the
+#          checkpoint actually holds.
 #   bf16   pre-tiled bf16 panels for the array. The default, and what the
 #          shipped design sets are built for.
 #   i8     per-output-channel int8 with SmoothQuant calibration. The container
@@ -2015,12 +2091,16 @@ def main():
     # still produce a host-only container with no mention of it.
     #
     # arch=8 is on the accepting list as of the mppose work, and the difference
-    # from arch=6 is that this one has NO measured array run behind it: there is
-    # no design set for its twenty-two streams and none can be built on this
-    # machine (no aie.iron, so no peano and no xchesscc). So it stages panels
-    # whose shape the exporter can build a design from -- checked by
-    # tools/verify/verify_pose_streamset.py against the container in both
-    # directions -- and the runtime keeps refusing --npu-ops for it by name.
+    # from arch=6 is that its array run is measured on ONE machine and nothing
+    # more: runtime/artifacts/mediapipe-pose/artifacts_npu1/gemm_rtp/design.json
+    # carries the 22-stream set and is embedded in the container (the older
+    # claim that no such set could exist here was wrong -- it can be read off
+    # disk, and it is), and tools/verify/verify_mppose.py section 4 runs that
+    # container on the device (447 dispatches, 131.3 ms). What is still true is
+    # that the stream/shape agreement in BOTH directions is what
+    # tools/verify/verify_pose_streamset.py checks, and that this machine has no
+    # aie.iron, so a NEW design set still cannot be exported here -- the panels
+    # below are written for the set that exists.
     if args.npu and not (args.pose_onnx or args.mppose_onnx or
                          args.hands_onnx):
         raise SystemExit(
@@ -2031,6 +2111,22 @@ def main():
             "targets the array by construction -- its containers carry no host "
             "path at all -- so on those this flag would be a no-op that looks "
             "like an opt-in.")
+
+    # THE i4 GROUP FOR THE CONVOLUTION ARCHITECTURES, defined here rather
+    # than in each branch because three packers share it and three
+    # copies of one default is how they would drift apart. It is
+    # per-architecture, not global, because the three measured three
+    # different cliffs (the tables inside the branches below). Eight,
+    # and not the GEMM packers' 32, because arch=6 measured a cliff
+    # between 8 and 16: eight keeps the three detections that
+    # photograph has, sixteen finds eight. arch=7/8 then measured
+    # their own cliff, and it sits between 4 and 2 -- on their gate
+    # frames groups 8 and 4 find nothing at all -- so the last group
+    # that keeps a detection on those two is ONE. That is their
+    # default, not arch=6's eight: the sweep that picked eight here
+    # measured zero hands and zero people there.
+    POSE_I4_GROUP_DEFAULT = 8       # arch=6: last point before its cliff
+    POSE_I4_GROUP_MEDIAPIPE = 1     # arch=7/8: the only point with a detection
 
     # arch=6 branch: a YOLOv8-pose checkpoint. Routed BEFORE the --model-dir
     # resolution below because it has no --model-dir: its input is one ONNX
@@ -2048,10 +2144,12 @@ def main():
         # refuse with a message about a format the operator never asked for.
         if not typed:
             dtype = "f32"
-            print(f"  dtype f32 -- the default for a pose pack, and NOT the "
-                  f"'bf16' default the rest of this file uses: there is no bf16 "
-                  f"convolution weight path in this runtime. --dtype i8 or i4 "
-                  f"if you want a smaller file.")
+            print("  dtype f32 -- the default for a pose pack, and NOT the "
+                  "'bf16' default the rest of this file uses: an UNSTATED "
+                  "dtype has to mean the precision the checkpoint itself "
+                  "holds, and a pose convolution weight stores f32, bf16, i8 "
+                  "or i4 (tools/lib/conv_quant.py). --dtype bf16, i8 or i4 if "
+                  "you want a smaller file.")
         # Its OWN int4 default, and not the GEMM packers' 32, because the pose
         # head is where the four-bit error lands and there is a cliff. Measured
         # on bus.jpg against the fp32 container (tools/verify/
@@ -2085,20 +2183,8 @@ def main():
         # And i8 is the only point on this table worth having: a third of the
         # bytes, a 1.9 px box, and the same three people. i4 buys 0.7 MB more
         # than i8 does -- the SMALLEST files here are the LEAST correct ones.
-        POSE_I4_GROUP_DEFAULT = 8
         grp = (POSE_I4_GROUP_DEFAULT if pose_group_typed is None
                else pose_group_typed)
-        # bf16 is in the top-level dtype vocabulary and has no meaning for a
-        # convolution weight here: there is no bf16 conv weight path in this
-        # runtime, and conv_quant refuses the spelling by name.
-        if dtype == "bf16":
-            raise SystemExit(
-                "--dtype bf16 is the array's GEMM operand format and there is no "
-                "bf16 CONVOLUTION weight path in this runtime. A pose "
-                "convolution weight is read as f32, i8 or i4 -- "
-                "tools/lib/conv_quant.py -- so bf16 here would be a container "
-                "whose weights are a precision nothing can multiply. Use "
-                "--dtype f32 (12.9 MiB), i8 (3.8 MiB) or i4.")
         from packers.pose import pack_pose  # noqa: E402
         return pack_pose(args.pose_onnx, args.out, device=args.device,
                           npue_args=args,
@@ -2114,25 +2200,29 @@ def main():
     # input is two ONNX files in one directory, and there is no config.json to
     # read a model_type out of.
     if args.hands_onnx:
-        # f32 is FORCED, and this is the one packer in the file that ignores the
-        # --dtype default rather than following it. The int8 graphs that ship
-        # alongside these float ones are not a smaller option, they are a broken
-        # one: measured on hand_plain.png, the int8 palm detector peaks at 0.022
-        # score where float reaches 0.894 (and cv2.dnn aborts inside its int8
-        # pooling layer outright), and the int8 landmark net puts the wrist
-        # 35 px off (197.7 against 232.5). ORT's int8 kernels are also SLOWER
-        # than float on this host -- 11.62 ms against 5.18 ms for the palm net,
-        # 4.45 ms against 0.94 ms for the landmark net -- so "smaller file" here
-        # would be worse on both counts at once. Refusing by name is better than
-        # accepting a flag and quietly producing the bad one.
-        if typed:
-            raise SystemExit(
-                "--dtype is not accepted for arch=7. These two networks are "
-                "float only: their int8 variants are not a smaller version of "
-                "the same model, they are a different and much worse one -- on "
-                "hand_plain.png the int8 palm detector peaks at 0.022 score "
-                "against 0.894, and the int8 landmark net puts the wrist 35 px "
-                "off. See models/mediapipe-hands/CHECKPOINT.json.")
+        # THE WEIGHT PRECISION IS THE CALLER'S, and an UNSTATED one is f32 --
+        # the checkpoint's own -- rather than this file's global "bf16" default,
+        # exactly as in the arch=6 branch above.
+        #
+        # WHAT USED TO BE HERE INSTEAD was a refusal of `--dtype` of any kind,
+        # and it was about the wrong thing. Its numbers (the int8 palm detector
+        # peaking at 0.022 against 0.894 on hand_plain.png, the wrist 35 px off,
+        # ORT's int8 kernels slower than float -- 11.62 ms against 5.18 ms for
+        # the palm net, 4.45 ms against 0.94 for the landmark net) are all
+        # measurements of the UPSTREAM `palm_detection_mediapipe_int8.onnx` /
+        # `handpose_estimation_mediapipe_int8.onnx` files, and this packer has
+        # never taken either: the filters two paragraphs down discard them on
+        # purpose, for those reasons. What it took instead was a REFUSAL OF THE
+        # FLAG -- including `--dtype f32`, the value it forced anyway -- so the
+        # one thing the flag could not be used for was the container it had just
+        # said it was making.
+        #
+        # Weight-side quantisation is a different operation with different
+        # numbers, and this pair's are measured on THIS container rather than
+        # inherited: tools/verify/verify_hands.py section 1 compares the packed
+        # weights against ORT's float kernels, sections 3-4 against recorded
+        # detections and the C++ runtime. Refusing an unmeasured capability was
+        # the choice; the capability plus its measurement is the other one.
         d = args.hands_onnx
         palm = sorted(glob.glob(os.path.join(d, "palm_detection_mediapipe_*.onnx")))
         lms = sorted(glob.glob(os.path.join(d, "handpose_estimation_mediapipe_*.onnx")))
@@ -2144,35 +2234,61 @@ def main():
                 f"float landmark net, and found "
                 f"{[os.path.basename(x) for x in palm]} and "
                 f"{[os.path.basename(x) for x in lms]}. The _int8 files are "
-                f"ignored on purpose -- see above. Point this at "
-                f"models/mediapipe-hands/.")
-        print("  dtype f32 -- forced, not defaulted: see the note above about "
-              "the int8 pair.")
+                f"ignored on purpose -- the upstream int8 pair is a worse model, "
+                f"not a smaller one (0.022 against 0.894 on hand_plain.png); this "
+                f"packer quantises the FLOAT weights itself when asked. Point "
+                f"this at models/mediapipe-hands/.")
+        if not typed:
+            dtype = "f32"
+            print("  dtype f32 -- the default for a hands pack, and NOT the "
+                  "'bf16' default the rest of this file uses: an UNSTATED dtype "
+                  "has to mean the precision the checkpoint itself holds, and "
+                  "these two nets are float. --dtype bf16, i8 or i4 if you want "
+                  "a smaller file.")
+        # THE i4 GROUP IS THIS ARCHITECTURE'S OWN, and the default
+        # is a measurement, not an inheritance: on hand_plain.png
+        # groups 8 and 4 find ZERO hands, group 2 keeps the hand
+        # but lands its landmarks 12.9 px off (the budget is 2.5),
+        # and group 1 is lossless (worst delta 0.007 px) -- while
+        # group 1's file is LARGER than f32's, because one scale
+        # per weight costs more bytes than the four bits it
+        # replaces. So on arch=7, i8 (8.1 MB, landmarks 7.6 px
+        # from the zoo's) is the compressing point, exactly as on
+        # arch=6 -- and --int4-group N overrides all of this.
+        if dtype == "i4" and pose_group_typed is None:
+            print("  dtype i4 -- group 1, this architecture's "
+                  "measured default: on hand_plain.png groups 8 "
+                  "and 4 find zero hands, group 2 keeps the hand "
+                  "with landmarks 12.9 px off (budget 2.5), group "
+                  "1 is lossless (worst 0.007 px) -- and LARGER "
+                  "than f32, so i8 is the compressing point here. "
+                  "--int4-group N overrides.")
         from packers.hands import pack_hands  # noqa: E402
         return pack_hands(palm[0], lms[0], args.out, dry_run=args.dry_run,
                            npue_args=args,
-                          device=args.device, npu=args.npu)
+                          device=args.device, npu=args.npu,
+                          dtype=dtype,
+                          int4_group=(POSE_I4_GROUP_MEDIAPIPE
+                                      if pose_group_typed is None
+                                      else pose_group_typed)
+                          if dtype == "i4" else None)
 
     if args.mppose_onnx:
-        # f32 is FORCED for the same class of reason --hands-onnx forces it, and
-        # the numbers below are THIS pair's own rather than hands' borrowed ones.
-        # Both repositories ship an ..._int8bq.onnx next to each float file, and
-        # taking it on docs/bus.jpg puts the 33 keypoints a mean 64.0 px apart
-        # from float with a worst case of 108.5 px, and the depth axis -- which
-        # is in PIXELS relative to the mid-hip -- off by as much as 291.9 px. It
-        # is also SLOWER end to end: 29.1 ms against 28.2 ms for the float pair.
-        # models/mediapipe-pose/CHECKPOINT.json records those measurements and
-        # the sha256 of both files actually taken, so this refusal names
-        # something that was measured rather than something inherited.
-        if typed:
-            raise SystemExit(
-                "--dtype is not accepted for arch=8. These two networks are "
-                "float only: the int8 pair is not a smaller version of the same "
-                "model, it is a worse and slower one -- on docs/bus.jpg it puts "
-                "the 33 keypoints a mean 64.0 px apart from float (worst 108.5 "
-                "px) and z off by as much as 291.9 px, while taking 29.1 ms "
-                "instead of 28.2 ms. See "
-                "models/mediapipe-pose/CHECKPOINT.json.")
+        # THE WEIGHT PRECISION IS THE CALLER'S here too, with f32 as the
+        # unstated default -- arch=7's note two paragraphs up says why the
+        # refusal this replaces was aimed at the wrong files.
+        #
+        # The numbers that refusal quoted are this pair's OWN and stay worth
+        # having: taking the upstream `..._int8bq.onnx` next to each float file
+        # puts the 33 keypoints on docs/bus.jpg a mean 64.0 px apart from float
+        # (worst 108.5 px), the depth axis -- pixels relative to the mid-hip --
+        # off by as much as 291.9 px, and the run slower end to end (29.1 ms
+        # against 28.2 ms). Those files are still filtered out below. What they
+        # never described is THIS packer's own weight-side quantisation, which
+        # is a per-output-channel scale over the float weights and is measured
+        # on this container by tools/verify/verify_mppose.py instead.
+        # models/mediapipe-pose/CHECKPOINT.json records the upstream numbers and
+        # the sha256 of both files actually taken.
         d = args.mppose_onnx
         det = sorted(glob.glob(
             os.path.join(d, "person_detection_mediapipe_*.onnx")))
@@ -2188,8 +2304,30 @@ def main():
                 f"{[os.path.basename(x) for x in pose]}. The _int8bq files are "
                 f"ignored on purpose -- see above. Point this at "
                 f"models/mediapipe-pose/.")
-        print("  dtype f32 -- forced, not defaulted: see the note above about "
-              "the int8 pair.")
+        if not typed:
+            dtype = "f32"
+            print("  dtype f32 -- the default for a mppose pack, and NOT the "
+                  "'bf16' default the rest of this file uses: an UNSTATED dtype "
+                  "has to mean the precision the checkpoint itself holds, and "
+                  "these two nets are float. --dtype bf16, i8 or i4 if you want "
+                  "a smaller file.")
+        # THE i4 GROUP IS THIS ARCHITECTURE'S OWN too, with
+        # an even sharper cliff than hands': on docs/bus.jpg
+        # groups 8, 4 AND 2 all find ZERO people, and group
+        # 1 keeps the pose with keypoints 0.04 px off --
+        # while group 1's file is LARGER than f32's, because
+        # one scale per weight costs more bytes than the four
+        # bits it replaces. So on arch=8, i8 (18.1 MB,
+        # landmarks a mean 52 px from the recording) is the
+        # compressing point, exactly as on arch=6 -- and
+        # --int4-group N overrides all of this.
+        if dtype == "i4" and pose_group_typed is None:
+            print("  dtype i4 -- group 1, this architecture's "
+                  "measured default: on docs/bus.jpg groups 8, "
+                  "4 and 2 all find zero people, group 1 keeps "
+                  "the pose with keypoints 0.04 px off -- and "
+                  "is LARGER than f32, so i8 is the compressing "
+                  "point here. --int4-group N overrides.")
         from packers.mppose import pack_mppose  # noqa: E402
         # --device IS THREADED RATHER THAN LEFT TO THE PACKER'S OWN DEFAULT, and
         # it is this file's --device, whose default is MAC_DEFAULT_DEVICE -- the
@@ -2200,7 +2338,12 @@ def main():
         # directly, which is how its own --help documents it).
         return pack_mppose(det[0], pose[0], args.out, dry_run=args.dry_run,
                             npue_args=args,
-                           device=args.device, npu=args.npu)
+                           device=args.device, npu=args.npu,
+                           dtype=dtype,
+                           int4_group=(POSE_I4_GROUP_MEDIAPIPE
+                                       if pose_group_typed is None
+                                       else pose_group_typed)
+                           if dtype == "i4" else None)
 
     # Resolved ONCE PER LAYOUT DTYPE, here, and printed by every branch: a
     # container whose B order is a guess is a container nobody can debug later.
@@ -2271,22 +2414,30 @@ def main():
         print(f"  smooth alpha {smooth_alpha} (--smooth-alpha; the measured "
               f"whisper default is {SMOOTH_ALPHA_DEFAULT['whisper']})")
 
-    # --dtype f32 is a container FOR THE CPU, and only one architecture has a
-    # CPU encoder in this build. Packing it anywhere else would write a file
-    # the runtime cannot run: there is no host path for it, and the pre-tiled
-    # NPU path would be handed row-major F32. Refused here, by model_type,
-    # with the two dtypes that checkpoint CAN take.
-    if dtype == "f32" and cfg.get("model_type") != "gemma3_text":
-        raise SystemExit(
-            f"--dtype f32 writes a host-only container (plain row-major F32 "
-            f"GEMM operands, gemm_layout \"host\"), and only arch=1 "
-            f"(model_type 'gemma3_text') has a host encoder in this build -- "
-            f"runtime/src/runtime.cpp refuses --cpu for every other "
-            f"architecture. This checkpoint has model_type "
-            f"{cfg.get('model_type')!r}, so it would be packed into a file "
-            f"nothing can run. Use --dtype bf16 (default: the array) or "
-            f"--dtype i8 (the array, int8 datapath, wants a design exported "
-            f"with tools/export/export_gemm_rtp.py --int8).")
+    # --dtype f32 is a container FOR THE CPU: plain row-major F32 GEMM
+    # operands and gemm_layout "host", i.e. the checkpoint's OWN precision
+    # written as the checkpoint stores it.
+    #
+    # This used to be refused for every model_type except gemma3_text, on the
+    # grounds that arch=1 was the only host encoder in the build. That was true
+    # when it was written and it is not true now: common/host_b.hpp gives the
+    # per-layer GEMM a CPU path (host_b_kn UNTILES the array's panel back to
+    # fp32 -- and takes the F32 tensor as-is, no untile at all), `gemm` is one
+    # of the nine codes the flag sends to the array, and the DEFAULT for every
+    # one of them is the host. Measured on this machine: all-MiniLM bf16 over
+    # the same two lines, 0.51 s on the host against 0.19 s with
+    # `--npu-ops gemm`.
+    #
+    # What is still true is that such a container has nothing to hand the
+    # ARRAY: f32 is not an operand the MMAC multiplies (the two sub-tiles are
+    # BF16 (8,4) and I8 (8,8)). `--npu-ops gemm` on one of these is refused by
+    # name at run time rather than silently running the host, which is the
+    # same rule --cpu was refused under, one flag further along.
+    if dtype == "f32":
+        print("  dtype f32 -- the checkpoint's own precision: row-major F32 "
+              "operands, gemm_layout \"host\", GEMM on the CPU. The array "
+              "takes bf16 and i8 only, so --npu-ops gemm is refused on this "
+              "container by name rather than ignored.")
 
     # arch=1 branch (tasks/0064-m12-embeddinggemma-arch1-integration): a Gemma3-family checkpoint is a completely
     # different tensor shape and a completely different container -- routed
@@ -2324,7 +2475,8 @@ def main():
                           smooth_alpha=smooth_alpha,
                           smooth_texts=args.smooth_texts, mac=mac,
                           corpus_path=args.int8_text_corpus,
-                          npue_args=args)
+                          npue_args=args,
+                          host_only=args.gemma_host_only)
 
     # arch=3 branch (0.5.0, tasks/0134/0135): model_type "new" is the
     # NewModel family (gte-multilingual-base). Same routing rule as the two
@@ -2340,7 +2492,8 @@ def main():
                         smooth_alpha=smooth_alpha,
                         smooth_texts=args.smooth_texts,
                         corpus_path=args.int8_text_corpus,
-                        npue_args=args)
+                        npue_args=args,
+                        host_only=args.gemma_host_only)
 
     # arch=4 branch: model_type "whisper" (openai/whisper-*). Speech-to-text,
     # so this one carries a conv frontend, a positional table, TWO stacks and a
@@ -2385,7 +2538,8 @@ def main():
                             int4_group=args.int4_group,
                             int8_alpha=smooth_alpha,
                             int8_clips=args.int8_clips,
-                            int8_corpus=args.int8_corpus)
+                            int8_corpus=args.int8_corpus,
+                            host_only=args.gemma_host_only)
 
     # arch=5 branch: model_type "vit" (google/vit-*-224). An IMAGE CLASSIFIER,
     # so it carries a position table, a patch-embedding GEMM and a
@@ -2463,7 +2617,8 @@ def main():
                         int8=args.int8, int4_group=args.int4_group,
                         int8_alpha=smooth_alpha,
                         int8_images=args.int8_images,
-                        int8_corpus=args.int8_corpus)
+                        int8_corpus=args.int8_corpus,
+                        host_only=args.gemma_host_only)
 
     src, _ = load(model_dir / MODEL_ONNX)
     src_sha = model_digest(model_dir / MODEL_ONNX)
@@ -2475,8 +2630,12 @@ def main():
     scale = 1.0 / math.sqrt(head_dim)
 
     tk, tn = args.tile_k, args.tile_n
+    # ONE flag, decided here and read by the banner, the config, the emitter
+    # and the two prints at the end: --dtype f32 packs row-major F32 operands
+    # for the CPU path in common/host_b.hpp instead of panels for the array.
+    host_only = dtype == "f32"
     print(f"packing {model_dir.name} -> {Path(args.out).name}")
-    print(f"  tile ({tk}, {tn}), mac (s={mac[0]}, t={mac[1]}), "
+    print(f"  {'HOST-only GEMMs, f32 operands' if host_only else f'tile ({tk}, {tn}), mac (s={mac[0]}, t={mac[1]})'}, "
           f"1/sqrt({head_dim}) = {scale:.17g}"
           f"{' NOT folded' if args.no_fold_scale else ' folded into Q'}")
 
@@ -2492,18 +2651,25 @@ def main():
         "max_seq_len": max_seq_embedder,
         "pooling": read_pooling(model_dir), "l2_normalize": True,
         "activation": "gelu_erf_exact",
-        "tile_k": tk, "tile_n": tn, "mac_s": mac[0], "mac_t": mac[1],
+        # THE LAYOUT AND THE DTYPE, as the container states them. "host" means
+        # plain row-major F32 [K, N] (add_gemm_b_host) and is what makes
+        # `list` print `cpu` and the array path refuse by name; tile_k/tile_n/
+        # mac are the ARRAY's descriptor, so they are absent rather than
+        # carried as values nothing reads -- pack_gemma writes it the same way.
+        "gemm_layout": "host" if host_only else "pretiled_bf16",
+        **({} if host_only else {"tile_k": tk, "tile_n": tn,
+                                 "mac_s": mac[0], "mac_t": mac[1]}),
         # The operand datapath. Absent in every container packed before
         # tasks/0078, and every one of those is bf16 -- so the runtime reads
         # silence as "bf16" rather than defaulting blindly.
-        "a_dtype": "i8" if args.int8 else "bf16",
+        "a_dtype": "f32" if host_only else ("i8" if args.int8 else "bf16"),
         **({"int4_group": args.int4_group}
            if args.int4_group is not None else {}),
         "fusions": {
             "qkv_fused": True,
             "transposed_to_kn": True,
             "qk_scale_folded_into_q": not args.no_fold_scale,
-            "gemm_operands_bf16": True,
+            "gemm_operands_bf16": not host_only,
             "biases_and_layernorm_fp32": True,
             "position_embeddings_presliced_to": max_seq_embedder,
         },
@@ -2548,6 +2714,12 @@ def main():
               if args.int8 and smooth_alpha > 0 else {})
     qerr = []
     def emit(name, mat, layer, op):
+        # HOST FIRST, and before the dtype family: a container whose operands
+        # are F32 row-major has no panel to tile, so int8/int4 cannot apply to
+        # it either. pack_gemma's branch order is the same one.
+        if host_only:
+            add_gemm_b_host(w, name, mat)
+            return
         if not args.int8:
             add_gemm_b(w, name, mat, tk, tn, mac=mac)
             return
@@ -2619,22 +2791,28 @@ def main():
     # What the DMA will actually see, per distinct GEMM shape. The 1023 limit is
     # on a BD size field, so what matters is that no access-pattern dimension
     # reaches it -- with whole tiles read linearly, the dims are tile counts.
-    print(f"\n  {'operand':<14} {'[K,N]':>12} {'k-blocks':>9} {'n-blocks':>9} "
-          f"{'tiles':>7} {'max BD dim':>11}")
-    shapes = {"qkv": (hidden, 3 * hidden), "attn_out": (hidden, hidden),
-              "ffn_up": (hidden, cfg["intermediate_size"]),
-              "ffn_down": (cfg["intermediate_size"], hidden)}
-    for nm, (K, N) in shapes.items():
-        kb, nb = K // tk, N // tn
-        flag = "" if max(kb, nb) < 1024 else "  <-- OVER 1023"
-        print(f"  {nm:<14} {str([K, N]):>12} {kb:>9} {nb:>9} {kb*nb:>7} "
-              f"{max(kb, nb):>11}{flag}")
-    print(f"  (row-major DDR would need K={cfg['intermediate_size']} as a BD "
-          f"dimension for ffn_down -- over 1023, which is why it could not be "
-          f"expressed before)")
+    # HOST PACKS PRINT NEITHER TABLE: there is no DMA and no tiling, so a row
+    # of tile counts over a row-major container would be a claim about a
+    # descriptor the file does not carry.
+    if not host_only:
+        print(f"\n  {'operand':<14} {'[K,N]':>12} {'k-blocks':>9} "
+              f"{'n-blocks':>9} {'tiles':>7} {'max BD dim':>11}")
+        shapes = {"qkv": (hidden, 3 * hidden),
+                  "attn_out": (hidden, hidden),
+                  "ffn_up": (hidden, cfg["intermediate_size"]),
+                  "ffn_down": (cfg["intermediate_size"], hidden)}
+        for nm, (K, N) in shapes.items():
+            kb, nb = K // tk, N // tn
+            flag = "" if max(kb, nb) < 1024 else "  <-- OVER 1023"
+            print(f"  {nm:<14} {str([K, N]):>12} {kb:>9} {nb:>9} {kb*nb:>7} "
+                  f"{max(kb, nb):>11}{flag}")
+        print(f"  (row-major DDR would need K={cfg['intermediate_size']} as a BD "
+              f"dimension for ffn_down -- over 1023, which is why it could not "
+              f"be expressed before)")
 
     total = Path(args.out).stat().st_size
-    print(f"\n  tensors    : {len(w.entries)}  ({n_tiled} pre-tiled GEMM operands)")
+    print(f"\n  tensors    : {len(w.entries)}"
+          + ("" if host_only else f"  ({n_tiled} pre-tiled GEMM operands)"))
     print(f"  json       : {info['json_length']} B at {info['json_offset']}")
     print(f"  data       : {info['data_length']/1e6:.2f} MB at {info['data_offset']}")
     print(f"  file       : {total/1e6:.2f} MB")
@@ -2642,10 +2820,14 @@ def main():
     # REPORT THE VALUE, NOT THE INTENTION. This printed the bf16 hash while the
     # tensors carried the I8 one -- the same fail-open shape as tasks/0042's
     # "tile (64, 32)" banner over a tile-48 pack. Build the descriptor the same
-    # way the emitter does.
-    print(f"  layout_hash: "
-          f"{layout_hash(gemm_b_layout(tk, tn, mac[0], mac[1], dtype=b_layout_dtype(args.int8)))[:16]}..."
-          f"  ({'i8' if args.int8 else 'bf16'} operands)")
+    # way the emitter does. A host pack has no layout to hash, so it says so
+    # instead of printing a hash of tiles it did not write.
+    if host_only:
+        print("  layout     : none -- row-major F32, GEMM on the host")
+    else:
+        print(f"  layout_hash: "
+              f"{layout_hash(gemm_b_layout(tk, tn, mac[0], mac[1], dtype=b_layout_dtype(args.int8)))[:16]}..."
+              f"  ({'i8' if args.int8 else 'bf16'} operands)")
     return 0
 
 

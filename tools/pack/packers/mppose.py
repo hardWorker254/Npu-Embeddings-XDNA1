@@ -108,6 +108,7 @@ from onnx import numpy_helper
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "..", "lib"))
 
+import conv_quant                                            # noqa: E402
 from npue import (ARCH_MEDIAPIPE_POSE_DET_SSD_LM_REGRESS,  # noqa: E402
                   Writer)
 
@@ -1034,8 +1035,23 @@ def _embed(w, model_name, datapath, npue_args, where):
 
 
 def pack_mppose(det_onnx, pose_onnx, out_path, dry_run=False, device=None,
-                npu=False,
+                npu=False, dtype="f32", int4_group=None,
                 npue_args=None):
+    # THE WEIGHT PRECISION, checked exactly as arch=6's and arch=7's packers
+    # check it: an unknown spelling refused by conv_quant by name, an
+    # --int4-group that means nothing for this dtype refused rather than
+    # silently dropped.
+    wdtype = conv_quant.conv_weight_dtype(dtype)
+    if wdtype == "i4":
+        if int4_group is not None and int(int4_group) < 0:
+            _die(f"--int4-group {int4_group} is negative. 0 means one group over "
+                 f"the whole input axis, i.e. per-channel int4, and is the only "
+                 f"value below 1 that has a meaning.")
+    elif int4_group is not None:
+        _die(f"--int4-group {int4_group} was given with --dtype {wdtype}. It "
+             f"only means anything for i4, and ignoring it would leave a "
+             f"container whose `conv_int4_group` says 0 while the operator "
+             f"asked for {int4_group}.")
     td = trace("det", onnx.load(str(det_onnx)))
     tp = trace("pose", onnx.load(str(pose_onnx)))
 
@@ -1147,6 +1163,17 @@ def pack_mppose(det_onnx, pose_onnx, out_path, dry_run=False, device=None,
         "det_head": json.dumps(head_d["det_head"], separators=(",", ":")),
         "pose_head": json.dumps(head_p["pose_head"], separators=(",", ":")),
         "pose_unused": json.dumps(head_p["pose_unused"], separators=(",", ":")),
+        # WHAT THE CONVOLUTION WEIGHTS ARE STORED AT -- every `*.conv.*.w` here
+        # is 4-D (this pair has no 2-D head projections, unlike arch=7), so the
+        # whole weight set goes through conv_quant and only the biases stay
+        # fp32. REQUIRED rather than defaulted by the reader: a runtime that
+        # guessed would read int8 bytes as fp32 and draw a plausible skeleton
+        # that is simply wrong. `conv_int4_group` is 0 on every dtype but i4.
+        # Containers written before this key existed carry neither, so
+        # runtime/src/mppose/geometry.cpp defaults the pair to f32 instead of
+        # demanding it -- see the note there.
+        "conv_weight_dtype": wdtype,
+        "conv_int4_group": int(int4_group) if wdtype == "i4" else 0,
     }
 
     w = Writer(config, arch=ARCH_MEDIAPIPE_POSE_DET_SSD_LM_REGRESS)
@@ -1154,8 +1181,22 @@ def pack_mppose(det_onnx, pose_onnx, out_path, dry_run=False, device=None,
     check_disjoint(w_d, w_p, "convolution weights")
     check_disjoint(prelu_d, prelu_p, "prelu slopes")
     for name, arr in sorted(both.items()):
-        w.add(name, arr, "F32",
-              "conv" if ".conv." in name else "prelu", list(arr.shape))
+        if name.endswith(".w") and ".conv." in name:
+            # A convolution weight: stored at `conv_weight_dtype`, with the
+            # scale sidecars that dtype implies. The `.w` is checked as well as
+            # the `.conv.` because the BIAS of every convolution is named
+            # `*.conv.N.b`, contains ".conv." and is rank 1 -- routed into
+            # add_conv_w it dies in `_view` with a message about convolution
+            # shapes that does not name the tensor that actually arrived.
+            # Biases and prelu slopes are not weights the file is made of: a
+            # bias is 4 bytes per output channel and a slope is one value per
+            # channel, so there is no group axis to quantise against and a
+            # wrong one shifts an activation by a constant the network never
+            # saw in training.
+            conv_quant.add_conv_w(w, name[:-len(".w")], arr, wdtype, int4_group)
+        else:
+            w.add(name, arr, "F32",
+                  "conv" if ".conv." in name else "prelu", list(arr.shape))
     w.add("det_anchors", anchors.astype(np.float32), "F32", "anchors",
           list(anchors.shape))
 
@@ -1175,8 +1216,28 @@ def pack_mppose(det_onnx, pose_onnx, out_path, dry_run=False, device=None,
         # BOTH graphs' panels, because both graphs' dense convolutions dispatch.
         # A stream set for one network and not the other is a design whose slots
         # half match, which resolves for the detector and not for the landmarks.
-        pd, sd, tile = npu_panels("det", ops_d, w_d, device)
-        pp, sp, tile2 = npu_panels("pose", ops_p, w_p, device)
+        #
+        # Tiled from the DEQUANTISED weights, so that on a --dtype i8 container
+        # the host's `q * s` and the array's bf16(q * s) are one network rather
+        # than two that a performance flag selects between -- the rule arch=6's
+        # pack_pose writes down. Copies: `both` has already been written.
+        wp_d, wp_p = w_d, w_p
+        if wdtype != "f32":
+            def _deq(d):
+                # ONLY the tensors stored quantised (the `*.conv.*.w` keys): a
+                # bias or a prelu slope is fp32 in the file, so dequantising it
+                # would build a panel from numbers the container does not hold,
+                # and npu_panels never reads them anyway -- it keys on
+                # `.conv.{i}.w`. Touching a rank-1 bias in this comprehension
+                # would die in `_view` before any panel was built.
+                return {n: (np.asarray(
+                            conv_quant.dequantise(a, wdtype, int4_group)
+                            ).reshape(np.asarray(a).shape)
+                            if n.endswith(".w") and ".conv." in n else a)
+                        for n, a in d.items()}
+            wp_d, wp_p = _deq(w_d), _deq(w_p)
+        pd, sd, tile = npu_panels("det", ops_d, wp_d, device)
+        pp, sp, tile2 = npu_panels("pose", ops_p, wp_p, device)
         if tile != tile2:
             _die(f"the two networks were tiled differently ({tile} and {tile2}), "
                  f"so one container would carry two panel layouts under one "
@@ -1213,6 +1274,13 @@ def pack_mppose(det_onnx, pose_onnx, out_path, dry_run=False, device=None,
     size = os.path.getsize(out_path)
     print(f"wrote {out_path}  ({size / 1e6:.1f} MB, arch={ARCH_STRING})")
     print(f"  {len(both)} weight tensors, {anchors.shape[0]} anchors")
+    if wdtype != "f32":
+        conv_ws = {n: a for n, a in both.items()
+                   if n.endswith(".w") and ".conv." in n}
+        src = sum(np.asarray(a).size for a in conv_ws.values())
+        print(f"  conv weights {wdtype.upper()} -- {len(conv_ws)} convolution "
+              f"tensors, {src / 1e6:.2f} M source parameters; biases and prelu "
+              f"slopes stay f32")
     if npu:
         print(f"  npu        {len(pd) + len(pp)} pre-tiled bf16 panels over "
               f"{len(allstreams)} padded (K, N) shapes, tile {tile[0]}x{tile[1]}, "
@@ -1228,16 +1296,30 @@ def main():
     ap.add_argument("--npu", action="store_true",
                     help="add the pre-tiled bf16 B panels and the stream table, "
                          "so `--npu-ops conv` has slots to dispatch into. OFF by "
-                         "default because there is no design set for arch=8 on "
-                         "this machine, and a container with panels and nothing "
-                         "to dispatch into is 5x the size for no path.")
+                         "default: the panels roughly double this container, and "
+                         "the stream set they have to match is the one embedded "
+                         "from runtime/artifacts/mediapipe-pose (22 streams, "
+                         "checked in both directions by "
+                         "tools/verify/verify_pose_streamset.py).")
     ap.add_argument("--device", default=None,
                     help="which array the panels are tiled for (npu1, npu2). "
                          "Required with --npu, because N pads to tile_n*cols and "
                          "cols is a property of the array.")
+    ap.add_argument("--dtype", default="f32",
+                    choices=list(conv_quant.DTYPE_CHOICES),
+                    help="how the CONVOLUTION WEIGHTS are stored: f32 "
+                         "(default -- the checkpoint's own precision), bf16 "
+                         "(the array's operand width, no scales), i8 or i4 "
+                         "(per-output-channel symmetric scale, quantised here "
+                         "rather than taken from the upstream _int8bq files, "
+                         "which measured a mean 64.0 px off float)")
+    ap.add_argument("--int4-group", type=int, default=None,
+                    help="rows per int4 scale group along the input axis; "
+                         "0 = one group over the whole axis (per-channel)")
     a = ap.parse_args()
     pack_mppose(a.det_onnx, a.pose_onnx, a.out, dry_run=a.dry_run,
-                device=a.device, npu=a.npu)
+                device=a.device, npu=a.npu, dtype=a.dtype,
+                int4_group=a.int4_group)
 
 
 if __name__ == "__main__":

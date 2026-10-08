@@ -8,6 +8,8 @@
 
 #include "pose/geometry.hpp"
 
+#include "common/host_kernels.hpp"   // bf16_read
+
 #include <algorithm>
 #include <cmath>
 #include <string>
@@ -373,13 +375,13 @@ Geometry read_geometry(npue::File &f, const std::string &label) {
     throw std::runtime_error(
         label + ": conv_weight_dtype -- " + e.what() +
         ". A container has to say what its weights are stored at; see "
-        "tools/lib/conv_quant.py for the three spellings and what each costs.");
+        "tools/lib/conv_quant.py for the four spellings and what each costs.");
   }
-  if (wdtype != "f32" && wdtype != "i8" && wdtype != "i4")
+  if (wdtype != "f32" && wdtype != "bf16" && wdtype != "i8" && wdtype != "i4")
     throw std::runtime_error(
         label + ": conv_weight_dtype is '" + wdtype +
-        "', and this runtime reads f32, i8 and i4. There is no fp16 or fp8 "
-        "convolution weight here, and reading either as one of the three "
+        "', and this runtime reads f32, bf16, i8 and i4. There is no fp16 or "
+        "fp8 convolution weight here, and reading either as one of the four "
         "produces a network with the right shapes and no relationship to the "
         "checkpoint.");
   const int64_t i4_group = need_int(f, "conv_int4_group", label);
@@ -420,6 +422,26 @@ Geometry read_geometry(npue::File &f, const std::string &label) {
             "weight whose byte count disagrees with its shape is not a weight at a "
             "different precision; it is a number of the wrong size.");
       c.w = f.raw(base + ".w").as<float>();
+    } else if (wdtype == "bf16") {
+      // bf16: two bytes per weight, the source's own bits rounded RNE. There is
+      // no fp32 view into the payload to point at, so the bits widen once, at
+      // load, into the same per-convolution storage the int8/int4 paths use --
+      // and the pointer swap at the end of that path is the only difference
+      // between the three. Reusing `from_bf16`/`bf16_read` rather than writing
+      // a decode here is the same rule as everywhere else these bits are read:
+      // one widening rule, or two rules that disagree in the last place.
+      if (static_cast<int64_t>(info.nbytes) != want * 2)
+        throw std::runtime_error(
+            label + ": " + base + ".w is " + std::to_string(info.nbytes) +
+            " bytes, which is not " + std::to_string(want * 2) + " for " +
+            std::to_string(want) + " bf16 values. A weight whose byte count "
+            "disagrees with its shape is not a weight at a different precision; "
+            "it is a number of the wrong size.");
+      std::vector<float> &dst = g.w_storage[static_cast<size_t>(i)];
+      dst.resize(static_cast<size_t>(want));
+      app::bf16_read(dst.data(), f.raw(base + ".w").data,
+                     static_cast<size_t>(want));
+      c.w = dst.data();
     } else {
       // int8: one byte per weight. int4: one byte per TWO weights, and K may be
       // ODD -- YOLOv8's stem is 3x3x3 = 27 -- so the payload is ceil(K/2) bytes

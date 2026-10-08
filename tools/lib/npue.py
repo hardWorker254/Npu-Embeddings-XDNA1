@@ -334,6 +334,15 @@ ASMOOTH_SUFFIX = ".asmooth"
 # tensor because the factor varies along BOTH axes and wscale is per-channel.
 GSCALE_SUFFIX = ".gscale"
 
+# The `role` a CONVOLUTION weight is stored under -- two spellings, because
+# there are two writers and both sets of containers are still on disk.
+# conv_quant.add_conv_w writes "conv_w" (arch=6 first, and now arch=7 and
+# arch=8); the packers as they stood before convolution weights could be
+# quantised wrote "conv", which is what models/mediapipe-hands.npue,
+# models/mediapipe-pose.npue and every float variant carry. `role` is not
+# otherwise consulted by this module, so this is the one place the two meet.
+CONV_W_ROLES = ("conv_w", "conv")
+
 
 def pack_i4(q):
     """int4 values held in an int8 panel -> packed bytes, LOW nibble first.
@@ -972,6 +981,12 @@ class Reader:
         e = self.entries[name]
         if e["dtype"] != "I4":
             return self.raw(name)
+        if e.get("role") in CONV_W_ROLES:
+            raise ValueError(
+                f"{self.path}: {name} is an I4 CONVOLUTION weight and has no "
+                f"array panel -- the panels these containers carry are the "
+                f"separate `.btile` tensors, and the weight itself is the host "
+                f"conv engine's. tensor() dequantises it to fp32.")
         K, N = e["padded_shape"]
         lay = e.get("layout")
         if not lay or lay.get("kind") != "block_panel":
@@ -1020,6 +1035,134 @@ class Reader:
         start = self.data_offset + e["offset"]
         return np.asarray(self._map[start:start + e["nbytes"]])
 
+    def _conv_weight(self, name, e):
+        """A CONVOLUTION weight, dequantised, at its logical shape.
+
+        WHY THIS BRANCH EXISTS: the general path below reads an I8 or I4 entry
+        as a GEMM operand -- TWO sidecars (`.wscale` AND `.asmooth`) and, for
+        I4, a `block_panel` layout to untile through. A convolution weight has
+        neither: conv_quant writes `.wscale` alone (plus `.gscale` for i4),
+        writes NO layout at all, and its array panels are the separate
+        `.btile` tensors rather than anything tiled out of the weight. So the
+        general path on a quantised conv container raises about a sidecar that
+        was never meant to exist, or tilts a weight that was never tiled -- and
+        both failures are raised at a container that did exactly what it was
+        written to do. That is how tools/verify/verify_hands.py and
+        verify_mppose.py came to be unable to open a container they pack.
+
+        Every dtype returns fp32 at `logical_shape`, because that is what a
+        conv engine multiplies and what those checkers compare against ORT.
+
+        f32      the bytes are the weights.
+        bf16     the bytes are the weights, widened -- exact, and the same
+                 widening as a GEMM BF16 operand's (no scale to fold in: the
+                 value IS the payload).
+        i8       `q[n,k] * wscale[n]`, per output channel, from the file's own
+                 `.wscale` rather than one recomputed from the checkpoint --
+                 a stored scale one ulp from a recomputation is a real
+                 difference in the container and has to be the reader's input,
+                 not its own arithmetic.
+        i4       `q[n,k] * wscale[n] * gscale[g(k),n]`, left to right, with
+                 `g = ceil(K / conv_int4_group)` and the same left-to-right
+                 order the C++ reader uses -- `(v * s) * r` and `v * (s * r)`
+                 are different float32 numbers, and a checker that quietly
+                 swapped them would report a reader bug on weights where two
+                 readers agree exactly.
+
+        Missing sidecars raise rather than default: a container whose scale is
+        skipped silently is the failure this format's scale pair exists to make
+        impossible.
+        """
+        shp = list(e["logical_shape"])
+        dtype = e["dtype"]
+        if dtype == "F32":
+            return np.ascontiguousarray(self.raw(name).reshape(shp)).copy()
+        if dtype == "BF16":
+            x = from_bf16_bits(self.raw(name))
+            if x.size != int(np.prod(shp)):
+                raise ValueError(
+                    f"{self.path}: {name} is BF16 with {x.size} values for a "
+                    f"{shp} tensor")
+            return np.ascontiguousarray(x.reshape(shp)).copy()
+
+        if dtype == "I8":
+            q = np.frombuffer(self.payload(name), dtype=np.int8)
+            if q.size != int(np.prod(shp)):
+                raise ValueError(
+                    f"{self.path}: {name} is I8 with {q.size} bytes for a {shp} "
+                    f"weight -- one byte per weight, so the payload and the "
+                    f"shape disagree about which is wrong")
+            N, K = shp[0], int(np.prod(shp[1:]))
+            s = self._sidecar(name, WSCALE_SUFFIX, N, e)
+            x = (q.reshape(N, K).astype(np.float32) * s[:, None]).reshape(shp)
+            return np.ascontiguousarray(x).copy()
+
+        if dtype == "I4":
+            N, K = shp[0], int(np.prod(shp[1:]))
+            want = N * ((K + 1) // 2)
+            if e["nbytes"] != want:
+                raise ValueError(
+                    f"{self.path}: {name} is I4 with {e['nbytes']} bytes, but "
+                    f"[{N}, {K}] packed over the first K columns is {want} -- "
+                    f"nbytes is what decides where the NEXT tensor starts, so "
+                    f"they cannot disagree without every tensor after this one "
+                    f"being read from the wrong offset")
+            q = unpack_i4(self.payload(name)).reshape(N, -1)
+            if q.shape[1] < K:
+                raise ValueError(
+                    f"{self.path}: {name} unpacks to {q.shape[1]} values per "
+                    f"output channel, fewer than the {K} its shape asks for")
+            q = q[:, :K]                 # a whole final byte for an odd K
+            s = self._sidecar(name, WSCALE_SUFFIX, N, e)
+            g = int(self.config.get("conv_int4_group", 0) or 0) or K
+            G = (K + g - 1) // g
+            gs = self._sidecar(name, GSCALE_SUFFIX, G * N, e).reshape(G, N)
+            # [K, N] by repetition, truncated at K, then TRANSPOSED to [N, K]:
+            # the payload was packed over the first K columns exactly, so the
+            # tail group's last rows of scales have no weights to scale and must
+            # not appear as one -- and the transpose is what makes a [K, N]
+            # factor broadcast against an [N, K] payload. Sizes are already
+            # pinned above (payload bytes, wscale length, gscale length), so
+            # every shape here follows from those three plus K itself.
+            gk = np.repeat(gs, g, axis=0)[:K, :].T
+            x = q.astype(np.float32) * s[:, None] * gk
+            return np.ascontiguousarray(x.reshape(shp)).copy()
+
+        raise ValueError(
+            f"{self.path}: {name} is {dtype!r}, which no convolution weight "
+            f"unpacking here knows -- the container's own dtype tag is the "
+            f"source of this, not the caller's, so this is a packer that wrote "
+            f"a tag with no reader for it")
+
+    def _sidecar(self, name, suffix, want, e):
+        """One scale tensor of a convolution weight, as fp32, of length `want`."""
+        # BASE + SUFFIX, and the base is the weight MINUS its `.w`, because that
+        # is what both writers produce: conv_quant adds `.wscale`/`.gscale` to
+        # `conv.0` (yielding `conv.0.wscale`, not `conv.0.w.wscale`), and the
+        # GEMM side works only because its operand names (`layer.0.qkv`) do not
+        # end in `.w` at all. Spelling it here rather than in the caller keeps
+        # the one place that knows both conventions from being copied a second
+        # time.
+        base = name[:-len(".w")] if name.endswith(".w") else name
+        sname = base + suffix
+        if sname not in self.entries:
+            raise KeyError(
+                f"{self.path}: {name} is {e['dtype']} but {sname} is not in the "
+                f"container -- its bytes carry no scale, so they are not a "
+                f"weight. Repack with tools/pack/pack_npue.py.")
+        s = self.tensor(sname).reshape(-1)
+        if s.size != want:
+            raise ValueError(
+                f"{self.path}: {sname} has {s.size} entries, and {name} asks "
+                f"for {want} -- a scale read with the wrong stride multiplies "
+                f"the wrong channel and still produces a tensor of the right "
+                f"shape")
+        if not np.all(np.isfinite(s)) or np.any(s < 0):
+            raise ValueError(
+                f"{self.path}: {sname} has a negative or non-finite entry; it "
+                f"is multiplied into every weight of its slice")
+        return s.astype(np.float32)
+
     def tensor(self, name):
         """The logical tensor: de-tiled and widened to fp32. For verification
         and for the Python encoder -- the C++ runtime uses panel() instead.
@@ -1032,6 +1175,8 @@ class Reader:
         format's whole scale/smooth pair exists to make impossible.
         """
         e = self.entries[name]
+        if e.get("role") in CONV_W_ROLES:
+            return self._conv_weight(name, e)
         x = self.panel(name)
         if e["dtype"] == "BF16":
             x = from_bf16_bits(x)

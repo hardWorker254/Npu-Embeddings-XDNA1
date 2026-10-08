@@ -96,7 +96,21 @@ import numpy as np
 # The supported weight precisions. Spelled here once so the packer's --dtype
 # metavar and this module cannot drift apart, which is what happened to the
 # equivalent list in pack_npue.py before it was derived.
-DTYPE_CHOICES = ("f32", "i8", "i4")
+#
+# bf16 is the fourth, and it is NOT a quantisation: no scale, no sidecar, no
+# group -- the payload is the source's own bits rounded to 8 bits of mantissa,
+# which is what the array's own A/B operands already are. It exists because
+# "there is no bf16 convolution weight path" was a statement about this list,
+# not about the machine: the readers that would consume it were one branch
+# short, and every other tensor in an --npu container is bf16 already.
+DTYPE_CHOICES = ("f32", "bf16", "i8", "i4")
+
+# numpy plus npue: bf16 has no numpy dtype, so the RNE rounding and its inverse
+# live in tools/lib/npue.py next to every other place that touches those bits
+# (the GEMM panels, the ONNX reader). A second implementation here would be a
+# second rounding rule, and two rounding rules that differ in the last place
+# produce a weight that differs from the panel built beside it.
+from npue import from_bf16_bits, to_bf16_bits                             # noqa: E402
 
 I8_MAX = 127   # not 128: the symmetric range stays symmetric, so negating a
 I4_MAX = 7     # weight cannot saturate differently from its opposite
@@ -113,6 +127,8 @@ def conv_weight_dtype(kind):
     k = str(kind).lower()
     if k in ("f32", "fp32", "float32"):
         return "f32"
+    if k in ("bf16", "bfloat16"):
+        return "bf16"
     if k in ("i8", "int8"):
         return "i8"
     if k in ("i4", "int4"):
@@ -268,6 +284,12 @@ def dequantise(mat, dtype, group=None):
     N, K = view.shape
     if dtype == "f32":
         return view.copy()
+    if dtype == "bf16":
+        # The weight as the container will hold it: rounded to bf16 and
+        # widened back, so the array's panels (built from THIS) and the host's
+        # buffer (read from the stored bits) are the same numbers rather than
+        # two roundings of the same checkpoint that differ in the last place.
+        return from_bf16_bits(to_bf16_bits(view))
     s = _channel_scale(view)
     if dtype == "i8":
         q = quantise(view, s, None, "i8")
@@ -280,6 +302,25 @@ def dequantise(mat, dtype, group=None):
     q = quantise(vp, s, s4, "i4")
     return (q[:, :K].astype(np.float32) * s[:, None] *
             np.repeat(r, g, axis=1)[:, :K])
+
+
+def _payload_u16(payload):
+    """A bf16 payload (the file's raw BYTES) as its uint16 bit patterns.
+
+    `Reader.payload()` returns uint8 for every dtype -- it hands back the bytes
+    on disk -- and `np.asarray(x, dtype=np.uint16)` over that would be a VALUE
+    cast: 2*N*K bytes become 2*N*K uint16s whose values are 0..255, which then
+    reshapes to [N, 2K] and fails every shape check downstream (or, with the
+    shape forced, compares pairs of adjacent BYTES against one weight). The
+    reinterpretation is `.view`, spelled the same way
+    `tools/verify/verify_conv_quant.py` reinterprets an I8 payload as int8.
+    """
+    b = np.ascontiguousarray(payload, dtype=np.uint8).reshape(-1)
+    if b.size % 2:
+        raise SystemExit(f"a bf16 payload of {b.size} bytes -- a bf16 weight is "
+                         f"two bytes, so this is an odd-length stream that would "
+                         f"pair every byte with the wrong neighbour")
+    return b.view(np.uint16)
 
 
 def dequantise_payload(payload, wscale, gscale, N, K, dtype, group=None):
@@ -302,11 +343,24 @@ def dequantise_payload(payload, wscale, gscale, N, K, dtype, group=None):
     implementation detail -- `(v * s) * r` and `v * (s * r)` are different
     float32 numbers.
     """
+    # BEFORE THE SCALES ARE READ, because f32 and bf16 are the two dtypes that
+    # have no scale sidecar at all: `wscale` arrives as None from a caller that
+    # has no such tensor, and turning None into an array here would be an error
+    # about the caller rather than about anything it could have got wrong.
+    if dtype == "f32":
+        return np.asarray(payload, dtype=np.float32).reshape(N, K)
+    if dtype == "bf16":
+        # No scale and no sidecar: the payload is the value. Read it from the
+        # container's OWN bits, not from the source, so this stays the half of
+        # the comparison that never re-runs the packer.
+        bits = _payload_u16(payload)
+        if bits.size != N * K:
+            raise SystemExit(f"bf16 payload is {bits.size} values for a "
+                             f"[{N}, {K}] weight")
+        return from_bf16_bits(bits.reshape(N, K))
     s = np.asarray(wscale, dtype=np.float32).reshape(-1)
     if s.size != N:
         raise SystemExit(f"wscale has {s.size} entries for {N} output channels")
-    if dtype == "f32":
-        return np.asarray(payload, dtype=np.float32).reshape(N, K)
     if dtype == "i8":
         q = np.asarray(payload, dtype=np.int8).reshape(N, K)
         return q.astype(np.float32) * s[:, None]
@@ -374,6 +428,19 @@ def add_conv_w(w, base, mat, dtype="f32", group=None):
     if dtype == "f32":
         w.add(base + ".w", view.reshape(shape), "F32", "conv_w", shape)
         return (0.0, N * K * 4)
+    if dtype == "bf16":
+        # NO SCALE AND NO SIDECAR, so the branch ends here rather than falling
+        # into the quantisation below: `_channel_scale` would compute a factor
+        # nobody multiplies by and `.wscale` would be a tensor the reader never
+        # looks for. The payload is the source's own bits rounded to 8 bits of
+        # mantissa -- the same width, and the same RNE rule, as every bf16
+        # panel this runtime already stages.
+        w.add(base + ".w", to_bf16_bits(view).reshape(shape), "BF16", "conv_w",
+              shape)
+        deq = dequantise(view, dtype)
+        den = float(np.linalg.norm(view))
+        err = float(np.linalg.norm(deq - view) / den) if den else 0.0
+        return (err, N * K * 2)
 
     s = _channel_scale(view)                       # [N]
     # The values the runtime will actually hold, computed once and used for BOTH
@@ -458,6 +525,32 @@ def check_conv_w(name, wq, wscale, gscale, w_src, dtype, group=None):
     if src.ndim == 4:
         src = src.reshape(src.shape[0], -1)
     N, K = src.shape
+
+    if dtype == "bf16":
+        # BEFORE THE SCALE CHECKS BELOW, because a bf16 weight has no scales at
+        # all: `wscale` arrives as None here, and invariants 1 and 2 (one scale
+        # per output channel, none of them negative) have nothing to be about.
+        # Invariant 3 is the whole check -- the payload must be the source's own
+        # bits after RNE -- and it is bit-exact for the same reason the int8
+        # payload's is: this is a rounding, not an arithmetic to have a
+        # tolerance for. Invariant 4 cannot be wrong because there is no ratio.
+        raw = _payload_u16(wq)
+        if raw.size != N * K:
+            raise SystemExit(
+                f"{name}: the stored payload is {raw.size} bf16 values for a "
+                f"[{N}, {K}] weight -- bf16 is two bytes per weight, so it must "
+                f"be [{N}, {K}]")
+        raw = raw.reshape(N, K)
+        want = to_bf16_bits(src)
+        if not np.array_equal(raw, want):
+            i, k = np.argwhere(raw != want)[0]
+            raise SystemExit(
+                f"{name}: the payload disagrees with the source at [{i}, {k}] "
+                f"-- stored {raw[i, k]:#06x}, the source rounded to bf16 is "
+                f"{want[i, k]:#06x}. A bf16 payload is not quantised: it IS the "
+                f"weight, so any difference is a different rounding rule (or a "
+                f"truncation) between the writer and this check")
+        return
 
     s = np.asarray(wscale, dtype=np.float32).reshape(-1)
     if s.size != N:

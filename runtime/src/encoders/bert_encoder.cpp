@@ -41,11 +41,60 @@ int64_t BertEncoder::seq() const { return g_seq; }
 size_t BertEncoder::stage_all() {
   size_t bytes = 0;
   const bool i8 = qkv_.info().a_elem_bytes == 1;
+
+  // A HOST-LAYOUT CONTAINER (`--dtype f32`, gemm_layout "host") carries plain
+  // row-major F32 operands: no panel, no layout_hash, and nothing for the DMA
+  // to read. It still has to RUN -- the default for every one of the nine
+  // codes is the host, and common/host_b.hpp's F32 branch reads exactly these
+  // bytes with no untile -- so the per-operand staging below is skipped rather
+  // than failed, the same way `host_ln` skips the layernorm design's staging.
+  //
+  // Absent means PRETILED, not broken: this key was written only by arch=1
+  // until tasks/0140, and every other arch's containers predate it, so a
+  // silent `== "host"` here would read all 498 older containers as host ones.
+  // Only the spelled-out value flips the path.
+  bool host_layout = false;
+  try {
+    host_layout = model_.config_string("gemm_layout") == "host";
+  } catch (const std::exception &) {
+    host_layout = false;
+  }
+
+  // The cache key for an unstaged weight. stage() numbers slots from zero
+  // within one design's buffer, so anything this far out is a number it cannot
+  // produce -- and it is never bound (`d.bind(1, wslot)` is the array path,
+  // which refuses a host container above rather than reaching it).
+  static constexpr size_t kHostSlot = static_cast<size_t>(1) << 40;
+  size_t host_seq = 0;  // one key space for all four per-layer designs
+
   auto one = [&](npu::Design &d, const std::string &name,
                  std::vector<size_t> &slots,
                  std::vector<const float *> &bias,
                  std::vector<const float *> *wsc = nullptr,
                  std::vector<const float *> *asm_ = nullptr) {
+    if (host_layout) {
+      // Asked for the array by name, on a container that has no panel to
+      // hand it: refuse with the reason rather than stage nothing and let
+      // the bind fail later on a slot number it was never told about.
+      if (app::op_on_array("gemm"))
+        throw std::runtime_error(
+            name + ": this container is `--dtype f32` (gemm_layout \"host\") "
+            "-- its GEMM operands are row-major F32 for the CPU, and the MMAC "
+            "multiplies bf16 and int8 only. --npu-ops gemm is refused rather "
+            "than silently ignored; drop the flag, or repack with "
+            "--dtype bf16/i8 for the array.");
+      // ONE counter for all four vectors, not one per vector: in unified mode
+      // qkv_/attn_out_/ffn_up_/ffn_down_ are the SAME Design object, so the
+      // cache key is (that pointer, slot) and four vectors each starting at
+      // zero would collapse 4L operands onto L keys -- which is what made the
+      // host path multiply ffn_down at qkv's [K, N] on the first attempt.
+      slots.push_back(kHostSlot + host_seq++);
+      host_w_->record(&d, slots.back(), name);
+      bias.push_back(model_.raw(name + ".bias").as<float>());
+      // No wscale/asmooth: the packer writes neither for an f32 operand, and
+      // i8 is false here anyway (the design it embeds is the bf16 one).
+      return;
+    }
     const std::string &want = d.info().b_layout_hash;
     const std::string &got = model_.info(name).layout_hash;
     if (want.empty())

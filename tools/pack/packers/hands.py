@@ -90,6 +90,7 @@ from onnx import numpy_helper
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "..", "lib"))
 
+import conv_quant                                            # noqa: E402
 from npue import ARCH_MEDIAPIPE_HANDS_PALM_SSD_LM_HEATMAP, Writer  # noqa: E402
 
 ARCH_STRING = "mediapipe_hands_palm_ssd_lm_heatmap"
@@ -922,8 +923,25 @@ def _embed(w, model_name, datapath, npue_args, where):
 
 
 def pack_hands(palm_onnx, lm_onnx, out_path, dry_run=False,
-                device=None, npu=False,
-                npue_args=None):
+               device=None, npu=False, dtype="f32", int4_group=None,
+               npue_args=None):
+    # THE WEIGHT PRECISION, in the same place and with the same two checks as
+    # arch=6's packer: a spelling conv_quant does not know is refused there
+    # (by name, listing what it does know), and an --int4-group that only means
+    # something for i4 is refused rather than ignored, because a container whose
+    # `conv_int4_group` contradicts the flag that was typed is a disagreement
+    # discoverable only when the accuracy turns out to be somebody else's.
+    wdtype = conv_quant.conv_weight_dtype(dtype)
+    if wdtype == "i4":
+        if int4_group is not None and int(int4_group) < 0:
+            _die(f"--int4-group {int4_group} is negative. 0 means one group over "
+                 f"the whole input axis, i.e. per-channel int4, and is the only "
+                 f"value below 1 that has a meaning.")
+    elif int4_group is not None:
+        _die(f"--int4-group {int4_group} was given with --dtype {wdtype}. It "
+             f"only means anything for i4, and ignoring it would leave a "
+             f"container whose `conv_int4_group` says 0 while the operator "
+             f"asked for {int4_group}.")
     tp = trace("palm", onnx.load(str(palm_onnx)))
     tl = trace("landmark", onnx.load(str(lm_onnx)))
     ops_p, names_p, conv_p, w_p, prelu_p, head_p = emit_ops(tp, "palm")
@@ -996,6 +1014,20 @@ def pack_hands(palm_onnx, lm_onnx, out_path, dry_run=False,
         "lm_graph_nodes": json.dumps(names_l, separators=(",", ":")),
         "palm_head": json.dumps(head_p["palm_head"], separators=(",", ":")),
         "lm_head": json.dumps(head_l["lm_head"], separators=(",", ":")),
+        # WHAT THE CONVOLUTION WEIGHTS ARE STORED AT (`*.conv.*.w` only -- the
+        # biases, the prelu slopes and the four 2-D head projections are fp32 on
+        # every dtype), and the int4 group along the input axis -- REQUIRED
+        # rather than defaulted by the reader, for the same reason palm_row_terms
+        # is: a reader that had to guess would take int8 bytes for fp32 ones and
+        # produce a network with the right shapes and the wrong answer.
+        # `conv_int4_group` ships on every dtype as 0 unless i4, the same "one
+        # code path" rule gemm_i8 follows with its all-ones `.asmooth`. (The
+        # containers packed before this key existed -- models/mediapipe-hands.npue
+        # and the float ones -- carry neither, which is why the runtime defaults
+        # them to f32 rather than requiring them: see
+        # runtime/src/hands/geometry.cpp.)
+        "conv_weight_dtype": wdtype,
+        "conv_int4_group": int(int4_group) if wdtype == "i4" else 0,
     }
 
     w = Writer(config, arch=ARCH_MEDIAPIPE_HANDS_PALM_SSD_LM_HEATMAP)
@@ -1007,8 +1039,26 @@ def pack_hands(palm_onnx, lm_onnx, out_path, dry_run=False,
     check_disjoint(w_p, w_l, "convolution weights")
     check_disjoint(prelu_p, prelu_l, "prelu slopes")
     for name, arr in sorted(both.items()):
-        w.add(name, arr, "F32",
-              "conv" if ".conv." in name else "prelu", list(arr.shape))
+        if name.endswith(".w") and ".conv." in name:
+            # A CONVOLUTION weight, and only those: `conv_weight_dtype` is
+            # spelled honestly -- the four 2-D head projections in `lm.gemm.*`
+            # and every bias and prelu slope stay fp32. The `.w` is checked as
+            # well as the `.conv.` because the BIAS of every convolution is
+            # named `*.conv.N.b`, contains ".conv." and is rank 1: routed in
+            # here it dies inside `_view` with a message about convolution
+            # shapes that never names the tensor that actually arrived.
+            # The head projections stay out for two reasons, and the second is
+            # the real one: a 2-D matrix is not what `_view` shapes for
+            # add_conv_w (it would be written with a [N,1,1,K] logical shape,
+            # which is a different tensor to every reader), and those weights
+            # are 0.1% of this file -- quantising them buys nothing a byte count
+            # could show and costs a second read path in
+            # runtime/src/hands/geometry.cpp for a head whose output is 63
+            # numbers.
+            conv_quant.add_conv_w(w, name[:-len(".w")], arr, wdtype, int4_group)
+        else:
+            w.add(name, arr, "F32",
+                  "conv" if ".conv." in name else "prelu", list(arr.shape))
     w.add("palm_anchors", anchors.astype(np.float32), "F32", "anchors",
           list(anchors.shape))
 
@@ -1024,8 +1074,32 @@ def pack_hands(palm_onnx, lm_onnx, out_path, dry_run=False,
         # BOTH graphs' panels. The palm detector and the landmark network dispatch
         # independently, and a stream set for one and not the other is a design
         # whose slots half resolve.
-        pp, sp, tile = npu_panels("palm", ops_p, w_p, device)
-        pl, sl, tile2 = npu_panels("lm", ops_l, w_l, device)
+        #
+        # The panels are tiled from the DEQUANTISED weights, not from the
+        # checkpoint's own -- the same one-flag-one-network rule arch=6 states
+        # (see pack_pose): on a --dtype i8 container the host multiplies `q * s`
+        # and the array multiplies bf16(q * s), so a detection that moves when
+        # `--npu-ops conv` is added would mean the array was running a different
+        # model than the host, with nothing in the file that says so. Copy, not
+        # mutate: `both` above has already been written into the container.
+        wp_p, wp_l = w_p, w_l
+        if wdtype != "f32":
+            def _deq(d):
+                # ONLY the tensors that were actually STORED quantised -- the
+                # `*.conv.*.w` keys. The biases and the head projections are
+                # fp32 in the file, so dequantising them would build panels from
+                # numbers the container does not hold; npu_panels never reads
+                # them (it keys on `.conv.{i}.w`), and a comprehension that
+                # touched them would die in `_view` on a rank-1 bias before
+                # reaching a single panel.
+                return {n: (np.asarray(
+                            conv_quant.dequantise(a, wdtype, int4_group)
+                            ).reshape(np.asarray(a).shape)
+                            if n.endswith(".w") and ".conv." in n else a)
+                        for n, a in d.items()}
+            wp_p, wp_l = _deq(w_p), _deq(w_l)
+        pp, sp, tile = npu_panels("palm", ops_p, wp_p, device)
+        pl, sl, tile2 = npu_panels("lm", ops_l, wp_l, device)
         if tile != tile2:
             _die(f"the two networks were tiled differently ({tile} and {tile2}), "
                  f"so one container would carry two panel layouts under one "
@@ -1061,6 +1135,13 @@ def pack_hands(palm_onnx, lm_onnx, out_path, dry_run=False,
     print(f"  {len({**w_p, **w_l})} weight tensors, "
           f"{len({**prelu_p, **prelu_l})} slopes, "
           f"{anchors.shape[0]} anchors")
+    if wdtype != "f32":
+        conv_ws = {n: a for n, a in {**w_p, **w_l}.items()
+                   if n.endswith(".w") and ".conv." in n}
+        src = sum(np.asarray(a).size for a in conv_ws.values())
+        print(f"  conv weights {wdtype.upper()} -- {len(conv_ws)} convolution "
+              f"tensors, {src / 1e6:.2f} M source parameters; biases, prelu "
+              f"slopes and the four 2-D head projections stay f32")
     if npu:
         print(f"  npu        {len(pp) + len(pl)} pre-tiled bf16 panels over "
               f"{len(allstreams)} padded (K, N) shapes, tile {tile[0]}x{tile[1]}, "
@@ -1082,9 +1163,21 @@ def main():
                     help="which array the panels are tiled for (npu1, npu2). "
                          "Required with --npu, because N pads to tile_n*cols and "
                          "cols is a property of the array.")
+    ap.add_argument("--dtype", default="f32",
+                    choices=list(conv_quant.DTYPE_CHOICES),
+                    help="how the CONVOLUTION weights are stored: f32 "
+                         "(default -- the checkpoint's own precision), bf16 "
+                         "(the array's operand width, no scales), i8 or i4 "
+                         "(per-output-channel symmetric scale, quantised here "
+                         "rather than taken from the upstream _int8 files, "
+                         "which are not a smaller model but a broken one)")
+    ap.add_argument("--int4-group", type=int, default=None,
+                    help="rows per int4 scale group along the input axis; "
+                         "0 = one group over the whole axis (per-channel)")
     a = ap.parse_args()
     pack_hands(a.palm_onnx, a.lm_onnx, a.out, dry_run=a.dry_run,
-               device=a.device, npu=a.npu)
+               device=a.device, npu=a.npu, dtype=a.dtype,
+               int4_group=a.int4_group)
 
 
 if __name__ == "__main__":

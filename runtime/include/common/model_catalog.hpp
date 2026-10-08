@@ -65,6 +65,13 @@ struct ModelEntry {
   // no design. FALSE is not a claim of absence: a container packed before this
   // existed, or one whose reader has the set on disk, simply leaves it false.
   bool carries_design = false;
+
+  // TRUE when the container ALSO holds the decoder set, design/gemm_rtp_dec/.
+  // Only an STT container has a decoder, so this is false for every embedder
+  // without being a claim of absence -- the key simply does not exist there.
+  // It exists for `list`: an STT row needs BOTH sets, so `carries_design`
+  // alone would call ready a container carrying only the encoder's.
+  bool carries_design_dec = false;
 };
 
 
@@ -105,6 +112,10 @@ inline std::vector<ModelEntry> discover_models(const std::string &root) {
       // not be reported as unreadable.
       try {
         m.carries_design = f.has("design/gemm_rtp/design.json");
+      } catch (const std::exception &) {
+      }
+      try {
+        m.carries_design_dec = f.has("design/gemm_rtp_dec/design.json");
       } catch (const std::exception &) {
       }
       if (m.kind.empty())

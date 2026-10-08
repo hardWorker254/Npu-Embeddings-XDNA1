@@ -1,7 +1,10 @@
 # NpuEmbeddings
 # SPDX-License-Identifier: Apache-2.0
 
-cmake_minimum_required(VERSION 3.20)
+# 3.24 for $<LINK_LIBRARY:WHOLE_ARCHIVE,...> -- see the note above the three
+# binaries; without it the five self-registering ModelLoaders are not in the
+# link and every flag-form command dies with "no model loader for arch".
+cmake_minimum_required(VERSION 3.24)
 project(npuembeddings_runtime LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -333,9 +336,36 @@ endif()
 # They land in the same directory (runtime/build/) on purpose: default_root()
 # walks up from argv[0], and one directory of three binaries keeps every
 # documented command line a `./runtime/build/<verb>` away.
+#
+# WHOLE ARCHIVE, and the reason is a rule about static libraries rather than a
+# preference: ld extracts an archive member ONLY when it resolves a symbol
+# nothing else has. The five ModelLoaders (bert, gemma, vit, pose, whisper)
+# contain no symbol anybody calls -- each holds a namespace-scope lambda that
+# registers itself at static init -- so none of the five members was ever
+# extracted, `model_loaders()` stayed EMPTY, and every path that reaches
+# npue::load_model() died with
+#
+#     error: no model loader for arch 'bert_abs_gelu_postln'
+#
+# i.e. it named the arch it had just successfully read out of the container.
+# Those paths are the ones no verb exercises: the flag form (`npuembeddings ..
+# --model NAME --embed ...`) and `tokenize <name> <file>`. Measured on this
+# machine after the split, and caught by verify_whisper_cli's "flag form"
+# refusal case and verify_endpoint's --embed cross-check -- two gates out of
+# 28, because 26 of them go through subcommands that build their encoder
+# themselves.
+#
+# It was a REGRESSION of "one library, three mains": before the split every
+# source was listed on the executable itself, so all of them were in the link
+# unconditionally and the question never arose. `nm -C runtime/build/npuembeddings
+# | grep -c BertModelLoader` printed 0 against 10 in libnpue_core.a.
+#
+# WHOLE_ARCHIVE puts every member in the link the way the pre-split
+# add_executable did, on every platform CMake knows (GNU ld's --whole-archive,
+# MSVC's /WHOLEARCHIVE), and it needs CMake 3.24 -- hence the version below.
 foreach(npue_bin npuembeddings npuaudio npuimage)
   add_executable(${npue_bin} src/bin/${npue_bin}_main.cpp)
-  target_link_libraries(${npue_bin} PRIVATE npue_core)
+  target_link_libraries(${npue_bin} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,npue_core>")
   if(MSVC)
     target_compile_options(${npue_bin} PRIVATE /W3 /EHsc /Zc:__cplusplus /O2
                            /arch:${NPUE_HOST_ARCH})

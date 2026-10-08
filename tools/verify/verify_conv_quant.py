@@ -72,6 +72,33 @@ def rt_reads(payload, wscale, gscale, N, K, dtype, group):
     obvious vectorised version of it is the thing most likely to differ from the
     C++ in exactly the way this is looking for.
     """
+    # A TENSOR WITH NO SCALE SIDECAR, and read first so that `None` never has
+    # to be turned into an array below: bf16 stores the weight's own bits and
+    # f32 stores the checkpoint's, so there is no factor to transcribe.
+    if dtype in ("f32", "bf16"):
+        if dtype == "f32":
+            return np.asarray(payload, dtype=np.float32).reshape(N, K)
+        # THE SHIFT IS THE WHOLE WIDENING, and it is exact: a bf16 value's
+        # 8 significant bits (1 implicit + 7 stored) fit in f32's 24, and its
+        # 8-bit exponent is already an f32 exponent, so every field moves left
+        # by the same 16 and nothing is rounded. Written as the shift rather
+        # than borrowed from npue.from_bf16_bits, because this function exists
+        # to be an INDEPENDENT transcription to be compared against the
+        # packer's helper -- sharing the helper would make the comparison
+        # tautological for exactly the dtype where agreement is trivial.
+        #
+        # The bytes are reassembled here rather than `.view()`n, and that is
+        # part of the same independence: a little-endian pair built out of two
+        # element selects is a transcription of "the low byte is first" that
+        # can disagree with the writer, whereas a view cannot disagree with
+        # anything -- it just reinterprets whatever is there.
+        b = np.ascontiguousarray(payload, dtype=np.uint8).reshape(-1)
+        if b.size != 2 * N * K:
+            raise SystemExit(f"bf16 payload is {b.size} bytes for a [{N}, {K}] "
+                             f"weight ({2 * N * K} expected)")
+        u = b[0::2].astype(np.uint32) | (b[1::2].astype(np.uint32) << 8)
+        return ((u << 16).view(np.float32)).reshape(N, K)
+
     s = np.asarray(wscale, dtype=np.float32)
     if dtype == "i8":
         q = np.asarray(payload, dtype=np.int8).reshape(N, K)
@@ -205,8 +232,12 @@ def main():
                 G = (K + g - 1) // g
                 gs = r.raw(f"{base}.gscale").reshape(G, N)
                 pay = pay.reshape(N, (K + 1) // 2)
-            conv_quant.check_conv_w(base, pay, r.raw(f"{base}.wscale"), gs,
-                                    w, dtype, group)
+            # bf16 has NO `.wscale`: the payload is the value, so `None` goes
+            # down to functions that branch on dtype before they look at the
+            # factor. Asking for the tensor by name would be a KeyError raised
+            # at a container that did nothing wrong.
+            wscale = None if dtype == "bf16" else r.raw(f"{base}.wscale")
+            conv_quant.check_conv_w(base, pay, wscale, gs, w, dtype, group)
             # BOTH SIDES OF THE READER COMPARISON READ THE FILE. The scheme
             # applied to the container's own payload and the container's own
             # scales, against a transcription of geometry.cpp doing the same.
@@ -217,10 +248,9 @@ def main():
             # weights with both readers agreeing exactly. The quantisation error
             # below is still measured against the source, which is what it is
             # for.
-            deq = conv_quant.dequantise_payload(pay, r.raw(f"{base}.wscale"),
-                                                gs, N, K, dtype, group)
-            rt = rt_reads(pay, r.raw(f"{base}.wscale"), gs,
-                          N, K, dtype, group)
+            deq = conv_quant.dequantise_payload(pay, wscale, gs, N, K, dtype,
+                                                group)
+            rt = rt_reads(pay, wscale, gs, N, K, dtype, group)
             if not np.array_equal(rt, deq):
                 bad = np.argwhere(rt != deq)
                 n, k = (int(x) for x in bad[0])

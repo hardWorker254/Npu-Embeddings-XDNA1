@@ -267,6 +267,16 @@ struct Geometry {
   std::vector<ConvW> det_convs, pose_convs;
   std::vector<std::string> det_nodes, pose_nodes;   // node names, for errors
   std::vector<Slope> det_slopes, pose_slopes;
+  // Widened/dequantised weight storage, owned here for the lifetime of the
+  // Geometry: ConvW::w is a `const float *`, and a bf16 or int8/int4 container
+  // holds bytes that do not exist as floats until someone widens them or
+  // multiplies an int by a scale, once, at load. Detector convs first, then
+  // landmark convs, each in its graph's own index order -- the pointer is what
+  // ConvW::w keeps, so the ordering is for a reader of this file rather than
+  // for the convolution. Empty on an f32 container, whose ConvW::w points
+  // straight into the mapping. (pose/geometry.hpp says the same thing at
+  // greater length; this is the same field.)
+  std::vector<std::vector<float>> w_storage;
   // The 2254 SSD anchor centres, STORED. The packer generates them and reproduces
   // the zoo's literal table bit for bit, so shipping the table keeps that a fact
   // about one machine's packing rather than about every machine's arithmetic.

@@ -279,8 +279,21 @@ FAMILY = {"embed": "npuembeddings", "whisper": "npuaudio",
 
 
 def exe_for(exe: Path, arch: str) -> Path:
-    if exe.stem in FAMILY.values():
-        return exe
+    """The binary that serves THIS arch, resolved next to the given --exe.
+
+    It used to early-return `exe` whenever its stem was one of the three names
+    -- and since --exe defaults to `runtime/build/npuembeddings`, that one name
+    is what every arch got: the whisper row called `npuembeddings serve
+    whisper-tiny`, which refuses because it is not the audio binary, and the
+    gate reported a failing serve where the code had refused correctly. The
+    early return also contradicted this gate's own --exe help, which promises
+    that the other two are resolved from the arch under test.
+
+    THE ARCH PICKS THE BINARY, so this is one line: a path whose stem already
+    equals the wanted name is returned unchanged by construction, and any other
+    --exe (a differently named build, a wrapper) contributes its DIRECTORY and
+    nothing else -- which is the "overrides the TREE" the help text describes.
+    """
     return exe.with_name(FAMILY[arch])
 
 

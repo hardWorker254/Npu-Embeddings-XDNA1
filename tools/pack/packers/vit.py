@@ -215,6 +215,36 @@ class _Int8:
                 f"({worst[0]})")
 
 
+class _Host:
+    """The `--dtype f32` emitter: row-major F32 [K, N], no tiling, no scales.
+
+    The SAME two methods as _Int8 -- `emit(w, name, mat, key, fold)` and
+    `report()` -- because every call site branches on `if ctx` and not on the
+    dtype family. pack_whisper carries its own copy for the same reason these
+    packers carry their own `_embed` and their own int4 guard: the modules are
+    runnable as scripts as well as imported by pack_npue.py, and a shared
+    name is what the comment above `_embed` calls five opportunities for four
+    of them to disagree with the fifth.
+
+    `key` is the calibration lookup and is ignored: an f32 operand is the
+    checkpoint's own precision. The tensor is written under the layout kind
+    `gemm_b_host` -- the string this file's own classifier head has always
+    used, so the runtime reads the array's operands and the head through one
+    code path with no special case.
+    """
+
+    def emit(self, w, name, mat, key=None, fold=None):
+        mat = np.ascontiguousarray(mat, dtype=np.float32)
+        if fold is not None:
+            mat = mat * np.float32(fold)
+        K, N = mat.shape
+        w.add(name, mat.reshape(-1), "F32", "gemm_b_host", [K, N])
+
+    def report(self) -> str:
+        return ("  f32: row-major operands, no quantisation, GEMM on the host "
+                "(the array multiplies bf16 and int8 only)")
+
+
 def patch_embed_operand(w_proj: np.ndarray) -> np.ndarray:
     """Conv2d(3, H, kernel=P, stride=P) weight -> the [P*C*P, H] GEMM operand.
 
@@ -386,7 +416,7 @@ def _embed(w, model_name, datapath, npue_args, where):
 def pack_vit(model_dir, out, fold_scale=True, dry_run=False, device=None,
              int8=False, int4_group=None, int8_alpha=0.5, int8_images=8,
              int8_corpus=None,
-                npue_args=None):
+                npue_args=None, host_only=False):
     global I8_DTYPE
     if int4_group is not None and not int8:
         # int4 is the int8 datapath with 4-bit weights (gemm_i4.py), so with
@@ -400,6 +430,14 @@ def pack_vit(model_dir, out, fold_scale=True, dry_run=False, device=None,
             f"quantise (int8=False); int4 is the int8 datapath with 4-bit "
             f"weights, so it has nothing to attach to. Refusing rather than "
             f"emitting a bf16 container that ignores it.")
+    if host_only and int8:
+        # Two answers to one question -- pack_whisper's guard, restated rather
+        # than imported, because these modules are runnable as scripts too.
+        raise SystemExit(
+            "--dtype f32 and the int8 datapath are two answers to the same "
+            "question: f32 is row-major F32 on the host, i8 is a pre-tiled "
+            "panel for the array. Refusing rather than dropping one. int8="
+            "False for the f32 control, or drop --dtype f32.")
     model_dir = Path(model_dir)
     # int8's sub-tile is NOT bf16's on npu1 -- see npue.MAC_BY_DEVICE. The
     # dtype is required by mac_for_device for that reason.
@@ -507,7 +545,12 @@ def pack_vit(model_dir, out, fold_scale=True, dry_run=False, device=None,
     # rather than inside add_gemm_b so that the layout hash, the writer and the
     # printed report all read one value.
     ictx = None
-    if int8:
+    if host_only:
+        # FIRST, and exclusive: nothing to calibrate for an operand that is the
+        # checkpoint's own precision, so I8_DTYPE stays BF16 and the config
+        # below takes a_dtype from `host_only` rather than from it.
+        ictx = _Host()
+    elif int8:
         I8_DTYPE = "I8"
         images, label = vit_int8.load_or_make_corpus(int8_corpus, int8_images,
                                                       pre["image_size"])
@@ -524,6 +567,13 @@ def pack_vit(model_dir, out, fold_scale=True, dry_run=False, device=None,
     config = {
         "arch": "vit_patch16_prenorm_gelu",
         "kind": "cls",
+        # The layout the operands are stored in, stated by the container: "host"
+        # is plain row-major F32 (the classifier head has always been stored
+        # that way, under the same `gemm_b_host` role) and "pretiled_bf16" is
+        # the array's block_panel. `--npu-ops gemm` on a host container is
+        # refused by name at run time rather than ignored -- the MMAC multiplies
+        # bf16 and int8 only.
+        "gemm_layout": "host" if host_only else "pretiled_bf16",
         "source_repo": f"google/{model_dir.name}",
         "source_sha256": src_sha,
         "num_layers": layers,
@@ -581,7 +631,10 @@ def pack_vit(model_dir, out, fold_scale=True, dry_run=False, device=None,
         # default; "i8" means every GEMM operand is int8 with a
         # per-output-channel scale and a SmoothQuant factor, and the design set
         # must be exported with --int8 or the runtime refuses the pair by name.
-        "a_dtype": I8_DTYPE,
+        # "f32" is the third answer and it is not an operand the array takes:
+        # the container says gemm_layout "host" above and --npu-ops gemm on it
+        # is refused by name at run time.
+        "a_dtype": "f32" if host_only else I8_DTYPE,
         # INT4 ONLY: the K-group size behind every .gscale in this container.
         # Absent for bf16/int8 -- a config that carries it is an int4 config,
         # and the reader cannot fold an int4 panel without it (npue.fold_i4).
@@ -597,8 +650,16 @@ def pack_vit(model_dir, out, fold_scale=True, dry_run=False, device=None,
             "equals kernel, so im2col is a permutation and the conv is one "
             "[768,768] matrix multiply",
             ("patch_embed rides the attn_out stream's shape -- the array "
-             "computes it with no new design and no new stream"),
-            ("GEMM operands pre-tiled int8 block_panel (64,48) with a "
+             "computes it with no new design and no new stream"
+             if not host_only else
+             "patch_embed rides the attn_out stream's shape, which on a host "
+             "pack is a shape and not a dispatch: every GEMM here runs on the "
+             "CPU"),
+            ("GEMM operands row-major F32 (gemm_layout \"host\"), GEMM on "
+             "the CPU -- the array multiplies bf16 and int8 only, so "
+             "--npu-ops gemm is refused on this container by name"
+             if host_only else
+             "GEMM operands pre-tiled int8 block_panel (64,48) with a "
              "per-output-channel scale and a SmoothQuant factor"
              if int8 else
              "GEMM operands pre-tiled bf16 block_panel (64,48)"),
@@ -729,30 +790,47 @@ def pack_vit(model_dir, out, fold_scale=True, dry_run=False, device=None,
     st.close()
 
     if dry_run:
-        print(f"  would write {len(w.entries)} tensors "
-              f"({n_tiled} pre-tiled GEMM operands) to {out}")
+        print(f"  would write {len(w.entries)} tensors"
+              + ("" if host_only else f" ({n_tiled} pre-tiled GEMM operands)")
+              + f" to {out}")
         return 0
 
-    _embed(w, "vit-base-patch16-224", "bf16", npue_args, "vit")
+    # Same rule as the whisper packer: the datapath is THIS pack's. Hardcoded
+    # "bf16" glued a bf16 design into an int8 container, which the vit encoder
+    # then refuses (its A element width comes from the design, and it insists
+    # the container's own a_dtype agree with its operands).
+    _embed(w, "vit-base-patch16-224",
+           "i8" if (int8 or int4_group) else "bf16", npue_args, "vit")
     info = w.write(out)
     total = Path(out).stat().st_size
     print(f"\n  arch       : 5 vit_patch16_prenorm_gelu  hidden {d}, "
           f"{layers} pre-LN layers, {heads} heads x {head_dim}, patch {patch}, "
           f"{n_pos} positions ({n_patch} patches + CLS), {n_labels} labels")
     print(f"  source     : {src_sha[:16]}...  (google/{model_dir.name})")
-    print(f"  tensors    : {len(w.entries)}  ({n_tiled} pre-tiled GEMM operands)")
-    print(f"  on array   : patch_embed (rides attn_out), qkv, attn_out, "
-          f"ffn_up, ffn_down")
-    print(f"  on host    : classifier [{d},{n_labels}], image front end, "
-          f"attention")
+    print(f"  tensors    : {len(w.entries)}"
+          + ("" if host_only else f"  ({n_tiled} pre-tiled GEMM operands)"))
+    # "on array" is a claim about dispatch. A host pack sends nothing there,
+    # so the line says what runs where instead of naming streams the file has
+    # no operand for.
+    if host_only:
+        print("  on host    : every GEMM (row-major F32, gemm_layout "
+              "\"host\"), the image front end, attention, classifier")
+    else:
+        print(f"  on array   : patch_embed (rides attn_out), qkv, attn_out, "
+              f"ffn_up, ffn_down")
+        print(f"  on host    : classifier [{d},{n_labels}], image front end, "
+              f"attention")
     print(f"  labels     : {len(labels)} names "
           f"({len(blob) / 1e3:.1f} kB)")
     print(f"  data       : {info['data_length'] / 1e6:.2f} MB")
     print(f"  file       : {out}  ({total / 1e6:.2f} MB)")
     if ictx:
         print(ictx.report())
-    print(f"  layout_hash: "
-          f"{layout_hash(gemm_b_layout(TILE_K, TILE_N, mac[0], mac[1], dtype=I8_DTYPE))[:16]}..."
-          f"  (mac s={mac[0]} t={mac[1]}, {device or MAC_DEFAULT_DEVICE}"
-          f"{', i8 operands' if int8 else ''})")
+    if host_only:
+        print("  layout     : none -- row-major F32, GEMM on the host")
+    else:
+        print(f"  layout_hash: "
+              f"{layout_hash(gemm_b_layout(TILE_K, TILE_N, mac[0], mac[1], dtype=I8_DTYPE))[:16]}..."
+              f"  (mac s={mac[0]} t={mac[1]}, {device or MAC_DEFAULT_DEVICE}"
+              f"{', i8 operands' if int8 else ''})")
     return 0

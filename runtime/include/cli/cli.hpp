@@ -423,15 +423,27 @@ inline void print_usage() {
 // strength of its container alone would say "ready" for a model whose decoder
 // design does not exist -- and the refusal then arrives 0.2 s into a request
 // instead of in the table a reader checks first.
+//
+// THE PATHS ARE model_set_candidates()'s, all four of them per generation. The
+// first version of this looked only in runtime/<name>/artifacts_npu<N>, which is
+// where the exporter USED to write -- so a set exported to the current
+// runtime/artifacts/<name>/artifacts_npu<N> (and carried inside the container
+// besides) was reported as "no design" for whisper-tiny and whisper-base, the
+// two rows this function exists to answer. A stale path here is not a wrong
+// directory, it is a wrong status in the one table a reader checks first.
 inline int stt_design_sets(const std::string &root, const std::string &name) {
     namespace fs = std::filesystem;
-    std::error_code ec;
-    for (const char *sub : {"artifacts_npu1", "artifacts_npu2"}) {
-        const fs::path d = fs::path(root) / "runtime" / name / sub;
-        if (std::ifstream(d / "gemm_rtp" / "design.json").good() &&
-            std::ifstream(d / "gemm_rtp_dec" / "design.json").good())
-            return 1;
-    }
+    for (const char *sub : {"artifacts_npu1", "artifacts_npu2"})
+        for (const std::string &n : {name, name + "-i8"})
+            for (const fs::path &base :
+                 {fs::path(root) / "runtime" / "artifacts",
+                  fs::path(root) / "artifacts",
+                  fs::path(root) / "runtime", fs::path(root)}) {
+                const fs::path d = base / n / sub;
+                if (std::ifstream(d / "gemm_rtp" / "design.json").good() &&
+                    std::ifstream(d / "gemm_rtp_dec" / "design.json").good())
+                    return 1;
+            }
     return 0;
 }
 
@@ -469,12 +481,22 @@ inline void print_catalog(const std::string &root) {
         const char *state = !m                              ? "available"
                             : !encoder_implemented(m->arch) ? "no encoder"
                             // An STT row is ready only with BOTH of its design
-                            // sets; one of them cannot transcribe anything, and
-                            // the container being present says nothing about
-                            // either.
+                            // sets; one of them cannot transcribe anything.
+                            //
+                            // A CARRIED SET COUNTS -- here too, as it does in
+                            // `have_design` above: the container states its own
+                            // two sets under design/gemm_rtp/ and
+                            // design/gemm_rtp_dec/, and requiring both KEYS
+                            // rather than one is what keeps this from calling
+                            // ready a container that carries the encoder alone.
+                            // The disk scan is the other half of the OR, for a
+                            // container packed before designs travelled inside
+                            // it.
                             : is_stt_arch(m->arch) && m->arch == "whisper_encdec_gelu"
-                                ? (stt_design_sets(root, e.name) ? "ready"
-                                                                 : "no design")
+                                ? ((m->carries_design && m->carries_design_dec) ||
+                                           stt_design_sets(root, e.name)
+                                       ? "ready"
+                                       : "no design")
                             // arch=5 needs ONE set -- gemm_rtp -- and says so
                             // with `ready`/`no design` like an embedder, because
                             // that is what it is as far as "can this run" goes.

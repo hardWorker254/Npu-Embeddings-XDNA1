@@ -290,10 +290,14 @@ cd ..
 
 If XRT is not at `C:\Xilinx\XRT`, pass `-DXRT_ROOT=<path>`.
 
-Two things in `CMakeLists.txt` are load-bearing and are commented there:
+Three things in `CMakeLists.txt` are load-bearing and are commented there:
 `project()` must precede `find_package(XRT)` (otherwise linking silently
-downgrades to static), and `/Zc:__cplusplus` is required or XRT's headers
-demand Boost.
+downgrades to static), `/Zc:__cplusplus` is required or XRT's headers
+demand Boost, and the three binaries link `npue_core` as `WHOLE_ARCHIVE` —
+the five `ModelLoader`s register themselves at static init and nothing else
+references them, so an ordinary archive link drops them and every flag-form
+command fails with `no model loader for arch ...` (that is why the file asks
+for CMake 3.24).
 
 ### 2.4b Which CPU the binary is built for
 
