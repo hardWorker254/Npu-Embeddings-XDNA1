@@ -592,7 +592,7 @@ Geometry read_geometry(npue::File &f, const std::string &label) {
   //
   // BOTH KEYS ARE OPTIONAL, and their ABSENCE means f32 with no group. Four
   // containers were packed before either key existed -- mediapipe-hands.npue,
-  // mediapipe-pose.npue and the two .f32 variants under models/variants -- and
+  // mediapipe-pose.npue and the two .f32 variants in models/ -- and
   // they must keep reading exactly as they did, which is plain fp32. What is
   // NOT optional any more is the byte count against the declared precision: a
   // container whose payload contradicts its own dtype is refused below rather

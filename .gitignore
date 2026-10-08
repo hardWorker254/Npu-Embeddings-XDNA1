@@ -44,14 +44,15 @@ models/**
 # HuggingFace -- untracked, and not a set of instructions.
 !models/DOWNLOADS.md
 !models/DOWNLOADS.ru.md
-# The manifest of models/variants/ -- the 18x4 dtype matrix the
-# packer builds there, with every container's measured size and the
-# measured reason a dtype variant costs what it costs (the i4 group
-# sweep on the convolution architectures lives there). The containers
-# themselves stay ignored: they are deterministic packer output, and
-# the manifest is the only part a fresh checkout cannot rebuild by
-# running the commands it documents.
-!models/variants/MANIFEST.md
+# The manifest of models/ -- the 18x4 dtype matrix the
+# packer builds there (flat, next to the installed containers),
+# with every container's measured size and the measured reason
+# a dtype variant costs what it costs (the i4 group sweep on
+# the convolution architectures lives there). The containers
+# themselves stay ignored: they are deterministic packer output,
+# and the manifest is the only part a fresh checkout cannot
+# rebuild by running the commands it documents.
+!models/MANIFEST.md
 # A whisper model needs SIX small files besides the weights -- config.json
 # (geometry), preprocessor_config.json (the audio constants), generation_config.json
 # (the decoding policy: suppress_tokens / begin_suppress_tokens), and the
